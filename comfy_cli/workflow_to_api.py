@@ -51,6 +51,7 @@ _SUBGRAPH_OUTPUT_NODE_ID = -20
 # in malformed inputs.
 _MAX_RESOLUTION_DEPTH = 100
 _MAX_SUBGRAPH_ITERATIONS = 10
+_MAX_SUBGRAPH_EXPANSION_RATIO = 128
 _MAX_RESOLVED_SUBGRAPH_INPUTS = 10_000
 
 # Strings that ComfyUI appends after seed-like INT widgets to control how the
@@ -346,6 +347,18 @@ def _expand_subgraphs(
             if isinstance(entry, dict) and _is_slot_index(entry.get("link")):
                 max_link_id = max(max_link_id, entry["link"])
     link_id_counter = [max_link_id + 1]
+    serialized_size = len(nodes) + len(links) + 1
+    seen_definitions: set[int] = set()
+    for definition in subgraph_defs.values():
+        if not isinstance(definition, dict) or id(definition) in seen_definitions:
+            continue
+        seen_definitions.add(id(definition))
+        raw_nodes = definition.get("nodes")
+        raw_links = definition.get("links")
+        serialized_size += 1
+        serialized_size += len(raw_nodes) if isinstance(raw_nodes, list) else 0
+        serialized_size += len(raw_links) if isinstance(raw_links, list) else 0
+    expansion_budget = [serialized_size * _MAX_SUBGRAPH_EXPANSION_RATIO]
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
@@ -370,6 +383,10 @@ def _expand_subgraphs(
                     _definition_cache=definition_cache,
                     _link_id_counter=link_id_counter,
                 )
+                generated = len(sg_nodes) + len(sg_links)
+                if generated > expansion_budget[0]:
+                    raise WorkflowConversionError("subgraph expansion exceeded its proportional safe limit")
+                expansion_budget[0] -= generated
                 expanded.extend(sg_nodes)
                 links.extend(sg_links)
                 ctx.input_targets[str(node.get("id"))] = input_map
@@ -417,14 +434,14 @@ def _outer_slot_to_input_idx(
         definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
         for idx, inp in enumerate(definition_inputs):
             if isinstance(inp, dict):
-                sg_input_names[inp.get("name")] = idx
+                sg_input_names[_input_name(inp.get("name"))] = idx
     mapping: dict[int, int] = {}
     raw_outer_inputs = outer_node.get("inputs")
     outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
     for outer_idx, outer_input in enumerate(outer_inputs):
         if not isinstance(outer_input, dict):
             continue
-        name = outer_input.get("name")
+        name = _input_name(outer_input.get("name"))
         if name in sg_input_names:
             mapping[outer_idx] = sg_input_names[name]
     return mapping
@@ -443,6 +460,11 @@ def _is_slot_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _input_name(value: Any) -> str:
+    """Hashable boundary name with the same coercion on both sides."""
+    return "" if value is None else str(value)
+
+
 def _expand_one_subgraph(
     outer_node: dict,
     sg_def: dict,
@@ -454,6 +476,8 @@ def _expand_one_subgraph(
     from comfy_cli.cql.promoted import _link_holders, _listed_link_ids, held_link_targets
 
     outer_id = outer_node.get("id")
+    internal_link_map: dict[Any, dict] | None = None
+    interior_links: list[dict] | None = None
     cached = _definition_cache.get(id(sg_def)) if _definition_cache is not None else None
     if cached is None or cached[0] is not sg_def:
         raw_nodes = sg_def.get("nodes")
@@ -474,6 +498,13 @@ def _expand_one_subgraph(
                 if _is_link_id(link_id):
                     input_slots_by_link.setdefault(link_id, set()).add(idx)
         interior_by_id = {str(node.get("id")): node for node in internal_nodes}
+        internal_link_map = {link.get("id"): link for link in internal_links if _is_link_id(link.get("id"))}
+        interior_links = [
+            link
+            for link in internal_links
+            if str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+            and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+        ]
         cached = (
             sg_def,
             internal_nodes,
@@ -496,6 +527,17 @@ def _expand_one_subgraph(
         serialized_boundary_links,
         interior_by_id,
     ) = cached[:8]
+    if len(cached) >= 13:
+        internal_link_map, interior_links = cached[11:13]
+    elif internal_link_map is None or interior_links is None:
+        internal_link_map = {link.get("id"): link for link in internal_links if _is_link_id(link.get("id"))}
+        interior_links = [
+            link
+            for link in internal_links
+            if str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+            and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+        ]
+    assert internal_link_map is not None and interior_links is not None
 
     # Direct callers that do not share the expansion allocator still get an id
     # above concrete rows and every integer id held by this instance.
@@ -511,8 +553,7 @@ def _expand_one_subgraph(
         _link_id_counter = [max_link_id + 1]
 
     link_id_remap: dict[Any, int] = {}
-    internal_link_map: dict[Any, dict] = {}
-    for link in internal_links:
+    for link in interior_links:
         old_id = link.get("id")
         # link_id_remap[old_id] / internal_link_map[old_id] need a hashable key
         # (see _is_link_id). Skip the entry entirely on a missing/unhashable/
@@ -522,7 +563,6 @@ def _expand_one_subgraph(
             continue
         link_id_remap[old_id] = _link_id_counter[0]
         _link_id_counter[0] += 1
-        internal_link_map[old_id] = link
 
     if len(cached) >= 11:
         input_targets, output_sources, _definition_input_names = cached[8:11]
@@ -604,9 +644,11 @@ def _expand_one_subgraph(
             resolved_output_link_ids.add(lid)
 
         definition_input_names = {
-            entry.get("name"): idx for idx, entry in enumerate(definition_inputs) if isinstance(entry, dict)
+            _input_name(entry.get("name")): idx
+            for idx, entry in enumerate(definition_inputs)
+            if isinstance(entry, dict)
         }
-        cached = (*cached, input_targets, output_sources, definition_input_names)
+        cached = (*cached, input_targets, output_sources, definition_input_names, internal_link_map, interior_links)
         if _definition_cache is not None:
             _definition_cache[id(sg_def)] = cached
 
@@ -623,7 +665,7 @@ def _expand_one_subgraph(
         expanded_nodes.append(expanded)
 
     expanded_links: list = []
-    for link in internal_links:
+    for link in interior_links:
         origin_id = link.get("origin_id")
         target_id = link.get("target_id")
         if str(origin_id) in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID)):
@@ -919,11 +961,14 @@ def _record_subgraph_input_source(
     key = (node_id_str, input_idx)
     if key in seen:
         return
+    sources = ctx.input_sources.setdefault(node_id_str, {})
+    if input_idx in sources:
+        return
     if budget[0] <= 0:
         raise WorkflowConversionError("subgraph input-source resolution exceeded its safe limit")
     budget[0] -= 1
     seen.add(key)
-    ctx.input_sources.setdefault(node_id_str, {})[input_idx] = source
+    sources[input_idx] = source
     for internal_node, internal_slot in ctx.input_targets.get(node_id_str, {}).get(input_idx, []):
         if budget[0] <= 0:
             raise WorkflowConversionError("subgraph input-source resolution exceeded its safe limit")

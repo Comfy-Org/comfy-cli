@@ -705,6 +705,78 @@ def test_duplicate_outer_rows_use_the_link_maps_last_source():
     assert ctx.input_sources["10"][0] == ("last", 1)
 
 
+@pytest.mark.parametrize("name", [["unhashable"], {"nested": "name"}, 7])
+def test_subgraph_input_name_maps_normalize_malformed_names(name):
+    definition = {
+        "inputs": [{"name": name, "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [{"id": 7, "type": "Example", "inputs": [{"name": name, "link": 1}], "outputs": []}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    outer = {"id": 10, "inputs": [{"name": copy.deepcopy(name), "link": 20}]}
+    cache: dict = {}
+
+    _nodes, _links, targets, _outputs = workflow_to_api._expand_one_subgraph(
+        outer, definition, [], _definition_cache=cache
+    )
+
+    assert targets == {0: [(7, 0)]}
+    assert workflow_to_api._outer_slot_to_input_idx(outer, definition, _definition_cache=cache) == {0: 0}
+
+
+def test_subgraph_expansion_allocates_ids_only_for_interior_rows_and_caches_indexes():
+    definition = {
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [
+            {"id": 7, "type": "Source", "inputs": [{"name": "value", "link": 1}], "outputs": [{}]},
+            {"id": 8, "type": "Sink", "inputs": [{"name": "value", "link": 2}], "outputs": []},
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    cache: dict = {}
+    counter = [10]
+
+    _nodes, links, _inputs, _outputs = workflow_to_api._expand_one_subgraph(
+        {"id": 20}, definition, [], _definition_cache=cache, _link_id_counter=counter
+    )
+
+    assert counter == [11]
+    assert [link[0] for link in links] == [10]
+    assert len(cache[id(definition)]) == 13
+    assert set(cache[id(definition)][11]) == {1, 2}
+    assert [link["id"] for link in cache[id(definition)][12]] == [2]
+
+
+def test_recursive_subgraph_expansion_has_a_proportional_output_cap():
+    def uuid_for(level: int) -> str:
+        return f"00000000-0000-4000-8000-{level:012d}"
+
+    definitions = []
+    for level in range(10):
+        node_type = uuid_for(level + 1) if level < 9 else "Plain"
+        definitions.append(
+            {
+                "id": uuid_for(level),
+                "inputs": [],
+                "outputs": [],
+                "nodes": [{"id": index, "type": node_type, "inputs": [], "outputs": []} for index in range(4)],
+                "links": [],
+            }
+        )
+    workflow = {
+        "nodes": [{"id": 1, "type": uuid_for(0), "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {"subgraphs": definitions},
+    }
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="proportional safe limit"):
+        convert_ui_to_api(workflow, {})
+
+
 def test_input_source_budget_charges_plain_fanout_targets():
     ctx = workflow_to_api._SubgraphCtx()
     ctx.input_targets["10"] = {0: [(7, 0), (8, 0)]}

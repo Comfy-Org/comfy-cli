@@ -699,6 +699,120 @@ def test_reused_nested_boundary_paths_charge_each_materialized_copy():
         promoted.boundary_widget_targets(definitions["level-0"], pi, definitions)
 
 
+def test_valid_six_level_four_way_boundary_fanout_uses_the_output_budget():
+    definitions: dict[str, dict] = {
+        "leaf": {
+            "id": "leaf",
+            "inputs": [{"name": "value", "linkIds": [1]}],
+            "nodes": [
+                {"id": 9, "type": "Plain", "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}]}
+            ],
+            "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+        }
+    }
+    for level in reversed(range(6)):
+        child = "leaf" if level == 5 else f"level-{level + 1}"
+        definitions[f"level-{level}"] = {
+            "id": f"level-{level}",
+            "inputs": [{"name": "value", "linkIds": [1, 2, 3, 4]}],
+            "nodes": [
+                {"id": index, "type": child, "inputs": [{"name": "value", "link": index + 1}]} for index in range(4)
+            ],
+            "links": [{"id": index + 1, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(4)],
+        }
+
+    targets = promoted.boundary_widget_targets(
+        definitions["level-0"],
+        promoted.PromotedInput("value", "STRING", 0, 0),
+        definitions,
+    )
+
+    assert len(targets) == 4**6
+
+
+def test_stable_boundary_cache_revalidates_ancestor_dependencies():
+    ancestor = {
+        "id": "ancestor",
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [{"id": 9, "type": "Plain", "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}]}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    shared_input = {"name": "value", "linkIds": [2]}
+    shared = {
+        "id": "shared",
+        "inputs": [shared_input],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "ancestor",
+                "inputs": [{"name": "value", "link": 2, "widget": {"name": "fallback"}}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"ancestor": ancestor, "shared": shared})
+
+    assert promoted._boundary_targets(shared, shared_input, definitions, 1) == [(["7", "9"], "value")]
+    assert promoted._boundary_targets(shared, shared_input, definitions, 1, _stack=(id(ancestor),)) == [
+        (["7"], "fallback")
+    ]
+
+
+def test_stable_promoted_input_cache_revalidates_ancestor_dependencies():
+    ancestor = {
+        "id": "ancestor",
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 9,
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    shared = {
+        "id": "shared",
+        "inputs": [{"name": "value", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "ancestor",
+                "inputs": [{"name": "value", "link": 2, "widget": {"name": "fallback"}}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"ancestor": ancestor, "shared": shared})
+
+    [ordinary] = promoted.promoted_inputs(shared, definitions, depth=1)
+    [under_ancestor] = promoted.promoted_inputs(shared, definitions, depth=1, _stack=(id(ancestor),))
+
+    assert ordinary.nested is True
+    assert under_ancestor.nested is False
+    assert under_ancestor.source_widget == "fallback"
+
+
+def test_nested_boundary_names_use_consistent_string_coercion():
+    leaf = {
+        "id": "leaf",
+        "inputs": [{"name": 7, "linkIds": [1]}],
+        "nodes": [{"id": 9, "type": "Plain", "inputs": [{"name": 7, "link": 1, "widget": {"name": 7}}]}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    root_input = {"name": 7, "linkIds": [2]}
+    root = {
+        "id": "root",
+        "inputs": [root_input],
+        "nodes": [{"id": 8, "type": "leaf", "inputs": [{"name": 7, "link": 2}]}],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 8, "target_slot": 0}],
+    }
+
+    assert promoted._boundary_targets(root, root_input, {"root": root, "leaf": leaf}, 0) == [(["8", "9"], "7")]
+
+
 def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
     sg = {
         "id": "sg",
