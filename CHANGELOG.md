@@ -86,10 +86,11 @@ history.
 
 ### Changed
 
-- Once every model byte is in, `comfy deploy up` and `comfy deploy status
-  --watch` add "finishing: putting the models in place and preparing the
-  image" to the progress line while the deploy service sends
-  `placingModels: true`, so a line at "7.0 GB of 7.0 GB" no longer reads as
+- Once every model byte is in, the progress line of `comfy deploy up`,
+  `comfy deploy status` (with or without `--watch`) and a watching
+  `comfy deploy promote` or `rollback` adds "finishing: putting the models in
+  place" while the deploy service sends `placingModels: true`, on every
+  provider, so a line at "7.0 GB of 7.0 GB" no longer reads as
   stuck until the endpoint step starts. `placingModels` is documented in the
   `progress` object of the `deploy status`, `deploy up` and `deploy_progress`
   schemas. An older service's line is unchanged.

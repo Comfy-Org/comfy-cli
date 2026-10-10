@@ -76,7 +76,7 @@
         },
         "placingModels": {
           "type": "boolean",
-          "description": "Present and true once every byte of the models is in and the step is finishing: the models are being put in place, and a release image built beside the upload may still be building. It stays true until the step changes, and etaSeconds, where given, counts down what is left. Absent before the last byte, with no byte to move, and from a service that does not send it."
+          "description": "Present and true once every byte of the models is in and the step is finishing: the models are being put in place and, on Modal, a release image built beside the upload may still be building. It stays true until the step changes, and etaSeconds, where given, counts down what is left. Absent before the last byte, with no byte to move, and from a service that does not send it."
         },
         "attempt": {
           "type": "integer",

@@ -26,6 +26,7 @@ from comfy_cli.command.deploy_progress import (
     DeployWatchReporter,
     describe,
     is_stale,
+    live_line,
     progress_of,
 )
 from comfy_cli.command.deploy_runtime import poll_deployment
@@ -111,13 +112,13 @@ def _every_byte_in(**over) -> JsonObject:
         pytest.param(
             _every_byte_in(etaSeconds=40, placingModels=True),
             NOW,
-            "Staging models: 7.0 GB of 7.0 GB, finishing: putting the models in place and preparing the image, 40s left",
+            "Staging models: 7.0 GB of 7.0 GB, finishing: putting the models in place, 40s left",
             id="every byte in, the service says the step is finishing and how long it has left",
         ),
         pytest.param(
             _every_byte_in(placingModels=True),
             NOW,
-            "Staging models: 7.0 GB of 7.0 GB, finishing: putting the models in place and preparing the image",
+            "Staging models: 7.0 GB of 7.0 GB, finishing: putting the models in place",
             id="past the finishing countdown the words stay, with no time left",
         ),
         pytest.param(
@@ -730,6 +731,22 @@ def test_at_80_columns_the_live_line_keeps_the_time_left_ahead_of_the_finishing_
     # Then: every number survives the crop, the words come after them
     assert len(line) <= 80
     assert "Staging models: 7.0 GB of 7.0 GB, 40s left, finishing: putting the" in line
+
+
+def test_the_finishing_words_name_no_image_a_runpod_deploy_never_builds() -> None:
+    # Given a RunPod deploy with every byte in: the service sends placingModels
+    # for every provider and names none, but only Modal builds an image beside
+    # the upload
+    progress = _every_byte_in(placingModels=True)
+    assert "provider" not in progress
+
+    # When
+    lines = [describe(progress, now=NOW), live_line(progress, now=NOW)]
+
+    # Then: both say the step is finishing, and neither promises an image
+    for line in lines:
+        assert "finishing: putting the models in place" in line
+        assert "image" not in line
 
 
 @pytest.mark.parametrize("name", ["deploy_status.json", "deploy_up.json", "deploy_progress_event.json"])

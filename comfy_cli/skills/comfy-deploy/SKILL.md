@@ -158,7 +158,7 @@ provisioning". Things to read correctly:
   the upload may still be building, for up to about 4 minutes after the last
   byte. The step stays `staging_models` with `bytesDone` equal to `bytesTotal`
   and no rate, and the progress line adds "finishing: putting the models in
-  place and preparing the image". That is not a stall, even once `etaSeconds`
+  place" on every provider. That is not a stall, even once `etaSeconds`
   runs out and is dropped; never infer it from the bytes alone.
 - `etaSeconds` covers staging only. Creating the endpoint and the first worker's
   cold start come after it.

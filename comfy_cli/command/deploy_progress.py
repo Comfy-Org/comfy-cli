@@ -43,9 +43,11 @@ STALE_SECONDS: Final = 60.0
 
 STAGING_STEP: Final = "staging_models"
 
-# True for both things the step waits on once every byte is in: the models
-# being put in place and, on Modal, the release image built beside the upload.
-FINISHING_WORDS: Final = "finishing: putting the models in place and preparing the image"
+# True on every provider once every byte is in: the service sends
+# placingModels for Modal and RunPod alike and names neither. On Modal the step
+# may also wait on the release image built beside the upload, which these words
+# do not name: a RunPod deploy builds no image there.
+FINISHING_WORDS: Final = "finishing: putting the models in place"
 
 _STEP_LABELS: Final = {
     STAGING_STEP: "Staging models",
@@ -177,7 +179,8 @@ def _parts(progress: JsonObject, now: datetime, *, numbers_first: bool = False) 
             time_left = None if left is None else f"{human_seconds(left)} left"
             # Only the service says the step is finishing, never bytes done
             # matching the total: once every byte is in it is still putting the
-            # models in place, and may be waiting on an image built beside them.
+            # models in place, and on Modal may be waiting on an image built
+            # beside them.
             finishing = FINISHING_WORDS if progress.get("placingModels") is True else None
             order = (
                 (copied, per_second, time_left, finishing)
