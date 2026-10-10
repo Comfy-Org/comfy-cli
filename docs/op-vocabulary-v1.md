@@ -76,8 +76,10 @@ refused with `node_deprecated` unless it is `true`.
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.
-* Conflict: none — ids are minted leaderlessly (section 6), so two concurrent
-  `add_node` ops never target the same identity.
+* Conflict: Agent-bound frontend and structured-edit ranges are disjoint. Two
+  structured-edit writers still share one random range regardless of their
+  `actor`, so they can mint the same id; two different `add_node` ops with that
+  id are resolved first-arrival-wins, without a collision signal.
 * Invalid: an unknown `class_type` is rejected at mint time (`UnknownNodeType`,
   rendered as `node_not_found` with close matches).
 
@@ -159,8 +161,9 @@ input/output references.
 
 Command: `comfy workflow clear <file>`. Minted op fields: `removed_nodes` (ids
 present at mint time). Replay empties `nodes`, `links`, and `groups`.
-`last_node_id` / `last_link_id` are preserved so ids minted after a clear stay
-monotonic — id reuse would let a merge resurrect a deleted node's identity.
+`last_node_id` / `last_link_id` are preserved for legacy frontend allocators so
+their ids stay monotonic — id reuse would let a merge resurrect a deleted
+node's identity. Structured-edit ids from `mint_id` do not use these marks.
 
 * Batchable: **no**. `apply_specs` rejects it with the registered code
   `workflow_clear_not_batchable`; the batch is discarded atomically and the hint
@@ -175,11 +178,12 @@ present at mint time), same as `clear`.
 
 Replaces the entire document with the empty baseline, **including apply
 bookkeeping** — unlike `clear`, which preserves the id high-water marks and the
-applied-op history. `last_node_id` / `last_link_id` go to 0 (safe: ids come from
-`mint_id`, never from the high-water marks — §8.3), `_applied_ops` and
-`_widget_stamps` are dropped, and only the document `id` survives. Because it
-erases replay history it is a **history barrier**: ops minted against a
-pre-reset `base_version` do not replay across it.
+applied-op history. `last_node_id` / `last_link_id` go to 0, `_applied_ops` and
+`_widget_stamps` are dropped, and only the document `id` survives. This resets
+legacy frontend allocators as well as the graph. It is safe only because reset
+is a **history barrier**: no pre-reset identity survives, and ops minted against
+a pre-reset `base_version` do not replay across it. Structured-edit ids remain
+independent random draws (§8.3).
 
 * Guard: the CLI surface requires an explicit `--confirm`; without it the
   command fails closed with `workflow_reset_doc_unconfirmed` and writes nothing.
@@ -329,7 +333,7 @@ and `"7"` two registers for one node.
 | update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; a `connect` whose destination is gone is a no-op; a `connect` whose SOURCE is gone still claims its input register and leaves that input empty (v1.2 — otherwise the incumbent's survival depends on when the delete arrives); replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
-| duplicate entity creation | impossible by construction across writers (random 53-bit `mint_id`, no shared counter); a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
+| duplicate entity creation | frontend and structured-edit ranges are disjoint, but all structured-edit writers share one random range regardless of `actor`; a collision is unlikely but possible and resolves first-arrival-wins without a collision signal; a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
 | concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; their display order is the one sequence decision a leaderless writer cannot make and is surfaced by `detect_conflict` for the merge consumer | `_apply_connect` (grow path), `detect_conflict` |
 | invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index` |
 
@@ -381,18 +385,22 @@ specs in the same batch reference the minted node by alias.
 
 * `op_id`: uuid4 hex, minted by the creator pre-dispatch. Receivers never
   regenerate one (section 2).
-* Node and link ids: `mint_id()` — random ints in `[2^40, 2^53)`. Leaderless
-  and collision-free without coordination; always inside JS
-  `Number.MAX_SAFE_INTEGER`; always larger than small frontend counter ids.
-  `last_node_id` / `last_link_id` are advisory high-water marks, never
-  allocators.
+* Node and link ids: `mint_id()` — random ints with bit 40 set, all below
+  `2^52`. They are leaderless and always inside JS `Number.MAX_SAFE_INTEGER`.
+  Agent-bound frontend ids clear bit 40 (and set bit 41), so bit 40 is the sole
+  frontend-versus-structured-edit discriminator; Agent ids may also have bit 41
+  set. Random draws from any structured-edit writers can still collide. The
+  structured-edit path maintains `last_node_id` / `last_link_id` as advisory
+  high-water marks but never allocates from them; legacy frontend code may still
+  allocate from the marks.
 * Subgraph-scoped ids: an interior node is addressed as `57:3` (the flattened
   form the UI→API lowering mints and `validate` / server errors print) or
   `57/3` (the edit-path form); both resolve to the same interior target. **Ops
   must carry fully-scoped ids** — a bare interior id is meaningless at the top
   level and is rejected, not guessed.
-* OPEN: ID representation is to be reconciled with the FE stable-ID workstream
-  before this document's v1.1. Until then, the shapes above are the contract.
+* The frontend stable-ID reconciliation sets bit 41 for Agent-bound frontend
+  ids and clears bit 40. Clearing bit 40 is what keeps them disjoint from
+  `mint_id()` ids; bit 41 is not reserved from Agent random draws.
 
 ## 7. Attribution origins
 
@@ -445,9 +453,10 @@ changes who wins ties. Receivers never regenerate or normalize an `op_id`.
 
 ### 8.3 `last_node_id` / `last_link_id` are max-registers
 
-Both are advisory high-water marks, never allocators (ids come from
-`mint_id`). Register semantics: **max-register** — a write is
-`max(current, new)`, and merging two replicas' values is `max(a, b)`; a plain
+Both are advisory high-water marks for the structured-edit path, which allocates
+ids with `mint_id`, not from these fields. Legacy frontend code may still use
+them as counters. Register semantics under op replay: **max-register** — a write
+is `max(current, new)`, and merging two replicas' values is `max(a, b)`; a plain
 overwrite is wrong under concurrency.
 
 `_apply_add_node` implements this for nodes:
@@ -698,8 +707,9 @@ discard one writer's connection. That target keeps its §3 role as conflict
   gap above, on a target that is deliberately not a register.
 * Two `add_node` ops with the SAME `node_id` and different payloads resolve
   first-writer-wins by arrival (`("node", node_id)` is reserved but ungated).
-  §1.1 rules this out by construction — `mint_id` draws 53-bit random ids — so
-  it is a property of hand-authored or replayed streams, not of minted ones.
+  Clearing bit 40 on frontend ids prevents frontend-versus-structured-edit
+  collisions. Different structured-edit actors still share the `mint_id` range,
+  so their random draws can collide; v1 has no collision signal or redraw path.
 
 **Batch caveat, now stated.** `apply_specs` stamps every op in one batch with
 the same `base_version`, so two writes to the SAME target inside one batch are
