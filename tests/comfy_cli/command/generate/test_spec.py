@@ -465,6 +465,10 @@ def test_extract_enum_unions_anyof_and_intersects_allof():
     # every branch, deduped, not just the first.
     assert spec._extract_enum({"anyOf": [{"enum": ["a", "b"]}, {"enum": ["b", "c"]}]}) == ["a", "b", "c"]
     assert spec._extract_enum({"oneOf": [{"enum": ["x"]}, {"enum": ["y"]}]}) == ["x", "y"]
+    assert spec._extract_enum({"oneOf": [{"enum": ["x", "shared"]}, {"enum": ["y", "shared"]}]}) == [
+        "x",
+        "y",
+    ]
     # allOf branches are constraints: only values valid in every branch count.
     assert spec._extract_enum({"allOf": [{"enum": ["a", "b", "c"]}, {"enum": ["b", "c", "d"]}]}) == ["b", "c"]
     # An empty allOf intersection means no usable enum.
@@ -542,3 +546,50 @@ def test_find_property_skips_union_branches_that_cannot_be_request_objects(non_o
     }
 
     assert spec._extract_enum(spec._find_property(schema, "model")) == ["v1"]
+
+
+def test_find_property_skips_closed_object_branches_that_cannot_hold_the_field():
+    schema = {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"model": {"enum": ["v1"]}},
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"other": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["v1"]
+
+
+def test_schema_object_check_combines_union_and_allof_siblings():
+    schema = {
+        "anyOf": [{"type": "object"}, {"type": "string"}],
+        "allOf": [{"type": "string"}],
+    }
+
+    assert spec._schema_may_be_object(schema) is False
+
+
+def test_find_property_shares_the_object_memo_across_union_branches(monkeypatch):
+    leaf: dict = {"type": "object"}
+    shared = leaf
+    for _ in range(20):
+        shared = {"allOf": [shared, shared]}
+    schema = {"anyOf": [{"properties": {"model": {"enum": ["v1"]}}}, *([shared] * 20)]}
+    calls = 0
+    original = spec._schema_may_be_object
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(spec, "_schema_may_be_object", counted)
+    assert spec._find_property(schema, "model") is None
+    assert calls < 100

@@ -3559,6 +3559,7 @@ def _definition_alias_conflicts(
     definitions: list[dict],
     by_id: dict[str, dict],
     candidates: dict[str, dict],
+    name_aliases: dict[str, dict],
 ) -> set[str]:
     """Candidate names reachable as real node types from their own definition.
 
@@ -3591,7 +3592,10 @@ def _definition_alias_conflicts(
             node_type = node.get("type")
             if isinstance(node_type, str):
                 direct_masks[index] |= bit_by_name.get(node_type, 0)
-                nested = by_id.get(node_type)
+                # IDs win, but an older definition can itself hold a
+                # name-typed nested instance. Follow that edge as well or a
+                # conflict below it is invisible to the reachability mask.
+                nested = by_id.get(node_type) or name_aliases.get(node_type)
                 nested_index = index_by_identity.get(id(nested)) if nested is not None else None
                 if nested_index is not None:
                     edges[index].add(nested_index)
@@ -3701,13 +3705,12 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
         for node in raw_nodes if isinstance(raw_nodes, list) else []:
             if isinstance(node, dict) and isinstance(node.get("type"), str):
                 used_types.add(node["type"])
-    candidates = {
-        name: name_first[name]
-        for name, count in name_counts.items()
-        if count == 1 and name not in by_id and name in used_types
-    }
-    conflicts = _definition_alias_conflicts(definitions, ids_only, candidates)
-    for name, definition in candidates.items():
+    unique_names = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in by_id}
+    candidates = {name: definition for name, definition in unique_names.items() if name in used_types}
+    conflicts = _definition_alias_conflicts(definitions, ids_only, candidates, unique_names)
+    # Conflict analysis only needs bits for names used as node types, but the
+    # compatibility index still publishes every unique, non-conflicting name.
+    for name, definition in unique_names.items():
         if name not in conflicts:
             by_id[name] = definition
     return by_id
@@ -3966,6 +3969,15 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
     return None
 
 
+def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
+    """Frontend-like option equality with booleans distinct from numbers."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, int | float) and isinstance(right, int | float):
+        return left == right
+    return type(left) is type(right) and left == right
+
+
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
     """The selected option's sub-inputs as Ports, dotted under ``prefix``.
 
@@ -3973,7 +3985,7 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
     malformed. Connection-only sub-inputs (e.g. ``COMFY_AUTOGROW_V3`` image
     lists) are included with ``is_link=True`` so callers can skip them.
     """
-    option = next((o for o in dynamic_options if o.get("key") == selector), None)
+    option = next((o for o in dynamic_options if _dynamic_combo_key_matches(o.get("key"), selector)), None)
     if option is None:
         return []
     sub_def = option.get("inputs")
@@ -4527,12 +4539,12 @@ def _write_dynamic_combo_selector(
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
     widgets = list(widgets) if widgets is not None else _widgets_as_list(node.get("widgets_values"))
-    if value not in port.enum_values:
+    if not any(_dynamic_combo_key_matches(value, key) for key in port.enum_values):
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
 
     current = widgets[widget_idx] if widget_idx < len(widgets) else None
-    if value == current:
+    if _dynamic_combo_key_matches(value, current):
         # Same option — the roster is unchanged; plain in-place write.
         if widget_idx >= len(widgets):
             if not extend:

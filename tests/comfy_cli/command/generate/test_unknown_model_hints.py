@@ -594,3 +594,13 @@ def test_ref_memo_does_not_reuse_a_cycle_pruned_resolution():
 
     sibling_inner = resolved["anyOf"][1]
     assert spec._extract_enum(spec._find_property(sibling_inner, "model")) == ["example-model-v1"]
+
+
+def test_completed_cyclic_resolution_does_not_retain_ancestry_memo_keys():
+    outer_ref = "#/components/schemas/Outer"
+    raw = {"components": {"schemas": {"Outer": {"next": {"$ref": outer_ref}}}}}
+    memo: dict = {}
+
+    spec._resolve(raw, {"$ref": outer_ref}, memo=memo)
+
+    assert all(not any(isinstance(part, frozenset) for part in key) for key in memo)

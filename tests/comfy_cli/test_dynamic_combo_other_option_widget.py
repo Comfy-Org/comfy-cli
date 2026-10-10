@@ -143,6 +143,34 @@ def test_dynamic_default_publishes_an_actual_option_key(declared_default, expect
     assert selected == expected
 
 
+def test_dynamic_selector_keeps_boolean_keys_distinct_from_integer_keys():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    options["options"] = [
+        {"key": 1, "inputs": {"required": {"integer_only": ["STRING", {"default": "int"}]}}},
+        {"key": True, "inputs": {"required": {"boolean_only": ["STRING", {"default": "bool"}]}}},
+    ]
+    options["default"] = True
+    graph = Graph.from_object_info(object_info)
+    wf, _ = _fresh(graph)
+
+    assert graph.widget_order_for_node("MinimaxHailuo03TextToVideoNode", wf["nodes"][0]["widgets_values"])[:2] == [
+        "model",
+        "model.boolean_only",
+    ]
+
+
+def test_dynamic_sub_widget_rejects_catalog_invalid_values_before_writing(graph):
+    wf, nid = _fresh(graph)
+    wf, _ = workflow_ops.set_widget(wf, graph, nid, "model", "MiniMax H3 Max")
+    before = copy.deepcopy(wf)
+
+    with pytest.raises(workflow_ops.FatalFindingError, match="not in"):
+        workflow_ops.set_widget(wf, graph, nid, "model.prompt_expansion_mode", "ghost")
+
+    assert wf == before
+
+
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):
     wf, nid = _fresh(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, nid, "model", "MiniMax H3 Max")

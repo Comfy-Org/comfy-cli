@@ -49,7 +49,10 @@ def test_subgraph_name_alias_checks_preserve_every_deep_acyclic_definition():
 
 def test_subgraph_alias_bit_matrix_fails_closed_above_cap(monkeypatch):
     definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
-    workflow = {"nodes": [], "definitions": {"subgraphs": definitions}}
+    workflow = {
+        "nodes": [{"id": index, "type": f"Alias{index}"} for index in range(3)],
+        "definitions": {"subgraphs": definitions},
+    }
     monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
 
     resolved = _subgraph_defs_by_id(workflow)
@@ -57,7 +60,7 @@ def test_subgraph_alias_bit_matrix_fails_closed_above_cap(monkeypatch):
     assert set(resolved) == {"id-0", "id-1", "id-2"}
 
 
-def test_subgraph_alias_bit_matrix_ignores_unused_definition_names(monkeypatch):
+def test_subgraph_alias_bit_matrix_still_publishes_unused_definition_names(monkeypatch):
     definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
     workflow = {"nodes": [{"id": 1, "type": "Alias0"}], "definitions": {"subgraphs": definitions}}
     monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
@@ -65,8 +68,19 @@ def test_subgraph_alias_bit_matrix_ignores_unused_definition_names(monkeypatch):
     resolved = _subgraph_defs_by_id(workflow)
 
     assert resolved["Alias0"] is definitions[0]
-    assert "Alias1" not in resolved
-    assert "Alias2" not in resolved
+    assert resolved["Alias1"] is definitions[1]
+    assert resolved["Alias2"] is definitions[2]
+
+
+def test_subgraph_alias_conflicts_follow_name_typed_definition_edges():
+    leaf = {"id": "leaf-id", "name": "LeafAlias", "nodes": [{"id": 3, "type": "OuterAlias"}]}
+    outer = {"id": "outer-id", "name": "OuterAlias", "nodes": [{"id": 2, "type": "LeafAlias"}]}
+    resolved = _subgraph_defs_by_id(
+        {"nodes": [{"id": 1, "type": "OuterAlias"}], "definitions": {"subgraphs": [outer, leaf]}}
+    )
+
+    assert "OuterAlias" not in resolved
+    assert "LeafAlias" not in resolved
 
 
 def _object_info() -> dict[str, Any]:
@@ -2899,6 +2913,38 @@ class TestSubgraphIsolation:
         inst12 = next(n for n in wf["nodes"] if n["id"] == 12)
         inst12_def = defs[inst12["type"]]
         assert inst12_def["nodes"][0]["widgets_values"][0] == "orig"
+
+    def test_rejected_replay_does_not_leave_a_shared_definition_fork(self, graph: Graph):
+        from comfy_cli import workflow_ops
+
+        wf = {
+            "nodes": [{"id": 10, "type": "uuid-def-1"}, {"id": 12, "type": "uuid-def-1"}],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [{"id": 9, "type": "CLIPTextEncode", "widgets_values": ["orig"]}],
+                    }
+                ]
+            },
+        }
+        before = copy.deepcopy(wf)
+        op = workflow_ops._new_op(
+            "set_widget",
+            "agent",
+            1,
+            node_id="10/9",
+            widget="missing",
+            value="x",
+            path=["10", "9"],
+            inner_widget="missing",
+        )
+
+        with pytest.raises(ValueError, match="not found"):
+            workflow_ops.apply_op(wf, op, graph)
+
+        assert wf == before
 
     def test_single_instance_no_fork(self, graph: Graph):
         """When only one instance of a def exists, no fork is created."""

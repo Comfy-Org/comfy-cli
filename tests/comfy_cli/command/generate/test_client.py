@@ -89,6 +89,32 @@ def test_send_request_uses_bearer_for_firebase_tokens(monkeypatch):
     assert captured["url"].endswith("/proxy/bfl/flux-pro-1.1/generate")
 
 
+def test_send_request_dispatches_non_get_post_methods(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/update",
+        path="/proxy/example/update",
+        method="put",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="application/json",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(client.httpx, "request", fake_request)
+    client.send_request(ep, {"prompt": "x"}, [], api_key="comfyui-test")
+
+    assert captured["method"] == "PUT"
+    assert captured["json"] == {"prompt": "x"}
+
+
 def test_raise_for_status_includes_body():
     resp = httpx.Response(400, json={"error": "bad prompt"})
     with pytest.raises(client.ApiError) as exc:

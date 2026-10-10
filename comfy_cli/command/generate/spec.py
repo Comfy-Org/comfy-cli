@@ -403,8 +403,13 @@ def _resolve_schema(
                 # after a missing ref, recursion error, or exhausted budget.
                 memo.pop(memo_key, None)
                 raise
-            memo[memo_key] = result
-            if not result[1]:
+            if result[1]:
+                # An ancestry-scoped placeholder is useful only while this
+                # branch is in progress. Retaining every completed cyclic key
+                # pins its full seen/active frozensets and grows with paths.
+                memo.pop(memo_key, None)
+            else:
+                memo[memo_key] = result
                 memo[shared_key] = result
             return result
         if id(node) in active_inline:
@@ -432,8 +437,10 @@ def _resolve_schema(
             memo.pop(memo_key, None)
             raise
         result = (value, cyclic)
-        memo[memo_key] = result
-        if not cyclic:
+        if cyclic:
+            memo.pop(memo_key, None)
+        else:
+            memo[memo_key] = result
             memo[shared_key] = result
         return result
     if isinstance(node, list):
@@ -460,8 +467,10 @@ def _resolve_schema(
             memo.pop(memo_key, None)
             raise
         result = (value, cyclic)
-        memo[memo_key] = result
-        if not cyclic:
+        if cyclic:
+            memo.pop(memo_key, None)
+        else:
+            memo[memo_key] = result
             memo[shared_key] = result
         return result
     raise AssertionError("unreachable schema node")
@@ -671,6 +680,7 @@ def _extract_enum(
         merged: list[str] = []
         merged_values: set[str] = set()
         merged_results: set[int] = set()
+        branch_counts: dict[str, int] = {}
         unconstrained = False
         for variant in variants:
             if variant is False:
@@ -686,14 +696,23 @@ def _extract_enum(
                     unconstrained = True
                     break
                 continue
-            if id(found) not in merged_results:
+            if key == "oneOf":
+                for value in set(found):
+                    branch_counts[value] = branch_counts.get(value, 0) + 1
+                for value in found:
+                    if value not in merged_values:
+                        merged_values.add(value)
+                        merged.append(value)
+            elif id(found) not in merged_results:
                 merged_results.add(id(found))
                 for value in found:
                     if value not in merged_values:
                         merged_values.add(value)
                         merged.append(value)
-        if merged and not unconstrained:
-            constraints.append(merged)
+        if not unconstrained and merged:
+            constraints.append(
+                [value for value in merged if branch_counts.get(value) == 1] if key == "oneOf" else merged
+            )
     all_of = prop.get("allOf")
     if isinstance(all_of, list):
         branch_results: set[int] = set()
@@ -817,15 +836,15 @@ def _schema_may_be_object(
                 result = any(isinstance(value, dict) for value in enum)
             else:
                 result = True
-                for key in ("anyOf", "oneOf"):
-                    variants = schema.get(key)
-                    if isinstance(variants, list):
-                        result = any(_schema_may_be_object(variant, _active, _memo) for variant in variants)
-                        break
-                else:
-                    all_of = schema.get("allOf")
-                    if isinstance(all_of, list) and all_of:
-                        result = all(_schema_may_be_object(variant, _active, _memo) for variant in all_of)
+            # Composition keywords constrain their siblings; none suppresses
+            # a sibling allOf merely by appearing first.
+            for key in ("anyOf", "oneOf"):
+                variants = schema.get(key)
+                if isinstance(variants, list):
+                    result = result and any(_schema_may_be_object(variant, _active, _memo) for variant in variants)
+            all_of = schema.get("allOf")
+            if isinstance(all_of, list) and all_of:
+                result = result and all(_schema_may_be_object(variant, _active, _memo) for variant in all_of)
         _memo[schema_id] = result
         return result
     finally:
@@ -837,6 +856,8 @@ def _find_property(
     field: str,
     _memo: dict[tuple[int, str], dict[str, Any] | None] | None = None,
     _active: set[tuple[int, str]] | None = None,
+    _object_memo: dict[int, bool] | None = None,
+    _property_memo: dict[tuple[int, str], bool] | None = None,
 ) -> dict[str, Any] | None:
     """Locate ``field`` in ``schema['properties']``, descending into top-level
     ``allOf``/``anyOf``/``oneOf`` composition when the schema carries no direct
@@ -846,6 +867,10 @@ def _find_property(
         _memo = {}
     if _active is None:
         _active = set()
+    if _object_memo is None:
+        _object_memo = {}
+    if _property_memo is None:
+        _property_memo = {}
     memo_key = (id(schema), field)
     if memo_key in _memo:
         return _memo[memo_key]
@@ -862,7 +887,7 @@ def _find_property(
     if isinstance(all_of, list):
         for variant in all_of:
             if isinstance(variant, dict):
-                found = _find_property(variant, field, _memo, _active)
+                found = _find_property(variant, field, _memo, _active, _object_memo, _property_memo)
                 if found is not None:
                     candidates.append(found)
     for key in ("anyOf", "oneOf"):
@@ -871,9 +896,13 @@ def _find_property(
             continue
         matches: list[dict[str, Any]] = []
         for variant in variants:
-            found = _find_property(variant, field, _memo, _active) if isinstance(variant, dict) else None
+            found = (
+                _find_property(variant, field, _memo, _active, _object_memo, _property_memo)
+                if isinstance(variant, dict)
+                else None
+            )
             if found is None:
-                if _schema_may_be_object(variant):
+                if _schema_may_accept_property(variant, field, _object_memo=_object_memo, _memo=_property_memo):
                     matches = []
                     break
                 continue
@@ -884,6 +913,52 @@ def _find_property(
     result = candidates[0] if len(candidates) == 1 else ({"allOf": candidates} if candidates else None)
     _memo[memo_key] = result
     return result
+
+
+def _schema_may_accept_property(
+    schema: Any,
+    field: str,
+    _active: set[tuple[int, str]] | None = None,
+    _memo: dict[tuple[int, str], bool] | None = None,
+    _object_memo: dict[int, bool] | None = None,
+) -> bool:
+    """Whether an object branch can contain ``field`` at all."""
+    if schema is False:
+        return False
+    if schema is True or not isinstance(schema, dict):
+        return True
+    if _active is None:
+        _active = set()
+    if _memo is None:
+        _memo = {}
+    if _object_memo is None:
+        _object_memo = {}
+    key = (id(schema), field)
+    if key in _memo:
+        return _memo[key]
+    if key in _active:
+        return True
+    if not _schema_may_be_object(schema, _memo=_object_memo):
+        return False
+    _active.add(key)
+    try:
+        props = schema.get("properties")
+        result = (isinstance(props, dict) and field in props) or schema.get("additionalProperties") is not False
+        for keyword in ("anyOf", "oneOf"):
+            variants = schema.get(keyword)
+            if isinstance(variants, list):
+                result = result and any(
+                    _schema_may_accept_property(variant, field, _active, _memo, _object_memo) for variant in variants
+                )
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and all_of:
+            result = result and all(
+                _schema_may_accept_property(variant, field, _active, _memo, _object_memo) for variant in all_of
+            )
+        _memo[key] = result
+        return result
+    finally:
+        _active.remove(key)
 
 
 # OpenAI's image request schema types `model` as a free string (no enum), so

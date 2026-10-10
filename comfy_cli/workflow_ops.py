@@ -178,10 +178,12 @@ class NotBatchableError(ValueError):
 
 
 # Node types that live only in the UI graph and never reach the API — the
-# frontend's isVirtualNode set. Mirrors workflow_to_api._UI_ONLY_NODE_TYPES;
-# duplicated rather than imported to keep workflow_ops import-free of the
-# converter. Keep the two in sync.
-UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
+# frontend's isVirtualNode set plus the converter's special LoadImageOutput
+# exclusion. Duplicated rather than imported to keep workflow_ops import-free
+# of the converter; keep both sources in sync.
+UI_ONLY_NODE_TYPES = frozenset(
+    {"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute", "LoadImageOutput"}
+)
 
 # The annotation subset of UI_ONLY_NODE_TYPES. The catalog has no schema for
 # them, so add-node / set-widget cannot build or address their text — but an
@@ -1050,7 +1052,7 @@ def _set_widget_impl(
             # recording an op that writes nothing.
             i = _widget_index(graph, inner_type, inner_widget, cur, node_id="/".join(str(s) for s in segments))
             old = cur[i] if i < len(cur) else None
-        warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
+        warnings = _validate_widget(graph, inner_type, inner_widget, value, cur)  # raises on shape/catalog mismatch
         if norm_note:
             warnings = [norm_note, *warnings]
         op = _new_op(
@@ -1075,7 +1077,7 @@ def _set_widget_impl(
     idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"))  # raises on unknown name
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
-    warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
+    warnings = _validate_widget(graph, class_type, widget, value, widgets)  # raises on shape/catalog mismatch
     morphism = graph.node(class_type)
     port = next((p for p in morphism.inputs if p.name == widget), None) if morphism is not None else None
     if port is not None and port.dynamic_options:
@@ -2485,6 +2487,7 @@ def apply_specs(
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
     op whose ``op_id`` was already applied is a no-op."""
+    had_applied_ops = "_applied_ops" in workflow
     applied = workflow.setdefault("_applied_ops", [])
     if op["op_id"] in applied:
         return workflow
@@ -2495,6 +2498,7 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed
     # attempt's own stamp and is silently dropped forever.
+    had_widget_stamps = "_widget_stamps" in workflow
     stamps_before = dict(workflow.get("_widget_stamps") or {})
     try:
         if kind == "add_node":
@@ -2514,8 +2518,12 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
         else:
             raise ValueError(f"unknown op {kind!r}")
     except BaseException:
-        if stamps_before or "_widget_stamps" in workflow:
+        if had_widget_stamps:
             workflow["_widget_stamps"] = stamps_before
+        else:
+            workflow.pop("_widget_stamps", None)
+        if not had_applied_ops and not workflow.get("_applied_ops"):
+            workflow.pop("_applied_ops", None)
         raise
     # NOT ``applied.append`` — ``_apply_reset_doc`` REPLACES ``_applied_ops``
     # with a fresh list (that is what makes it a history barrier), so the local
@@ -2598,6 +2606,11 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
             return
         from comfy_cli.cql import engine as _engine
 
+        # Validate against the current definition before the mutating resolver
+        # forks shared ancestors. Imported/replayed malformed ops must be
+        # atomic: a rejected widget cannot leave an unreachable fork behind.
+        preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        _engine._write_widget(copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False)
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
@@ -3294,13 +3307,23 @@ class FatalFindingError(ValueError):
         super().__init__(finding.get("message", finding.get("code", "invalid value")))
 
 
-def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[dict]:
+def _validate_widget(
+    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
     m = graph.node(class_type)
     if m is None:
         return []
     port = next((p for p in m.inputs if p.name == widget), None)
+    if port is None and widgets_values is not None:
+        from comfy_cli.cql import engine as _engine
+
+        # Dynamic-combo sub-widgets live only in the active flattened layout,
+        # not in ``m.inputs``. Validate the concrete selected port before the
+        # writer materializes it.
+        entries = _engine._expand_widget_entries(m, widgets_values)
+        port = next((entry.port for entry in entries if entry.name == widget), None)
     if port is None:
         return []
     err = port.validate_shape(value)
