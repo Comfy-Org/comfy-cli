@@ -1443,6 +1443,9 @@ def disconnect(
 ) -> tuple[dict, dict]:
     """Remove the link occupying one concrete input slot."""
     try:
+        interior = _interior_disconnect_scope(workflow, to_node)
+        if interior is not None:
+            return _disconnect_interior(workflow, graph, interior, to_slot, actor=actor, base_version=base_version)
         boundary = _subgraph_boundary_error(workflow, to_node)
         if boundary is not None:
             raise boundary
@@ -1585,6 +1588,54 @@ def _interior_link_scope(workflow: dict, from_node: Any, to_node: Any) -> dict |
     return {"path": [str(seg) for seg in path], "definition": definition, "src": src, "dst": dst}
 
 
+def _interior_disconnect_scope(workflow: dict, to_node: Any) -> dict | None:
+    """Resolve one interior disconnect destination without crossing its boundary.
+
+    Invalid paths return ``None`` so the existing boundary error can explain
+    them. A shared definition is refused for the same reason as an interior
+    connect: mutating it would rewire every live instance.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    text = str(to_node)
+    if _find_by_str(workflow, text) is not None:
+        return None
+    if _engine._SUBGRAPH_PATH_SEP in text:
+        segments = _engine.split_node_path(workflow, text)
+    elif ":" in text:
+        segments = text.split(":")
+    else:
+        return None
+    if len(segments) < 2:
+        return None
+    path = segments[:-1]
+    try:
+        host = _navigate_subgraph_path(workflow, path)
+    except ValueError:
+        return None
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None:
+        return None
+    dst = next(
+        (
+            node
+            for node in definition.get("nodes") or []
+            if isinstance(node, dict) and str(node.get("id")) == str(segments[-1])
+        ),
+        None,
+    )
+    if dst is None:
+        return None
+    instances = _definition_instance_count(workflow, str(definition.get("id")))
+    if instances > 1:
+        raise ValueError(
+            f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
+            f"{instances} instances, so disconnecting a link inside it would rewire all {instances} at once — "
+            "disconnect refuses that; edit a single-instance copy (unpack or duplicate the subgraph in the editor)"
+        )
+    return {"path": [str(seg) for seg in path], "definition": definition, "dst": dst}
+
+
 def _definition_instance_count(workflow: dict, def_id: str) -> int:
     """How many live instances of definition ``def_id`` the workflow holds.
 
@@ -1670,6 +1721,49 @@ def _connect_interior(
         to_node=dst.get("id"),
         to_slot=in_idx,
         link_type=link_type,
+    )
+    return apply_op(workflow, op, graph), op
+
+
+def _disconnect_interior(
+    workflow: dict, graph, scope: dict, to_slot: Any, *, actor: str, base_version: int
+) -> tuple[dict, dict]:
+    """Disconnect one concrete input whose source is in the same definition."""
+    dst = scope["dst"]
+    in_idx = _resolve_input_slot(dst, graph, to_slot)
+    inp = (dst.get("inputs") or [])[in_idx]
+    link_id = inp.get("link")
+    address = f"{'/'.join(scope['path'])}/{dst.get('id')}"
+    if link_id is None:
+        raise ValueError(f"input {to_slot!r} on interior node {address} is not connected")
+
+    link = next(
+        (row for row in scope["definition"].get("links") or [] if _interior_link_id(row) == link_id),
+        None,
+    )
+    if isinstance(link, dict):
+        origin_id = link.get("origin_id")
+        target_id = link.get("target_id")
+        target_slot = link.get("target_slot")
+    elif isinstance(link, list) and len(link) >= 5:
+        origin_id, target_id, target_slot = link[1], link[3], link[4]
+    else:
+        origin_id = target_id = target_slot = None
+    node_ids = {str(node.get("id")) for node in scope["definition"].get("nodes") or [] if isinstance(node, dict)}
+    if str(origin_id) not in node_ids or str(target_id) != str(dst.get("id")) or target_slot != in_idx:
+        raise ValueError(
+            f"link {link_id} on interior node {address} crosses the subgraph boundary or has no interior source — "
+            "disconnect it through the subgraph instance's promoted input instead"
+        )
+
+    op = _new_op(
+        "disconnect",
+        actor,
+        base_version,
+        path=list(scope["path"]),
+        link_id=link_id,
+        to_node=dst.get("id"),
+        to_slot=in_idx,
     )
     return apply_op(workflow, op, graph), op
 
@@ -2965,6 +3059,9 @@ def _remove_link(workflow: dict, link_id: Any) -> None:
 
 def _apply_disconnect(workflow: dict, op: dict) -> None:
     """Apply a scalar write that leaves a concrete input unoccupied."""
+    if op.get("path"):
+        _apply_interior_disconnect(workflow, op)
+        return
     dst = _find_by_str(workflow, op["to_node"])
     if dst is None:
         return
@@ -3002,6 +3099,45 @@ def _apply_disconnect(workflow: dict, op: dict) -> None:
     current = ins[to_idx].get("link")
     if current is not None:
         _remove_link(workflow, current)
+
+
+def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
+    """Apply a path-scoped disconnect inside one subgraph definition."""
+    from comfy_cli.cql import engine as _engine
+
+    try:
+        host = _navigate_subgraph_path(workflow, [str(seg) for seg in op["path"]])
+    except ValueError:
+        return
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None:
+        return
+    dst = next(
+        (
+            node
+            for node in definition.get("nodes") or []
+            if isinstance(node, dict) and str(node.get("id")) == str(op["to_node"])
+        ),
+        None,
+    )
+    if dst is None:
+        return
+    to_idx = op["to_slot"]
+    ins = dst.get("inputs")
+    if (
+        not isinstance(ins, list)
+        or not isinstance(to_idx, int)
+        or isinstance(to_idx, bool)
+        or not 0 <= to_idx < len(ins)
+        or not isinstance(ins[to_idx], dict)
+    ):
+        return
+    if not _lww_gate(workflow, op):
+        return
+    _lww_commit(workflow, op)
+    current = ins[to_idx].get("link")
+    if current is not None:
+        _remove_interior_link(definition, current)
 
 
 def _apply_delete_node(workflow: dict, op: dict) -> None:

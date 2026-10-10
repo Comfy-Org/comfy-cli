@@ -125,6 +125,12 @@ losing disconnect changes nothing. A missing node or drifted slot is a replay
 no-op. Minting against an existing empty input is rejected so callers cannot
 mistake an already-disconnected or incorrectly addressed slot for a mutation.
 
+When the destination is an interior node, the op also carries `path` (the
+subgraph instance path) and scopes the same numeric-slot register to that path.
+It removes only a link whose source and destination are both inside the same
+single-instance definition. A boundary-crossing link and a definition shared
+by multiple live instances are rejected at mint time.
+
 ### 1.3 `set_widget`
 
 Spec form:
