@@ -515,9 +515,7 @@ class TestCodeSearchCLI:
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_connection_error(self, mock_fetch):
         secret_query = "secret-user-derived-query"
-        mock_fetch.side_effect = requests.ConnectionError(
-            f"GET https://service.invalid/?query={secret_query} failed"
-        )
+        mock_fetch.side_effect = requests.ConnectionError(f"GET https://service.invalid/?query={secret_query} failed")
 
         result = runner.invoke(app, [secret_query])
 
