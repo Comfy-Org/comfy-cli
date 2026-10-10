@@ -24,7 +24,15 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES, _dynamic_group_row_count
+from comfy_cli.cql.engine import (
+    _FRONTEND_DOM_WIDGET_TYPES,
+    LOAD_3D_BUTTON_VALUES,
+    DynamicGroupBindingError,
+    _dynamic_group_fields,
+    _dynamic_group_row_count,
+    _parse_morphism,
+    _validate_dynamic_group_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +180,8 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
                 bypassed=bypassed,
                 nodes_to_exclude=nodes_to_exclude,
             )
+        except DynamicGroupBindingError as exc:
+            raise WorkflowConversionError(f"Node {node_id_str} ({node_type}): {exc}") from exc
         except Exception:
             # An individual malformed node should not torpedo the whole prompt.
             # The executor will fail loudly on missing nodes if this matters.
@@ -1605,9 +1615,29 @@ def _collect_widget_inputs(
 
     out: dict[str, Any] = {}
     schema = _schema_for(node_type, node, object_info)
+    group_ui_names: set[str] = set()
+    if schema and any(
+        isinstance(spec, (list, tuple))
+        and spec
+        and isinstance(spec[0], str)
+        and spec[0].startswith("COMFY_DYNAMICGROUP")
+        for section in ("required", "optional")
+        for spec in _schema_input_def(schema).get(section, {}).values()
+    ):
+        morphism = _parse_morphism(node_type, schema)
+        entries = _validate_dynamic_group_layout(node, morphism) or []
+        fields = {p.name: {f.name for f in _dynamic_group_fields(p)} for p in morphism.inputs if p.is_dynamic_group}
+        group_ui_names.update(fields)
+        group_ui_names.update(
+            e.name
+            for e in entries
+            if e.owner in fields and e.name[len(e.owner) + 1 :].partition(".")[2] not in fields[e.owner]
+        )
     if isinstance(widget_values, dict):
         # Already self-describing; drop UI-only keys and respect link overrides.
         for key, value in widget_values.items():
+            if key in group_ui_names:
+                continue
             spec = _declared_input_spec(_schema_input_def(schema), key)
             if spec and spec[0] == "COMFY_DYNAMICGROUP_V3":
                 continue

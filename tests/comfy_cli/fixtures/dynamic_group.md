@@ -14,3 +14,9 @@ subgraph UI cleanup assertion.
 The empty case is reduced from the same frontend revision's
 `browser_tests/assets/inputs/dynamic_group.json`. Its expected inputs omit the
 zero-row controller, as required by the prompt contract.
+
+`CompositeDynamicGroup` is a synthetic composition of that captured schema with
+a second seed/weight group and a sibling DynamicCombo set to its non-default
+option. Its saved order includes the seed companion before the trailing string.
+The expected prompt omits both group controllers and the seed companion. This
+fixture covers array, named-object and matching explicit-form producer shapes.

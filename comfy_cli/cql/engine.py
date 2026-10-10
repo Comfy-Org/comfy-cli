@@ -3878,11 +3878,58 @@ def _dynamic_group_widgets(port: Port, prefix: str = "") -> list[Port]:
     return widgets
 
 
+class DynamicGroupBindingError(ValueError):
+    pass
+
+
 def _dynamic_group_row_count(value: Any, available: int, width: int) -> int:
     # A corrupt controller must not allocate a roster larger than the saved data.
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or not width or value * width > available:
-        raise ValueError("DynamicGroup row count does not match the saved widget values")
+        raise DynamicGroupBindingError("DynamicGroup row count does not match the saved widget values")
     return value
+
+
+def _validate_dynamic_group_schema(m: Morphism) -> None:
+    for port in m.inputs:
+        if port.type.startswith("COMFY_DYNAMICGROUP") and not port.is_dynamic_group:
+            raise DynamicGroupBindingError(f"unsupported DynamicGroup schema {port.type!r} on {m.id}")
+        if not port.is_dynamic_group:
+            continue
+        if any(p.name.startswith(f"{port.name}.") for p in m.inputs):
+            raise DynamicGroupBindingError(f"DynamicGroup generated-name collision under {port.name!r} on {m.id}")
+        names = [field.name for field in _dynamic_group_fields(port)]
+        if len(names) != len(set(names)):
+            raise DynamicGroupBindingError(f"DynamicGroup duplicate template field under {port.name!r} on {m.id}")
+
+
+def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry] | None:
+    _validate_dynamic_group_schema(m)
+    if not any(p.is_dynamic_group for p in m.inputs):
+        return None
+    values = node.get("widgets_values")
+    form = node.get("widgets_values_form")
+    source = values
+    if "widgets_values_form" in node:
+        if not isinstance(form, dict) or set(form) != {"order"}:
+            raise DynamicGroupBindingError("widgets_values_form must contain only an order array")
+        order = form["order"]
+        if not isinstance(order, list) or not order or any(not isinstance(n, str) or not n for n in order):
+            raise DynamicGroupBindingError("widgets_values_form.order must be a non-empty array of widget names")
+        if isinstance(values, list):
+            if len(values) != len(order):
+                raise DynamicGroupBindingError("widgets_values_form length does not match widgets_values")
+            source = dict(zip(order, values))
+        elif isinstance(values, dict):
+            if len(order) != len(set(order)) or any(n not in values for n in order):
+                raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
+        else:
+            raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
+    entries = _expand_widget_entries(m, source or [])
+    if form is not None and form["order"] != [e.name for e in entries]:
+        raise DynamicGroupBindingError("widgets_values_form does not match the available DynamicGroup schema")
+    if isinstance(values, list) and len(entries) != len(values):
+        raise DynamicGroupBindingError("DynamicGroup schema does not match the saved widget values")
+    return entries
 
 
 def _expand_widget_entries(
@@ -3911,6 +3958,7 @@ def _expand_widget_entries(
     contribute (``COMFY_AUTOGROW_V3`` groups, ``GEMINI_INPUT_FILES``…) — they
     own no slot, but the wiring side needs to know they exist.
     """
+    _validate_dynamic_group_schema(m)
     entries: list[_WidgetEntry] = []
 
     def saved_value(name: str, index: int, default: Any = None) -> Any:
@@ -3974,6 +4022,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     m = graph.node(node_type)
     if m is None:
         return []
+    _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
     for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
@@ -4266,13 +4315,16 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
+    _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    order = graph.widget_order_for_node(node_type, widgets)
+    if any(p.is_dynamic_group for p in m.inputs) and order.count(input_name) > 1:
+        raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
     if not isinstance(node.get("widgets_values"), list):
         # Persist the positional projection so downstream re-reads (the
         # dynamic-combo selector path re-reads from the node) see the same
         # values this write is about to index against.
         node["widgets_values"] = widgets
-    order = graph.widget_order_for_node(node_type, widgets)
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):
         raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
