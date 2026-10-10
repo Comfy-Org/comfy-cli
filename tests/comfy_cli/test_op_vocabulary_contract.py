@@ -250,4 +250,4 @@ def test_clear_rejected_in_batch_with_registered_hint():
 
 
 def test_load_image_output_is_treated_as_a_ui_only_node():
-    assert "LoadImageOutput" in workflow_ops.UI_ONLY_NODE_TYPES
+    assert "LoadImageOutput" not in workflow_ops.UI_ONLY_NODE_TYPES

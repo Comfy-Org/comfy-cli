@@ -400,13 +400,18 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
             continue
         value = match.group("value").strip()
         key_indent = len(content) - len(content.lstrip(" \t"))
-        block_scalar = bool(re.fullmatch(r"[|>][+-]?(?:[ \t]+#.*)?", value))
+        block_scalar = bool(re.fullmatch(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?", value))
         next_is_sequence = False
-        if not value and index + 1 < len(lines):
-            next_content = lines[index + 1].rstrip("\r\n")
+        next_is_scalar = False
+        probe = index + 1
+        while probe < len(lines) and not lines[probe].rstrip("\r\n").strip():
+            probe += 1
+        if (not value or value.startswith("#")) and probe < len(lines):
+            next_content = lines[probe].rstrip("\r\n")
             next_indent = len(next_content) - len(next_content.lstrip(" \t"))
-            next_is_sequence = next_indent > key_indent and next_content.lstrip(" \t").startswith("- ")
-        if not block_scalar and not next_is_sequence:
+            next_is_sequence = next_indent >= key_indent and next_content.lstrip(" \t").startswith("- ")
+            next_is_scalar = value.startswith("#") and next_indent > key_indent
+        if not block_scalar and not next_is_sequence and not next_is_scalar:
             out.append(line)
             index += 1
             continue
@@ -418,7 +423,11 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
                 index += 1
                 continue
             child_indent = len(child) - len(child.lstrip(" \t"))
-            if child_indent <= key_indent:
+            child_is_sequence = child.lstrip(" \t").startswith("- ")
+            if next_is_sequence:
+                if child_indent < key_indent or (child_indent == key_indent and not child_is_sequence):
+                    break
+            elif child_indent <= key_indent:
                 break
             index += 1
     return "".join(out)
@@ -501,6 +510,58 @@ def _looks_like_hostname(authority: str) -> bool:
             for label in authority.split(".")
         )
     )
+
+
+def _authority_labels_before(context: str) -> str | None:
+    """Return the dotted authority prefix immediately before a matched label."""
+    last_space = max(context.rfind(" "), context.rfind("\t"), context.rfind("\r"), context.rfind("\n"))
+    token = context[last_space + 1 :]
+    if "://" in token:
+        scheme, labels = token.rsplit("://", 1)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*", scheme):
+            return None
+    else:
+        labels = token
+        words = context[: last_space + 1].rstrip().lower().rsplit(maxsplit=1)
+        if words[-1:] != ["host"]:
+            return None
+    if (labels and not labels.endswith(".")) or any(char.isspace() or char in ":/" for char in labels):
+        return None
+    return labels
+
+
+def _render_assignment_siblings(prefix: str, value: str, *, mask_leading: bool) -> str | None:
+    """Mask secret-shaped assignments after the leading value on one line."""
+    siblings = list(
+        re.finditer(
+            r"(?P<sep>[&;]|,[ \t]*|[ \t]+)(?P<key>[\"']?[A-Za-z_][\w.-]*[\"']?)(?P<assign>[:=])",
+            value,
+        )
+    )
+    if not siblings:
+        return None
+    safe_keys = {
+        "request",
+        "request_id",
+        "request-id",
+        "x-request-id",
+        "trace",
+        "trace_id",
+        "trace-id",
+        "content-type",
+    }
+    rendered = [f"{prefix}***" if mask_leading else f"{prefix}{value[: siblings[0].start()]}"]
+    for idx, sibling in enumerate(siblings):
+        key = sibling.group("key").strip("\"'")
+        end = siblings[idx + 1].start() if idx + 1 < len(siblings) else len(value)
+        secret_key = re.fullmatch(_SECRET_ASSIGNMENT_KEY_PATTERN, key, re.IGNORECASE) is not None
+        separator = sibling.group("sep")
+        quoted_mapping_key = separator.startswith(",") and sibling.group("key").startswith(("'", '"'))
+        if key.lower() in safe_keys or (not secret_key and (separator[0].isspace() or quoted_mapping_key)):
+            rendered.append(value[sibling.start() : end])
+        else:
+            rendered.append(f"{separator}{sibling.group('key')}{sibling.group('assign')}***")
+    return "".join(rendered)
 
 
 def _scrub_url_userinfo(text: str) -> str:
@@ -606,58 +667,37 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
     """
     prefix = match.group("prefix")
     value = match.group("value")
-    if re.match(r"[ \t]*[\"']?\*{3}", value):
-        # An earlier structured rule already masked this value. Do not parse
-        # the remaining diagnostic as part of its replacement.
-        return match.group(0)
     host_match = re.fullmatch(r"(?P<host>[^\s:=]+):", prefix)
     port = re.split(r"[\s/]", value.lstrip(), maxsplit=1)[0]
     context = match.string[: match.start()]
-    authority_prefix = re.search(r"(?:[A-Za-z][A-Za-z0-9+.-]*://|\bhost[ \t]+)(?P<labels>[^\s/:]*\.)*$", context, re.I)
-    full_host = (
-        f"{authority_prefix.group('labels') or ''}{host_match.group('host')}" if authority_prefix and host_match else ""
-    )
+    authority_labels = _authority_labels_before(context) if host_match is not None else None
+    full_host = f"{authority_labels}{host_match.group('host')}" if authority_labels is not None and host_match else ""
     if (
         host_match is not None
-        and authority_prefix is not None
+        and authority_labels is not None
         and _looks_like_numbered_network_authority(f"{full_host}:{port}")
     ):
         # Only an actual URL/``host ...`` authority earns the exemption. An
-        # ``=`` assignment with a numeric value is still a credential.
-        return match.group(0)
-    siblings = list(
-        re.finditer(
-            r"(?P<sep>[&;]|,[ \t]*|[ \t]+)(?P<key>[\"']?[A-Za-z_][\w.-]*[\"']?)(?P<assign>[:=])",
-            value,
-        )
-    )
-    if siblings:
-        safe_keys = {
-            "request",
-            "request_id",
-            "request-id",
-            "x-request-id",
-            "trace",
-            "trace_id",
-            "trace-id",
-            "content-type",
-        }
-        rendered = [f"{prefix}***"]
-        for idx, sibling in enumerate(siblings):
-            key = sibling.group("key").strip("\"'")
-            end = siblings[idx + 1].start() if idx + 1 < len(siblings) else len(value)
-            secret_key = re.fullmatch(_SECRET_ASSIGNMENT_KEY_PATTERN, key, re.IGNORECASE) is not None
-            separator = sibling.group("sep")
-            quoted_mapping_key = separator.startswith(",") and sibling.group("key").startswith(("'", '"'))
-            if key.lower() in safe_keys or (not secret_key and (separator[0].isspace() or quoted_mapping_key)):
-                rendered.append(value[sibling.start() : end])
-            else:
-                rendered.append(f"{separator}{sibling.group('key')}{sibling.group('assign')}***")
-        return "".join(rendered)
+        # ``=`` assignment with a numeric value is still a credential. Preserve
+        # this authority, but continue masking later assignments on the line.
+        return _render_assignment_siblings(prefix, value, mask_leading=False) or match.group(0)
+    already_masked = re.match(r"[ \t]*[\"']?\*{3}", value) is not None
+    rendered_siblings = _render_assignment_siblings(prefix, value, mask_leading=not already_masked)
+    if rendered_siblings is not None:
+        return rendered_siblings
     opening_wrapper = (
         match.string[match.start() - 1] if match.start() and match.string[match.start() - 1] in "\"'" else ""
     )
-    if opening_wrapper and (closing := value.find(opening_wrapper)) >= 0:
+    closing = next(
+        (
+            idx
+            for idx in range(len(value) - 1, -1, -1)
+            if value[idx] == opening_wrapper
+            and (idx + 1 == len(value) or value[idx + 1].isspace() or value[idx + 1] in ",;)]}")
+        ),
+        -1,
+    )
+    if opening_wrapper and closing >= 0:
         suffix = value[closing:]
     else:
         explanation = re.search(r"[ \t]+\([^\r\n()]*\)$", value)

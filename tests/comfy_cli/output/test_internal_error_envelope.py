@@ -820,6 +820,18 @@ def test_internal_error_scrubber_rescans_after_an_allowlisted_sibling():
     assert "request=req-1" in scrubbed
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "auth=('u', 'p') password=hunter2",
+        "credentials=Creds(user='a') api_key=sk-LIVE",
+    ],
+)
+def test_internal_error_scrubber_masks_assignments_after_a_structured_secret(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "hunter2" not in scrubbed and "sk-LIVE" not in scrubbed
+
+
 def test_internal_error_scrubber_masks_a_multiword_unquoted_passphrase():
     scrubbed = _internal_error_message(RuntimeError("passphrase=correct horse battery staple request=req-1"))
     assert "correct" not in scrubbed and "battery" not in scrubbed
@@ -850,7 +862,11 @@ def test_internal_error_scrubber_masks_unquoted_yaml_values_on_the_next_line(mes
     ("message", "secrets"),
     [
         ("api_keys:\n  - sk-A\n  - sk-B\nrequest: req-1", ("sk-A", "sk-B")),
+        ("api_keys:\n- sk-A\n- sk-B\nrequest: req-1", ("sk-A", "sk-B")),
+        ("api_keys:  # prod\n\n  - sk-A\nrequest: req-1", ("sk-A",)),
+        ("password: # prod\n  hunter2\nrequest: req-1", ("hunter2",)),
         ("password: |\n  alpha\n  beta\nrequest: req-1", ("alpha", "beta")),
+        ("password: |2-\n    alpha\nrequest: req-1", ("alpha",)),
         ("password: >-\n  alpha\n  beta\nrequest: req-1", ("alpha", "beta")),
         ("auth:\n  alice:hunter2\nrequest: req-1", ("alice:hunter2",)),
     ],
@@ -881,6 +897,23 @@ def test_internal_error_scrubber_masks_doubled_single_quote_escapes():
 def test_internal_error_scrubber_preserves_deep_secret_named_host_ports():
     message = "https://a.b.auth.com:443/callback"
     assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_keeps_host_port_but_masks_later_assignment():
+    scrubbed = _internal_error_message(RuntimeError("https://a.b.auth.com:8443/cb failed; password=hunter2"))
+    assert "https://a.b.auth.com:8443/cb" in scrubbed
+    assert "hunter2" not in scrubbed
+
+
+def test_internal_error_scrubber_handles_many_authority_dots_without_regex_backtracking():
+    message = f"http://{'a.' * 100}example/x token=LIVE"
+    assert "LIVE" not in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_uses_the_closing_wrapper_not_an_apostrophe():
+    scrubbed = _internal_error_message(RuntimeError("bad option 'password=it's-secret' given"))
+    assert "it's-secret" not in scrubbed
+    assert "' given" in scrubbed
 
 
 def test_internal_error_scrubber_does_not_exempt_out_of_range_ports():

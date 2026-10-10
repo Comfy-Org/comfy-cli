@@ -257,6 +257,27 @@ def test_interior_write_to_a_hidden_sub_widget_is_refused(graph):
     assert "57/7.model" in msg, f"must name the interior selector address: {msg}"
 
 
+def test_replayed_hidden_sub_widget_does_not_fork_or_commit_the_op(graph):
+    wf = _in_subgraph(graph)
+    wf["nodes"].append(copy.deepcopy(wf["nodes"][0]) | {"id": 58})
+    before = copy.deepcopy(wf)
+    op = workflow_ops._new_op(
+        "set_widget",
+        "agent",
+        1,
+        node_id="57/7",
+        widget="model.prompt_expansion_mode",
+        value="quality",
+        path=["57", "7"],
+        inner_widget="model.prompt_expansion_mode",
+    )
+
+    with pytest.raises(workflow_ops.FatalFindingError, match="does not exist"):
+        workflow_ops.apply_op(wf, op, graph)
+
+    assert wf == before
+
+
 def test_interior_write_succeeds_once_the_revealing_option_is_selected(graph):
     wf = _in_subgraph(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, "57/7", "model", "MiniMax H3 Max")
