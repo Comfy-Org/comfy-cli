@@ -513,6 +513,17 @@ def test_find_property_preserves_combinator_enum_semantics():
     assert spec._extract_enum(spec._find_property(any_of, "model")) == ["v1", "v2"]
 
 
+def test_find_property_keeps_values_shared_by_distinct_object_oneof_variants():
+    schema = {
+        "oneOf": [
+            {"properties": {"mode": {"const": "a"}, "model": {"enum": ["m1", "shared"]}}},
+            {"properties": {"mode": {"const": "b"}, "model": {"enum": ["m2", "shared"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["m1", "shared", "m2"]
+
+
 def test_find_property_treats_a_non_declaring_union_branch_as_unconstrained():
     schema = {
         "properties": {"model": {"enum": ["a", "b"]}},

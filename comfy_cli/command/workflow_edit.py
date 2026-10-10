@@ -690,14 +690,15 @@ def ls_nodes_cmd(
     name_first: dict[str, dict] = {}
     for definition in subgraphs:
         name = definition.get("name")
-        if isinstance(name, str) and name in node_types:
+        if isinstance(name, str) and name:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, definition)
-    candidates = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in ids_only}
-    conflicts = _definition_alias_conflicts(subgraphs, ids_only, candidates)
-    for name, count in name_counts.items():
-        if count == 1 and name not in ids_only and name not in conflicts:
-            subgraph_ids.add(name)
+    unique_names = {
+        name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in ids_only
+    }
+    candidates = {name: definition for name, definition in unique_names.items() if name in node_types}
+    conflicts = _definition_alias_conflicts(subgraphs, ids_only, candidates, unique_names)
+    subgraph_ids.update(name for name in candidates if name not in conflicts)
     rows = []
     for n in nodes:
         properties = n.get("properties")

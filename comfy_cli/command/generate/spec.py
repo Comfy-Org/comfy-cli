@@ -908,7 +908,11 @@ def _find_property(
                 continue
             matches.append(found)
         if matches:
-            candidates.append(matches[0] if len(matches) == 1 else {key: matches})
+            # ``oneOf`` is exclusive for the whole object. Two otherwise
+            # distinct request variants may legally share this property's
+            # value, so the lifted property union is inclusive.
+            lifted_key = "anyOf" if key == "oneOf" else key
+            candidates.append(matches[0] if len(matches) == 1 else {lifted_key: matches})
     _active.remove(memo_key)
     result = candidates[0] if len(candidates) == 1 else ({"allOf": candidates} if candidates else None)
     _memo[memo_key] = result

@@ -178,12 +178,9 @@ class NotBatchableError(ValueError):
 
 
 # Node types that live only in the UI graph and never reach the API — the
-# frontend's isVirtualNode set plus the converter's special LoadImageOutput
-# exclusion. Duplicated rather than imported to keep workflow_ops import-free
-# of the converter; keep both sources in sync.
-UI_ONLY_NODE_TYPES = frozenset(
-    {"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute", "LoadImageOutput"}
-)
+# frontend's isVirtualNode set. Duplicated rather than imported to keep
+# workflow_ops import-free of the converter; keep both sources in sync.
+UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
 
 # The annotation subset of UI_ONLY_NODE_TYPES. The catalog has no schema for
 # them, so add-node / set-widget cannot build or address their text — but an
@@ -2610,7 +2607,12 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         # forks shared ancestors. Imported/replayed malformed ops must be
         # atomic: a rejected widget cannot leave an unreachable fork behind.
         preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
-        _engine._write_widget(copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False)
+        preflight_warnings = _engine._write_widget(
+            copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False
+        )
+        refusal = next((item for item in preflight_warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
+        if refusal is not None:
+            raise FatalFindingError(refusal)
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
