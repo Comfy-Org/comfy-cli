@@ -727,10 +727,10 @@ def ls_nodes_cmd(
         # show` cannot take that type. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
-            if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
-                row["ui_only"] = True
-            elif workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
+            if workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
                 row["subgraph"] = True
+            elif node_type in workflow_ops.UI_ONLY_NODE_TYPES:
+                row["ui_only"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():

@@ -278,6 +278,58 @@ def test_replayed_hidden_sub_widget_does_not_fork_or_commit_the_op(graph):
     assert wf == before
 
 
+def test_replayed_top_level_hidden_sub_widget_does_not_commit_the_op(graph):
+    wf, node_id = _fresh(graph)
+    before = copy.deepcopy(wf)
+    op = workflow_ops._new_op(
+        "set_widget",
+        "agent",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+
+    with pytest.raises(workflow_ops.FatalFindingError, match="does not exist"):
+        workflow_ops.apply_op(wf, op, graph)
+
+    assert wf == before
+
+
+def test_dynamic_sub_widget_combo_uses_the_same_normalization_as_top_level():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    max_inputs = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]["options"][1]["inputs"][
+        "required"
+    ]
+    max_inputs["aspect_ratio"] = ["COMBO", {"default": "16:9 (Landscape)", "options": ["16:9 (Landscape)"]}]
+    local_graph = Graph.from_object_info(object_info)
+    wf, node_id = _fresh(local_graph)
+    wf, _ = workflow_ops.set_widget(wf, local_graph, node_id, "model", "MiniMax H3 Max")
+
+    wf, op = workflow_ops.set_widget(wf, local_graph, node_id, "model.aspect_ratio", "16:9")
+
+    assert op["value"] == "16:9 (Landscape)"
+
+
+def test_materializing_a_missing_selector_fills_plain_widget_defaults():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    required = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]
+    required["model"][1]["default"] = "MiniMax H3"
+    object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"] = {
+        "cfg": ["FLOAT", {"default": 8.0}],
+        **required,
+    }
+    object_info["MinimaxHailuo03TextToVideoNode"]["input_order"]["required"] = ["cfg", "model", "watermark"]
+    local_graph = Graph.from_object_info(object_info)
+    node = {"id": 1, "type": "MinimaxHailuo03TextToVideoNode", "widgets_values": []}
+
+    from comfy_cli.cql.engine import _write_widget
+
+    _write_widget(node, "model.prompt", "hello", local_graph, extend=True)
+
+    assert node["widgets_values"][0] == 8.0
+
+
 def test_interior_write_succeeds_once_the_revealing_option_is_selected(graph):
     wf = _in_subgraph(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, "57/7", "model", "MiniMax H3 Max")

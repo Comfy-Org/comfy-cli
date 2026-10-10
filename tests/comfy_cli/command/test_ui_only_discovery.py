@@ -228,6 +228,17 @@ def test_ls_nodes_matches_editor_resolution_for_a_definition_collision(patched_g
     assert ksampler["subgraph"] is True
 
 
+def test_ls_nodes_prefers_a_subgraph_definition_over_a_ui_only_name(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["nodes"].append({"id": 20, "type": "Reroute", "inputs": [], "outputs": []})
+    wf["definitions"] = {"subgraphs": [{"id": "Reroute", "nodes": [], "links": [], "inputs": [], "outputs": []}]}
+
+    row = _ls_rows(tmp_path, capsys, wf)[20]
+
+    assert row.get("subgraph") is True
+    assert "ui_only" not in row
+
+
 def test_ls_nodes_real_classes_stay_clean(patched_graph, tmp_path, capsys):
     rows = _ls_rows(tmp_path, capsys, _wf_with_reroute_and_subgraph())
     for nid in (3, 7):

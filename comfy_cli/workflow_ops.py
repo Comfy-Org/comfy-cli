@@ -861,7 +861,9 @@ def _widget_schema_port(graph, class_type: str, widget: str):
     return port
 
 
-def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
+def _normalize_combo(
+    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+) -> tuple[Any, dict | None]:
     """Rewrite a mangled model/COMBO value to the real option it means so the
     model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
     ``wai-illustrious-sdxl.safetensors``). Returns ``(value, note)`` — ``note`` is
@@ -870,6 +872,16 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     ``unknown_enum_value`` (with ``did_you_mean``) still fires.
     """
     port = _widget_schema_port(graph, class_type, widget)
+    if port is None and widgets_values is not None:
+        from comfy_cli.cql import engine as _engine
+
+        m = graph.node(class_type)
+        if m is None:
+            return value, None
+        port = next(
+            (entry.port for entry in _engine._expand_widget_entries(m, widgets_values) if entry.name == widget),
+            None,
+        )
     if port is None:
         return value, None
     text = _string_widget_text(port, value)
@@ -1058,8 +1070,8 @@ def _set_widget_impl(
         segments, inner_widget = target.segments, target.widget
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
-        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
         cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
+        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value, cur)
         old = None
         if graph.node(inner_type) is not None:
             # Same resolution as a top-level node, so a sub-widget the current
@@ -1090,7 +1102,7 @@ def _set_widget_impl(
     class_type = node.get("type", "")
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
     idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"))  # raises on unknown name
-    value, norm_note = _normalize_combo(graph, class_type, widget, value)
+    value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets)
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value, widgets)  # raises on shape/catalog mismatch
     morphism = graph.node(class_type)
@@ -2683,7 +2695,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # The CQL writer is the schema-aware positional owner. In particular, a
     # dynamic-combo selector change must replace the old option's variable-width
     # sub-widget span before preserving trailing values such as seed/watermark.
-    _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
+    warnings = _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
+    refusal = next((item for item in warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
+    if refusal is not None:
+        raise FatalFindingError(refusal)
     _lww_commit(workflow, op)
 
 
