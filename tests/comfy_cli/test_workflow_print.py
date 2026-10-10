@@ -1708,14 +1708,6 @@ def test_string_and_integer_link_ids_are_conflicting_duplicates(sd15_graph):
         render_py(wf, sd15_graph)
 
 
-def test_link_rows_that_only_differ_by_type_are_conflicting_duplicates(sd15_graph):
-    wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
-    wf["links"].append([7, 1, 0, 2, 0, "IMAGE"])
-
-    with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
-        render_py(wf, sd15_graph)
-
-
 def test_typed_duplicate_link_rows_are_rejected():
     wf = _mini([_node(1, "Source"), _node(2, "Target", inputs=[{"name": "x", "link": 7}])], [])
     wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]

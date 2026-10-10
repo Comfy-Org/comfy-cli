@@ -176,12 +176,12 @@ def _typed_value_key(value: Any) -> tuple[type, str]:
 
 
 def _normalised_link_row(values: Any) -> tuple[Any, ...]:
-    """The six serialized link fields, with ids keyed as the renderer keys them."""
-    fields = list(values)[:6]
+    """The five fields the renderer consumes, with ids keyed as its maps key them."""
+    fields = list(values)[:5]
     for index in (1, 3):
         if index < len(fields) and fields[index] is not None:
             fields[index] = str(fields[index])
-    return tuple((type(value), repr(value)) if index in (0, 2, 4, 5) else value for index, value in enumerate(fields))
+    return tuple((type(value), repr(value)) if index in (0, 2, 4) else value for index, value in enumerate(fields))
 
 
 _NONLIST_INPUTS = object()

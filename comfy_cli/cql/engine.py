@@ -4050,15 +4050,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             # (recursing for nested instances). A legacy template whose
             # curated surface comes entirely from ``proxyWidgets`` (nothing
             # linked) keeps its hand-picked view without recursion.
-            declared, fully_curated = _declared_subgraph_slots(
-                node,
-                sg,
-                node_id,
-                graph,
-                workflow,
-                scope,
-                defs_by_id,
-            )
+            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph, workflow, scope)
             for slot in declared:
                 if (node_id, slot["name"]) not in exclude:
                     add(slot)
@@ -4089,7 +4081,6 @@ def _declared_subgraph_slots(
     graph: Graph,
     workflow: dict | None = None,
     scope: dict | None = None,
-    defs: dict[str, dict] | None = None,
 ) -> tuple[list[dict], bool]:
     """Build slots for a subgraph instance's promoted inputs.
 
@@ -4111,8 +4102,8 @@ def _declared_subgraph_slots(
     declared: list[dict] = []
     any_declared = False
     all_resolved = True
-    resolved_defs = defs if defs is not None else _subgraph_defs_by_id(workflow) if workflow is not None else {}
-    promoted_by_name = {p.name: p for p in _promoted.promoted_inputs(sg, resolved_defs)}
+    defs = _subgraph_defs_by_id(workflow) if workflow is not None else {}
+    promoted_by_name = {p.name: p for p in _promoted.promoted_inputs(sg, defs)}
     for inp in sg.get("inputs") or []:
         if not isinstance(inp, dict):
             continue
@@ -4124,7 +4115,7 @@ def _declared_subgraph_slots(
         if pi is not None and pi.is_widget and workflow is not None:
             current = _promoted.host_value(instance, pi)
             if current is _promoted.UNSET:
-                current = _promoted.source_value(workflow, sg, pi, graph, resolved_defs)
+                current = _promoted.source_value(workflow, sg, pi, graph, defs)
             if current is _promoted.UNSET:
                 current = _UNRESOLVED
             # Only a LIVE link counts (the workflow's for a top-level instance,
@@ -4163,12 +4154,12 @@ def _declared_subgraph_slots(
         # value the frontend shows (legacy host value, else the interior
         # source). Reads never mutate; the first write performs the repair.
         advertised = {s["name"] for s in declared}
-        for entry in _promoted.plan_proxy_migration(workflow, instance, graph, resolved_defs):
+        for entry in _promoted.plan_proxy_migration(workflow, instance, graph, defs):
             if not entry.repairable or entry.name in advertised:
                 continue
             advertised.add(entry.name)
             any_declared = True
-            current = _promoted.entry_effective_value(workflow, sg, entry, graph, resolved_defs)
+            current = _promoted.entry_effective_value(workflow, sg, entry, graph, defs)
             if current is _promoted.UNSET:
                 all_resolved = False
                 continue

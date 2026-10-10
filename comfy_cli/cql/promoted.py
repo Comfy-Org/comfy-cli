@@ -467,48 +467,45 @@ def promoted_inputs(
         and _dependency_memo is None
         and _dependency_state is None
     )
-    registered_root = _root_is_registered(defs, sg)
-    root_cache = getattr(defs, "promotion_inputs", None) if registered_root else None
+    root_cache = getattr(defs, "promotion_inputs", None)
     if root_call and root_cache is not None:
         cached = root_cache.get(id(sg))
         if cached is not None and cached[0] is sg:
             return list(cached[1])
     if _memo is None:
-        shared_memo = getattr(defs, "promotion_inputs_memo", None) if root_call and registered_root else None
+        shared_memo = getattr(defs, "promotion_inputs_memo", None) if root_call else None
         _memo = shared_memo if shared_memo is not None else {}
     if _name_memo is None:
-        shared_names = getattr(defs, "promotion_inputs_names", None) if root_call and registered_root else None
+        shared_names = getattr(defs, "promotion_inputs_names", None) if root_call else None
         _name_memo = shared_names if shared_names is not None else {}
     if _cycle_memo is None:
-        shared_cycles = getattr(defs, "promotion_inputs_cycle_memo", None) if root_call and registered_root else None
+        shared_cycles = getattr(defs, "promotion_inputs_cycle_memo", None) if root_call else None
         _cycle_memo = shared_cycles if shared_cycles is not None else {}
     if _cycle_state is None:
         _cycle_state = [False]
     if _dependency_memo is None:
-        shared_dependencies = (
-            getattr(defs, "promotion_inputs_dependencies", None) if root_call and registered_root else None
-        )
+        shared_dependencies = getattr(defs, "promotion_inputs_dependencies", None) if root_call else None
         _dependency_memo = shared_dependencies if shared_dependencies is not None else {}
     if _dependency_state is None:
         _dependency_state = [set()]
     if _budget is None:
         _budget = _shared_promotion_budget(defs, sg, "promotion_inputs_budget")
     memo_key = (id(sg), depth, _stack)
-    stable_cache = getattr(defs, "promotion_inputs_stable_memo", None) if registered_root else None
+    stable_cache = getattr(defs, "promotion_inputs_stable_memo", None)
     stable_key = (id(sg), depth)
     if stable_cache is not None and stable_key in stable_cache:
         stable_result, stable_dependencies = stable_cache[stable_key]
         if stable_dependencies.isdisjoint(_stack):
             _dependency_state[0].update(stable_dependencies)
             _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
-            return list(stable_result)
+            return stable_result
     if memo_key in _memo:
         result = _memo[memo_key]
         _dependency_state[0].update(_dependency_memo.get(memo_key, (id(sg),)))
         if _cycle_memo.get(memo_key, False):
             _cycle_state[0] = True
         _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
-        return list(result)
+        return result
     raw_inputs = sg.get("inputs")
     inputs = raw_inputs if isinstance(raw_inputs, list) else []
     _spend_traversal_budget(
@@ -580,11 +577,7 @@ def promoted_inputs(
                         )
                         dependencies.update(child_dependencies[0])
                         cycle_sensitive = cycle_sensitive or child_cycle[0] or _cycle_memo.get(child_memo_key, False)
-                        name_source = _memo.get(child_memo_key)
-                        if name_source is None and stable_cache is not None:
-                            child_stable = stable_cache.get((id(inner_def), depth + 1))
-                            name_source = child_stable[0] if child_stable is not None else None
-                        inner_key = id(name_source if name_source is not None else inner)
+                        inner_key = id(inner)
                         if inner_key not in _name_memo:
                             _name_memo[inner_key] = _promoted_name_index(inner)
                         inner_by_name = _name_memo[inner_key]
@@ -1427,12 +1420,7 @@ def _find_host_input_for_promotion(sg: dict, defs: dict[str, dict], node_id: str
 
 def _subgraph_input_target(inner_def: dict, defs: dict[str, dict], input_name: str) -> tuple[str, str] | None:
     """``resolveSubgraphInputTarget``: what a nested instance's input projects."""
-    raw_inputs = inner_def.get("inputs")
-    inputs = raw_inputs if isinstance(raw_inputs, list) else []
-    inp = next(
-        (i for i in inputs if isinstance(i, dict) and _input_name(i.get("name")) == _input_name(input_name)),
-        None,
-    )
+    inp = next((i for i in inner_def.get("inputs") or [] if isinstance(i, dict) and i.get("name") == input_name), None)
     return _promotion_source(inner_def, inp, defs) if inp is not None else None
 
 
