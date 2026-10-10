@@ -197,7 +197,7 @@ _SECRET_KEY_QUALIFIER = (
 _CAMEL_SECRET_KEY_PATTERN = (
     r"(?:(?!(?-i:(?:max|prompt|completion|total|input|output|maxOutput|maxCompletion|maxNew)Tokens?)\b)"
     r"[a-z][A-Za-z0-9]{0,63}(?:(?-i:(?:Api|API)Keys?|Passwords?|Secrets?|Tokens?|Passphrases?))|"
-    r"(?:api|app|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
+    r"(?:api|app|auth|access|refresh|token|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
     r"proxy|credential|master|subscription|hmac|encryption|account|sharedAccess|sshPrivate|service|db)"
     r"[A-Za-z0-9]{0,32}(?:(?-i:KeyIds?|Keys?|Authorization|Cookies?|Signatures?|SessionIds?))|"
     r"(?!(?i:(?:max|prompt|completion|total|input|output|maxoutput|maxcompletion|maxnew)tokens?)\b)"
@@ -434,7 +434,10 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
             next_is_sequence = (
                 (not value or value.startswith("#")) and next_indent >= key_indent and stripped_next.startswith("- ")
             )
-            quoted_mapping = re.match(r"""(?:"(?:\\.|[^"])*"|'(?:''|[^'])*')[ \t]*:""", stripped_next)
+            quoted_mapping = re.match(
+                r"""(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:''|[^'\r\n])*')[ \t]*:""",
+                stripped_next,
+            )
             next_is_continuation = next_indent > key_indent and (
                 not stripped_next.startswith(("(", "'", '"')) or quoted_mapping is not None
             )
@@ -497,7 +500,7 @@ def _scrub_armored_blocks(text: str) -> str:
     return "".join(chunks)
 
 
-_URL_SCHEME_START = re.compile(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://")
+_URL_SCHEME_START = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*://")
 
 
 def _looks_like_numbered_network_authority(authority: str) -> bool:
@@ -544,7 +547,10 @@ def _looks_like_hostname(authority: str) -> bool:
 
 def _authority_labels_before(context: str) -> str | None:
     """Return the dotted authority prefix immediately before a matched label."""
-    embedded_url = re.search(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<labels>[A-Za-z0-9.-]*)$", context)
+    embedded_url = re.search(
+        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*://(?P<labels>[A-Za-z0-9.-]*)$",
+        context,
+    )
     if embedded_url is not None:
         labels = embedded_url.group("labels")
         if (labels and not labels.endswith(".")) or ".." in labels:
@@ -554,7 +560,7 @@ def _authority_labels_before(context: str) -> str | None:
     token = context[last_space + 1 :]
     if "://" in token:
         scheme, labels = token.rsplit("://", 1)
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*", scheme):
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+._-]*", scheme):
             return None
     else:
         labels = token
@@ -681,8 +687,14 @@ def _scrub_url_userinfo(text: str) -> str:
             # as one malformed password. If the outer URL also had userinfo,
             # mask it before preserving the proxy path.
             inner_start = match.end() + later_scheme.start()
-            if authority_at >= 0:
-                outer_at = token.rfind("@", authority_at, later_scheme.start())
+            outer_at = token.rfind("@", 0, later_scheme.start())
+            outer_authority = token[:first_delimiter]
+            outer_has_userinfo = authority_at >= 0 or (
+                outer_at >= first_delimiter
+                and ":" in outer_authority
+                and not _looks_like_numbered_network_authority(outer_authority)
+            )
+            if outer_has_userinfo and outer_at >= 0:
                 chunks.extend(
                     (
                         text[cursor : match.end()],
@@ -755,7 +767,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
         boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#;&,"]
         safe_end = min(boundaries) if boundaries else len(value)
         return f"{prefix}{value[:safe_end]}{_scrub_secret_tail(value[safe_end:])}"
-    already_masked = re.match(r"[ \t]*[\"']?\*{3}", value) is not None
+    already_masked = re.match(r"""[ \t]*(?:\*{3}(?=$|[\s}\]),;])|(["'])\*{3}\1(?=$|[\s}\]),;]))""", value) is not None
     rendered_siblings = _render_assignment_siblings(prefix, value, mask_leading=not already_masked)
     if rendered_siblings is not None:
         return rendered_siblings
@@ -785,7 +797,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
 
 _SECRET_PATTERNS = (
     (
-        re.compile(r'([A-Za-z][A-Za-z0-9+.-]*://(?:\[[^\]\s"]+\]|[^\s/?#":]+):[0-9]{1,5})\?[^\s"]*'),
+        re.compile(r'([A-Za-z][A-Za-z0-9+._-]*://(?:\[[^\]\s"]+\]|[^\s/?#":]+):[0-9]{1,5})\?[^\s"]*'),
         r"\1?***",
     ),
     (re.compile(r'(https?://[^\s?#"]+)\?[^\s"]*', re.IGNORECASE), r"\1?***"),

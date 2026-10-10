@@ -20,7 +20,7 @@ import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
-from comfy_cli.cmdline import _INTERNAL_ERROR_SCRUB_INPUT_CAP, _internal_error_message, app
+from comfy_cli.cmdline import _INTERNAL_ERROR_SCRUB_INPUT_CAP, _internal_error_message, _scrub_yaml_secret_blocks, app
 
 
 def _boom(*_a, **_kw):
@@ -290,12 +290,30 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         (r"password=C:\Users\bob", r"Users\bob", "password="),
         ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
         ("GET https://user:pa,ss@example.com/x failed", "pa,ss", "example.com/x"),
+        ("password=Pa(ss)word123 request=req-1", "word123", "request=req-1"),
+        ("api_key=[a]TAIL user=x", "TAIL", "user=x"),
+        ("password=***abc123 request=req-1", "abc123", "request=req-1"),
+        ("tokenSignature=abc123 request=req-1", "abc123", "request=req-1"),
+        ("oracle+cx_oracle://scott:tiger@db/orcl", "tiger", "db/orcl"),
+        ("连接失败https://alice:pw@host", "pw", "host"),
+        (
+            "https://alice:pa/ss@proxy/fetch/https://a:b@internal/x",
+            "alice:pa/ss",
+            "proxy/fetch/",
+        ),
     ],
 )
 def test_internal_error_scrubber_handles_reviewed_secret_shapes(message, secret, kept):
     scrubbed = _internal_error_message(RuntimeError(message))
     assert secret not in scrubbed
     assert kept in scrubbed
+
+
+def test_quoted_yaml_mapping_scan_handles_long_escape_runs_without_backtracking():
+    child_key = "\\" + "!" * 2_000
+    scrubbed = _scrub_yaml_secret_blocks(f'api_keys:\n  "{child_key}": "sk-LIVE"')
+
+    assert "sk-LIVE" not in scrubbed
 
 
 def test_internal_error_scrubber_handles_unprintable_exception():

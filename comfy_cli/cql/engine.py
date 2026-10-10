@@ -3203,11 +3203,11 @@ def _check_dynamic_combo_input(
         # already validated by the driver loop.
         return errors, warnings, set(), {f"{name}."}
 
-    option = next((o for o in options if _dynamic_combo_key_matches(o.get("key"), selected)), None)
+    option = next((o for o in options if _dynamic_combo_server_key_matches(o.get("key"), selected)), None)
     if option is None:
-        # Strict ``==`` on the key — the same test the server
+        # Ordinary Python equality on the key — the same test the server
         # (``DynamicCombo._expand_schema_for_dynamic``) and the converter both
-        # apply, so all three agree on which option expands.
+        # apply, including Python's bool/numeric equality.
         #
         # Same late failure as the absent selector above: an unmatched key
         # expands to nothing, so the server drops this node's inputs rather
@@ -3811,7 +3811,17 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
                 used_types.add(node["type"])
     unique_names = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in by_id}
     candidates = {name: definition for name, definition in unique_names.items() if name in used_types}
-    conflicts = _definition_alias_conflicts(definitions, ids_only, candidates, unique_names)
+    # Reject aliases that are already ambiguous through definition-id edges
+    # before following any legacy name-typed edges. Otherwise a rejected alias
+    # can manufacture a false self-reachability path for another valid alias.
+    intrinsic_conflicts = _definition_alias_conflicts(definitions, ids_only, candidates, {})
+    viable_aliases = {name: definition for name, definition in unique_names.items() if name not in intrinsic_conflicts}
+    conflicts = intrinsic_conflicts | _definition_alias_conflicts(
+        definitions,
+        ids_only,
+        candidates,
+        viable_aliases,
+    )
     # Conflict analysis only needs bits for names used as node types, but the
     # compatibility index still publishes every unique, non-conflicting name.
     for name, definition in unique_names.items():
@@ -4103,6 +4113,11 @@ def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
     if isinstance(left, int | float) and isinstance(right, int | float):
         return left == right
     return type(left) is type(right) and left == right
+
+
+def _dynamic_combo_server_key_matches(left: Any, right: Any) -> bool:
+    """Match the backend DynamicCombo parser's ordinary Python equality."""
+    return left == right
 
 
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
@@ -4810,6 +4825,18 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
                 widgets.append("fixed")
             else:
                 widgets.append(button_defaults.get(entry.name))
+
+    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+        return _write_dynamic_combo_selector(
+            node,
+            port,
+            input_name,
+            widget_idx,
+            value,
+            entries,
+            widgets=widgets,
+            extend=extend,
+        )
 
     warnings: list[dict] = []
     if port:
