@@ -479,6 +479,8 @@ def _resolve_schema(
 def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None:
     """Heuristic: classify async polling style by partner + response shape."""
     props = response_schema.get("properties", {}) if isinstance(response_schema, dict) else {}
+    if not isinstance(props, dict):
+        return None
     if partner == "bfl" and "polling_url" in props:
         return "bfl"
     if partner == "kling" and "data" in props:
@@ -584,7 +586,7 @@ def _registry() -> dict[str, Endpoint]:
             resp_schema = {}
         _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
 
-        polling = polling_hint or _detect_polling(partner, resp_schema)
+        polling = polling_hint or _detect_polling(partner, resp_schema if isinstance(resp_schema, dict) else {})
 
         registry[endpoint_id] = Endpoint(
             id=endpoint_id,
@@ -669,7 +671,9 @@ def _extract_enum(
         if values:
             constraints.append(values)
     items = prop.get("items")
-    if isinstance(items, dict):
+    schema_type = prop.get("type")
+    array_typed = schema_type == "array" or (isinstance(schema_type, list) and "array" in schema_type)
+    if isinstance(items, dict) and (array_typed or not constraints):
         found = _extract_enum(items, _memo, _string_memo)
         if found:
             constraints.append(found)

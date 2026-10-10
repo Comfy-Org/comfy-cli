@@ -3115,7 +3115,7 @@ def _check_dynamic_combo_input(
         # already validated by the driver loop.
         return errors, warnings, set(), {f"{name}."}
 
-    option = next((o for o in options if o.get("key") == selected), None)
+    option = next((o for o in options if _dynamic_combo_key_matches(o.get("key"), selected)), None)
     if option is None:
         # Strict ``==`` on the key — the same test the server
         # (``DynamicCombo._expand_schema_for_dynamic``) and the converter both
@@ -4375,12 +4375,28 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     # node before the target exists and its value has validated.
     widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     if extend:
+        button_defaults = dict(load_3d_button_slots(m))
+
+        def entry_default(entry: _WidgetEntry) -> Any:
+            if entry.port is not None:
+                if (
+                    entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and _declared_dynamic_default(entry.port) is None
+                ):
+                    return None
+                return _widget_default(entry.port)
+            if entry.name == "control_after_generate":
+                return "fixed"
+            return button_defaults.get(entry.name)
+
         # A truncated positional array can omit a dynamic selector while its
         # declared default makes a nested sub-widget virtually addressable.
         # Materialize every missing selector ancestor first; otherwise padding
         # writes the sub-value beside ``None`` and the next layout drops or
         # reinterprets it.
-        for _ in range(_MAX_DYNAMIC_COMBO_DEPTH):
+        materialized_selectors: set[str] = set()
+        while True:
             entries_now = _expand_widget_entries(m, widgets)
             target_idx = next((idx for idx, entry in enumerate(entries_now) if entry.name == input_name), None)
             missing = next(
@@ -4399,20 +4415,12 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             if missing is None:
                 break
             selector_idx, selector = missing
+            selector_name = entries_now[selector_idx].name
+            if selector_name in materialized_selectors:
+                raise ValueError(f"could not stabilize dynamic-combo layout for {node_type}")
+            materialized_selectors.add(selector_name)
             for gap_idx in range(len(widgets), selector_idx):
-                gap_port = entries_now[gap_idx].port if gap_idx < len(entries_now) else None
-                # The current layout was expanded with an absent selector.
-                # Choosing its first option here would insert sub-slots on the
-                # next expansion and shift the intended target widget.
-                if (
-                    gap_port is not None
-                    and gap_port.dynamic_options
-                    and _is_dynamic_combo_type(gap_port.type)
-                    and _declared_dynamic_default(gap_port) is None
-                ):
-                    widgets.append(None)
-                else:
-                    widgets.append(_widget_default(gap_port) if gap_port is not None else None)
+                widgets.append(entry_default(entries_now[gap_idx]))
             selector_default = _widget_default(selector)
             widgets.append(selector_default)
             default_values, _default_names = _dynamic_combo_default_values(
@@ -4465,7 +4473,24 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     if widget_idx >= len(widgets):
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
-        widgets.extend([None] * (widget_idx + 1 - len(widgets)))
+        button_defaults = dict(load_3d_button_slots(m))
+        for gap_idx in range(len(widgets), widget_idx + 1):
+            entry = entries[gap_idx] if gap_idx < len(entries) else None
+            if entry is None:
+                widgets.append(None)
+            elif entry.port is not None:
+                if (
+                    entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and _declared_dynamic_default(entry.port) is None
+                ):
+                    widgets.append(None)
+                else:
+                    widgets.append(_widget_default(entry.port))
+            elif entry.name == "control_after_generate":
+                widgets.append("fixed")
+            else:
+                widgets.append(button_defaults.get(entry.name))
 
     warnings: list[dict] = []
     if port:

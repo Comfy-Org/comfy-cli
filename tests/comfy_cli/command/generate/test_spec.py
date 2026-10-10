@@ -114,6 +114,7 @@ def test_registry_skips_malformed_path_and_operation_shapes(monkeypatch, path_it
         "invalid",
         {"content": "invalid"},
         {"content": {"application/json": "invalid"}},
+        {"content": {"application/json": {"schema": "invalid"}}},
         {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}},
     ],
 )
@@ -135,6 +136,30 @@ def test_registry_keeps_endpoint_when_only_response_schema_is_malformed(monkeypa
     try:
         assert list(spec._registry()) == [endpoint_id]
         assert spec._registry()[endpoint_id].response_schema == {}
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_ignores_non_mapping_response_properties_for_polling(monkeypatch):
+    endpoint_id = "usable/endpoint"
+    schema = {"type": "object", "properties": None}
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": schema}}}},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        endpoint = spec._registry()[endpoint_id]
+        assert endpoint.response_schema == schema
+        assert endpoint.polling is None
     finally:
         spec._registry.cache_clear()
 
@@ -458,6 +483,8 @@ def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"enum": [True, False]}) is None
     assert spec._extract_enum({"type": "string"}) is None
     assert spec._extract_enum({"anyOf": [{"enum": ["v1"]}, False]}) == ["v1"]
+    assert spec._extract_enum({"enum": ["a", "b"], "items": {"enum": ["a"]}}) == ["a", "b"]
+    assert spec._extract_enum({"enum": ["a"], "items": {"enum": ["z"]}}) == ["a"]
 
 
 def test_extract_enum_unions_anyof_and_intersects_allof():

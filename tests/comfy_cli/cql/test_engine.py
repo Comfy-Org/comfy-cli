@@ -15,6 +15,7 @@ import pytest
 from comfy_cli.command.run.loader import _classify_api_workflow
 from comfy_cli.cql import engine as cql_engine
 from comfy_cli.cql.engine import (
+    _MAX_DYNAMIC_COMBO_DEPTH,
     Graph,
     Port,
     _apply_one_slot,
@@ -799,6 +800,111 @@ class TestDynamicComboImplicitControlAfterGenerate:
 
         assert node["widgets_values"] == [None, "b1", 7]
         assert graph.widget_order_for_node("TwoDynNode", node["widgets_values"]) == ["a", "b", "b.q"]
+
+    def test_padding_materializes_control_markers_and_plain_defaults(self):
+        info = {
+            "Node": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "cfg": ["FLOAT", {"default": 8.0}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "a",
+                                "options": [
+                                    {
+                                        "key": "a",
+                                        "inputs": {"required": {"x": ["INT", {"default": 1}]}},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "cfg", "model"]},
+                "output": [],
+                "output_name": [],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "Node", "widgets_values": []}
+
+        _write_widget(node, "model.x", 9, graph, extend=True)
+
+        assert node["widgets_values"] == [0, "fixed", 8.0, "a", 9]
+
+    def test_final_padding_materializes_truncated_dynamic_subwidget_defaults(self):
+        graph = Graph.from_object_info(_dynamic_combo_object_info())
+        node = {"id": 1, "type": "DynNode", "widgets_values": ["prompt", "alpha"]}
+
+        _write_widget(node, "model.width", 9, graph, extend=True)
+
+        assert node["widgets_values"][:4] == ["prompt", "alpha", "S", 9]
+
+    def test_many_missing_sibling_selectors_are_not_limited_by_nesting_cap(self):
+        inputs = {
+            f"selector_{index}": [
+                "COMFY_DYNAMICCOMBO_V3",
+                {
+                    "default": "a",
+                    "options": [
+                        {
+                            "key": "a",
+                            "inputs": {"required": {"x": ["INT", {"default": index}]}},
+                        }
+                    ],
+                },
+            ]
+            for index in range(_MAX_DYNAMIC_COMBO_DEPTH + 2)
+        }
+        info = {
+            "ManySelectors": {
+                "input": {"required": inputs},
+                "input_order": {"required": list(inputs)},
+                "output": [],
+                "output_name": [],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "ManySelectors", "widgets_values": []}
+        target = f"selector_{_MAX_DYNAMIC_COMBO_DEPTH + 1}.x"
+
+        _write_widget(node, target, 99, graph, extend=True)
+
+        assert node["widgets_values"][-2:] == ["a", 99]
+
+    def test_boolean_and_numeric_dynamic_keys_select_distinct_layouts(self):
+        info = {
+            "BoolKeys": {
+                "input": {
+                    "required": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {"default": 1}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {"default": 2}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["mode"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+
+        assert graph.widget_order_for_node("BoolKeys", [True, 2]) == ["mode", "mode.boolean"]
+        result = graph.validate_workflow({"1": {"class_type": "BoolKeys", "inputs": {"mode": True, "mode.boolean": 2}}})
+        assert result["valid"] is True, result["errors"]
+        assert not [warning for warning in result["warnings"] if warning["code"] == "unknown_input"]
 
 
 # ===========================================================================

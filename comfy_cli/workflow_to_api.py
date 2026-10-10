@@ -24,7 +24,7 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES
+from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES, _dynamic_combo_key_matches
 
 logger = logging.getLogger(__name__)
 
@@ -1163,7 +1163,7 @@ def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any
     options_meta = input_spec[1] if isinstance(input_spec[1], dict) else {}
     options = options_meta.get("options") or []
     for option in options:
-        if not isinstance(option, dict) or option.get("key") != selected:
+        if not isinstance(option, dict) or not _dynamic_combo_key_matches(option.get("key"), selected):
             continue
         sub_def = option.get("inputs")
         if not isinstance(sub_def, dict):
@@ -1289,7 +1289,9 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             vidx += 1
             if is_dynamic:
                 subs = _dynamic_combo_selected_subs(name, spec, value)
-                if not subs and value not in _dynamic_combo_option_keys(spec):
+                if not subs and not any(
+                    _dynamic_combo_key_matches(value, key) for key in _dynamic_combo_option_keys(spec)
+                ):
                     # The saved selector no longer names any option in the current
                     # schema (model renamed/removed server-side, or object_info /
                     # workflow version skew). Its sub-input value slots go
@@ -1578,7 +1580,7 @@ def _widget_rejects_control_value(input_spec: Any, value: str) -> bool:
     if type_field == "COMBO":
         return not _combo_lists_option(input_spec, value)
     if _is_widget_input(input_spec)[1]:
-        return value not in _dynamic_combo_option_keys(input_spec)
+        return not any(_dynamic_combo_key_matches(value, key) for key in _dynamic_combo_option_keys(input_spec))
     return False
 
 
