@@ -298,6 +298,8 @@ def base_url() -> str:
 
 
 def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not isinstance(ref, str):
+        raise SpecError(f"Invalid non-string $ref: {ref!r}")
     if not ref.startswith("#/"):
         raise SpecError(f"Only local $refs are supported: {ref}")
     parts = ref[2:].split("/")
@@ -307,24 +309,181 @@ def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
     return node
 
 
-def _resolve(spec: dict[str, Any], node: Any, seen: frozenset[str] = frozenset()) -> Any:
-    """Recursively inline $refs in a schema. Cycles are broken with a placeholder."""
+def _resolve(
+    spec: dict[str, Any],
+    node: Any,
+    seen: frozenset[str] = frozenset(),
+    memo: dict[tuple[Any, ...], tuple[Any, bool]] | None = None,
+    budget_limit: int | None = None,
+    budget: list[int] | None = None,
+) -> Any:
+    """Recursively inline $refs in a schema. Cycles are broken with a placeholder.
+
+    Cycle-bearing results are keyed by active ref ancestry, so a pruned subtree
+    is not reused outside that cycle. Cycle-free results are shared regardless
+    of ancestry, and object-identity keys collapse YAML alias DAGs whose shared
+    inline nodes carry no ``$ref`` of their own.
+    """
+    value, _cyclic = _resolve_schema(
+        spec,
+        node,
+        seen,
+        memo if memo is not None else {},
+        budget
+        if budget is not None
+        else [budget_limit if budget_limit is not None else _schema_resolution_budget(spec, node)],
+    )
+    return value
+
+
+def _schema_resolution_budget(spec: dict[str, Any], node: Any = None) -> int:
+    """A linear call budget for malformed ref graphs, including object cycles."""
+    stack = [spec]
+    if node is not None:
+        stack.append(node)
+    containers: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, (dict, list)) or id(current) in containers:
+            continue
+        containers.add(id(current))
+        stack.extend(current.values() if isinstance(current, dict) else current)
+    return max(1_024, len(containers) * 64)
+
+
+def _resolution_attempt_budget(limit: int, aggregate: list[int]) -> tuple[list[int], int]:
+    """Allocate one isolated attempt without removing the operation-wide cap."""
+    if aggregate[0] <= 0:
+        raise SpecError("Schema resolution exceeded its aggregate safe traversal limit")
+    allowance = min(limit, aggregate[0])
+    return [allowance], allowance
+
+
+def _charge_resolution_attempt(aggregate: list[int], allowance: int, remaining: list[int]) -> None:
+    # A shared-memo hit can make resolution itself free, but the caller still
+    # scans a path and its model metadata. Charge one unit so an adversarial
+    # number of paths cannot bypass the operation-wide bound.
+    aggregate[0] -= max(1, allowance - remaining[0])
+
+
+def _resolve_schema(
+    spec: dict[str, Any],
+    node: Any,
+    seen: frozenset[str],
+    memo: dict[tuple[Any, ...], tuple[Any, bool]],
+    budget: list[int],
+    active_inline: frozenset[int] = frozenset(),
+) -> tuple[Any, bool]:
+    """Return ``(resolved, contains_cycle_placeholder)`` for :func:`_resolve`."""
+    if not isinstance(node, (dict, list)):
+        return node, False
     if isinstance(node, dict):
         if "$ref" in node:
             ref = node["$ref"]
+            if not isinstance(ref, str):
+                raise SpecError(f"Invalid non-string $ref: {ref!r}")
             if ref in seen:
-                return {"type": "object", "x-recursive-ref": ref}
-            resolved = _resolve_ref(spec, ref)
-            return _resolve(spec, resolved, seen | {ref})
-        return {k: _resolve(spec, v, seen) for k, v in node.items()}
+                return {"type": "object", "x-recursive-ref": ref}, True
+            if id(node) in active_inline:
+                return {"type": "object", "x-recursive-object": True}, True
+            child_active = active_inline | {id(node)}
+            shared_key = ("ref", ref)
+            if shared_key in memo:
+                return memo[shared_key]
+            memo_key = (*shared_key, seen, active_inline)
+            if memo_key in memo:
+                return memo[memo_key]
+            if budget[0] <= 0:
+                raise SpecError("Schema resolution exceeded its safe traversal limit")
+            budget[0] -= 1
+            memo[memo_key] = ({"type": "object", "x-recursive-ref": ref}, True)
+            try:
+                resolved = _resolve_ref(spec, ref)
+                result = _resolve_schema(spec, resolved, seen | {ref}, memo, budget, child_active)
+            except BaseException:
+                # The placeholder means "currently resolving", not "resolved
+                # successfully". Shared registry/hint memos must never reuse it
+                # after a missing ref, recursion error, or exhausted budget.
+                memo.pop(memo_key, None)
+                raise
+            if result[1]:
+                # An ancestry-scoped placeholder is useful only while this
+                # branch is in progress. Retaining every completed cyclic key
+                # pins its full seen/active frozensets and grows with paths.
+                memo.pop(memo_key, None)
+            else:
+                memo[memo_key] = result
+                memo[shared_key] = result
+            return result
+        if id(node) in active_inline:
+            return {"type": "object", "x-recursive-object": True}, True
+        shared_key = ("object", id(node))
+        if shared_key in memo:
+            return memo[shared_key]
+        memo_key = ("object", id(node), seen, active_inline)
+        if memo_key in memo:
+            return memo[memo_key]
+        if budget[0] <= 0:
+            raise SpecError("Schema resolution exceeded its safe traversal limit")
+        budget[0] -= 1
+        memo[memo_key] = ({"type": "object", "x-recursive-object": True}, True)
+        value: dict[str, Any] = {}
+        cyclic = False
+        try:
+            for key, child in node.items():
+                resolved_child, child_cyclic = _resolve_schema(
+                    spec, child, seen, memo, budget, active_inline | {id(node)}
+                )
+                value[key] = resolved_child
+                cyclic = cyclic or child_cyclic
+        except BaseException:
+            memo.pop(memo_key, None)
+            raise
+        result = (value, cyclic)
+        if cyclic:
+            memo.pop(memo_key, None)
+        else:
+            memo[memo_key] = result
+            memo[shared_key] = result
+        return result
     if isinstance(node, list):
-        return [_resolve(spec, item, seen) for item in node]
-    return node
+        if id(node) in active_inline:
+            return [], True
+        shared_key = ("list", id(node))
+        if shared_key in memo:
+            return memo[shared_key]
+        memo_key = ("list", id(node), seen, active_inline)
+        if memo_key in memo:
+            return memo[memo_key]
+        if budget[0] <= 0:
+            raise SpecError("Schema resolution exceeded its safe traversal limit")
+        budget[0] -= 1
+        memo[memo_key] = ([], True)
+        value: list[Any] = []
+        cyclic = False
+        try:
+            for item in node:
+                resolved_item, item_cyclic = _resolve_schema(spec, item, seen, memo, budget, active_inline | {id(node)})
+                value.append(resolved_item)
+                cyclic = cyclic or item_cyclic
+        except BaseException:
+            memo.pop(memo_key, None)
+            raise
+        result = (value, cyclic)
+        if cyclic:
+            memo.pop(memo_key, None)
+        else:
+            memo[memo_key] = result
+            memo[shared_key] = result
+        return result
+    raise AssertionError("unreachable schema node")
 
 
 def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None:
     """Heuristic: classify async polling style by partner + response shape."""
     props = response_schema.get("properties", {}) if isinstance(response_schema, dict) else {}
+    if not isinstance(props, dict):
+        return None
     if partner == "bfl" and "polling_url" in props:
         return "bfl"
     if partner == "kling" and "data" in props:
@@ -336,38 +495,101 @@ def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None
     return None
 
 
+def _preferred_media_type(content: dict[str, Any]) -> str:
+    if "application/json" in content:
+        return "application/json"
+    if "multipart/form-data" in content:
+        return "multipart/form-data"
+    return next(iter(content), "application/json")
+
+
+_SUPPORTED_OPERATION_METHODS = {"get", "put", "patch", "delete", "options", "head", "trace"}
+
+
+def _select_operation(node: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Choose an operation exactly as registry and model-hint discovery do."""
+    if isinstance(node.get("post"), dict):
+        return "post", node["post"]
+    for key, value in node.items():
+        if isinstance(key, str) and key.lower() in _SUPPORTED_OPERATION_METHODS and isinstance(value, dict):
+            return key.lower(), value
+    return None
+
+
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, Endpoint]:
     spec = load_raw_spec()
     paths = spec.get("paths") or {}
+    if not isinstance(paths, dict):
+        return {}
     registry: dict[str, Endpoint] = {}
+    resolution_budget_limit = _schema_resolution_budget(spec)
+    aggregate_resolution_budget = [resolution_budget_limit * 4]
+    resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
     for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
+        if aggregate_resolution_budget[0] <= 0:
+            break
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
-        if not node:
+        if not isinstance(node, dict) or not node:
             continue  # spec drift — skip silently, surfaced via `comfy generate list`
-        # All image endpoints are POST; pick the first defined method anyway.
-        method = "post" if "post" in node else next(iter(node.keys()))
-        op = node[method]
+        selected_operation = _select_operation(node)
+        if selected_operation is None:
+            continue
+        method, op = selected_operation
         partner = endpoint_id.split("/", 1)[0]
+        # Request and response share one allowance for this endpoint, but a
+        # malformed endpoint cannot starve every endpoint that follows it. A
+        # constant-factor operation-wide allowance prevents many independently
+        # failing endpoints from multiplying traversal and memo growth.
+        resolution_budget, resolution_allowance = _resolution_attempt_budget(
+            resolution_budget_limit, aggregate_resolution_budget
+        )
+        try:
+            req_body = op.get("requestBody") or {}
+            if isinstance(req_body, dict) and "$ref" in req_body:
+                req_body = _resolve(spec, req_body, memo=resolution_memo, budget=resolution_budget)
+            if not isinstance(req_body, dict):
+                raise SpecError("request body is not an object")
+            content = req_body.get("content") or {}
+            if not isinstance(content, dict):
+                raise SpecError("request body content is not an object")
+            ctype = _preferred_media_type(content)
+            request_media = content.get(ctype) or {}
+            if not isinstance(request_media, dict):
+                raise SpecError("request body media type is not an object")
+            req_schema = _resolve(
+                spec,
+                request_media.get("schema") or {},
+                memo=resolution_memo,
+                budget=resolution_budget,
+            )
+        except (AttributeError, KeyError, TypeError, SpecError, RecursionError):
+            _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
+            continue
 
-        req_body = op.get("requestBody") or {}
-        content = req_body.get("content") or {}
-        if "application/json" in content:
-            ctype = "application/json"
-        elif "multipart/form-data" in content:
-            ctype = "multipart/form-data"
-        else:
-            ctype = next(iter(content.keys()), "application/json")
-        req_schema = _resolve(spec, (content.get(ctype) or {}).get("schema") or {})
+        # A malformed response affects only polling detection; it must not
+        # remove an otherwise usable request endpoint from the generate catalog.
+        resp_schema: Any = {}
+        try:
+            responses = op.get("responses") or {}
+            resp = (responses.get("200") or {}) if isinstance(responses, dict) else {}
+            resp_content = (resp.get("content") or {}) if isinstance(resp, dict) else {}
+            if isinstance(resp_content, dict) and resp_content:
+                resp_ctype = _preferred_media_type(resp_content)
+                response_media = resp_content.get(resp_ctype) or {}
+                if isinstance(response_media, dict):
+                    resp_schema = _resolve(
+                        spec,
+                        response_media.get("schema") or {},
+                        memo=resolution_memo,
+                        budget=resolution_budget,
+                    )
+        except (AttributeError, KeyError, TypeError, SpecError, RecursionError):
+            resp_schema = {}
+        _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
 
-        # 200 response
-        resp = (op.get("responses") or {}).get("200") or {}
-        resp_content = resp.get("content") or {}
-        resp_ctype = "application/json" if "application/json" in resp_content else next(iter(resp_content), "")
-        resp_schema = _resolve(spec, (resp_content.get(resp_ctype) or {}).get("schema") or {}) if resp_ctype else {}
-
-        polling = polling_hint or _detect_polling(partner, resp_schema)
+        polling = polling_hint or _detect_polling(partner, resp_schema if isinstance(resp_schema, dict) else {})
 
         registry[endpoint_id] = Endpoint(
             id=endpoint_id,
@@ -410,45 +632,208 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     raise SpecError(_unknown_endpoint_message(endpoint_id))
 
 
-def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
+def _schema_accepts_string_value(schema: Any, value: str, active: set[int] | None = None) -> bool:
+    """Evaluate the finite string constraints needed for enum extraction."""
+    if schema is True:
+        return True
+    if schema is False or not isinstance(schema, dict):
+        return False
+    if active is None:
+        active = set()
+    schema_id = id(schema)
+    if schema_id in active:
+        return True
+    active.add(schema_id)
+    try:
+        schema_type = schema.get("type")
+        if isinstance(schema_type, str) and schema_type != "string":
+            return False
+        if isinstance(schema_type, list) and "string" not in schema_type:
+            return False
+        if "const" in schema and not (isinstance(schema["const"], str) and schema["const"] == value):
+            return False
+        enum = schema.get("enum")
+        if isinstance(enum, list) and value not in [item for item in enum if isinstance(item, str)]:
+            return False
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and not all(_schema_accepts_string_value(item, value, active) for item in all_of):
+            return False
+        any_of = schema.get("anyOf")
+        if isinstance(any_of, list) and not any(_schema_accepts_string_value(item, value, active) for item in any_of):
+            return False
+        one_of = schema.get("oneOf")
+        if isinstance(one_of, list) and sum(_schema_accepts_string_value(item, value, active) for item in one_of) != 1:
+            return False
+        return True
+    finally:
+        active.remove(schema_id)
+
+
+def _extract_enum(
+    prop: dict[str, Any],
+    _memo: dict[int, list[str] | None] | None = None,
+    _string_memo: dict[int, bool] | None = None,
+) -> list[str] | None:
     """Pull a string enum out of a resolved property schema — directly, from
     ``items`` (array-typed fields), or from ``anyOf``/``oneOf``/``allOf``
-    variants. ``anyOf``/``oneOf`` branches are unioned (a spec may split the
-    model set across variants) while ``allOf`` branches are intersected (every
-    constraint must hold). Numeric members are coerced to their string form so
-    an unquoted YAML value like ``3.5`` isn't silently dropped. Returns None
-    when no non-empty string enum is found."""
+    variants. ``anyOf``/``oneOf`` branches are unioned across their
+    string-accepting branches; a free-form string branch makes that union
+    unconstrained, while null/integer/object alternatives do not. ``allOf``
+    branches and sibling keywords are intersected because every constraint
+    must hold. Numeric members are coerced to their string form so an unquoted
+    YAML value like ``3.5`` isn't silently dropped. Returns None when no
+    finite, non-empty string enum is found."""
+    if _memo is None:
+        _memo = {}
+    if _string_memo is None:
+        _string_memo = {}
+    memo_key = id(prop)
+    if memo_key in _memo:
+        return _memo[memo_key]
+    # A resolved schema is a shared DAG. Mark this object before descending so
+    # repeated branches are linear and a malformed object cycle is harmless.
+    _memo[memo_key] = None
+
+    def finish(value: list[str] | None) -> list[str] | None:
+        _memo[memo_key] = value
+        return value
+
+    constraints: list[list[str]] = []
+    const = prop.get("const")
+    if isinstance(const, str):
+        constraints.append([const])
+    elif isinstance(const, int | float) and not isinstance(const, bool):
+        constraints.append([str(const)])
     enum = prop.get("enum")
     if isinstance(enum, list):
         values = [str(v) if isinstance(v, int | float) and not isinstance(v, bool) else v for v in enum]
         values = [v for v in values if isinstance(v, str)]
         if values:
-            return values
+            constraints.append(values)
     items = prop.get("items")
-    if isinstance(items, dict):
-        found = _extract_enum(items)
+    schema_type = prop.get("type")
+    array_typed = schema_type == "array" or (isinstance(schema_type, list) and "array" in schema_type)
+    if isinstance(items, dict) and (array_typed or not constraints):
+        found = _extract_enum(items, _memo, _string_memo)
         if found:
-            return found
+            constraints.append(found)
     for key in ("anyOf", "oneOf"):
         variants = prop.get(key)
         if not isinstance(variants, list):
             continue
         merged: list[str] = []
+        merged_values: set[str] = set()
+        merged_results: set[int] = set()
+        branch_counts: dict[str, int] = {}
+        unconstrained = False
         for variant in variants:
-            if isinstance(variant, dict):
-                found = _extract_enum(variant)
-                if found:
-                    merged.extend(v for v in found if v not in merged)
-        if merged:
-            return merged
+            if variant is False:
+                # Boolean false accepts nothing, so it contributes no values
+                # and cannot make a finite union unconstrained.
+                continue
+            if variant is True:
+                unconstrained = True
+                continue
+            found = _extract_enum(variant, _memo, _string_memo) if isinstance(variant, dict) else None
+            if not found:
+                if not isinstance(variant, dict) or _schema_admits_unconstrained_string(variant, _memo=_string_memo):
+                    unconstrained = True
+                    continue
+                continue
+            if key == "oneOf":
+                for value in set(found):
+                    branch_counts[value] = branch_counts.get(value, 0) + 1
+                for value in found:
+                    if value not in merged_values:
+                        merged_values.add(value)
+                        merged.append(value)
+            elif id(found) not in merged_results:
+                merged_results.add(id(found))
+                for value in found:
+                    if value not in merged_values:
+                        merged_values.add(value)
+                        merged.append(value)
+        if key == "oneOf" and unconstrained and constraints:
+            finite_sibling_values = list(dict.fromkeys(value for constraint in constraints for value in constraint))
+            constraints.append(
+                [
+                    value
+                    for value in finite_sibling_values
+                    if sum(_schema_accepts_string_value(variant, value) for variant in variants) == 1
+                ]
+            )
+        elif not unconstrained and merged:
+            constraints.append(
+                [value for value in merged if branch_counts.get(value) == 1] if key == "oneOf" else merged
+            )
     all_of = prop.get("allOf")
     if isinstance(all_of, list):
-        branch_enums = [e for v in all_of if isinstance(v, dict) if (e := _extract_enum(v))]
-        if branch_enums:
-            intersected = [v for v in branch_enums[0] if all(v in b for b in branch_enums[1:])]
-            if intersected:
-                return intersected
-    return None
+        branch_results: set[int] = set()
+        for variant in all_of:
+            found = _extract_enum(variant, _memo, _string_memo) if isinstance(variant, dict) else None
+            if found and id(found) not in branch_results:
+                branch_results.add(id(found))
+                constraints.append(found)
+    if not constraints:
+        return finish(None)
+    allowed = set(constraints[0])
+    for constraint in constraints[1:]:
+        allowed.intersection_update(constraint)
+    intersected = [value for value in constraints[0] if value in allowed]
+    return finish(intersected or None)
+
+
+def _schema_admits_unconstrained_string(
+    schema: dict[str, Any],
+    _active: set[int] | None = None,
+    _memo: dict[int, bool] | None = None,
+) -> bool:
+    """Whether ``schema`` can accept arbitrary strings rather than a finite enum."""
+    if _active is None:
+        _active = set()
+    if _memo is None:
+        _memo = {}
+    schema_id = id(schema)
+    if schema_id in _memo:
+        return _memo[schema_id]
+    if schema_id in _active:
+        return True
+    _active.add(schema_id)
+    try:
+        if "const" in schema or "enum" in schema:
+            result = False
+        else:
+            schema_type = schema.get("type")
+            if isinstance(schema_type, str):
+                result = schema_type == "string"
+            elif isinstance(schema_type, list):
+                result = "string" in schema_type
+            else:
+                result = "items" not in schema and "properties" not in schema
+            # JSON Schema composition keywords are conjunctive with their
+            # siblings. A free-form ``type: string`` does not override a finite
+            # sibling ``allOf``, and an ``anyOf``/``oneOf`` only admits arbitrary
+            # strings when at least one of its own branches does.
+            for key in ("anyOf", "oneOf"):
+                variants = schema.get(key)
+                if isinstance(variants, list):
+                    result = result and any(
+                        variant is True
+                        or (isinstance(variant, dict) and _schema_admits_unconstrained_string(variant, _active, _memo))
+                        or (variant is not False and not isinstance(variant, dict))
+                        for variant in variants
+                    )
+            all_of = schema.get("allOf")
+            if isinstance(all_of, list) and all_of:
+                result = result and all(
+                    variant is True
+                    or (isinstance(variant, dict) and _schema_admits_unconstrained_string(variant, _active, _memo))
+                    for variant in all_of
+                )
+        _memo[schema_id] = result
+        return result
+    finally:
+        _active.remove(schema_id)
 
 
 def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
@@ -470,26 +855,172 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
     return _extract_enum(prop)
 
 
-def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
+def _schema_may_be_object(
+    schema: Any,
+    _active: set[int] | None = None,
+    _memo: dict[int, bool] | None = None,
+) -> bool:
+    """Whether an OpenAPI/JSON Schema branch can describe a request object."""
+    if schema is False:
+        return False
+    if schema is True or not isinstance(schema, dict):
+        return True
+    if _active is None:
+        _active = set()
+    if _memo is None:
+        _memo = {}
+    schema_id = id(schema)
+    if schema_id in _memo:
+        return _memo[schema_id]
+    if schema_id in _active:
+        return True
+    _active.add(schema_id)
+    try:
+        schema_type = schema.get("type")
+        if isinstance(schema_type, str):
+            result = schema_type == "object"
+        elif isinstance(schema_type, list):
+            result = "object" in schema_type
+        elif "const" in schema:
+            result = isinstance(schema.get("const"), dict)
+        else:
+            enum = schema.get("enum")
+            if isinstance(enum, list) and enum:
+                result = any(isinstance(value, dict) for value in enum)
+            else:
+                result = True
+        enum = schema.get("enum")
+        if isinstance(enum, list):
+            # Sibling keywords are conjunctive: an empty enum accepts
+            # nothing, and a scalar-only enum cannot satisfy object type.
+            result = result and any(isinstance(value, dict) for value in enum)
+        # Composition keywords constrain their siblings, including an
+        # explicit ``type`` or ``const`` sibling.
+        for key in ("anyOf", "oneOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list):
+                result = result and any(_schema_may_be_object(variant, _active, _memo) for variant in variants)
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and all_of:
+            result = result and all(_schema_may_be_object(variant, _active, _memo) for variant in all_of)
+        _memo[schema_id] = result
+        return result
+    finally:
+        _active.remove(schema_id)
+
+
+def _find_property(
+    schema: dict[str, Any],
+    field: str,
+    _memo: dict[tuple[int, str], dict[str, Any] | None] | None = None,
+    _active: set[tuple[int, str]] | None = None,
+    _object_memo: dict[int, bool] | None = None,
+    _property_memo: dict[tuple[int, str], bool] | None = None,
+) -> dict[str, Any] | None:
     """Locate ``field`` in ``schema['properties']``, descending into top-level
     ``allOf``/``anyOf``/``oneOf`` composition when the schema carries no direct
     match — a composed request body must not silently defeat the spec-derived
     enum and fall back to the hardcoded list."""
+    if _memo is None:
+        _memo = {}
+    if _active is None:
+        _active = set()
+    if _object_memo is None:
+        _object_memo = {}
+    if _property_memo is None:
+        _property_memo = {}
+    memo_key = (id(schema), field)
+    if memo_key in _memo:
+        return _memo[memo_key]
+    if memo_key in _active:
+        return None
+    _active.add(memo_key)
+    candidates: list[dict[str, Any]] = []
     props = schema.get("properties")
     if isinstance(props, dict):
         prop = props.get(field)
         if isinstance(prop, dict):
-            return prop
-    for key in ("allOf", "anyOf", "oneOf"):
-        variants = schema.get(key)
-        if not isinstance(variants, list):
-            continue
-        for variant in variants:
+            candidates.append(prop)
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for variant in all_of:
             if isinstance(variant, dict):
-                found = _find_property(variant, field)
+                found = _find_property(variant, field, _memo, _active, _object_memo, _property_memo)
                 if found is not None:
-                    return found
-    return None
+                    candidates.append(found)
+    for key in ("anyOf", "oneOf"):
+        variants = schema.get(key)
+        if not isinstance(variants, list) or not variants:
+            continue
+        matches: list[dict[str, Any]] = []
+        for variant in variants:
+            found = (
+                _find_property(variant, field, _memo, _active, _object_memo, _property_memo)
+                if isinstance(variant, dict)
+                else None
+            )
+            if found is None:
+                if _schema_may_accept_property(variant, field, _object_memo=_object_memo, _memo=_property_memo):
+                    matches = []
+                    break
+                continue
+            matches.append(found)
+        if matches:
+            # ``oneOf`` is exclusive for the whole object. Two otherwise
+            # distinct request variants may legally share this property's
+            # value, so the lifted property union is inclusive.
+            lifted_key = "anyOf" if key == "oneOf" else key
+            candidates.append(matches[0] if len(matches) == 1 else {lifted_key: matches})
+    _active.remove(memo_key)
+    result = candidates[0] if len(candidates) == 1 else ({"allOf": candidates} if candidates else None)
+    _memo[memo_key] = result
+    return result
+
+
+def _schema_may_accept_property(
+    schema: Any,
+    field: str,
+    _active: set[tuple[int, str]] | None = None,
+    _memo: dict[tuple[int, str], bool] | None = None,
+    _object_memo: dict[int, bool] | None = None,
+) -> bool:
+    """Whether an object branch can contain ``field`` at all."""
+    if schema is False:
+        return False
+    if schema is True or not isinstance(schema, dict):
+        return True
+    if _active is None:
+        _active = set()
+    if _memo is None:
+        _memo = {}
+    if _object_memo is None:
+        _object_memo = {}
+    key = (id(schema), field)
+    if key in _memo:
+        return _memo[key]
+    if key in _active:
+        return True
+    if not _schema_may_be_object(schema, _memo=_object_memo):
+        return False
+    _active.add(key)
+    try:
+        props = schema.get("properties")
+        result = (isinstance(props, dict) and field in props) or schema.get("additionalProperties") is not False
+        for keyword in ("anyOf", "oneOf"):
+            variants = schema.get(keyword)
+            if isinstance(variants, list):
+                result = result and any(
+                    _schema_may_accept_property(variant, field, _active, _memo, _object_memo) for variant in variants
+                )
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and all_of:
+            result = result and all(
+                _schema_may_accept_property(variant, field, _active, _memo, _object_memo) for variant in all_of
+            )
+        _memo[key] = result
+        return result
+    finally:
+        _active.remove(key)
 
 
 # OpenAI's image request schema types `model` as a free string (no enum), so
@@ -506,17 +1037,21 @@ _OPENAI_IMAGE_MODELS: dict[str, str | None] = {
 }
 
 
-def _direct_route(alias: str, model_id: str) -> str:
-    """The `comfy generate <alias> --model <id>` line, saying whether it can
+def _direct_route(alias: str, model_id: str, *, model_field: str = "model", suggest_partner_node: bool = True) -> str:
+    """The matching `comfy generate <alias> --<field> <id>` line, saying whether it can
     also `--emit-workflow`. A caller building a workflow runs `generate` with
     `--emit-workflow`, so a route that cannot emit must say so or the hint is a
     dead end for it."""
     from comfy_cli.command.generate import emit
 
-    route = f"`comfy generate {alias} --model {model_id} ...`"
+    option = model_field.replace("_", "-")
+    route = f"`comfy generate {alias} --{option} {model_id} ...`"
     if emit.is_supported(alias):
         return f"{route} (also with --emit-workflow)"
-    return f"{route} runs it directly; that alias has no --emit-workflow, so use a partner node for a workflow"
+    suffix = "; that alias has no --emit-workflow"
+    if suggest_partner_node:
+        suffix += ", so use a partner node for a workflow"
+    return f"{route} runs it directly{suffix}"
 
 
 def _model_name_hint(name: str) -> str | None:
@@ -531,7 +1066,7 @@ def _model_name_hint(name: str) -> str | None:
     lowered = name.strip().lower()
     if lowered in _OPENAI_IMAGE_MODELS:
         node = _OPENAI_IMAGE_MODELS[lowered]
-        direct = _direct_route("dalle", lowered)
+        direct = _direct_route("dalle", lowered, suggest_partner_node=node is not None)
         if node is None:
             return f"{lowered!r} is an OpenAI image model, not an alias. {direct}."
         return (
@@ -545,33 +1080,84 @@ def _model_name_hint(name: str) -> str | None:
     # body's `model` field. A name equal to or prefixing one of them is that
     # partner's model family, whichever route serves it.
     raw = load_raw_spec()
+    paths = raw.get("paths") or {}
+    if not isinstance(paths, dict):
+        return None
+    resolution_budget_limit = _schema_resolution_budget(raw)
+    aggregate_resolution_budget = [resolution_budget_limit * 4]
+    resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
+    property_memo: dict[tuple[int, str], dict[str, Any] | None] = {}
+    object_memo: dict[int, bool] = {}
+    accepts_property_memo: dict[tuple[int, str], bool] = {}
+    enum_memo: dict[int, list[str] | None] = {}
+    string_memo: dict[int, bool] = {}
+    match_memo: dict[tuple[int, str], list[str]] = {}
     aliased = {v: k for k, v in _ALIASES.items()}
-    hits: list[tuple[str, list[str]]] = []
-    for path, node in (raw.get("paths") or {}).items():
+    hits: list[tuple[str, str, list[str]]] = []
+    for path, node in paths.items():
+        if aggregate_resolution_budget[0] <= 0:
+            break
         if not str(path).startswith(PROXY_PREFIX) or not isinstance(node, dict):
             continue
-        op = node.get("post")
-        if not isinstance(op, dict):
+        selected_operation = _select_operation(node)
+        if selected_operation is None:
             continue
-        content = (op.get("requestBody") or {}).get("content") or {}
-        schema = next((c.get("schema") for c in content.values() if isinstance(c, dict) and c.get("schema")), None)
-        if not schema:
+        _method, op = selected_operation
+        resolution_budget, resolution_allowance = _resolution_attempt_budget(
+            resolution_budget_limit, aggregate_resolution_budget
+        )
+        try:
+            request_body = op.get("requestBody") or {}
+            if isinstance(request_body, dict) and "$ref" in request_body:
+                request_body = _resolve(raw, request_body, memo=resolution_memo, budget=resolution_budget)
+            if not isinstance(request_body, dict):
+                continue
+            content = request_body.get("content") or {}
+            if not isinstance(content, dict):
+                continue
+            ctype = _preferred_media_type(content)
+            media = content.get(ctype) or {}
+            if not isinstance(media, dict):
+                continue
+            schema = media.get("schema")
+            if not schema:
+                continue
+            resolved = _resolve(raw, schema, memo=resolution_memo, budget=resolution_budget)
+            if not isinstance(resolved, dict):
+                continue
+            for field in ("model", "model_name", "model_id"):
+                prop = _find_property(
+                    resolved,
+                    field,
+                    property_memo,
+                    _object_memo=object_memo,
+                    _property_memo=accepts_property_memo,
+                )
+                if prop is None:
+                    continue
+                match_key = (id(prop), lowered)
+                matched = match_memo.get(match_key)
+                if matched is None:
+                    values = _extract_enum(prop, enum_memo, string_memo)
+                    matched = [v for v in values or [] if v.lower().startswith(lowered)]
+                    match_memo[match_key] = matched
+                if matched:
+                    hits.append((str(path)[len(PROXY_PREFIX) :], field, matched))
+                    break
+        except (KeyError, TypeError, SpecError, RecursionError):
             continue
-        prop = _find_property(_resolve(raw, schema), "model")
-        values = _extract_enum(prop) if prop else None
-        matched = [v for v in values or [] if v.lower().startswith(lowered)]
-        if matched:
-            hits.append((str(path)[len(PROXY_PREFIX) :], matched))
+        finally:
+            _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
     if not hits:
         return None
     lines = [
         f"Partner models matching {lowered!r} (for a workflow, find the partner node: `comfy nodes search {lowered}`):"
     ]
-    for endpoint_id, values in hits:
+    for endpoint_id, field, values in hits:
         shown = ", ".join(values[:6])
         alias = aliased.get(endpoint_id)
         if alias is not None:
-            lines.append(f"- {shown}: {_direct_route(alias, '<id>')}.")
+            lines.append(f"- {shown}: {_direct_route(alias, '<id>', model_field=field)}.")
         else:
             lines.append(f"- {shown}: served at {endpoint_id}, which has no `comfy generate` alias.")
     return "\n".join(lines)

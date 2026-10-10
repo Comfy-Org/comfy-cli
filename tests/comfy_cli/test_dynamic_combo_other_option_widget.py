@@ -18,6 +18,8 @@ write.
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from comfy_cli import workflow_ops
@@ -93,11 +95,120 @@ def test_refusal_names_the_option_to_select_first(graph):
     assert f"{nid}.model" in msg, f"must name the selector address to set first: {msg}"
 
 
+def test_refusal_reports_no_selection_when_absent_selector_has_no_declared_default(graph):
+    wf, nid = _fresh(graph)
+    wf["nodes"][0]["widgets_values"] = []
+
+    with pytest.raises(ValueError) as exc:
+        workflow_ops.set_widget(wf, graph, nid, "model.prompt_expansion_mode", "quality")
+
+    msg = str(exc.value)
+    assert "model=None" in msg, f"must name the selector value the active layout actually used: {msg}"
+
+
+def test_refusal_uses_a_declared_non_first_dynamic_default():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model_options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    model_options["default"] = "MiniMax H3 Max"
+    turbo_inputs = dict(model_options["options"][2]["inputs"]["required"])
+    turbo_inputs["turbo_only"] = ["BOOLEAN", {"default": False}]
+    model_options["options"][2]["inputs"]["required"] = turbo_inputs
+    graph = Graph.from_object_info(object_info)
+    assert graph.widget_default_for_node("MinimaxHailuo03TextToVideoNode", "model", []) == "MiniMax H3 Max"
+    default_order = graph.widget_order_default("MinimaxHailuo03TextToVideoNode")
+    assert "model.prompt_expansion_mode" in default_order
+    assert "model.turbo_only" not in default_order
+    wf, _ = _fresh(graph)
+    assert wf["nodes"][0]["widgets_values"][0] == "MiniMax H3 Max"
+
+
+@pytest.mark.parametrize(
+    ("declared_default", "expected"),
+    [(1.0, 1), (2.0, 2), (True, 2), ("1", 1)],
+)
+def test_dynamic_default_publishes_an_actual_option_key(declared_default, expected):
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model_options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    model_options["default"] = declared_default
+    model_options["options"] = [
+        {"key": 2, "inputs": {"required": _MAX_SUB}},
+        {"key": 1, "inputs": {"required": _SUB}},
+    ]
+    graph = Graph.from_object_info(object_info)
+
+    assert graph.dynamic_combo_options("MinimaxHailuo03TextToVideoNode")["model"]["default"] == str(expected)
+    wf, _ = _fresh(graph)
+    selected = wf["nodes"][0]["widgets_values"][0]
+    assert type(selected) is int
+    assert selected == expected
+
+
+def test_dynamic_selector_uses_backend_equality_for_boolean_and_integer_keys():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    options["options"] = [
+        {"key": 1, "inputs": {"required": {"integer_only": ["STRING", {"default": "int"}]}}},
+        {"key": True, "inputs": {"required": {"boolean_only": ["STRING", {"default": "bool"}]}}},
+    ]
+    options["default"] = True
+    graph = Graph.from_object_info(object_info)
+    wf, _ = _fresh(graph)
+
+    assert graph.widget_order_for_node("MinimaxHailuo03TextToVideoNode", wf["nodes"][0]["widgets_values"])[:2] == [
+        "model",
+        "model.integer_only",
+    ]
+
+
+def test_dynamic_sub_widget_rejects_catalog_invalid_values_before_writing(graph):
+    wf, nid = _fresh(graph)
+    wf, _ = workflow_ops.set_widget(wf, graph, nid, "model", "MiniMax H3 Max")
+    before = copy.deepcopy(wf)
+
+    with pytest.raises(workflow_ops.FatalFindingError, match="not in"):
+        workflow_ops.set_widget(wf, graph, nid, "model.prompt_expansion_mode", "ghost")
+
+    assert wf == before
+
+
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):
     wf, nid = _fresh(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, nid, "model", "MiniMax H3 Max")
     wf, op = workflow_ops.set_widget(wf, graph, nid, "model.prompt_expansion_mode", "quality")
     assert op["value"] == "quality"
+
+
+def test_missing_selector_materializes_the_whole_default_option_roster():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"]
+    model[1]["default"] = "MiniMax H3"
+    model[1]["options"][0]["inputs"]["required"] = {
+        "first": ["INT", {"default": 11}],
+        "second": ["INT", {"default": 22}],
+    }
+    default_graph = Graph.from_object_info(object_info)
+    node = {"id": 1, "type": "MinimaxHailuo03TextToVideoNode", "widgets_values": []}
+
+    from comfy_cli.cql.engine import _write_widget
+
+    _write_widget(node, "model.second", 99, default_graph, extend=True)
+
+    assert node["widgets_values"] == ["MiniMax H3", 11, 99]
+
+
+def test_writing_a_missing_selector_to_its_default_materializes_its_roster():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"]
+    model[1]["default"] = "MiniMax H3"
+    model[1]["options"][0]["inputs"]["required"] = {"first": ["INT", {"default": 11}]}
+    default_graph = Graph.from_object_info(object_info)
+    node = {"id": 1, "type": "MinimaxHailuo03TextToVideoNode", "widgets_values": []}
+
+    from comfy_cli.cql.engine import _write_widget
+
+    _write_widget(node, "model", "MiniMax H3", default_graph, extend=True)
+
+    assert node["widgets_values"] == ["MiniMax H3", 11]
 
 
 def test_unknown_sub_widget_keeps_the_plain_refusal(graph):
@@ -161,6 +272,80 @@ def test_interior_write_to_a_hidden_sub_widget_is_refused(graph):
     assert "57/7.model" in msg, f"must name the interior selector address: {msg}"
 
 
+def test_replayed_hidden_sub_widget_commits_a_no_op_without_forking(graph):
+    wf = _in_subgraph(graph)
+    wf["nodes"].append(copy.deepcopy(wf["nodes"][0]) | {"id": 58})
+    before = copy.deepcopy(wf)
+    op = workflow_ops._new_op(
+        "set_widget",
+        "agent",
+        1,
+        node_id="57/7",
+        widget="model.prompt_expansion_mode",
+        value="quality",
+        path=["57", "7"],
+        inner_widget="model.prompt_expansion_mode",
+    )
+
+    workflow_ops.apply_op(wf, op, graph)
+
+    assert wf["nodes"] == before["nodes"]
+    assert wf["definitions"] == before["definitions"]
+    assert wf["_widget_stamps"]
+
+
+def test_replayed_top_level_hidden_sub_widget_commits_a_no_op(graph):
+    wf, node_id = _fresh(graph)
+    before = copy.deepcopy(wf)
+    op = workflow_ops._new_op(
+        "set_widget",
+        "agent",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+
+    workflow_ops.apply_op(wf, op, graph)
+
+    assert wf["nodes"] == before["nodes"]
+    assert wf["_widget_stamps"]
+
+
+def test_dynamic_sub_widget_combo_uses_the_same_normalization_as_top_level():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    max_inputs = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]["options"][1]["inputs"][
+        "required"
+    ]
+    max_inputs["aspect_ratio"] = ["COMBO", {"default": "16:9 (Landscape)", "options": ["16:9 (Landscape)"]}]
+    local_graph = Graph.from_object_info(object_info)
+    wf, node_id = _fresh(local_graph)
+    wf, _ = workflow_ops.set_widget(wf, local_graph, node_id, "model", "MiniMax H3 Max")
+
+    wf, op = workflow_ops.set_widget(wf, local_graph, node_id, "model.aspect_ratio", "16:9")
+
+    assert op["value"] == "16:9 (Landscape)"
+
+
+def test_materializing_a_missing_selector_fills_plain_widget_defaults():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    required = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]
+    required["model"][1]["default"] = "MiniMax H3"
+    object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"] = {
+        "cfg": ["FLOAT", {"default": 8.0}],
+        **required,
+    }
+    object_info["MinimaxHailuo03TextToVideoNode"]["input_order"]["required"] = ["cfg", "model", "watermark"]
+    local_graph = Graph.from_object_info(object_info)
+    node = {"id": 1, "type": "MinimaxHailuo03TextToVideoNode", "widgets_values": []}
+
+    from comfy_cli.cql.engine import _write_widget
+
+    _write_widget(node, "model.prompt", "hello", local_graph, extend=True)
+
+    assert node["widgets_values"][0] == 8.0
+
+
 def test_interior_write_succeeds_once_the_revealing_option_is_selected(graph):
     wf = _in_subgraph(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, "57/7", "model", "MiniMax H3 Max")
@@ -179,6 +364,18 @@ _MODE = [
             {
                 "key": "slow",
                 "inputs": {"required": {"steps": ["INT", {"default": 4}], "refine": ["BOOLEAN", {"default": False}]}},
+            },
+        ]
+    },
+]
+_ALT_MODE = [
+    "COMFY_DYNAMICCOMBO_V3",
+    {
+        "options": [
+            {"key": "quick", "inputs": {"required": {"steps": ["INT", {"default": 2}]}}},
+            {
+                "key": "detailed",
+                "inputs": {"required": {"steps": ["INT", {"default": 8}], "refine": ["BOOLEAN", {"default": True}]}},
             },
         ]
     },
@@ -265,3 +462,41 @@ def test_nested_set_slot_warning_falls_back_to_the_outer_selector(nested_graph):
     w = next(w for w in warnings if w["code"] == "unknown_dynamic_sub_input")
     assert "model='v2'" in w["message"], w
     assert "revealed_by" not in w and "'slow'" not in w["hint"], w
+
+
+def test_missing_nested_selector_uses_the_active_outer_options_default():
+    object_info = {
+        "NestedComboNode": {
+            **NESTED_OBJECT_INFO["NestedComboNode"],
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {"key": "v1", "inputs": {"required": {"mode": _MODE}}},
+                                {"key": "v2", "inputs": {"required": {"mode": _ALT_MODE}}},
+                            ]
+                        },
+                    ]
+                }
+            },
+        }
+    }
+    object_info = copy.deepcopy(object_info)
+    active_mode = object_info["NestedComboNode"]["input"]["required"]["model"][1]["options"][1]["inputs"]["required"][
+        "mode"
+    ][1]
+    active_mode["default"] = "quick"
+    graph = Graph.from_object_info(object_info)
+    wf, nid = _fresh_nested(graph, model="v2")
+    wf["nodes"][0]["widgets_values"] = ["v2"]
+    before = list(wf["nodes"][0]["widgets_values"])
+
+    with pytest.raises(ValueError) as exc:
+        workflow_ops.set_widget(wf, graph, nid, "model.mode.refine", True)
+
+    msg = str(exc.value)
+    assert "model.mode='quick'" in msg, msg
+    assert "'detailed'" in msg, msg
+    assert wf["nodes"][0]["widgets_values"] == before

@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import json
 import os
 import re
@@ -145,16 +146,19 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
     and the exit code stays 1. Pretty mode is left exactly as it was.
     """
     try:
+        context_command = _command_path(ctx)
+        if not context_command and ctx is not None and ctx.invoked_subcommand:
+            context_command = str(ctx.invoked_subcommand)
         renderer = get_renderer()
         if not renderer.is_json():
             # The root callback installs the renderer, so a crash in it (or
             # before it) still sees the pretty default. The root flags did
             # parse, so decide the mode from them. No version lookup: that
             # lookup is one of the things that can have crashed.
-            renderer = Renderer.resolve(command=_command_path(ctx), **_output_flags(ctx))
+            renderer = Renderer.resolve(command=context_command, **_output_flags(ctx))
         if not renderer.is_json() or renderer._envelope_emitted:
             return
-        command = getattr(renderer, "command", None) or _command_path(ctx)
+        command = getattr(renderer, "command", None) or context_command or ""
         renderer.error(
             code="internal_error",
             message=_internal_error_message(error),
@@ -177,8 +181,630 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 #: (scheme and credential together), `key=value` / `key: value` token pairs,
 #: and `user:pass@` userinfo.
 _INTERNAL_ERROR_MESSAGE_CAP = 500
+_INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
+_SECRET_KEY_PATTERN = (
+    r"(?:proxy-)?authorization|auth|api[ ._-]?keys?|api[ ._-]?tokens?|token|access[ ._-]?tokens?|"
+    r"refresh[ ._-]?tokens?|secrets?|passwords?|passphrases?|private[ ._-]?keys?|"
+    r"(?:auth|api|access|client|consumer|db|pg|secret|service)(?:tokens?|keys?|secrets?|passwords?)|"
+    r"session(?:[ ._-]?(?:id|key))?|sid|sig|signature|passphrase|passwd|pwd|credentials?|creds|jwt|oauth|"
+    r"(?:set-)?cookies?"
+)
+_SECRET_KEY_QUALIFIER = (
+    r"comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|refresh|"
+    r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt|aws|"
+    r"encryption|decryption|master|hmac|app|consumer|subscription|shared|ssh|license|db"
+)
+_CAMEL_SECRET_KEY_PATTERN = (
+    r"(?:(?!(?-i:(?:max|prompt|completion|total|input|output|maxOutput|maxCompletion|maxNew)Tokens?)\b)"
+    r"[a-z][A-Za-z0-9]{0,63}(?:(?-i:(?:Api|API)Keys?|Passwords?|Secrets?|Tokens?|Passphrases?))|"
+    r"(?:api|app|auth|access|refresh|token|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
+    r"proxy|credential|master|subscription|hmac|encryption|account|sharedAccess|sshPrivate|service|db)"
+    r"[A-Za-z0-9]{0,32}(?:(?-i:KeyIds?|Keys?|Authorization|Cookies?|Signatures?|SessionIds?))|"
+    r"(?!(?i:(?:max|prompt|completion|total|input|output|maxoutput|maxcompletion|maxnew)tokens?)\b)"
+    r"(?:(?-i:[A-Z][A-Z0-9]{0,63}(?:APIKEYS?|PASSWORDS?|SECRETS?|TOKENS?|PASSPHRASES?))|"
+    r"(?-i:[a-z][a-z0-9]{0,63}(?:passwords?|secrets?|tokens?|passphrases?))))"
+    r"(?:(?-i:Backup|Value|V[0-9]+))?"
+)
+_ORDINARY_KEY_WORD = (
+    r"(?<!primary_)(?<!primary-)(?<!foreign_)(?<!foreign-)(?<!sort_)(?<!sort-)"
+    r"(?<!cache_)(?<!cache-)(?<!hash_)(?<!hash-)keys?"
+)
+_SECRET_KEY_TAIL = r"(?:[_.-]+(?!(?:counts?|counters?|lengths?|algorithms?)\b)[^\W_]+){0,8}"
+_SECRET_ASSIGNMENT_KEY_PATTERN = (
+    rf"(?<![\w-])(?:"
+    rf"(?:[\w-]+[_.-]{_ORDINARY_KEY_WORD}"
+    rf"(?:[_.-](?:{_SECRET_KEY_QUALIFIER})){{0,8}}{_SECRET_KEY_TAIL})"
+    rf"|(?:(?:{_SECRET_KEY_QUALIFIER})(?:[ ._-]+(?:{_SECRET_KEY_QUALIFIER})){{0,8}}[ ._-]+keys?"
+    rf"(?:[_.-](?:{_SECRET_KEY_QUALIFIER})){{0,8}}{_SECRET_KEY_TAIL})"
+    rf"|{_CAMEL_SECRET_KEY_PATTERN}"
+    rf"|(?:[\w-]*[_.-])?(?:{_SECRET_KEY_PATTERN})"
+    rf"{_SECRET_KEY_TAIL}"
+    rf")"
+)
+_OPTIONAL_KEY_CLOSING_QUOTE = r"(?:[\"'](?=[^\S\r\n]*[:=]))?"
+_SECRET_NEXT_LINE_VALUE = (
+    r"(?:[bBuUrR]{0,2}[\"']|[\[{]|"
+    r"(?!(?:\(|[A-Za-z_][\w .-]{0,63}[ \t]*:(?=[ \t\r\n]|$)))[^\s])"
+)
+_SECRET_VALUE_SPACE = rf"(?:[^\S\r\n]*|[^\S\r\n]*(?:\r\n|\r|\n)[ \t]+(?:-[ \t]+)?(?={_SECRET_NEXT_LINE_VALUE}))"
+_SECRET_CONSTRUCTOR_START = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+    r"[A-Za-z_][\w.]*\(",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_constructors(text: str) -> str:
+    """Mask constructor-shaped secret values without stopping at an inner call."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _SECRET_CONSTRUCTOR_START.search(text, search_from):
+        index = match.end()
+        depth = 1
+        quote: str | None = None
+        escaped = False
+        while index < len(text) and depth:
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char in "\r\n":
+                break
+            index += 1
+        if depth:
+            # A multiline or truncated constructor has no trustworthy end.
+            # Mask the full tail so a later value cannot escape through the
+            # simpler single-line constructor pattern.
+            chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
+            return "".join(chunks)
+        chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
+        cursor = index
+        search_from = index
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+_SECRET_CONTAINER_START = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+    r"(?P<opener>[\[({<])",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_containers(text: str) -> str:
+    """Mask balanced or truncated secret containers, including multiline values."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    closers = {"[": "]", "(": ")", "{": "}", "<": ">"}
+    while match := _SECRET_CONTAINER_START.search(text, search_from):
+        stack = [closers[match.group("opener")]]
+        index = match.end()
+        quote: str | None = None
+        escaped = False
+        while index < len(text) and stack:
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char in closers:
+                stack.append(closers[char])
+            elif char == stack[-1]:
+                stack.pop()
+            index += 1
+        chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
+        if stack:
+            # A truncated wrapper has no safe boundary. Mask the full tail.
+            return "".join(chunks)
+        cursor = index
+        search_from = index
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+_SECRET_QUOTED_START = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+    r"(?P<wrapper>[bBuUrR]{0,2})(?P<quote>\"\"\"|'''|[\"'])",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_quoted_values(text: str) -> str:
+    """Mask a quoted secret through its matching quote, including newlines."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _SECRET_QUOTED_START.search(text, search_from):
+        quote = match.group("quote")
+        index = match.end()
+        escaped = False
+        while index < len(text):
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif len(quote) == 1 and text.startswith(quote * 2, index):
+                # YAML/SQL single-quoted scalars escape a quote by doubling it.
+                # The pair is data, not the end of the secret value.
+                index += 2
+                continue
+            elif text.startswith(quote, index):
+                break
+            index += 1
+        chunks.extend(
+            (
+                text[cursor : match.start()],
+                match.group("prefix"),
+                match.group("wrapper"),
+                quote,
+                "***",
+            )
+        )
+        if index >= len(text):
+            return "".join(chunks)
+        chunks.append(quote)
+        cursor = index + len(quote)
+        search_from = cursor
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+_YAML_SECRET_LINE = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*:)"
+    r"(?P<space>[^\S\r\n]*)(?P<value>[^\r\n]*)$",
+    re.IGNORECASE,
+)
+_YAML_MAPPING_LINE = re.compile(r"[A-Za-z_][\w .-]{0,63}[ \t]*:(?=[ \t]|$)")
+
+
+def _scrub_yaml_secret_blocks(text: str) -> str:
+    """Mask YAML block scalars and every item in a secret sequence.
+
+    The scalar/sequence body is indentation-delimited. Handling it line by
+    line avoids a closer-dependent regex and preserves the next sibling
+    diagnostic verbatim, including CR-only input.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        search_from = 0
+        match = _YAML_SECRET_LINE.search(content, search_from)
+        while match is not None:
+            # Secret-shaped labels can also be ordinary URL authority labels
+            # (``https://auth.example.com:443/...``). Skip only that match so
+            # a real secret block later on the same line is still found.
+            authority_labels = _authority_labels_before(content[: match.start()])
+            key = match.group("prefix").rstrip(" \t")[:-1].strip("\"'")
+            port = re.split(r"[\s/?#;&,]", match.group("value").lstrip(), maxsplit=1)[0]
+            if authority_labels is None or not _looks_like_numbered_network_authority(
+                f"{authority_labels}{key}:{port}"
+            ):
+                break
+            search_from = match.end("prefix")
+            match = _YAML_SECRET_LINE.search(content, search_from)
+        if match is None:
+            out.append(line)
+            index += 1
+            continue
+        value = match.group("value").strip()
+        key_indent = len(content) - len(content.lstrip(" \t"))
+        block_scalar = bool(
+            re.fullmatch(
+                r"(?:(?:![^\s]+|&[^\s]+)[ \t]+)*[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?",
+                value,
+            )
+        )
+        next_is_sequence = False
+        next_is_continuation = False
+        probe = index + 1
+        while probe < len(lines) and not lines[probe].rstrip("\r\n").strip():
+            probe += 1
+        if probe < len(lines):
+            next_content = lines[probe].rstrip("\r\n")
+            next_indent = len(next_content) - len(next_content.lstrip(" \t"))
+            stripped_next = next_content.lstrip(" \t")
+            next_is_sequence = (
+                (not value or value.startswith("#")) and next_indent >= key_indent and stripped_next.startswith("- ")
+            )
+            quoted_mapping = re.match(
+                r"""(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:''|[^'\r\n])*')[ \t]*:""",
+                stripped_next,
+            )
+            next_is_continuation = next_indent > key_indent and (
+                not stripped_next.startswith(("(", "'", '"')) or quoted_mapping is not None
+            )
+        if not block_scalar and not next_is_sequence and not next_is_continuation:
+            out.append(line)
+            index += 1
+            continue
+        out.append(content[: match.start("value")] + "***" + ending)
+        index += 1
+        while index < len(lines):
+            child = lines[index].rstrip("\r\n")
+            if not child.strip():
+                index += 1
+                continue
+            child_indent = len(child) - len(child.lstrip(" \t"))
+            stripped_child = child.lstrip(" \t")
+            child_is_sequence = stripped_child.startswith("- ")
+            if next_is_sequence:
+                if child_indent < key_indent or (child_indent == key_indent and not child_is_sequence):
+                    break
+            elif child_indent <= key_indent:
+                break
+            elif not block_scalar and stripped_child.startswith("("):
+                break
+            index += 1
+    return "".join(out)
+
+
+_ARMORED_BLOCK_BEGIN = re.compile(r"-----BEGIN ", re.IGNORECASE)
+_ARMORED_BLOCK_LABEL = re.compile(r"[A-Z0-9][A-Z0-9 -]*", re.IGNORECASE)
+
+
+def _scrub_armored_blocks(text: str) -> str:
+    """Mask complete or truncated key/certificate armor without eating later diagnostics."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _ARMORED_BLOCK_BEGIN.search(text, search_from):
+        label_start = match.end()
+        label_end = text.find("-----", label_start, label_start + 165)
+        if label_end < 0:
+            search_from = label_start
+            continue
+        label = text[label_start:label_end]
+        if not _ARMORED_BLOCK_LABEL.fullmatch(label) or not re.search(r"key|certificate", label, re.IGNORECASE):
+            # ``label_end`` can itself be the opening dashes of a later valid
+            # header. Resume inside the rejected label so that header is seen.
+            search_from = label_start
+            continue
+        end_marker = re.compile(re.escape(f"-----END {label}-----"), re.IGNORECASE)
+        end_match = end_marker.search(text, label_end + 5)
+        chunks.extend((text[cursor : match.start()], "***"))
+        if end_match is None:
+            return "".join(chunks)
+        cursor = end_match.end()
+        search_from = cursor
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+_URL_SCHEME_START = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*://")
+
+
+def _looks_like_numbered_network_authority(authority: str) -> bool:
+    """Whether ``authority`` is an unambiguous host plus a 1-5 digit port."""
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close < 0 or close + 1 >= len(authority) or authority[close + 1] != ":":
+            return False
+        host = authority[: close + 1]
+        port = authority[close + 2 :]
+    else:
+        host, separator, port = authority.rpartition(":")
+        if not separator:
+            return False
+    valid_host = bool(
+        host
+        and (
+            (host.startswith("[") and host.endswith("]"))
+            or all(
+                label
+                and label[0].isalnum()
+                and label[-1].isalnum()
+                and all(char.isalnum() or char == "-" for char in label)
+                for label in host.split(".")
+            )
+        )
+    )
+    return valid_host and bool(re.fullmatch(r"[0-9]{1,5}", port)) and int(port) <= 65_535
+
+
+def _looks_like_hostname(authority: str) -> bool:
+    return bool(
+        authority
+        and len(authority) <= 253
+        and all(
+            label
+            and label[0].isalnum()
+            and label[-1].isalnum()
+            and all(char.isalnum() or char == "-" for char in label)
+            for label in authority.split(".")
+        )
+    )
+
+
+def _authority_labels_before(context: str) -> str | None:
+    """Return the dotted authority prefix immediately before a matched label."""
+    embedded_url = re.search(
+        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*://(?P<labels>[A-Za-z0-9.-]*)$",
+        context,
+    )
+    if embedded_url is not None:
+        labels = embedded_url.group("labels")
+        if (labels and not labels.endswith(".")) or ".." in labels:
+            return None
+        return labels
+    last_space = max(context.rfind(" "), context.rfind("\t"), context.rfind("\r"), context.rfind("\n"))
+    token = context[last_space + 1 :]
+    if "://" in token:
+        scheme, labels = token.rsplit("://", 1)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+._-]*", scheme):
+            return None
+    else:
+        labels = token
+        words = context[: last_space + 1].rstrip().lower().rsplit(maxsplit=1)
+        if words[-1:] != ["host"]:
+            return None
+    if (labels and not labels.endswith(".")) or any(char.isspace() or char in ":/" for char in labels):
+        return None
+    return labels
+
+
+def _render_assignment_siblings(prefix: str, value: str, *, mask_leading: bool) -> str | None:
+    """Mask secret-shaped assignments after the leading value on one line."""
+    siblings = list(
+        re.finditer(
+            rf"(?P<sep>[&;]|,[ \t]*|[ \t]+)"
+            rf"(?P<key>[\"']?(?:{_SECRET_ASSIGNMENT_KEY_PATTERN}|[A-Za-z_][\w.-]*)[\"']?)"
+            r"(?P<assign>[:=])",
+            value,
+            re.IGNORECASE,
+        )
+    )
+    if not siblings:
+        return None
+    safe_keys = {
+        "request",
+        "request_id",
+        "request-id",
+        "x-request-id",
+        "trace",
+        "trace_id",
+        "trace-id",
+        "content-type",
+    }
+    rendered = [f"{prefix}***" if mask_leading else f"{prefix}{value[: siblings[0].start()]}"]
+    for idx, sibling in enumerate(siblings):
+        key = sibling.group("key").strip("\"'")
+        end = siblings[idx + 1].start() if idx + 1 < len(siblings) else len(value)
+        secret_key = re.fullmatch(_SECRET_ASSIGNMENT_KEY_PATTERN, key, re.IGNORECASE) is not None
+        separator = sibling.group("sep")
+        quoted_mapping_key = separator.startswith(",") and sibling.group("key").startswith(("'", '"'))
+        if key.lower() in safe_keys or (not secret_key and (separator[0].isspace() or quoted_mapping_key)):
+            rendered.append(_scrub_secret_tail(value[sibling.start() : end]))
+        else:
+            rendered.append(f"{separator}{sibling.group('key')}{sibling.group('assign')}***")
+    return "".join(rendered)
+
+
+_SCRUB_SECRET_TAIL_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "comfy_cli_scrub_secret_tail_depth", default=0
+)
+_MAX_SCRUB_SECRET_TAIL_DEPTH = 32
+
+
+def _scrub_secret_tail(text: str) -> str:
+    """Re-run scalar rules over a suffix preserved by a broader match."""
+    depth = _SCRUB_SECRET_TAIL_DEPTH.get()
+    if depth >= _MAX_SCRUB_SECRET_TAIL_DEPTH:
+        return "***"
+    token = _SCRUB_SECRET_TAIL_DEPTH.set(depth + 1)
+    try:
+        for pattern, replacement in _SECRET_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+    finally:
+        _SCRUB_SECRET_TAIL_DEPTH.reset(token)
+
+
+def _scrub_url_userinfo(text: str) -> str:
+    """Mask URL userinfo while leaving ``host:port/path?...@...`` URLs intact.
+
+    Raw ``/``, ``?`` and ``#`` can occur in a malformed password, so a simple
+    authority regex cannot stop on them. We allow those characters through to
+    the last ``@`` unless the pre-delimiter segment is unambiguously a numbered
+    network authority; that preserves ordinary URLs whose path/query contains
+    an ``@`` without weakening credential masking.
+    """
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _URL_SCHEME_START.search(text, search_from):
+        token_end_match = re.search(r'[\s"]', text[match.end() :])
+        token_end = match.end() + token_end_match.start() if token_end_match is not None else len(text)
+        token = text[match.end() : token_end]
+        delimiters = [index for char in "/?#" if (index := token.find(char)) >= 0]
+        first_delimiter = min(delimiters) if delimiters else len(token)
+        # Prefer an @ inside the real authority. A later @ in a path, query,
+        # fragment, or VCS ref must not pull the mask past the delimiter and
+        # erase the query anchor. Only malformed passwords that themselves
+        # crossed a raw delimiter fall back to the final token-wide @.
+        authority_at = token.rfind("@", 0, first_delimiter)
+        standard_userinfo = authority_at >= 0
+        if standard_userinfo:
+            candidate_host = token[authority_at + 1 : first_delimiter]
+            later_at = token.rfind("@")
+            # An email-form username supplies an early @. If what follows it
+            # cannot be a host (``corp.com:pa``), a later @ owns the authority
+            # and everything before it is malformed userinfo.
+            if later_at > authority_at:
+                crossed = token[first_delimiter:later_at]
+                query_shaped = "?" in crossed and "=" in crossed
+                early_userinfo = token[:authority_at]
+                candidate_is_host = _looks_like_hostname(candidate_host) or _looks_like_numbered_network_authority(
+                    candidate_host
+                )
+                # A later delimiter owns malformed userinfo when the early
+                # prefix already has a password, or a host:port-looking middle
+                # is followed by a fragment. Keep token-only userinfo to
+                # underscore/trailing-dot hosts masked through the early @.
+                if (":" in early_userinfo and not query_shaped) or (
+                    _looks_like_numbered_network_authority(candidate_host) and "#" in crossed
+                ):
+                    standard_userinfo = False
+                elif not candidate_is_host and ":" in candidate_host:
+                    standard_userinfo = False
+        at = authority_at if standard_userinfo else token.rfind("@")
+        if at < 0:
+            search_from = match.end()
+            continue
+        later_scheme = _URL_SCHEME_START.search(token, first_delimiter, at)
+        if not standard_userinfo and later_scheme is not None:
+            # A joined/nested URL owns that later @. Let the outer URL go and
+            # resume at the inner scheme rather than treating the entire span
+            # as one malformed password. If the outer URL also had userinfo,
+            # mask it before preserving the proxy path.
+            inner_start = match.end() + later_scheme.start()
+            outer_at = token.rfind("@", 0, later_scheme.start())
+            outer_authority = token[:first_delimiter]
+            outer_crossed_tail = token[first_delimiter:outer_at]
+            clear_outer_network_tail = (
+                _looks_like_numbered_network_authority(outer_authority)
+                and "?" in outer_crossed_tail
+                and "=" in outer_crossed_tail
+            )
+            outer_has_userinfo = authority_at >= 0 or (
+                outer_at >= first_delimiter and ":" in outer_authority and not clear_outer_network_tail
+            )
+            if outer_has_userinfo and outer_at >= 0:
+                chunks.extend(
+                    (
+                        text[cursor : match.end()],
+                        "***@",
+                        token[outer_at + 1 : later_scheme.start()],
+                    )
+                )
+                cursor = inner_start
+            search_from = inner_start
+            continue
+        authority = token[:first_delimiter]
+        numbered_authority = _looks_like_numbered_network_authority(authority)
+        crossed_tail = token[first_delimiter:at]
+        # A valid host:port followed by a query-shaped @ belongs to a normal
+        # path/query, including single-label Docker and Kubernetes services.
+        # A bare path/fragment remains ambiguous with a password and therefore
+        # fails closed.
+        clear_network_tail = numbered_authority and "?" in crossed_tail and "=" in crossed_tail
+        malformed_password = ":" in authority and not clear_network_tail
+        if not standard_userinfo and not malformed_password:
+            # A whitespace-free token can contain another URL (proxy wrappers,
+            # comma-joined indexes). Resume immediately after this scheme so
+            # the next scheme remains discoverable.
+            search_from = match.end()
+            continue
+        post_at = token[at + 1 :]
+        if (
+            not standard_userinfo
+            and any(char in token[:at] for char in "?#")
+            and re.search(r"[&;][A-Za-z_][\w.-]*[:=]", post_at)
+        ):
+            # The fallback crossed a query or fragment anchor. Keeping the
+            # post-@ tail could expose another key/value pair that no later
+            # query scrubber can recognize, so mask the rest of this token.
+            chunks.extend((text[cursor : match.end()], "***"))
+            cursor = token_end
+        else:
+            chunks.extend((text[cursor : match.end()], "***@"))
+            cursor = match.end() + at + 1
+        search_from = cursor
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+def _mask_unquoted_secret_assignment(match: re.Match) -> str:
+    """Mask a whitespace-delimited secret token without leaking punctuation.
+
+    Commas, apostrophes, semicolons, and ampersands can all be part of an
+    unquoted credential. Preserve a delimiter only when it unambiguously opens
+    the next ``name=value`` pair, plus structural closing punctuation.
+    """
+    prefix = match.group("prefix")
+    value = match.group("value")
+    host_match = re.fullmatch(r"(?P<host>[^\s:=]+):", prefix)
+    port = re.split(r"[\s/?#;&,]", value.lstrip(), maxsplit=1)[0]
+    context = match.string[: match.start()]
+    authority_labels = _authority_labels_before(context) if host_match is not None else None
+    full_host = f"{authority_labels}{host_match.group('host')}" if authority_labels is not None and host_match else ""
+    if (
+        host_match is not None
+        and authority_labels is not None
+        and _looks_like_numbered_network_authority(f"{full_host}:{port}")
+    ):
+        # Only an actual URL/``host ...`` authority earns the exemption. An
+        # ``=`` assignment with a numeric value is still a credential. Preserve
+        # only the authority/path token, then rescan its query, fragment, and
+        # following diagnostics for credentials.
+        boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#;&,"]
+        safe_end = min(boundaries) if boundaries else len(value)
+        return f"{prefix}{value[:safe_end]}{_scrub_secret_tail(value[safe_end:])}"
+    already_masked = re.match(r"""[ \t]*(?:\*{3}(?=$|[\s}\])])|(["'])\*{3}\1(?=$|[\s}\])]))""", value) is not None
+    rendered_siblings = _render_assignment_siblings(prefix, value, mask_leading=not already_masked)
+    if rendered_siblings is not None:
+        return rendered_siblings
+    opening_wrapper = (
+        match.string[match.start() - 1] if match.start() and match.string[match.start() - 1] in "\"'" else ""
+    )
+    closing = next(
+        (
+            idx
+            for idx in range(len(value) - 1, -1, -1)
+            if value[idx] == opening_wrapper
+            and (idx + 1 == len(value) or value[idx + 1].isspace() or value[idx + 1] in ",;)]}")
+        ),
+        -1,
+    )
+    if opening_wrapper and closing >= 0:
+        suffix = value[closing:]
+    else:
+        explanation = re.search(r"[ \t]+\([^\r\n()]*\)$", value)
+        if explanation is not None:
+            suffix = value[explanation.start() :]
+        else:
+            structural = re.search(r"[\"']?[}\]),]+$", value)
+            suffix = value[structural.start() :] if structural is not None else ""
+    return f"{prefix}***{_scrub_secret_tail(suffix)}"
+
+
 _SECRET_PATTERNS = (
-    (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
+    (
+        re.compile(r'([A-Za-z][A-Za-z0-9+._-]*://(?:\[[^\]\s"]+\]|[^\s/?#":]+):[0-9]{1,5})\?[^\s"]*'),
+        r"\1?***",
+    ),
+    (re.compile(r'(https?://[^\s?#"]+)\?[^\s"]*', re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
     # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
     # (Basic, Bearer, Token, Digest with its quoted comma-separated params,
@@ -192,30 +818,164 @@ _SECRET_PATTERNS = (
     # and swallowed the headers after it.
     (
         re.compile(
-            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)"
+            r"(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*"
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*\2?|[^\r\n]+"
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*)",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+    ),
+    (
+        # Constructor reprs are balanced and normally followed by useful
+        # diagnostics, so consume just the constructor (never whitespace plus
+        # an ordinary explanatory parenthetical).
+        re.compile(
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+            r"[A-Za-z_][\w.]*\([^\r\n)]*\)",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
+        # A container may be nested, truncated by the message cap, or pretty
+        # printed. Once a secret value opens a container, conservatively mask
+        # the rest of that line and its indented continuations. This is linear
+        # and cannot leak later elements through a premature closer.
+        re.compile(
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+            r"(?:[\[({]|[A-Za-z_][\w.]*\()[^\r\n]*"
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
+        # Quoted values stop at their matching quote so later diagnostics stay
+        # visible. Constructors and containers were handled above.
+        re.compile(
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+            r"([bBuUrR]{0,2})((?:\\)?(?:\"\"\"|'''|[\"']))(?:(?!\3)(?:\\.|[^\r\n]))*\3?",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}{m[3]}***{m[3]}",
+    ),
+    (
+        # The Bearer scrubber above preserves the scheme; do not remask it as
+        # an unquoted token. Mask punctuation inside every other credential.
+        re.compile(
+            rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}"
+            rf"[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+            r"(?!Bearer\s)(?![bBuUrR]{0,2}(?:\"\"\"|'''|[\"']))(?P<value>[^\r\n]+)",
+            re.IGNORECASE,
+        ),
+        _mask_unquoted_secret_assignment,
+    ),
+    (
+        # JSON that has itself been escaped can still carry a nested,
+        # truncated, or pretty-printed container. Mask its remainder without
+        # a closer-dependent regex, so backslash runs stay linear-time.
+        re.compile(
+            rf"(\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
+            r"\\+[\"']\s*[:=]\s*)[\[({][^\r\n]*(?:(?:\r\n|\r|\n)[ \t]+[^\r\n]*)*",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            rf"(?P<prefix>\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
+            r"\\+[\"']\s*[:=]\s*)(?P<slashes>\\+)(?P<quote>[\"'])"
+            r"(?:(?:\\\\.)|\\(?![\"'])|(?!(?P=slashes)(?P=quote))[^\\])*?"
+            r"(?P<closer>(?P=slashes)(?P=quote)|$)",
+            re.IGNORECASE,
+        ),
+        r"\g<prefix>\g<slashes>\g<quote>***\g<closer>",
+    ),
+    (
+        re.compile(
+            rf"(\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
+            r"\\+[\"']\s*[:=]\s*)(?!\\+[\"'])(?:\\(?![\"'])|[^\s,}])+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"((?:set-)?cookie[\"']\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
-            r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
+            r"((?:set-)?cookie\s*[:=]\s*)[^\r\n]*"
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
     ),
-    (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
 )
 
 
 def _internal_error_message(error: BaseException) -> str:
-    text = f"{type(error).__name__}: {error}"
+    prefix = f"{type(error).__name__}: "
+    try:
+        detail = str(error)
+    except Exception:
+        detail = "unprintable exception"
+    detail_cap = max(0, _INTERNAL_ERROR_SCRUB_INPUT_CAP - len(prefix))
+    scrub_input_truncated = len(detail) > detail_cap
+    # ``str(error)`` necessarily materializes the exception's value, but do not
+    # create a second unbounded copy merely to prepend its type name.
+    text = detail[:detail_cap]
+    if scrub_input_truncated:
+        # A userinfo scrub needs its closing ``@``. If the input cap removed
+        # that anchor, drop the incomplete credential token before earlier
+        # scrubbers contract the message and pull it into the visible prefix.
+        partial_userinfo = next(
+            (
+                scheme
+                for scheme in reversed(list(_URL_SCHEME_START.finditer(text)))
+                if re.fullmatch(r'[^\s"]*', text[scheme.end() :])
+            ),
+            None,
+        )
+        if partial_userinfo is not None:
+            tail = text[partial_userinfo.end() :]
+            authority = re.split(r"[/?#]", tail, maxsplit=1)[0]
+            if "@" in tail:
+                # The cap may have removed a later ``@host``. Even a DNS-like
+                # suffix after the last visible @ can still be part of the
+                # password, so the only safe boundary is the URL start.
+                should_trim = True
+            else:
+                boundary_visible = len(authority) < len(tail)
+                looks_like_bare_ipv6 = authority.startswith("[") and authority.endswith("]")
+                complete_network_authority = boundary_visible and _looks_like_hostname(authority)
+                # With no visible path/query/fragment boundary, a dotted token
+                # or ``user:common-port`` cut before ``@host`` is
+                # indistinguishable from a complete hostname. Fail closed; an
+                # IPv6 closing bracket remains an unambiguous terminator.
+                should_trim = not looks_like_bare_ipv6 and not complete_network_authority
+        else:
+            should_trim = False
+        if should_trim:
+            text = text[: partial_userinfo.start()]
+    text = _scrub_yaml_secret_blocks(text)
+    text = _scrub_secret_constructors(text)
+    text = _scrub_secret_containers(text)
+    text = _scrub_secret_quoted_values(text)
+    text = _scrub_armored_blocks(text)
+    text = _scrub_url_userinfo(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
-    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
-        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
-    return text
+    visible_detail_cap = max(0, _INTERNAL_ERROR_MESSAGE_CAP - len(prefix))
+    if len(text) > visible_detail_cap:
+        text = text[: visible_detail_cap - 1] + "…"
+    elif scrub_input_truncated:
+        text = text[: visible_detail_cap - 1] + "…"
+    return prefix + text
 
 
 def _traceback_tail(error: BaseException, frames: int = 3) -> list[str]:

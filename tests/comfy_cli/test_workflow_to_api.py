@@ -939,6 +939,45 @@ class TestMalformedInputHardening:
         assert result["1"]["class_type"] == "Foo"
         assert result["1"]["inputs"]["shape"] == "square"
 
+    def test_v3_combo_conversion_matches_server_boolean_numeric_equality(self):
+        object_info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output_node": True,
+                "display_name": "Foo",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Foo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [True, 7],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"shape": True, "shape.number": 7}
+
     def test_malformed_schema_input_does_not_crash(self):
         # Several helpers do ``schema.get("input") or {}`` then ``.get(section)``.
         # If "input" was ever a non-dict, ``.get`` would AttributeError before

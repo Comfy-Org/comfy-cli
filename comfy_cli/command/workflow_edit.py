@@ -674,14 +674,23 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
+    from comfy_cli.cql.engine import _subgraph_defs_by_id
+
+    nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
+    node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
+    # Use the editor's exact id/legacy-name resolver. Reimplementing only part
+    # of its conflict analysis made listing disagree with path navigation.
+    definitions = workflow.get("definitions")
+    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    resolved_subgraphs = _subgraph_defs_by_id(workflow) if isinstance(raw_subgraphs, list) else {}
+    subgraph_ids = {node_type for node_type in node_types if node_type in resolved_subgraphs}
     rows = []
-    for n in workflow.get("nodes") or []:
-        if not isinstance(n, dict):
-            continue
+    for n in nodes:
+        properties = n.get("properties")
         row = {
             "id": n.get("id"),
             "type": n.get("type"),
-            "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
+            "title": n.get("title") or (properties.get("Node name for S&R") if isinstance(properties, dict) else None),
         }
         # ComfyUI disables a node without deleting it: mode 4 = bypass (input
         # passes through), mode 2 = mute/never (dropped from execution). Both are
@@ -689,7 +698,12 @@ def ls_nodes_cmd(
         # from a live one — and would "repair" a graph that is merely bypassed,
         # or call a workflow runnable while a required node is muted.
         # Emitted only when set, so a normal node stays a single clean row.
-        if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
+        mode = n.get("mode")
+        if (
+            isinstance(mode, int | float)
+            and not isinstance(mode, bool)
+            and (label := _MODE_LABELS.get(mode)) is not None
+        ):
             row["mode"] = label
         # A row's `type` reads like an addable class. Two kinds are not: a
         # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
@@ -698,10 +712,10 @@ def ls_nodes_cmd(
         # show` cannot take that type. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
-            if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
-                row["ui_only"] = True
-            elif workflow_ops._UUID_RE.match(node_type):
+            if workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
                 row["subgraph"] = True
+            elif node_type in workflow_ops.UI_ONLY_NODE_TYPES:
+                row["ui_only"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():
@@ -711,8 +725,18 @@ def ls_nodes_cmd(
         tbl.add_column("id", no_wrap=True)
         tbl.add_column("type")
         tbl.add_column("title", style="dim")
+        tbl.add_column("state", style="yellow")
         for r in rows:
-            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""))
+            state = ", ".join(
+                value
+                for value in (
+                    r.get("mode"),
+                    "ui-only" if r.get("ui_only") else None,
+                    "subgraph" if r.get("subgraph") else None,
+                )
+                if value
+            )
+            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""), state)
         renderer.console().print(tbl)
     renderer.emit(payload, command="workflow ls-nodes")
 

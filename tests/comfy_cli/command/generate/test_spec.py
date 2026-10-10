@@ -1,6 +1,8 @@
 """Tests for the openapi registry — verify the curated image allowlist resolves
 against the vendored spec and classifies each endpoint correctly."""
 
+from unittest import mock
+
 import pytest
 import yaml
 
@@ -53,6 +55,264 @@ def test_cached_json_spec_round_trips(monkeypatch, tmp_path):
 def test_registry_loads_and_has_entries():
     eps = spec.list_endpoints()
     assert len(eps) > 20, "expected the v1 allowlist to resolve >20 endpoints"
+
+
+def test_registry_skips_an_endpoint_whose_schema_cannot_be_resolved(monkeypatch):
+    bad_id = "bad/endpoint"
+    good_id = "good/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{bad_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"bad": True}}}},
+                    "responses": {},
+                }
+            },
+            f"/proxy/{good_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {},
+                }
+            },
+        }
+    }
+    real_resolve = spec._resolve
+
+    def resolve(raw_spec, schema, *args, **kwargs):
+        if schema.get("bad"):
+            raise spec.SpecError("schema resolution exceeded its safe traversal limit")
+        return real_resolve(raw_spec, schema, *args, **kwargs)
+
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(bad_id, "test", None), (good_id, "test", None)])
+    monkeypatch.setattr(spec, "_resolve", resolve)
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == [good_id]
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_resolves_a_referenced_request_body(monkeypatch):
+    endpoint_id = "referenced/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "put": {"requestBody": {"$ref": "#/components/requestBodies/Generate"}, "responses": {}}
+            }
+        },
+        "components": {
+            "requestBodies": {
+                "Generate": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"model": {"enum": ["example-v1"]}}}
+                        }
+                    }
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        endpoint = spec._registry()[endpoint_id]
+        assert endpoint.method == "put"
+        assert spec._extract_enum(endpoint.request_schema["properties"]["model"]) == ["example-v1"]
+    finally:
+        spec._registry.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "path_item",
+    ["invalid", {"parameters": []}, {"post": "invalid"}, {"post": {"requestBody": "invalid"}}],
+)
+def test_registry_skips_malformed_path_and_operation_shapes(monkeypatch, path_item):
+    endpoint_id = "bad/endpoint"
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: {"paths": {f"/proxy/{endpoint_id}": path_item}})
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        assert spec._registry() == {}
+    finally:
+        spec._registry.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "invalid",
+        {"content": "invalid"},
+        {"content": {"application/json": "invalid"}},
+        {"content": {"application/json": {"schema": "invalid"}}},
+        {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}},
+    ],
+)
+def test_registry_keeps_endpoint_when_only_response_schema_is_malformed(monkeypatch, response):
+    endpoint_id = "usable/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {"200": response},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == [endpoint_id]
+        assert spec._registry()[endpoint_id].response_schema == {}
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_ignores_non_mapping_response_properties_for_polling(monkeypatch):
+    endpoint_id = "usable/endpoint"
+    schema = {"type": "object", "properties": None}
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": schema}}}},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        endpoint = spec._registry()[endpoint_id]
+        assert endpoint.response_schema == schema
+        assert endpoint.polling is None
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_computes_one_resolution_budget_per_spec(monkeypatch):
+    endpoint_ids = ["one/endpoint", "two/endpoint"]
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                }
+            }
+            for endpoint_id in endpoint_ids
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None) for endpoint_id in endpoint_ids])
+    spec._registry.cache_clear()
+    try:
+        with mock.patch.object(spec, "_schema_resolution_budget", wraps=spec._schema_resolution_budget) as budget:
+            assert list(spec._registry()) == endpoint_ids
+        assert budget.call_count == 1
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_gives_each_endpoint_a_fresh_decrementing_resolution_budget(monkeypatch):
+    endpoint_ids = ["one/endpoint", "two/endpoint"]
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {},
+                }
+            }
+            for endpoint_id in endpoint_ids
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None) for endpoint_id in endpoint_ids])
+    budgets: list[list[int]] = []
+    real_resolve = spec._resolve
+
+    def resolve(*args, **kwargs):
+        budgets.append(kwargs["budget"])
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(spec, "_resolve", resolve)
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == endpoint_ids
+        assert len(budgets) == len(endpoint_ids)
+        assert budgets[0] is not budgets[1]
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_bounds_aggregate_failed_resolution_work(monkeypatch):
+    endpoint_ids = [f"partner/{index}" for index in range(10)]
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {"requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}}
+            }
+            for endpoint_id in endpoint_ids
+        }
+    }
+    calls = 0
+
+    def exhaust(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["budget"][0] = 0
+        raise spec.SpecError("pathological schema")
+
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None) for endpoint_id in endpoint_ids])
+    monkeypatch.setattr(spec, "_schema_resolution_budget", lambda _raw: 10)
+    monkeypatch.setattr(spec, "_resolve", exhaust)
+    spec._registry.cache_clear()
+    try:
+        assert spec._registry() == {}
+        assert calls == 4
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_ignores_non_string_path_item_method_keys(monkeypatch):
+    endpoint_id = "one/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                200: {"unexpected": True},
+                "post": {"requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+            }
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == [endpoint_id]
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_schema_object_check_memoizes_shared_acyclic_dag():
+    leaf: dict = {"type": "object"}
+    root = leaf
+    for _ in range(20):
+        root = {"allOf": [root, root]}
+
+    with mock.patch.object(spec, "_schema_may_be_object", wraps=spec._schema_may_be_object) as check:
+        assert spec._schema_may_be_object(root) is True
+
+    # One completed result per unique schema plus cheap memo hits for the
+    # duplicated edges. Without a completed-result memo this DAG takes 2**20
+    # recursive calls despite having only 21 distinct schema objects.
+    assert check.call_count <= 42
 
 
 def test_get_endpoint_round_trip():
@@ -246,12 +506,16 @@ def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"enum": ["a", "b"]}) == ["a", "b"]
     assert spec._extract_enum({"type": "array", "items": {"enum": ["x"]}}) == ["x"]
     assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) == ["y"]
+    assert spec._extract_enum({"anyOf": [{"type": "null"}, {"enum": ["optional"]}]}) == ["optional"]
     assert spec._extract_enum({"oneOf": [{"items": {"enum": ["z"]}}]}) == ["z"]
     # Numeric members coerce to their string form (unquoted YAML values);
     # bools and enum-less schemas don't count.
     assert spec._extract_enum({"enum": [1, 2.5]}) == ["1", "2.5"]
     assert spec._extract_enum({"enum": [True, False]}) is None
     assert spec._extract_enum({"type": "string"}) is None
+    assert spec._extract_enum({"anyOf": [{"enum": ["v1"]}, False]}) == ["v1"]
+    assert spec._extract_enum({"enum": ["a", "b"], "items": {"enum": ["a"]}}) == ["a", "b"]
+    assert spec._extract_enum({"enum": ["a"], "items": {"enum": ["z"]}}) == ["a"]
 
 
 def test_extract_enum_unions_anyof_and_intersects_allof():
@@ -259,12 +523,25 @@ def test_extract_enum_unions_anyof_and_intersects_allof():
     # every branch, deduped, not just the first.
     assert spec._extract_enum({"anyOf": [{"enum": ["a", "b"]}, {"enum": ["b", "c"]}]}) == ["a", "b", "c"]
     assert spec._extract_enum({"oneOf": [{"enum": ["x"]}, {"enum": ["y"]}]}) == ["x", "y"]
+    assert spec._extract_enum({"oneOf": [{"enum": ["x", "shared"]}, {"enum": ["y", "shared"]}]}) == [
+        "x",
+        "y",
+    ]
+    assert spec._extract_enum({"enum": ["a", "b"], "oneOf": [{"type": "string"}, {"const": "a"}]}) == ["b"]
     # allOf branches are constraints: only values valid in every branch count.
     assert spec._extract_enum({"allOf": [{"enum": ["a", "b", "c"]}, {"enum": ["b", "c", "d"]}]}) == ["b", "c"]
     # An empty allOf intersection means no usable enum.
     assert spec._extract_enum({"allOf": [{"enum": ["a"]}, {"enum": ["b"]}]}) is None
     # An enum-less allOf branch constrains nothing.
     assert spec._extract_enum({"allOf": [{"type": "string"}, {"enum": ["k"]}]}) == ["k"]
+    assert spec._extract_enum({"enum": ["a", "b"], "allOf": [{"enum": ["a"]}]}) == ["a"]
+    assert spec._extract_enum(
+        {"anyOf": [{"type": "string"}, {"enum": ["ignored"]}], "allOf": [{"enum": ["kept"]}]}
+    ) == ["kept"]
+    assert spec._schema_admits_unconstrained_string({"type": "string", "allOf": [{"enum": ["v2"]}]}) is False
+    assert (
+        spec._schema_admits_unconstrained_string({"anyOf": [{"type": "string"}], "allOf": [{"const": "v2"}]}) is False
+    )
 
 
 def test_find_property_descends_top_level_composition():
@@ -275,3 +552,148 @@ def test_find_property_descends_top_level_composition():
     nested = {"anyOf": [{"oneOf": [{"properties": {"model": {"enum": ["m2"]}}}]}]}
     assert spec._find_property(nested, "model") == {"enum": ["m2"]}
     assert spec._find_property({"allOf": [{"type": "object"}]}, "model") is None
+
+
+def test_find_property_preserves_combinator_enum_semantics():
+    all_of = {
+        "allOf": [
+            {"properties": {"model": {"enum": ["allowed", "forbidden"]}}},
+            {"properties": {"model": {"enum": ["allowed"]}}},
+        ]
+    }
+    any_of = {
+        "anyOf": [
+            {"properties": {"model": {"enum": ["v1"]}}},
+            {"properties": {"model": {"enum": ["v2"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(all_of, "model")) == ["allowed"]
+    assert spec._extract_enum(spec._find_property(any_of, "model")) == ["v1", "v2"]
+
+
+def test_find_property_keeps_values_shared_by_distinct_object_oneof_variants():
+    schema = {
+        "oneOf": [
+            {"properties": {"mode": {"const": "a"}, "model": {"enum": ["m1", "shared"]}}},
+            {"properties": {"mode": {"const": "b"}, "model": {"enum": ["m2", "shared"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["m1", "shared", "m2"]
+
+
+def test_find_property_treats_a_non_declaring_union_branch_as_unconstrained():
+    schema = {
+        "properties": {"model": {"enum": ["a", "b"]}},
+        "anyOf": [
+            {"properties": {"model": {"enum": ["a"]}}},
+            {"properties": {"other": {"type": "string"}}},
+        ],
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["a", "b"]
+
+
+def test_find_property_treats_an_enumless_declared_union_branch_as_unconstrained():
+    schema = {
+        "anyOf": [
+            {"properties": {"model": {"enum": ["v1"]}}},
+            {"properties": {"model": {"type": "string"}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) is None
+
+
+@pytest.mark.parametrize("non_object", [{"type": "null"}, {"type": "array", "items": {"type": "object"}}, False])
+def test_find_property_skips_union_branches_that_cannot_be_request_objects(non_object):
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"model": {"enum": ["v1"]}}},
+            non_object,
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["v1"]
+
+
+def test_find_property_skips_closed_object_branches_that_cannot_hold_the_field():
+    schema = {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"model": {"enum": ["v1"]}},
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"other": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["v1"]
+
+
+def test_schema_object_check_combines_union_and_allof_siblings():
+    schema = {
+        "anyOf": [{"type": "object"}, {"type": "string"}],
+        "allOf": [{"type": "string"}],
+    }
+
+    assert spec._schema_may_be_object(schema) is False
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "allOf": [{"type": "string"}]},
+        {"const": {}, "oneOf": [{"type": "array"}]},
+    ],
+)
+def test_schema_object_check_applies_composition_to_explicit_base_constraints(schema):
+    assert spec._schema_may_be_object(schema) is False
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"enum": []},
+        {"type": "object", "enum": ["scalar-only"]},
+        {"const": {}, "enum": ["scalar-only"]},
+    ],
+)
+def test_schema_object_check_rejects_unsatisfiable_object_enums(schema):
+    assert spec._schema_may_be_object(schema) is False
+
+
+def test_unsatisfiable_union_branch_does_not_hide_a_real_property():
+    schema = {
+        "anyOf": [
+            {"enum": []},
+            {"type": "object", "properties": {"model": {"enum": ["m1"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["m1"]
+
+
+def test_find_property_shares_the_object_memo_across_union_branches(monkeypatch):
+    leaf: dict = {"type": "object"}
+    shared = leaf
+    for _ in range(20):
+        shared = {"allOf": [shared, shared]}
+    schema = {"anyOf": [{"properties": {"model": {"enum": ["v1"]}}}, *([shared] * 20)]}
+    calls = 0
+    original = spec._schema_may_be_object
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(spec, "_schema_may_be_object", counted)
+    assert spec._find_property(schema, "model") is None
+    assert calls < 100

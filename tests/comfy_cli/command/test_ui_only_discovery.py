@@ -88,6 +88,176 @@ def test_ls_nodes_marks_ui_only_and_subgraph_rows(patched_graph, tmp_path, capsy
     assert rows[21].get("subgraph") is True, rows[21]
 
 
+def test_ls_nodes_uuid_subgraph_signal_wins_over_serialized_class_identity(patched_graph, tmp_path, capsys):
+    wf = _wf_with_reroute_and_subgraph()
+    subgraph = next(node for node in wf["nodes"] if node["id"] == 21)
+    subgraph["properties"] = {"Node name for S&R": _SG_UUID}
+
+    row = _ls_rows(tmp_path, capsys, wf)[21]
+    assert row.get("subgraph") is True, row
+
+
+def test_ls_nodes_marks_a_declared_non_uuid_subgraph(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    subgraph_id = "named-subgraph"
+    wf["definitions"] = {"subgraphs": [{"id": subgraph_id, "nodes": [], "links": [], "inputs": [], "outputs": []}]}
+    wf["nodes"].append({"id": 21, "type": subgraph_id, "pos": [0, 0], "inputs": [], "outputs": []})
+
+    row = _ls_rows(tmp_path, capsys, wf)[21]
+    assert row["type"] == subgraph_id
+    assert row.get("subgraph") is True, row
+
+
+def test_ls_nodes_marks_a_unique_definition_name_used_as_the_instance_type(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": _SG_UUID,
+                "name": "Legacy Group",
+                "nodes": [],
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+        ]
+    }
+    wf["nodes"].append({"id": 21, "type": "Legacy Group", "pos": [0, 0], "inputs": [], "outputs": []})
+
+    row = _ls_rows(tmp_path, capsys, wf)[21]
+    assert row["type"] == "Legacy Group"
+    assert row.get("subgraph") is True, row
+
+
+def test_ls_nodes_preserves_all_deep_acyclic_definition_name_aliases(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    depth = 32
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": f"id-{index}",
+                "name": f"Alias{index}",
+                "nodes": ([{"id": index, "type": f"id-{index + 1}"}] if index + 1 < depth else []),
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+            for index in range(depth)
+        ]
+    }
+    wf["nodes"].extend(
+        {"id": 100 + index, "type": f"Alias{index}", "pos": [0, 0], "inputs": [], "outputs": []}
+        for index in range(depth)
+    )
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+
+    assert all(rows[100 + index].get("subgraph") is True for index in range(depth))
+
+
+@pytest.mark.parametrize(
+    "definitions",
+    [[], {"subgraphs": 1}, {"subgraphs": [{"id": "x", "name": "KSampler", "nodes": 1}]}],
+)
+def test_ls_nodes_tolerates_malformed_definitions_shape(patched_graph, tmp_path, capsys, definitions):
+    wf = _base_workflow()
+    wf["definitions"] = definitions
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+    assert 3 in rows and 7 in rows
+
+
+def test_ls_nodes_tolerates_malformed_properties_and_mode(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    node = next(item for item in wf["nodes"] if item["type"] == "KSampler")
+    node["properties"] = ["invalid"]
+    node["mode"] = []
+
+    row = _ls_rows(tmp_path, capsys, wf)[node["id"]]
+
+    assert row["type"] == "KSampler"
+    assert row.get("title") is None
+    assert "mode" not in row
+
+
+def test_ls_nodes_matches_execution_semantics_for_integral_float_modes(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    node = next(item for item in wf["nodes"] if item["type"] == "KSampler")
+    node["mode"] = 4.0
+
+    row = _ls_rows(tmp_path, capsys, wf)[node["id"]]
+
+    assert row["mode"] == "bypass"
+
+
+def test_ls_nodes_does_not_treat_a_real_class_as_a_self_named_subgraph(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": _SG_UUID,
+                "name": "KSampler",
+                "nodes": [{"id": 100, "type": "KSampler", "inputs": [], "outputs": []}],
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+        ]
+    }
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+    ksampler = next(row for row in rows.values() if row["type"] == "KSampler")
+    assert "subgraph" not in ksampler, ksampler
+
+
+def test_ls_nodes_uses_the_editor_alias_conflict_resolution(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["nodes"].append({"id": 20, "type": "Outer", "inputs": [], "outputs": []})
+    wf["definitions"] = {
+        "subgraphs": [
+            {"id": "outer-id", "name": "Outer", "nodes": [{"id": 1, "type": "KSampler"}]},
+            {
+                "id": "sampler-id",
+                "name": "KSampler",
+                "nodes": [{"id": 2, "type": "KSampler"}, {"id": 3, "type": "Outer"}],
+            },
+        ]
+    }
+
+    row = _ls_rows(tmp_path, capsys, wf)[20]
+
+    assert row["subgraph"] is True
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        {"id": "KSampler", "nodes": [], "links": [], "inputs": [], "outputs": []},
+        {"id": _SG_UUID, "name": "KSampler", "nodes": [], "links": [], "inputs": [], "outputs": []},
+    ],
+)
+def test_ls_nodes_matches_editor_resolution_for_a_definition_collision(patched_graph, tmp_path, capsys, definition):
+    wf = _base_workflow()
+    wf["definitions"] = {"subgraphs": [definition]}
+    ksampler_node = next(node for node in wf["nodes"] if node["type"] == "KSampler")
+    ksampler_node["properties"] = {"Node name for S&R": "KSampler"}
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+    ksampler = next(row for row in rows.values() if row["type"] == "KSampler")
+    assert ksampler["subgraph"] is True
+
+
+def test_ls_nodes_prefers_a_subgraph_definition_over_a_ui_only_name(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["nodes"].append({"id": 20, "type": "Reroute", "inputs": [], "outputs": []})
+    wf["definitions"] = {"subgraphs": [{"id": "Reroute", "nodes": [], "links": [], "inputs": [], "outputs": []}]}
+
+    row = _ls_rows(tmp_path, capsys, wf)[20]
+
+    assert row.get("subgraph") is True
+    assert "ui_only" not in row
+
+
 def test_ls_nodes_real_classes_stay_clean(patched_graph, tmp_path, capsys):
     rows = _ls_rows(tmp_path, capsys, _wf_with_reroute_and_subgraph())
     for nid in (3, 7):

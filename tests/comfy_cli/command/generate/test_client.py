@@ -56,6 +56,24 @@ def test_split_payload_multipart_separates_files(tmp_path):
         payload[1].close()
 
 
+def test_send_request_encodes_form_urlencoded_values(monkeypatch):
+    ep = spec.get_endpoint("pika/generate/2.2/t2v")
+    flags = schema.flags_for(ep)
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(client.httpx, "post", fake_post)
+
+    client.send_request(ep, {"promptText": "hello"}, flags, api_key="comfyui-test")
+
+    assert captured["data"] == {"promptText": "hello"}
+    assert captured.get("files") is None
+    assert captured.get("json") is None
+
+
 def _capture_post(monkeypatch):
     captured = {}
 
@@ -87,6 +105,32 @@ def test_send_request_uses_bearer_for_firebase_tokens(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer eyJhbGciOi.foo.bar"
     assert "X-API-Key" not in captured["headers"]
     assert captured["url"].endswith("/proxy/bfl/flux-pro-1.1/generate")
+
+
+def test_send_request_dispatches_non_get_post_methods(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/update",
+        path="/proxy/example/update",
+        method="put",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="application/json",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(client.httpx, "request", fake_request)
+    client.send_request(ep, {"prompt": "x"}, [], api_key="comfyui-test")
+
+    assert captured["method"] == "PUT"
+    assert captured["json"] == {"prompt": "x"}
 
 
 def test_raise_for_status_includes_body():
