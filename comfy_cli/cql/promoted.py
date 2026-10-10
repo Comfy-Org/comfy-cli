@@ -234,6 +234,8 @@ def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) 
         "promotion_boundary_dependencies",
         "promotion_boundary_names",
         "promotion_visit_limits",
+        "promotion_definition_metrics",
+        "promotion_budget_roots",
     ):
         cache = getattr(defs, name, None)
         if cache is not None:
@@ -309,38 +311,46 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     if isinstance(limits, dict) and id(root) in limits:
         return limits[id(root)]
     # Only definitions reachable from this root can affect its resolution.
-    # Fresh indexes used by one-off callers therefore do not rescan every
-    # unrelated definition for every small instance.
-    definitions: dict[int, dict] = {}
+    # Cache each definition's own size and outgoing definition edges once, so
+    # many small roots that share a large child do not rescan that child.
+    definitions: set[int] = set()
     pending = [root]
+    graph_size = 0
     while pending:
         definition = pending.pop()
         if id(definition) in definitions:
             continue
-        definitions[id(definition)] = definition
+        definitions.add(id(definition))
+        metrics = getattr(defs, "promotion_definition_metrics", None)
+        cached_metrics = metrics.get(id(definition)) if isinstance(metrics, dict) else None
+        if cached_metrics is not None and cached_metrics[0] is definition:
+            _identity, own_size, children = cached_metrics
+            graph_size += own_size
+            pending.extend(child for child in children if id(child) not in definitions)
+            continue
+        own_size = 1
+        for field_name in ("inputs", "nodes", "links"):
+            values = definition.get(field_name)
+            own_size += len(values) if isinstance(values, list) else 0
+        inputs = definition.get("inputs")
+        for entry in inputs if isinstance(inputs, list) else []:
+            if isinstance(entry, dict):
+                own_size += len(_listed_link_ids(entry))
+        children_by_id: dict[int, dict] = {}
         raw_nodes = definition.get("nodes")
         for node in raw_nodes if isinstance(raw_nodes, list) else []:
             if not isinstance(node, dict):
                 continue
-            candidate = defs.get(str(node.get("type", "")))
-            if isinstance(candidate, dict) and id(candidate) not in definitions:
-                pending.append(candidate)
-    graph_size = 0
-    for definition in definitions.values():
-        graph_size += 1
-        for field_name in ("inputs", "nodes", "links"):
-            values = definition.get(field_name)
-            graph_size += len(values) if isinstance(values, list) else 0
-        inputs = definition.get("inputs")
-        for entry in inputs if isinstance(inputs, list) else []:
-            if isinstance(entry, dict):
-                graph_size += len(_listed_link_ids(entry))
-        nodes = definition.get("nodes")
-        for node in nodes if isinstance(nodes, list) else []:
-            if not isinstance(node, dict):
-                continue
             node_inputs = node.get("inputs")
-            graph_size += len(node_inputs) if isinstance(node_inputs, list) else 0
+            own_size += len(node_inputs) if isinstance(node_inputs, list) else 0
+            candidate = defs.get(str(node.get("type", "")))
+            if isinstance(candidate, dict):
+                children_by_id[id(candidate)] = candidate
+        children = tuple(children_by_id.values())
+        if isinstance(metrics, dict):
+            metrics[id(definition)] = (definition, own_size, children)
+        graph_size += own_size
+        pending.extend(child for child in children if id(child) not in definitions)
     limit = max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
     if isinstance(limits, dict):
         limits[id(root)] = limit
@@ -356,8 +366,16 @@ def _shared_promotion_budget(defs: dict[str, dict], root: dict, attribute: str) 
         return [limit]
     budget = getattr(defs, attribute)
     if budget is None:
-        budget = [limit]
+        budget = [0]
         setattr(defs, attribute, budget)
+    roots_by_attribute = getattr(defs, "promotion_budget_roots", None)
+    if isinstance(roots_by_attribute, dict):
+        credited = roots_by_attribute.setdefault(attribute, set())
+        if id(root) not in credited:
+            budget[0] += limit
+            credited.add(id(root))
+    elif budget[0] == 0:
+        budget[0] = limit
     return budget
 
 
@@ -368,8 +386,16 @@ def _shared_boundary_output_budget(defs: dict[str, dict], root: dict) -> list[in
         return [limit]
     budget = defs.promotion_boundary_output_budget
     if budget is None:
-        budget = [limit]
+        budget = [0]
         defs.promotion_boundary_output_budget = budget
+    roots_by_attribute = getattr(defs, "promotion_budget_roots", None)
+    if isinstance(roots_by_attribute, dict):
+        credited = roots_by_attribute.setdefault("promotion_boundary_output_budget", set())
+        if id(root) not in credited:
+            budget[0] += limit
+            credited.add(id(root))
+    elif budget[0] == 0:
+        budget[0] = limit
     return budget
 
 

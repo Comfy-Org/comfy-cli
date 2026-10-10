@@ -411,7 +411,12 @@ def _expand_subgraphs(
         if not found_any:
             return nodes, links, ctx
 
-    if any(node.get("mode") not in (_MODE_MUTED, _MODE_BYPASS) and node.get("type") in subgraph_defs for node in nodes):
+    if any(
+        node.get("mode") not in (_MODE_MUTED, _MODE_BYPASS)
+        and isinstance(node.get("type"), str)
+        and node.get("type") in subgraph_defs
+        for node in nodes
+    ):
         raise WorkflowConversionError("subgraph expansion exceeded its iteration safe limit")
     return nodes, links, ctx
 
@@ -420,9 +425,12 @@ def _node_expansion_cost(node: dict) -> int:
     """Work/memory copied for one node during expansion."""
     raw_inputs = node.get("inputs")
     raw_outputs = node.get("outputs")
+    input_entries = raw_inputs if isinstance(raw_inputs, list) else []
     return (
-        1
-        + (len(raw_inputs) if isinstance(raw_inputs, list) else 0)
+        len(node)
+        + len(str(node.get("id", "")))
+        + len(input_entries)
+        + sum(len(entry) for entry in input_entries if isinstance(entry, dict))
         + (len(raw_outputs) if isinstance(raw_outputs, list) else 0)
     )
 
@@ -433,6 +441,18 @@ def _definition_expansion_cost(definition: dict) -> int:
     nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
     links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
     return sum(_node_expansion_cost(node) for node in nodes) + len(links)
+
+
+def _last_wins_interior_links(internal_links: list[dict], link_map: dict[Any, dict]) -> list[dict]:
+    """Interior rows that own their id after last-row-wins normalization."""
+    return [
+        link
+        for link in internal_links
+        if _is_link_id(link.get("id"))
+        and link_map.get(link.get("id")) is link
+        and str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+        and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+    ]
 
 
 def _outer_slot_to_input_idx(
@@ -516,12 +536,7 @@ def _expand_one_subgraph(
                     input_slots_by_link.setdefault(link_id, set()).add(idx)
         interior_by_id = {str(node.get("id")): node for node in internal_nodes}
         internal_link_map = {link.get("id"): link for link in internal_links if _is_link_id(link.get("id"))}
-        interior_links = [
-            link
-            for link in internal_links
-            if str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
-            and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
-        ]
+        interior_links = _last_wins_interior_links(internal_links, internal_link_map)
         cached = (
             sg_def,
             internal_nodes,
@@ -548,12 +563,7 @@ def _expand_one_subgraph(
         internal_link_map, interior_links = cached[11:13]
     elif internal_link_map is None or interior_links is None:
         internal_link_map = {link.get("id"): link for link in internal_links if _is_link_id(link.get("id"))}
-        interior_links = [
-            link
-            for link in internal_links
-            if str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
-            and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
-        ]
+        interior_links = _last_wins_interior_links(internal_links, internal_link_map)
     assert internal_link_map is not None and interior_links is not None
 
     # Direct callers that do not share the expansion allocator still get an id

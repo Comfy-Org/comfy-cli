@@ -259,7 +259,12 @@ def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
 
 def test_registered_roots_share_one_budget_per_promotion_operation():
     left = {"id": "left", "inputs": [], "nodes": [], "links": []}
-    right = {"id": "right", "inputs": [], "nodes": [], "links": []}
+    right = {
+        "id": "right",
+        "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(20)],
+        "nodes": [],
+        "links": [],
+    }
     definitions = _SubgraphDefs()
     definitions.update({"left": left, "right": right})
 
@@ -270,7 +275,25 @@ def test_registered_roots_share_one_budget_per_promotion_operation():
     promoted.promoted_inputs(right, definitions)
 
     assert definitions.promotion_inputs_budget is budget
-    assert budget[0] < remaining
+    assert budget[0] > remaining
+
+
+def test_shared_child_definition_metrics_are_computed_once():
+    child = {
+        "id": "child",
+        "inputs": [{"name": f"value-{index}", "linkIds": []} for index in range(100)],
+        "nodes": [],
+        "links": [],
+    }
+    left = {"id": "left", "inputs": [], "nodes": [{"id": 1, "type": "child"}], "links": []}
+    right = {"id": "right", "inputs": [], "nodes": [{"id": 2, "type": "child"}], "links": []}
+    definitions = _SubgraphDefs()
+    definitions.update({"child": child, "left": left, "right": right})
+
+    promoted._promotion_visit_limit(definitions, left)
+    promoted._promotion_visit_limit(definitions, right)
+
+    assert len(definitions.promotion_definition_metrics) == 3
 
 
 def test_registered_root_lookup_is_constant_time_after_limit_is_cached():

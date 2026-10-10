@@ -665,6 +665,26 @@ def test_non_interior_boundary_row_id_is_cleared_before_outer_scope_indexing():
     ) == {"name": "value", "link": None}
 
 
+def test_last_boundary_row_shadows_an_earlier_interior_row_with_the_same_id():
+    definition = {
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [
+            {"id": 7, "type": "Source", "inputs": [], "outputs": [{}]},
+            {"id": 8, "type": "Sink", "inputs": [{"name": "value", "link": 1}], "outputs": []},
+        ],
+        "links": [
+            {"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+
+    nodes, links, _inputs, _outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert links == []
+    assert next(node for node in nodes if node["id"] == "10:8")["inputs"][0]["link"] is None
+
+
 def test_string_input_proxy_row_is_not_expanded_as_an_interior_edge():
     definition = {
         "inputs": [{"name": "value", "linkIds": [1]}],
@@ -816,6 +836,18 @@ def test_expansion_charges_node_inputs_before_allocating_the_next_instance(monke
     assert expand.call_count == 1
 
 
+def test_node_expansion_cost_counts_copied_mapping_keys_and_id_bytes():
+    node = {
+        "id": "long-id",
+        "type": "Plain",
+        "padding": True,
+        "inputs": [{"name": "value", "link": 1, "padding": True}],
+        "outputs": [{}],
+    }
+
+    assert workflow_to_api._node_expansion_cost(node) >= len(node) + len("long-id") + 3
+
+
 def test_expansion_budget_has_a_floor_for_legitimate_reuse(monkeypatch):
     definition_id = "00000000-0000-4000-8000-000000000001"
     definition = {
@@ -862,6 +894,25 @@ def test_subgraph_depth_exhaustion_fails_closed():
 
     with pytest.raises(workflow_to_api.WorkflowConversionError, match="iteration safe limit"):
         convert_ui_to_api(workflow, {})
+
+
+def test_iteration_cap_tolerates_an_unhashable_sibling_type():
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {
+        "id": definition_id,
+        "inputs": [],
+        "outputs": [],
+        "nodes": [
+            {"id": 1, "type": ["malformed"], "inputs": [], "outputs": []},
+            {"id": 2, "type": definition_id, "inputs": [], "outputs": []},
+        ],
+        "links": [],
+    }
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="iteration safe limit"):
+        workflow_to_api._expand_subgraphs(
+            [{"id": 1, "type": definition_id, "inputs": [], "outputs": []}], [], {definition_id: definition}
+        )
 
 
 def test_input_source_budget_charges_plain_fanout_targets():

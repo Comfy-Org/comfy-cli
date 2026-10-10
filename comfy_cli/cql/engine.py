@@ -3494,6 +3494,8 @@ class _SubgraphDefs(dict[str, dict]):
         self._registered_definition_refcounts: dict[int, int] = {}
         self.promotion_visit_limit: int | None = None
         self.promotion_visit_limits: dict[int, int] = {}
+        self.promotion_definition_metrics: dict[int, tuple[dict, int, tuple[dict, ...]]] = {}
+        self.promotion_budget_roots: dict[str, set[int]] = {}
         self.promotion_holders: dict[int, tuple[dict, dict[Any, list[tuple[dict, int, dict]]]]] = {}
         self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
         self.promotion_input_positions: dict[int, tuple[dict, dict[int, int]]] = {}
