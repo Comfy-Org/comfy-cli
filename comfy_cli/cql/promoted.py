@@ -43,6 +43,7 @@ SUBGRAPH_INPUT_NODE_ID = -10
 #: Recursion cap for nested promotion chains (an inner instance promoting a
 #: deeper instance's input). Mirrors the frontend's own bounded traversal.
 _MAX_NESTED_PROMOTION_DEPTH = 32
+_MAX_BOUNDARY_MATERIALIZATIONS = 100_000
 
 #: Sentinel: "no value is materialized here" (distinct from a stored ``None``).
 UNSET: Any = object()
@@ -232,6 +233,7 @@ def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) 
         "promotion_boundary_cycle_memo",
         "promotion_boundary_dependencies",
         "promotion_boundary_names",
+        "promotion_visit_limits",
     ):
         cache = getattr(defs, name, None)
         if cache is not None:
@@ -303,11 +305,26 @@ def _root_is_registered(defs: dict[str, dict], root: dict) -> bool:
 def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     """A linear cap for malformed definition DAGs with exponentially many paths."""
     root_registered = _root_is_registered(defs, root)
-    cached = getattr(defs, "promotion_visit_limit", None) if root_registered else None
-    if cached is not None:
-        return cached
-    definitions = {id(definition): definition for definition in defs.values() if isinstance(definition, dict)}
-    definitions.setdefault(id(root), root)
+    limits = getattr(defs, "promotion_visit_limits", None) if root_registered else None
+    if isinstance(limits, dict) and id(root) in limits:
+        return limits[id(root)]
+    # Only definitions reachable from this root can affect its resolution.
+    # Fresh indexes used by one-off callers therefore do not rescan every
+    # unrelated definition for every small instance.
+    definitions: dict[int, dict] = {}
+    pending = [root]
+    while pending:
+        definition = pending.pop()
+        if id(definition) in definitions:
+            continue
+        definitions[id(definition)] = definition
+        raw_nodes = definition.get("nodes")
+        for node in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            candidate = defs.get(str(node.get("type", "")))
+            if isinstance(candidate, dict) and id(candidate) not in definitions:
+                pending.append(candidate)
     graph_size = 0
     for definition in definitions.values():
         graph_size += 1
@@ -325,6 +342,8 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
             node_inputs = node.get("inputs")
             graph_size += len(node_inputs) if isinstance(node_inputs, list) else 0
     limit = max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
+    if isinstance(limits, dict):
+        limits[id(root)] = limit
     if hasattr(defs, "promotion_visit_limit") and root_registered:
         defs.promotion_visit_limit = limit
     return limit
@@ -344,7 +363,7 @@ def _shared_promotion_budget(defs: dict[str, dict], root: dict, attribute: str) 
 
 def _shared_boundary_output_budget(defs: dict[str, dict], root: dict) -> list[int]:
     """Bound materialized boundary paths separately from graph traversal."""
-    limit = _promotion_visit_limit(defs, root) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
+    limit = _MAX_BOUNDARY_MATERIALIZATIONS
     if not hasattr(defs, "promotion_boundary_output_budget") or not _root_is_registered(defs, root):
         return [limit]
     budget = defs.promotion_boundary_output_budget
@@ -2018,7 +2037,7 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
     cacheable = (
         0 <= pi.index < len(inputs)
         and isinstance(inputs[pi.index], dict)
-        and str(inputs[pi.index].get("name") or "") == pi.name
+        and _input_name(inputs[pi.index].get("name")) == pi.name
     )
     if cache is not None and cacheable:
         cached = cache.get(cache_key)

@@ -313,6 +313,13 @@ def test_definition_input_to_output_passthrough_uses_the_outer_input_source():
     assert next(link for link in rewritten if link[0] == 12)[1:3] == ["producer", 2]
 
 
+def test_unwired_input_to_output_passthrough_drops_the_consumer_row():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.output_sources["10"] = {0: (-10, 0)}
+
+    assert workflow_to_api._rewrite_links_for_subgraphs([[12, 10, 0, "consumer", 0, "*"]], ctx, []) == []
+
+
 def test_passthrough_uses_the_held_outer_input_not_stale_row_order():
     ctx = workflow_to_api._SubgraphCtx()
     ctx.output_sources["10"] = {0: (-10, 1)}
@@ -650,6 +657,14 @@ def test_dangling_interior_link_id_is_cleared_before_outer_scope_indexing():
     ) == {"name": "value", "link": None}
 
 
+def test_non_interior_boundary_row_id_is_cleared_before_outer_scope_indexing():
+    assert workflow_to_api._rewrite_internal_input(
+        {"name": "value", "link": 7},
+        internal_link_map={7: {"id": 7, "origin_id": 5, "target_id": -20}},
+        link_id_remap={},
+    ) == {"name": "value", "link": None}
+
+
 def test_string_input_proxy_row_is_not_expanded_as_an_interior_edge():
     definition = {
         "inputs": [{"name": "value", "linkIds": [1]}],
@@ -774,6 +789,78 @@ def test_recursive_subgraph_expansion_has_a_proportional_output_cap():
     }
 
     with pytest.raises(workflow_to_api.WorkflowConversionError, match="proportional safe limit"):
+        convert_ui_to_api(workflow, {})
+
+
+def test_expansion_charges_node_inputs_before_allocating_the_next_instance(monkeypatch):
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {
+        "id": definition_id,
+        "inputs": [],
+        "outputs": [],
+        "nodes": [{"id": 7, "type": "Plain", "inputs": [{"name": str(index)} for index in range(10)], "outputs": []}],
+        "links": [],
+    }
+    nodes = [{"id": index, "type": definition_id, "inputs": [], "outputs": []} for index in range(3)]
+    monkeypatch.setattr(workflow_to_api, "_MIN_SUBGRAPH_EXPANSION_BUDGET", 0)
+    monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_RATIO", 1)
+
+    with (
+        mock.patch.object(
+            workflow_to_api, "_expand_one_subgraph", wraps=workflow_to_api._expand_one_subgraph
+        ) as expand,
+        pytest.raises(workflow_to_api.WorkflowConversionError, match="proportional safe limit"),
+    ):
+        workflow_to_api._expand_subgraphs(nodes, [], {definition_id: definition})
+
+    assert expand.call_count == 1
+
+
+def test_expansion_budget_has_a_floor_for_legitimate_reuse(monkeypatch):
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {
+        "id": definition_id,
+        "inputs": [],
+        "outputs": [],
+        "nodes": [{"id": index, "type": "Plain", "inputs": [], "outputs": []} for index in range(20)],
+        "links": [],
+    }
+    nodes = [{"id": index, "type": definition_id, "inputs": [], "outputs": []} for index in range(20)]
+    monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_RATIO", 1)
+
+    expanded, _links, _ctx = workflow_to_api._expand_subgraphs(nodes, [], {definition_id: definition})
+
+    assert len(expanded) == 400
+
+
+def test_subgraph_depth_exhaustion_fails_closed():
+    def uuid_for(level: int) -> str:
+        return f"00000000-0000-4000-8000-{level:012d}"
+
+    definitions = [
+        {
+            "id": uuid_for(level),
+            "inputs": [],
+            "outputs": [],
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": uuid_for(level + 1) if level < 10 else "Plain",
+                    "inputs": [],
+                    "outputs": [],
+                }
+            ],
+            "links": [],
+        }
+        for level in range(11)
+    ]
+    workflow = {
+        "nodes": [{"id": 1, "type": uuid_for(0), "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {"subgraphs": definitions},
+    }
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="iteration safe limit"):
         convert_ui_to_api(workflow, {})
 
 

@@ -52,6 +52,7 @@ _SUBGRAPH_OUTPUT_NODE_ID = -20
 _MAX_RESOLUTION_DEPTH = 100
 _MAX_SUBGRAPH_ITERATIONS = 10
 _MAX_SUBGRAPH_EXPANSION_RATIO = 128
+_MIN_SUBGRAPH_EXPANSION_BUDGET = 100_000
 _MAX_RESOLVED_SUBGRAPH_INPUTS = 10_000
 
 # Strings that ComfyUI appends after seed-like INT widgets to control how the
@@ -347,18 +348,14 @@ def _expand_subgraphs(
             if isinstance(entry, dict) and _is_slot_index(entry.get("link")):
                 max_link_id = max(max_link_id, entry["link"])
     link_id_counter = [max_link_id + 1]
-    serialized_size = len(nodes) + len(links) + 1
+    serialized_size = len(links) + 1 + sum(_node_expansion_cost(node) for node in nodes)
     seen_definitions: set[int] = set()
     for definition in subgraph_defs.values():
         if not isinstance(definition, dict) or id(definition) in seen_definitions:
             continue
         seen_definitions.add(id(definition))
-        raw_nodes = definition.get("nodes")
-        raw_links = definition.get("links")
-        serialized_size += 1
-        serialized_size += len(raw_nodes) if isinstance(raw_nodes, list) else 0
-        serialized_size += len(raw_links) if isinstance(raw_links, list) else 0
-    expansion_budget = [serialized_size * _MAX_SUBGRAPH_EXPANSION_RATIO]
+        serialized_size += 1 + _definition_expansion_cost(definition)
+    expansion_budget = [max(_MIN_SUBGRAPH_EXPANSION_BUDGET, serialized_size * _MAX_SUBGRAPH_EXPANSION_RATIO)]
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
@@ -376,6 +373,10 @@ def _expand_subgraphs(
                     expanded.append(node)
                     continue
                 found_any = True
+                generated = _definition_expansion_cost(subgraph_defs[node_type])
+                if generated > expansion_budget[0]:
+                    raise WorkflowConversionError("subgraph expansion exceeded its proportional safe limit")
+                expansion_budget[0] -= generated
                 sg_nodes, sg_links, input_map, output_map = _expand_one_subgraph(
                     node,
                     subgraph_defs[node_type],
@@ -383,10 +384,6 @@ def _expand_subgraphs(
                     _definition_cache=definition_cache,
                     _link_id_counter=link_id_counter,
                 )
-                generated = len(sg_nodes) + len(sg_links)
-                if generated > expansion_budget[0]:
-                    raise WorkflowConversionError("subgraph expansion exceeded its proportional safe limit")
-                expansion_budget[0] -= generated
                 expanded.extend(sg_nodes)
                 links.extend(sg_links)
                 ctx.input_targets[str(node.get("id"))] = input_map
@@ -414,8 +411,28 @@ def _expand_subgraphs(
         if not found_any:
             return nodes, links, ctx
 
-    logger.warning("Subgraph expansion hit iteration cap — possible cyclic reference")
+    if any(node.get("mode") not in (_MODE_MUTED, _MODE_BYPASS) and node.get("type") in subgraph_defs for node in nodes):
+        raise WorkflowConversionError("subgraph expansion exceeded its iteration safe limit")
     return nodes, links, ctx
+
+
+def _node_expansion_cost(node: dict) -> int:
+    """Work/memory copied for one node during expansion."""
+    raw_inputs = node.get("inputs")
+    raw_outputs = node.get("outputs")
+    return (
+        1
+        + (len(raw_inputs) if isinstance(raw_inputs, list) else 0)
+        + (len(raw_outputs) if isinstance(raw_outputs, list) else 0)
+    )
+
+
+def _definition_expansion_cost(definition: dict) -> int:
+    raw_nodes = definition.get("nodes")
+    raw_links = definition.get("links")
+    nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
+    links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
+    return sum(_node_expansion_cost(node) for node in nodes) + len(links)
 
 
 def _outer_slot_to_input_idx(
@@ -707,11 +724,13 @@ def _rewrite_internal_input(
         # outer scope after expansion.
         input_copy["link"] = None
         return input_copy
-    if str(link.get("origin_id")) == str(_SUBGRAPH_INPUT_NODE_ID):
-        # Will be reattached to an external link by _rewrite_links_for_subgraphs.
-        input_copy["link"] = None
-    elif link_id in link_id_remap:
+    if link_id in link_id_remap:
         input_copy["link"] = link_id_remap[link_id]
+    else:
+        # Boundary and malformed rows are not emitted. They may be reattached
+        # to an external link later; until then their definition-scope id must
+        # never collide with an outer row.
+        input_copy["link"] = None
     return input_copy
 
 
@@ -823,7 +842,10 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         link_id, src_id, src_slot, tgt_id, tgt_slot, link_type = link[:6]
 
         src_id_str = str(src_id)
-        src_id_out, src_slot_out = _resolve_subgraph_output(src_id_str, src_slot, ctx)
+        resolved_source = _resolve_subgraph_output(src_id_str, src_slot, ctx)
+        if resolved_source is None:
+            continue
+        src_id_out, src_slot_out = resolved_source
 
         tgt_id_str = str(tgt_id)
         effective_tgt_slot = tgt_slot
@@ -923,7 +945,7 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
     return updated
 
 
-def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0) -> tuple[Any, Any]:
+def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0) -> tuple[Any, Any] | None:
     if depth > _MAX_RESOLUTION_DEPTH:
         return node_id_str, slot
     mapping = ctx.output_sources.get(node_id_str)
@@ -938,7 +960,7 @@ def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, dep
     if str(internal_node) == str(_SUBGRAPH_INPUT_NODE_ID):
         upstream = ctx.input_sources.get(node_id_str, {}).get(internal_slot)
         if upstream is None:
-            return node_id_str, slot
+            return None
         return _resolve_subgraph_output(str(upstream[0]), upstream[1], ctx, depth + 1)
     new_id = f"{node_id_str}:{internal_node}"
     return _resolve_subgraph_output(new_id, internal_slot, ctx, depth + 1)
@@ -1480,7 +1502,10 @@ def _build_api_node(
         actual_id, actual_slot = tracers.trace_get_set(actual_id, actual_slot)
         actual_id, actual_slot = tracers.trace_reroute(actual_id, actual_slot)
         # If we crossed a subgraph boundary while tracing, finalize to internal node.
-        actual_id, actual_slot = _resolve_subgraph_output(str(actual_id), actual_slot, tracers.subgraph_ctx)
+        resolved_source = _resolve_subgraph_output(str(actual_id), actual_slot, tracers.subgraph_ctx)
+        if resolved_source is None:
+            continue
+        actual_id, actual_slot = resolved_source
 
         actual_id_str = str(actual_id)
         if actual_id_str in primitive_values:
