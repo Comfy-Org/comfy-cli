@@ -115,7 +115,9 @@ class TestTemplateIds:
     def test_disconnect_resolves_bare_template_id(self, graph):
         wf, connected = workflow_ops.connect(_canvas(), graph, 16, "IMAGE", 9, "images")
 
-        wf, disconnected = workflow_ops.disconnect(wf, graph, 9, "images")
+        # A later local write advances the Lamport counter; equal counters are
+        # concurrent and intentionally use op_id as the deterministic tie-break.
+        wf, disconnected = workflow_ops.disconnect(wf, graph, 9, "images", base_version=1)
 
         assert disconnected["to_node"].endswith(":root:node:9")
         assert disconnected["link_id"] == connected["link_id"]
