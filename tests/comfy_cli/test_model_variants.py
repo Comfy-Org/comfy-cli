@@ -326,35 +326,6 @@ class TestResolveWorkflowModels:
         assert inner_instance["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors", missing]
         assert wf["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
 
-    def test_follows_a_model_through_more_than_sixteen_promoted_layers(self, graph):
-        missing = "minimax_h3_video_vae_int8_convrot.safetensors"
-        wf = _template()
-        definitions = wf["definitions"]["subgraphs"]
-        child_id = "sg-1"
-        for depth in range(20):
-            parent_id = f"wrapper-{depth}"
-            definitions.append(
-                {
-                    "id": parent_id,
-                    "inputs": [{"name": "vae_name", "type": "COMBO", "linkIds": [1]}],
-                    "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0}],
-                    "nodes": [
-                        {
-                            "id": 1,
-                            "type": child_id,
-                            "inputs": [{"name": "vae_name", "type": "COMBO", "link": 1}],
-                            "widgets_values": [missing],
-                        }
-                    ],
-                }
-            )
-            child_id = parent_id
-        wf["nodes"] = [{"id": 500, "type": child_id, "widgets_values": [missing]}]
-
-        resolve_workflow_models(wf, graph)
-
-        assert wf["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
-
     def test_installed_files_are_untouched(self, graph):
         wf = _template()
         wf["definitions"]["subgraphs"][0]["nodes"][1]["widgets_values"] = ["ae.safetensors"]

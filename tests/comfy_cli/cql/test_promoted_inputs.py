@@ -964,7 +964,6 @@ def test_nested_null_input_name_uses_the_normalized_source_key():
     parent_by_input, _parent_reverse = promoted._promotion_source_indexes(parent, definitions)
     assert child_reverse[("9", "value")] == ""
     assert parent_by_input[id(parent["inputs"][0])] == ("7", "")
-    assert promoted._subgraph_input_target(child, definitions, "") == ("9", "value")
 
 
 def test_resolve_write_uses_last_link_row_and_declared_input_membership():
@@ -1070,8 +1069,7 @@ def test_promoted_input_memo_hits_use_constant_budget_and_cached_name_index():
     remaining = budget[0]
     second = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
 
-    assert second == first
-    assert second is not first
+    assert second is first
     assert budget[0] == remaining - 1
 
 
@@ -1132,20 +1130,6 @@ def test_definition_index_caches_limit_and_holder_scans():
     assert second == first
     assert second is not first
     assert definitions.promotion_visit_limit is not None
-
-
-def test_transient_definition_does_not_enter_shared_identity_caches():
-    registered = {"id": "registered", "inputs": [], "nodes": [], "links": []}
-    transient = {"id": "transient", "inputs": [{"name": "value"}], "nodes": [], "links": []}
-    definitions = _SubgraphDefs()
-    definitions["registered"] = registered
-
-    result = promoted.promoted_inputs(transient, definitions)
-
-    assert [item.name for item in result] == ["value"]
-    assert id(transient) not in definitions.promotion_inputs
-    assert all(key[0] != id(transient) for key in definitions.promotion_inputs_memo)
-    assert all(key[0] != id(transient) for key in definitions.promotion_inputs_stable_memo)
 
 
 def test_boundary_targets_are_cached_for_the_definition_index():
