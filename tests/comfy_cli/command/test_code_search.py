@@ -7,6 +7,7 @@ import pytest
 import requests
 from typer.testing import CliRunner
 
+from comfy_cli._lazy import LazyCommand
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
@@ -1270,6 +1271,14 @@ class TestRootCLIWiring:
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert "results" in parsed
+
+    def test_installed_root_shape_does_not_require_nested_command(self):
+        """The lazy root must expose QUERY directly, not as a Typer subgroup."""
+        from comfy_cli.cmdline import _RootGroup
+
+        entry = _RootGroup.lazy_subcommands["code-search"]
+        assert isinstance(entry, LazyCommand)
+        assert entry.attr == "code_search"
 
     @patch("comfy_cli.tracking.prompt_tracking_consent")
     @patch("comfy_cli.cmdline.workspace_manager")
