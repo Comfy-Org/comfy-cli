@@ -129,6 +129,33 @@ def _connect(
     }
 
 
+def _disconnect(tag: str, actor: str, base_version: int, link_id: int = 9000) -> dict[str, Any]:
+    return {
+        "op": "disconnect",
+        "op_id": _op_id(tag),
+        "actor": actor,
+        "base_version": base_version,
+        "stamp": [base_version, actor],
+        "link_id": link_id,
+        "to_node": SAMPLER,
+        "to_slot": POSITIVE,
+    }
+
+
+def test_disconnect_and_connect_share_one_lww_register():
+    connect = _connect("dc1", AGENT, 5, 9101, ENCODER)
+    disconnect = _disconnect("dc2", HUMAN, 9)
+    results = []
+    for order in ((connect, disconnect), (disconnect, connect)):
+        wf = copy.deepcopy(_wired_base())
+        for op in order:
+            ops.apply_op(wf, copy.deepcopy(op), None)
+        results.append(wf)
+    assert ops.canonical(results[0]) == ops.canonical(results[1])
+    assert results[0]["links"] == []
+    assert results[0]["nodes"][-1]["inputs"][POSITIVE]["link"] is None
+
+
 def _add_encoder(tag: str, actor: str, base_version: int, node_id: int, text: str) -> dict[str, Any]:
     return {
         "op": "add_node",
@@ -414,6 +441,42 @@ def test_concurrent_autogrows_are_not_a_shared_register():
     assert _link_ids(forward) == [9701, 9702]
     assert _link_ids(reverse) == [9701, 9702]
     assert _comparable(forward) == _comparable(reverse)
+
+
+@pytest.mark.parametrize(
+    "grow",
+    [
+        {"name": "images.image0", "type": "IMAGE"},
+        {"name": "cfg", "type": "FLOAT", "widget": "cfg"},
+    ],
+    ids=["ordinary-autogrow", "widget-converted"],
+)
+def test_dynamic_disconnect_tombstone_survives_reversed_replay(grow: dict[str, Any]):
+    """A disconnect can arrive before the connect that materializes its slot."""
+    connect = _grow_connect("id1", AGENT, 5, 9751, 500)
+    connect["grow"] = grow
+    connect["link_type"] = grow["type"]
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("id2"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": 9751,
+        "to_node": 700,
+        "to_slot": 1,
+        "grow_id": 9751,
+    }
+
+    forward = _run(_autogrow_base(), [connect, disconnect])
+    reverse = _run(_autogrow_base(), [disconnect, connect])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == []
+    grown = next(i for i in forward["nodes"][-1]["inputs"] if i.get("grow_id") == 9751)
+    assert grown["link"] is None
+    if "widget" in grow:
+        assert grown["widget"] == {"name": grow["widget"]}
 
 
 # ---------------------------------------------------------------------------
