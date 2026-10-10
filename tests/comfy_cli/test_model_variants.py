@@ -326,6 +326,35 @@ class TestResolveWorkflowModels:
         assert inner_instance["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors", missing]
         assert wf["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
 
+    def test_follows_a_model_through_more_than_sixteen_promoted_layers(self, graph):
+        missing = "minimax_h3_video_vae_int8_convrot.safetensors"
+        wf = _template()
+        definitions = wf["definitions"]["subgraphs"]
+        child_id = "sg-1"
+        for depth in range(20):
+            parent_id = f"wrapper-{depth}"
+            definitions.append(
+                {
+                    "id": parent_id,
+                    "inputs": [{"name": "vae_name", "type": "COMBO", "linkIds": [1]}],
+                    "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0}],
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": child_id,
+                            "inputs": [{"name": "vae_name", "type": "COMBO", "link": 1}],
+                            "widgets_values": [missing],
+                        }
+                    ],
+                }
+            )
+            child_id = parent_id
+        wf["nodes"] = [{"id": 500, "type": child_id, "widgets_values": [missing]}]
+
+        resolve_workflow_models(wf, graph)
+
+        assert wf["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+
     def test_installed_files_are_untouched(self, graph):
         wf = _template()
         wf["definitions"]["subgraphs"][0]["nodes"][1]["widgets_values"] = ["ae.safetensors"]
@@ -334,21 +363,22 @@ class TestResolveWorkflowModels:
         assert resolve_workflow_models(wf, graph) == ([], [])
         assert wf == before
 
-    def test_top_level_only_resolution_preserves_nested_identity_without_deepcopy(self, graph, monkeypatch):
+    def test_top_level_only_resolution_is_staged_transactionally(self, graph):
         missing = "minimax_h3_video_vae_int8_convrot.safetensors"
-        node = {"id": 1, "type": "VAELoader", "widgets_values": [missing]}
+        node = {
+            "id": 1,
+            "type": "VAELoader",
+            "widgets_values": [missing],
+            "properties": {"models": 5},
+        }
         workflow = {"nodes": [node]}
-
-        def unexpected_copy(_workflow):
-            raise AssertionError("top-level model resolution must not deepcopy the workflow")
-
-        monkeypatch.setattr("comfy_cli.model_variants.copy.deepcopy", unexpected_copy)
 
         substitutions, unavailable = resolve_workflow_models(workflow, graph)
 
         assert substitutions and not unavailable
-        assert workflow["nodes"][0] is node
-        assert node["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+        assert workflow["nodes"][0] is not node
+        assert workflow["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+        assert node["widgets_values"] == [missing]
 
     def test_promoted_resolution_reports_deepcopy_recursion_without_mutation(self, graph, monkeypatch):
         workflow = _template()
@@ -405,7 +435,7 @@ class TestResolveWorkflowModels:
 
         # Keep this transactional-failure regression independent of traversal
         # optimizations: shared acyclic DAGs are intentionally memoized now.
-        monkeypatch.setattr("comfy_cli.cql.promoted._promotion_visit_limit", lambda *_args: 1)
+        monkeypatch.setattr("comfy_cli.cql.promoted._promotion_index_limit", lambda *_args: 1)
 
         with pytest.raises(ModelVariantResolutionError, match="input traversal"):
             resolve_workflow_models(workflow, graph)

@@ -2721,6 +2721,24 @@ class TestTemplateModeSlots:
         assert len(slots) == 2
         assert all(s["node_type"] == "MyTemplate" for s in slots)
 
+    def test_slot_walk_reuses_one_definition_index(self, graph: Graph, monkeypatch):
+        import comfy_cli.cql.engine as engine
+
+        wf = _template_workflow()
+        original = engine._subgraph_defs_by_id
+        calls = 0
+
+        def counted(workflow):
+            nonlocal calls
+            calls += 1
+            return original(workflow)
+
+        monkeypatch.setattr(engine, "_subgraph_defs_by_id", counted)
+
+        _extract_frontend_slots(wf, graph)
+
+        assert calls == 1
+
     def test_apply_template_slot_text(self, graph: Graph):
         wf = _template_workflow()
         _apply_one_slot(wf, "1.text", "new prompt", graph)

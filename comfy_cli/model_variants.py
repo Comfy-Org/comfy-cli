@@ -168,18 +168,6 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     """
     from comfy_cli.cql.promoted import PromotionTraversalLimitError
 
-    needs_promoted_rename = any(
-        sg_id is not None
-        and any(
-            value not in {str(option) for option in port.enum_values}
-            and precision_sibling(value, list(port.enum_values)) is not None
-            for _key, port, _field, value in _model_widgets(node, graph)
-        )
-        for node, sg_id in _workflow_nodes(workflow)
-    )
-    if not needs_promoted_rename:
-        return _resolve_workflow_models(workflow, graph)
-
     try:
         candidate = copy.deepcopy(workflow)
         result = _resolve_workflow_models(candidate, graph)
@@ -243,7 +231,8 @@ def _rename_download(node: dict, old: str, new: str) -> None:
 
     The download URL and hash describe the replaced file, so they go."""
     props = node.get("properties")
-    for entry in (props.get("models") if isinstance(props, dict) else None) or []:
+    raw_models = props.get("models") if isinstance(props, dict) else None
+    for entry in raw_models if isinstance(raw_models, list) else []:
         if isinstance(entry, dict) and entry.get("name") == old:
             entry["name"] = new
             entry.pop("url", None)
@@ -259,10 +248,10 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
     A rewritten slot on an instance that itself sits inside a definition is a
     swap of that definition too, so a widget promoted through nested subgraphs
     is followed out to the outermost host."""
-    from comfy_cli.cql.promoted import defs_by_id, promoted_inputs
+    from comfy_cli.cql.promoted import _MAX_NESTED_PROMOTION_DEPTH, defs_by_id, promoted_inputs
 
     defs = defs_by_id(workflow)
-    for _ in range(16):  # nesting depth bound, as the engine's promotion walk
+    for _ in range(_MAX_NESTED_PROMOTION_DEPTH + 1):
         grown = False
         for node, sg_loc in _workflow_nodes(workflow):
             sg_id = str(node.get("type", ""))
@@ -281,3 +270,4 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
                         grown = True
         if not grown:
             return
+    raise ModelVariantResolutionError("promoted model propagation exceeded its nesting safe limit")

@@ -921,7 +921,7 @@ def test_boundary_output_allowance_does_not_accumulate_across_roots(monkeypatch)
         promoted.boundary_widget_targets(wide, wide_item, definitions)
 
 
-def test_boundary_cache_hits_are_charged_before_copying(monkeypatch):
+def test_boundary_cache_hits_do_not_spend_the_distinct_materialization_budget(monkeypatch):
     root = {"id": "root", "inputs": [{"name": "value"}], "nodes": [], "links": []}
     definitions = _SubgraphDefs()
     definitions["root"] = root
@@ -932,8 +932,11 @@ def test_boundary_cache_hits_are_charged_before_copying(monkeypatch):
     )
     monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
 
-    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
-        promoted.boundary_widget_targets(root, item, definitions)
+    assert promoted.boundary_widget_targets(root, item, definitions) == [
+        (["1"], "value"),
+        (["2"], "value"),
+        (["3"], "value"),
+    ]
 
 
 def test_nested_null_input_name_uses_the_normalized_source_key():
@@ -961,6 +964,52 @@ def test_nested_null_input_name_uses_the_normalized_source_key():
     parent_by_input, _parent_reverse = promoted._promotion_source_indexes(parent, definitions)
     assert child_reverse[("9", "value")] == ""
     assert parent_by_input[id(parent["inputs"][0])] == ("7", "")
+    assert promoted._subgraph_input_target(child, definitions, "") == ("9", "value")
+
+
+def test_resolve_write_uses_last_link_row_and_declared_input_membership():
+    sg_id = "11111111-2222-3333-4444-555555555555"
+    definition = {
+        "id": sg_id,
+        "inputs": [
+            {"name": "seed", "type": "INT", "linkIds": []},
+            {"name": "cfg", "type": "FLOAT", "linkIds": [5]},
+        ],
+        "nodes": [
+            {
+                "id": "inner",
+                "type": "Plain",
+                "inputs": [{"name": "value", "type": "FLOAT", "link": 5, "widget": {"name": "value"}}],
+                "widgets_values": [1.0],
+            }
+        ],
+        "links": [
+            {"id": 5, "origin_id": 99, "origin_slot": 0, "target_id": "inner", "target_slot": 0},
+            {"id": 5, "origin_id": -10, "origin_slot": 0, "target_id": "inner", "target_slot": 0},
+        ],
+    }
+    workflow = {
+        "nodes": [{"id": "host", "type": sg_id, "inputs": [], "widgets_values": [7.5]}],
+        "links": [],
+        "definitions": {"subgraphs": [definition]},
+    }
+    graph = Graph.from_object_info(
+        {
+            "Plain": {
+                "input": {"required": {"value": ["FLOAT", {"default": 1.0}]}},
+                "input_order": {"required": ["value"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+            }
+        }
+    )
+
+    target = promoted.resolve_write(workflow, graph, ["host", "inner"], "value")
+
+    assert target.kind == "host"
+    assert target.widget == "cfg"
+    assert target.redirected_from == "host/inner.value"
 
 
 def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
@@ -1021,7 +1070,8 @@ def test_promoted_input_memo_hits_use_constant_budget_and_cached_name_index():
     remaining = budget[0]
     second = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
 
-    assert second is first
+    assert second == first
+    assert second is not first
     assert budget[0] == remaining - 1
 
 
@@ -1082,6 +1132,20 @@ def test_definition_index_caches_limit_and_holder_scans():
     assert second == first
     assert second is not first
     assert definitions.promotion_visit_limit is not None
+
+
+def test_transient_definition_does_not_enter_shared_identity_caches():
+    registered = {"id": "registered", "inputs": [], "nodes": [], "links": []}
+    transient = {"id": "transient", "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    definitions = _SubgraphDefs()
+    definitions["registered"] = registered
+
+    result = promoted.promoted_inputs(transient, definitions)
+
+    assert [item.name for item in result] == ["value"]
+    assert id(transient) not in definitions.promotion_inputs
+    assert all(key[0] != id(transient) for key in definitions.promotion_inputs_memo)
+    assert all(key[0] != id(transient) for key in definitions.promotion_inputs_stable_memo)
 
 
 def test_boundary_targets_are_cached_for_the_definition_index():

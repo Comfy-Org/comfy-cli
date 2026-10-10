@@ -210,6 +210,38 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     """
     from comfy_cli.cql import promoted as _promoted
 
+    visit_budget = [_MAX_SUBGRAPH_EXPANSION_BUDGET]
+    definition_nodes: dict[int, tuple[dict, list[dict]]] = {}
+    scope_links: dict[int, tuple[dict, set[tuple[type, int | str]]]] = {}
+
+    def nodes_for(definition: dict) -> list[dict]:
+        cached = definition_nodes.get(id(definition))
+        if cached is not None and cached[0] is definition:
+            return cached[1]
+        raw_nodes = definition.get("nodes")
+        nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
+        definition_nodes[id(definition)] = (definition, nodes)
+        return nodes
+
+    def live_link_keys(scope: dict) -> set[tuple[type, int | str]]:
+        cached = scope_links.get(id(scope))
+        if cached is not None and cached[0] is scope:
+            return cached[1]
+        keys: set[tuple[type, int | str]] = set()
+        raw_links = scope.get("links")
+        for link in raw_links if isinstance(raw_links, list) else []:
+            candidate = (
+                link.get("id")
+                if isinstance(link, dict)
+                else link[0]
+                if isinstance(link, (list, tuple)) and link
+                else None
+            )
+            if _is_link_id(candidate):
+                keys.add((type(candidate), candidate))
+        scope_links[id(scope)] = (scope, keys)
+        return keys
+
     def visit(instance: dict, sg: dict, scope: dict, prefix: str, depth: int) -> None:
         # ``scope`` holds the links that can feed THIS instance's inputs: the
         # workflow for a top-level instance, the containing definition for a
@@ -218,15 +250,24 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         # runs, exactly as ``resolve_write`` and ``slots`` treat it.
         if depth > _MAX_SUBGRAPH_ITERATIONS or instance.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
             return
-        for inner in sg.get("nodes") or []:
-            if not isinstance(inner, dict):
-                continue
+        inner_nodes = nodes_for(sg)
+        if len(inner_nodes) + 1 > visit_budget[0]:
+            raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
+        visit_budget[0] -= len(inner_nodes) + 1
+        for inner in inner_nodes:
             inner_type = inner.get("type")
             inner_def = subgraph_defs.get(str(inner_type)) if is_subgraph_uuid(inner_type) else None
             if inner_def is not None:
                 visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
+        raw_instance_inputs = instance.get("inputs")
+        instance_inputs = raw_instance_inputs if isinstance(raw_instance_inputs, list) else []
+        external_links = {
+            _input_name(entry.get("name")): entry.get("link") for entry in instance_inputs if isinstance(entry, dict)
+        }
+        live_links = live_link_keys(scope)
         for pi in _promoted.promoted_inputs(sg, subgraph_defs):
-            if not pi.is_widget or _promoted.live_external_link(scope, instance, pi.name) is not None:
+            external_link = external_links.get(pi.name)
+            if not pi.is_widget or (_is_link_id(external_link) and (type(external_link), external_link) in live_links):
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
@@ -337,6 +378,7 @@ def _expand_subgraphs(
         return nodes, links, ctx
 
     definition_cache: dict[int, tuple[Any, ...]] = {}
+    expansion_metrics: dict[int, tuple[dict, int, int, int]] = {}
     # Interior rows minted during expansion must not collide with either a
     # concrete outer row or a stale id that an outer input still holds. A
     # single allocator also avoids rescanning the growing link list once per
@@ -357,7 +399,9 @@ def _expand_subgraphs(
         if not isinstance(definition, dict) or id(definition) in seen_definitions:
             continue
         seen_definitions.add(id(definition))
-        serialized_size += 1 + _definition_expansion_cost(definition)
+        cost, node_count, link_count = _definition_expansion_metrics(definition)
+        expansion_metrics[id(definition)] = (definition, cost, node_count, link_count)
+        serialized_size += 1 + cost
     expansion_budget = [
         min(
             _MAX_SUBGRAPH_EXPANSION_BUDGET,
@@ -381,7 +425,11 @@ def _expand_subgraphs(
                     expanded.append(node)
                     continue
                 found_any = True
-                generated = _instance_expansion_cost(subgraph_defs[node_type], node.get("id"))
+                generated = _instance_expansion_cost(
+                    subgraph_defs[node_type],
+                    node.get("id"),
+                    _metrics=expansion_metrics,
+                )
                 if generated > expansion_budget[0]:
                     raise WorkflowConversionError("subgraph expansion exceeded its proportional safe limit")
                 expansion_budget[0] -= generated
@@ -444,24 +492,41 @@ def _node_expansion_cost(node: dict) -> int:
     )
 
 
-def _definition_expansion_cost(definition: dict) -> int:
+def _definition_expansion_metrics(definition: dict) -> tuple[int, int, int]:
+    """Cached-worthy copied work plus real node/link counts for one definition."""
     raw_nodes = definition.get("nodes")
     raw_links = definition.get("links")
     nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
     links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
-    return sum(_node_expansion_cost(node) for node in nodes) + sum(
-        1 + len(str(link.get("origin_id", ""))) + len(str(link.get("target_id", ""))) for link in links
+    raw_scan_cost = (len(raw_nodes) if isinstance(raw_nodes, list) else 0) + (
+        len(raw_links) if isinstance(raw_links, list) else 0
     )
+    copied_cost = sum(_node_expansion_cost(node) for node in nodes) + sum(
+        1 + len(link) + len(str(link.get("origin_id", ""))) + len(str(link.get("target_id", ""))) for link in links
+    )
+    return raw_scan_cost + copied_cost, len(nodes), len(links)
 
 
-def _instance_expansion_cost(definition: dict, outer_id: Any) -> int:
+def _definition_expansion_cost(definition: dict) -> int:
+    return _definition_expansion_metrics(definition)[0]
+
+
+def _instance_expansion_cost(
+    definition: dict,
+    outer_id: Any,
+    *,
+    _metrics: dict[int, tuple[dict, int, int, int]] | None = None,
+) -> int:
     """Copied work for one instance, including its repeated id prefix."""
-    raw_nodes = definition.get("nodes")
-    raw_links = definition.get("links")
-    node_count = sum(isinstance(node, dict) for node in raw_nodes) if isinstance(raw_nodes, list) else 0
-    link_count = sum(isinstance(link, dict) for link in raw_links) if isinstance(raw_links, list) else 0
+    cached = _metrics.get(id(definition)) if _metrics is not None else None
+    if cached is not None and cached[0] is definition:
+        _definition, definition_cost, node_count, link_count = cached
+    else:
+        definition_cost, node_count, link_count = _definition_expansion_metrics(definition)
+        if _metrics is not None:
+            _metrics[id(definition)] = (definition, definition_cost, node_count, link_count)
     prefix_size = len(str(outer_id)) + 1
-    return _definition_expansion_cost(definition) + prefix_size * (node_count + 2 * link_count)
+    return definition_cost + prefix_size * (node_count + 2 * link_count)
 
 
 def _last_wins_interior_links(internal_links: list[dict], link_map: dict[Any, dict]) -> list[dict]:
