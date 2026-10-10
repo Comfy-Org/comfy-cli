@@ -978,6 +978,73 @@ def test_internal_error_scrubber_prefers_the_later_at_for_malformed_passwords(me
     assert "://***@" in scrubbed
 
 
+def test_internal_error_scrubber_masks_outer_and_inner_nested_url_userinfo():
+    scrubbed = _internal_error_message(
+        RuntimeError("https://user:OUTER@proxy.example/fetch/https://a:INNER@internal/x")
+    )
+    assert "OUTER" not in scrubbed and "INNER" not in scrubbed
+    assert "proxy.example/fetch/" in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("message", "secrets"),
+    [
+        ("token=abc (api_key=sk-LIVE)", ("abc", "sk-LIVE")),
+        ("bad option 'token=abc' given, password = hunter2", ("abc", "hunter2")),
+        ("token=abc retry with API key: sk-LIVE", ("abc", "sk-LIVE")),
+        ("token=abc then signing key=sk-SIGN", ("abc", "sk-SIGN")),
+    ],
+)
+def test_internal_error_scrubber_rescans_preserved_suffixes_and_spaced_siblings(message, secrets):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert not any(secret in scrubbed for secret in secrets)
+
+
+@pytest.mark.parametrize(
+    ("message", "secrets"),
+    [
+        ("secrets:\n  prod:\n    openai: sk-A\nrequest: req-1", ("sk-A",)),
+        (
+            "credentials:\n  username: alice\n  primary:\n    value: hunter2\nrequest: req-1",
+            ("alice", "hunter2"),
+        ),
+    ],
+)
+def test_internal_error_scrubber_masks_nested_yaml_secret_mappings(message, secrets):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert not any(secret in scrubbed for secret in secrets)
+    assert "request: req-1" in scrubbed
+
+
+def test_internal_error_scrubber_masks_cr_only_escaped_json_container():
+    scrubbed = _internal_error_message(RuntimeError('body={\\"api_key\\": [\\"sk-A\\",\r  \\"sk-B\\"]}'))
+    assert "sk-A" not in scrubbed and "sk-B" not in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "https://auth.example.com:8443/cb;access_token=SECRET",
+        "https://oauth.example.com:443/authorize&client_secret=SECRET",
+    ],
+)
+def test_internal_error_scrubber_rescans_url_matrix_and_ampersand_parameters(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "SECRET" not in scrubbed
+    assert "https://" in scrubbed
+
+
+def test_internal_error_scrubber_bounds_repeated_host_port_rescans():
+    message = " ".join(["https://auth.example.com:443/cb"] * 120)
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert scrubbed.startswith("RuntimeError: https://auth.example.com:443/cb")
+
+
+def test_yaml_scrubber_does_not_consume_secret_named_url_authority_or_following_diagnostic():
+    message = "input_value='https://auth.example.com:8443/cb', ...\n  For further information"
+    assert message in _internal_error_message(RuntimeError(message))
+
+
 def test_internal_error_scrubber_checks_the_last_url_when_input_is_truncated():
     tail = " --extra-index-url https://pypi.org/simple,https://alice:LIVE-PASSWORD"
     prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))

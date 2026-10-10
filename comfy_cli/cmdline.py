@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import json
 import os
 import re
@@ -399,6 +400,17 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
             out.append(line)
             index += 1
             continue
+        # Secret-shaped labels can also be ordinary URL authority labels
+        # (``https://auth.example.com:443/...``). Do not let the YAML pass
+        # consume those before the scalar scrubber applies its host:port
+        # exemption.
+        authority_labels = _authority_labels_before(content[: match.start()])
+        key = match.group("prefix").rstrip(" \t")[:-1].strip("\"'")
+        port = re.split(r"[\s/?#;&,]", match.group("value").lstrip(), maxsplit=1)[0]
+        if authority_labels is not None and _looks_like_numbered_network_authority(f"{authority_labels}{key}:{port}"):
+            out.append(line)
+            index += 1
+            continue
         value = match.group("value").strip()
         key_indent = len(content) - len(content.lstrip(" \t"))
         block_scalar = bool(
@@ -419,12 +431,7 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
             next_is_sequence = (
                 (not value or value.startswith("#")) and next_indent >= key_indent and stripped_next.startswith("- ")
             )
-            next_is_continuation = (
-                next_indent > key_indent
-                and not stripped_next.startswith("(")
-                and not stripped_next.startswith(("'", '"'))
-                and _YAML_MAPPING_LINE.fullmatch(stripped_next) is None
-            )
+            next_is_continuation = next_indent > key_indent and not stripped_next.startswith(("(", "'", '"'))
         if not block_scalar and not next_is_sequence and not next_is_continuation:
             out.append(line)
             index += 1
@@ -444,9 +451,7 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
                     break
             elif child_indent <= key_indent:
                 break
-            elif not block_scalar and (
-                stripped_child.startswith("(") or _YAML_MAPPING_LINE.fullmatch(stripped_child) is not None
-            ):
+            elif not block_scalar and stripped_child.startswith("("):
                 break
             index += 1
     return "".join(out)
@@ -533,6 +538,12 @@ def _looks_like_hostname(authority: str) -> bool:
 
 def _authority_labels_before(context: str) -> str | None:
     """Return the dotted authority prefix immediately before a matched label."""
+    embedded_url = re.search(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<labels>[A-Za-z0-9.-]*)$", context)
+    if embedded_url is not None:
+        labels = embedded_url.group("labels")
+        if (labels and not labels.endswith(".")) or ".." in labels:
+            return None
+        return labels
     last_space = max(context.rfind(" "), context.rfind("\t"), context.rfind("\r"), context.rfind("\n"))
     token = context[last_space + 1 :]
     if "://" in token:
@@ -553,8 +564,11 @@ def _render_assignment_siblings(prefix: str, value: str, *, mask_leading: bool) 
     """Mask secret-shaped assignments after the leading value on one line."""
     siblings = list(
         re.finditer(
-            r"(?P<sep>[&;]|,[ \t]*|[ \t]+)(?P<key>[\"']?[A-Za-z_][\w.-]*[\"']?)(?P<assign>[:=])",
+            rf"(?P<sep>[&;]|,[ \t]*|[ \t]+)"
+            rf"(?P<key>[\"']?(?:{_SECRET_ASSIGNMENT_KEY_PATTERN}|[A-Za-z_][\w.-]*)[\"']?)"
+            r"(?P<assign>[:=])",
             value,
+            re.IGNORECASE,
         )
     )
     if not siblings:
@@ -583,11 +597,24 @@ def _render_assignment_siblings(prefix: str, value: str, *, mask_leading: bool) 
     return "".join(rendered)
 
 
+_SCRUB_SECRET_TAIL_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "comfy_cli_scrub_secret_tail_depth", default=0
+)
+_MAX_SCRUB_SECRET_TAIL_DEPTH = 32
+
+
 def _scrub_secret_tail(text: str) -> str:
     """Re-run scalar rules over a suffix preserved by a broader match."""
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
+    depth = _SCRUB_SECRET_TAIL_DEPTH.get()
+    if depth >= _MAX_SCRUB_SECRET_TAIL_DEPTH:
+        return "***"
+    token = _SCRUB_SECRET_TAIL_DEPTH.set(depth + 1)
+    try:
+        for pattern, replacement in _SECRET_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+    finally:
+        _SCRUB_SECRET_TAIL_DEPTH.reset(token)
 
 
 def _scrub_url_userinfo(text: str) -> str:
@@ -645,8 +672,19 @@ def _scrub_url_userinfo(text: str) -> str:
         if not standard_userinfo and later_scheme is not None:
             # A joined/nested URL owns that later @. Let the outer URL go and
             # resume at the inner scheme rather than treating the entire span
-            # as one malformed password.
-            search_from = match.end() + later_scheme.start()
+            # as one malformed password. If the outer URL also had userinfo,
+            # mask it before preserving the proxy path.
+            inner_start = match.end() + later_scheme.start()
+            if authority_at >= 0:
+                chunks.extend(
+                    (
+                        text[cursor : match.end()],
+                        "***@",
+                        token[authority_at + 1 : later_scheme.start()],
+                    )
+                )
+                cursor = inner_start
+            search_from = inner_start
             continue
         authority = token[:first_delimiter]
         numbered_authority = _looks_like_numbered_network_authority(authority)
@@ -694,7 +732,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
     prefix = match.group("prefix")
     value = match.group("value")
     host_match = re.fullmatch(r"(?P<host>[^\s:=]+):", prefix)
-    port = re.split(r"[\s/?#]", value.lstrip(), maxsplit=1)[0]
+    port = re.split(r"[\s/?#;&,]", value.lstrip(), maxsplit=1)[0]
     context = match.string[: match.start()]
     authority_labels = _authority_labels_before(context) if host_match is not None else None
     full_host = f"{authority_labels}{host_match.group('host')}" if authority_labels is not None and host_match else ""
@@ -707,7 +745,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
         # ``=`` assignment with a numeric value is still a credential. Preserve
         # only the authority/path token, then rescan its query, fragment, and
         # following diagnostics for credentials.
-        boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#"]
+        boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#;&,"]
         safe_end = min(boundaries) if boundaries else len(value)
         return f"{prefix}{value[:safe_end]}{_scrub_secret_tail(value[safe_end:])}"
     already_masked = re.match(r"[ \t]*[\"']?\*{3}", value) is not None
@@ -735,7 +773,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
         else:
             structural = re.search(r"[\"']?[}\]),]+$", value)
             suffix = value[structural.start() :] if structural is not None else ""
-    return f"{prefix}***{suffix}"
+    return f"{prefix}***{_scrub_secret_tail(suffix)}"
 
 
 _SECRET_PATTERNS = (
@@ -815,7 +853,7 @@ _SECRET_PATTERNS = (
         # a closer-dependent regex, so backslash runs stay linear-time.
         re.compile(
             rf"(\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
-            r"\\+[\"']\s*[:=]\s*)[\[({][^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
+            r"\\+[\"']\s*[:=]\s*)[\[({][^\r\n]*(?:(?:\r\n|\r|\n)[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
