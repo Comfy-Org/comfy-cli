@@ -10,12 +10,18 @@ from typer.testing import CliRunner
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
+    MAX_QUERY_BYTES,
+    MAX_RESPONSE_BYTES,
     REQUEST_TIMEOUT,
+    QueryRejectedError,
+    SearchUnavailableError,
     _build_query,
+    _decode_search,
     _fetch_results,
     _format_results,
     _get_stats,
     _print_results,
+    _validate_query,
     app,
 )
 
@@ -124,11 +130,11 @@ class TestBuildQuery:
 
     def test_with_repo_short_name(self):
         result = _build_query("LoadImage", "ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_repo_full_name(self):
         result = _build_query("LoadImage", "Comfy-Org/ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_custom_count(self):
         result = _build_query("LoadImage", None, 50)
@@ -136,7 +142,18 @@ class TestBuildQuery:
 
     def test_with_repo_and_count(self):
         result = _build_query("LoadImage", "ComfyUI", 100)
-        assert result == "repo:^Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
+        assert result == "repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
+
+    def test_rejects_injected_filters_and_repo_whitespace(self):
+        for query in ("count:99 x", "repo:evil x", "timeout:2s x"):
+            with pytest.raises(ValueError):
+                _validate_query(query, None)
+        with pytest.raises(ValueError):
+            _validate_query("x", "ComfyUI count:99")
+
+    def test_rejects_query_over_byte_limit(self):
+        with pytest.raises(ValueError):
+            _validate_query("é" * (MAX_QUERY_BYTES // 2 + 1), None)
 
     def test_user_type_filter_preserved(self):
         """Don't inject type:file when the user already specified a type: filter."""
@@ -164,6 +181,7 @@ class TestFormatResults:
         assert first["file"] == "nodes.py"
         assert first["branch"] == "main"
         assert first["commit"] == "abc123def456"
+        assert first["provenance"] == "default_branch_head"
         assert first["file_url"] == "https://github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py"
         assert len(first["matches"]) == 2
 
@@ -204,9 +222,10 @@ class TestFormatResults:
         }
         results = _format_results(search)
         assert len(results) == 1
-        assert results[0]["branch"] == "main"
+        assert results[0]["branch"] == ""
         assert results[0]["commit"] == ""
-        assert "blob/main/" in results[0]["matches"][0]["url"]
+        assert results[0]["file_url"] == ""
+        assert results[0]["matches"][0]["url"] == ""
 
     def test_handles_completely_empty_response(self):
         assert _format_results({}) == []
@@ -261,13 +280,17 @@ class TestFetchResults:
     @patch("requests.get")
     def test_successful_fetch(self, mock_get, raw_api_response):
         mock_response = MagicMock()
-        mock_response.json.return_value = raw_api_response
+        mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
+        mock_response.is_redirect = False
+        mock_response.is_permanent_redirect = False
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
 
         result = _fetch_results("LoadImage")
 
-        mock_get.assert_called_once_with(API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT)
+        mock_get.assert_called_once_with(
+            API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True
+        )
         assert result == raw_api_response
 
     @patch("requests.get")
@@ -293,6 +316,42 @@ class TestFetchResults:
         with pytest.raises(requests.ConnectionError):
             _fetch_results("LoadImage")
 
+    @patch("requests.get")
+    def test_refuses_redirect(self, mock_get):
+        response = mock_get.return_value
+        response.is_redirect = True
+        response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        with pytest.raises(SearchUnavailableError):
+            _fetch_results("secret-query")
+
+    @patch("requests.get")
+    def test_caps_response_before_decode(self, mock_get):
+        response = mock_get.return_value
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [b"x" * (MAX_RESPONSE_BYTES + 1)]
+        with pytest.raises(SearchUnavailableError):
+            _fetch_results("x")
+
+
+class TestDecodeSearch:
+    def test_graphql_errors_are_query_rejected(self):
+        with pytest.raises(QueryRejectedError, match="bad regex"):
+            _decode_search({"errors": [{"message": "bad regex"}], "data": None})
+
+    def test_null_data_is_query_rejected(self):
+        with pytest.raises(QueryRejectedError):
+            _decode_search({"data": None})
+
+    def test_alert_is_query_rejected(self):
+        with pytest.raises(QueryRejectedError, match="Unknown filter"):
+            _decode_search({"data": {"search": {"results": {"alert": {"title": "Unknown filter"}}}}})
+
+    def test_empty_response_is_unavailable(self):
+        with pytest.raises(SearchUnavailableError):
+            _decode_search({})
+
 
 # ---------------------------------------------------------------------------
 # _print_results tests
@@ -309,6 +368,7 @@ class TestPrintResults:
         parsed = json.loads(output)
         assert "stats" in parsed
         assert "results" in parsed
+        assert "untrusted advisory data" in parsed["content_note"]
         assert len(parsed["results"]) == 2
 
     def test_empty_results_message(self, capsys):
@@ -420,7 +480,9 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["--repo", "ComfyUI", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with(f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage")
+        mock_fetch.assert_called_once_with(
+            f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        )
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_with_count(self, mock_fetch, raw_api_response):
@@ -452,12 +514,17 @@ class TestCodeSearchCLI:
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_connection_error(self, mock_fetch):
-        mock_fetch.side_effect = requests.ConnectionError("no connection")
+        secret_query = "secret-user-derived-query"
+        mock_fetch.side_effect = requests.ConnectionError(
+            f"GET https://service.invalid/?query={secret_query} failed"
+        )
 
-        result = runner.invoke(app, ["LoadImage"])
+        result = runner.invoke(app, [secret_query])
 
         assert result.exit_code == 1
         assert "Could not connect" in result.output
+        assert secret_query not in result.output
+        assert "service.invalid" not in result.output
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_timeout_error(self, mock_fetch):
@@ -495,7 +562,7 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["-r", "ComfyUI", "-n", "30", "-j", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with("repo:^Comfy\\-Org/ComfyUI$ type:file count:30 LoadImage")
+        mock_fetch.assert_called_once_with("repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:30 LoadImage")
         parsed = json.loads(result.output)
         assert "results" in parsed
 

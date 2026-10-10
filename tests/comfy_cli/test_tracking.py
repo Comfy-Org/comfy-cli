@@ -515,6 +515,21 @@ class TestTrackCommandRedaction:
         assert "red fox" not in str(properties)
         assert "blurry" not in str(properties)
 
+    def test_code_search_query_and_repo_are_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("code-search")
+        def search(query, repo=None, count=20):
+            return None
+
+        search(query="private user-derived phrase", repo="private/repository", count=20)
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["query"] == "<redacted>"
+        assert properties["repo"] == "<redacted>"
+        assert properties["count"] == 20
+        assert "private" not in str(properties)
+
     def test_set_civitai_api_token_is_redacted(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
