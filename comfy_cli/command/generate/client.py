@@ -66,19 +66,21 @@ def _split_payload(
     and data is the non-file form fields (stringified or JSON-encoded as needed).
     """
     flag_by_name = {f.name: f for f in flags}
-    if content_type != "multipart/form-data":
+    if content_type == "application/json":
         return values, None, None
+    if content_type not in {"multipart/form-data", "application/x-www-form-urlencoded"}:
+        raise ApiError(0, "", f"Unsupported request content type: {content_type}")
 
     files: list[tuple[str, Any]] = []
     data: dict[str, Any] = {}
     for name, value in values.items():
         flag = flag_by_name.get(name)
-        if flag and flag.kind == "binary":
+        if content_type == "multipart/form-data" and flag and flag.kind == "binary":
             path = Path(value) if not isinstance(value, Path) else value
             if not path.is_file():
                 raise ApiError(0, "", f"--{name}: file not found: {path}")
             files.append((name, (path.name, path.open("rb"), "application/octet-stream")))
-        elif flag and flag.kind == "array" and flag.item_kind == "binary":
+        elif content_type == "multipart/form-data" and flag and flag.kind == "array" and flag.item_kind == "binary":
             for p in value:
                 p = Path(p) if not isinstance(p, Path) else p
                 if not p.is_file():
@@ -93,7 +95,7 @@ def _split_payload(
             data[name] = "true" if value else "false"
         else:
             data[name] = str(value)
-    return None, files, data
+    return None, files or None, data
 
 
 def _auth_headers(api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:

@@ -674,31 +674,16 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
-    from comfy_cli.cql.engine import _definition_alias_conflicts
+    from comfy_cli.cql.engine import _subgraph_defs_by_id
 
     nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
     node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
+    # Use the editor's exact id/legacy-name resolver. Reimplementing only part
+    # of its conflict analysis made listing disagree with path navigation.
     definitions = workflow.get("definitions")
-    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
-    subgraphs = [item for item in raw_subgraphs if isinstance(item, dict)] if isinstance(raw_subgraphs, list) else []
-    ids_only = {item["id"]: item for item in subgraphs if isinstance(item.get("id"), str) and item["id"]}
-    # Resolve only aliases a top-level row actually uses. This preserves the
-    # engine's id/unique-name rules without indexing every cosmetic name in a
-    # workflow that may contain thousands of definitions.
-    subgraph_ids = {key for key in ids_only if key in node_types}
-    name_counts: dict[str, int] = {}
-    name_first: dict[str, dict] = {}
-    for definition in subgraphs:
-        name = definition.get("name")
-        if isinstance(name, str) and name:
-            name_counts[name] = name_counts.get(name, 0) + 1
-            name_first.setdefault(name, definition)
-    unique_names = {
-        name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in ids_only
-    }
-    candidates = {name: definition for name, definition in unique_names.items() if name in node_types}
-    conflicts = _definition_alias_conflicts(subgraphs, ids_only, candidates, unique_names)
-    subgraph_ids.update(name for name in candidates if name not in conflicts)
+    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    resolved_subgraphs = _subgraph_defs_by_id(workflow) if isinstance(raw_subgraphs, list) else {}
+    subgraph_ids = {node_type for node_type in node_types if node_type in resolved_subgraphs}
     rows = []
     for n in nodes:
         properties = n.get("properties")

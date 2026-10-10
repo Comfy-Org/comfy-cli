@@ -925,7 +925,7 @@ class TestDynamicComboImplicitControlAfterGenerate:
 
         assert node["widgets_values"][-2:] == ["a", 99]
 
-    def test_frontend_layout_is_type_strict_but_server_validation_uses_python_equality(self):
+    def test_layout_and_server_validation_share_python_key_equality(self):
         info = {
             "BoolKeys": {
                 "input": {
@@ -950,7 +950,7 @@ class TestDynamicComboImplicitControlAfterGenerate:
         }
         graph = Graph.from_object_info(info)
 
-        assert graph.widget_order_for_node("BoolKeys", [True, 2]) == ["mode", "mode.boolean"]
+        assert graph.widget_order_for_node("BoolKeys", [True, 2]) == ["mode", "mode.number"]
         result = graph.validate_workflow({"1": {"class_type": "BoolKeys", "inputs": {"mode": True, "mode.number": 2}}})
         assert result["valid"] is True, result["errors"]
         assert not [warning for warning in result["warnings"] if warning["code"] == "unknown_input"]

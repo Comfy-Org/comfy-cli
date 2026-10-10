@@ -3980,17 +3980,13 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
 
 
 def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
-    """Frontend-like option equality with booleans distinct from numbers."""
-    if isinstance(left, bool) or isinstance(right, bool):
-        return type(left) is type(right) and left == right
-    if isinstance(left, int | float) and isinstance(right, int | float):
-        return left == right
-    return type(left) is type(right) and left == right
+    """Match the backend DynamicCombo parser's ordinary Python equality."""
+    return left == right
 
 
 def _dynamic_combo_server_key_matches(left: Any, right: Any) -> bool:
-    """Match the backend DynamicCombo parser's ordinary Python equality."""
-    return left == right
+    """Compatibility alias for callers that explicitly name server semantics."""
+    return _dynamic_combo_key_matches(left, right)
 
 
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
@@ -4477,7 +4473,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
         button_defaults = dict(load_3d_button_slots(m))
-        for gap_idx in range(len(widgets), widget_idx + 1):
+        # Leave a missing dynamic selector target absent so its writer sees a
+        # real option change and materializes that option's complete roster.
+        padding_stop = (
+            widget_idx
+            if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options
+            else widget_idx + 1
+        )
+        for gap_idx in range(len(widgets), padding_stop):
             entry = entries[gap_idx] if gap_idx < len(entries) else None
             if entry is None:
                 widgets.append(None)

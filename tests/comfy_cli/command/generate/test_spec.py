@@ -93,6 +93,37 @@ def test_registry_skips_an_endpoint_whose_schema_cannot_be_resolved(monkeypatch)
         spec._registry.cache_clear()
 
 
+def test_registry_resolves_a_referenced_request_body(monkeypatch):
+    endpoint_id = "referenced/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "put": {"requestBody": {"$ref": "#/components/requestBodies/Generate"}, "responses": {}}
+            }
+        },
+        "components": {
+            "requestBodies": {
+                "Generate": {
+                    "content": {
+                        "application/json": {
+                            "schema": {"type": "object", "properties": {"model": {"enum": ["example-v1"]}}}
+                        }
+                    }
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        endpoint = spec._registry()[endpoint_id]
+        assert endpoint.method == "put"
+        assert spec._extract_enum(endpoint.request_schema["properties"]["model"]) == ["example-v1"]
+    finally:
+        spec._registry.cache_clear()
+
+
 @pytest.mark.parametrize(
     "path_item",
     ["invalid", {"parameters": []}, {"post": "invalid"}, {"post": {"requestBody": "invalid"}}],
@@ -496,6 +527,7 @@ def test_extract_enum_unions_anyof_and_intersects_allof():
         "x",
         "y",
     ]
+    assert spec._extract_enum({"enum": ["a", "b"], "oneOf": [{"type": "string"}, {"const": "a"}]}) == ["b"]
     # allOf branches are constraints: only values valid in every branch count.
     assert spec._extract_enum({"allOf": [{"enum": ["a", "b", "c"]}, {"enum": ["b", "c", "d"]}]}) == ["b", "c"]
     # An empty allOf intersection means no usable enum.

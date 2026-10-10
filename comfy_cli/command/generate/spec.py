@@ -360,7 +360,10 @@ def _resolution_attempt_budget(limit: int, aggregate: list[int]) -> tuple[list[i
 
 
 def _charge_resolution_attempt(aggregate: list[int], allowance: int, remaining: list[int]) -> None:
-    aggregate[0] -= allowance - remaining[0]
+    # A shared-memo hit can make resolution itself free, but the caller still
+    # scans a path and its model metadata. Charge one unit so an adversarial
+    # number of paths cannot bypass the operation-wide bound.
+    aggregate[0] -= max(1, allowance - remaining[0])
 
 
 def _resolve_schema(
@@ -500,6 +503,19 @@ def _preferred_media_type(content: dict[str, Any]) -> str:
     return next(iter(content), "application/json")
 
 
+_SUPPORTED_OPERATION_METHODS = {"get", "put", "patch", "delete", "options", "head", "trace"}
+
+
+def _select_operation(node: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Choose an operation exactly as registry and model-hint discovery do."""
+    if isinstance(node.get("post"), dict):
+        return "post", node["post"]
+    for key, value in node.items():
+        if isinstance(key, str) and key.lower() in _SUPPORTED_OPERATION_METHODS and isinstance(value, dict):
+            return key.lower(), value
+    return None
+
+
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, Endpoint]:
     spec = load_raw_spec()
@@ -517,36 +533,11 @@ def _registry() -> dict[str, Endpoint]:
         node = paths.get(path)
         if not isinstance(node, dict) or not node:
             continue  # spec drift — skip silently, surfaced via `comfy generate list`
-        # All image endpoints are POST; pick the first defined method anyway.
-        method = (
-            "post"
-            if isinstance(node.get("post"), dict)
-            else next(
-                (
-                    key
-                    for key, value in node.items()
-                    if isinstance(key, str)
-                    and key.lower() in {"get", "put", "patch", "delete", "options", "head", "trace"}
-                    and isinstance(value, dict)
-                ),
-                None,
-            )
-        )
-        if method is None:
+        selected_operation = _select_operation(node)
+        if selected_operation is None:
             continue
-        op = node[method]
+        method, op = selected_operation
         partner = endpoint_id.split("/", 1)[0]
-
-        req_body = op.get("requestBody") or {}
-        if not isinstance(req_body, dict):
-            continue
-        content = req_body.get("content") or {}
-        if not isinstance(content, dict):
-            continue
-        ctype = _preferred_media_type(content)
-        request_media = content.get(ctype) or {}
-        if not isinstance(request_media, dict):
-            continue
         # Request and response share one allowance for this endpoint, but a
         # malformed endpoint cannot starve every endpoint that follows it. A
         # constant-factor operation-wide allowance prevents many independently
@@ -555,6 +546,18 @@ def _registry() -> dict[str, Endpoint]:
             resolution_budget_limit, aggregate_resolution_budget
         )
         try:
+            req_body = op.get("requestBody") or {}
+            if isinstance(req_body, dict) and "$ref" in req_body:
+                req_body = _resolve(spec, req_body, memo=resolution_memo, budget=resolution_budget)
+            if not isinstance(req_body, dict):
+                raise SpecError("request body is not an object")
+            content = req_body.get("content") or {}
+            if not isinstance(content, dict):
+                raise SpecError("request body content is not an object")
+            ctype = _preferred_media_type(content)
+            request_media = content.get(ctype) or {}
+            if not isinstance(request_media, dict):
+                raise SpecError("request body media type is not an object")
             req_schema = _resolve(
                 spec,
                 request_media.get("schema") or {},
@@ -629,6 +632,43 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     raise SpecError(_unknown_endpoint_message(endpoint_id))
 
 
+def _schema_accepts_string_value(schema: Any, value: str, active: set[int] | None = None) -> bool:
+    """Evaluate the finite string constraints needed for enum extraction."""
+    if schema is True:
+        return True
+    if schema is False or not isinstance(schema, dict):
+        return False
+    if active is None:
+        active = set()
+    schema_id = id(schema)
+    if schema_id in active:
+        return True
+    active.add(schema_id)
+    try:
+        schema_type = schema.get("type")
+        if isinstance(schema_type, str) and schema_type != "string":
+            return False
+        if isinstance(schema_type, list) and "string" not in schema_type:
+            return False
+        if "const" in schema and not (isinstance(schema["const"], str) and schema["const"] == value):
+            return False
+        enum = schema.get("enum")
+        if isinstance(enum, list) and value not in [item for item in enum if isinstance(item, str)]:
+            return False
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and not all(_schema_accepts_string_value(item, value, active) for item in all_of):
+            return False
+        any_of = schema.get("anyOf")
+        if isinstance(any_of, list) and not any(_schema_accepts_string_value(item, value, active) for item in any_of):
+            return False
+        one_of = schema.get("oneOf")
+        if isinstance(one_of, list) and sum(_schema_accepts_string_value(item, value, active) for item in one_of) != 1:
+            return False
+        return True
+    finally:
+        active.remove(schema_id)
+
+
 def _extract_enum(
     prop: dict[str, Any],
     _memo: dict[int, list[str] | None] | None = None,
@@ -693,12 +733,12 @@ def _extract_enum(
                 continue
             if variant is True:
                 unconstrained = True
-                break
+                continue
             found = _extract_enum(variant, _memo, _string_memo) if isinstance(variant, dict) else None
             if not found:
                 if not isinstance(variant, dict) or _schema_admits_unconstrained_string(variant, _memo=_string_memo):
                     unconstrained = True
-                    break
+                    continue
                 continue
             if key == "oneOf":
                 for value in set(found):
@@ -713,7 +753,16 @@ def _extract_enum(
                     if value not in merged_values:
                         merged_values.add(value)
                         merged.append(value)
-        if not unconstrained and merged:
+        if key == "oneOf" and unconstrained and constraints:
+            finite_sibling_values = list(dict.fromkeys(value for constraint in constraints for value in constraint))
+            constraints.append(
+                [
+                    value
+                    for value in finite_sibling_values
+                    if sum(_schema_accepts_string_value(variant, value) for variant in variants) == 1
+                ]
+            )
+        elif not unconstrained and merged:
             constraints.append(
                 [value for value in merged if branch_counts.get(value) == 1] if key == "oneOf" else merged
             )
@@ -1037,6 +1086,12 @@ def _model_name_hint(name: str) -> str | None:
     resolution_budget_limit = _schema_resolution_budget(raw)
     aggregate_resolution_budget = [resolution_budget_limit * 4]
     resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
+    property_memo: dict[tuple[int, str], dict[str, Any] | None] = {}
+    object_memo: dict[int, bool] = {}
+    accepts_property_memo: dict[tuple[int, str], bool] = {}
+    enum_memo: dict[int, list[str] | None] = {}
+    string_memo: dict[int, bool] = {}
+    match_memo: dict[tuple[int, str], list[str]] = {}
     aliased = {v: k for k, v in _ALIASES.items()}
     hits: list[tuple[str, str, list[str]]] = []
     for path, node in paths.items():
@@ -1044,33 +1099,48 @@ def _model_name_hint(name: str) -> str | None:
             break
         if not str(path).startswith(PROXY_PREFIX) or not isinstance(node, dict):
             continue
-        op = node.get("post")
-        if not isinstance(op, dict):
+        selected_operation = _select_operation(node)
+        if selected_operation is None:
             continue
-        request_body = op.get("requestBody") or {}
-        if not isinstance(request_body, dict):
-            continue
-        content = request_body.get("content") or {}
-        if not isinstance(content, dict):
-            continue
-        ctype = _preferred_media_type(content)
-        media = content.get(ctype) or {}
-        if not isinstance(media, dict):
-            continue
-        schema = media.get("schema")
-        if not schema:
-            continue
+        _method, op = selected_operation
         resolution_budget, resolution_allowance = _resolution_attempt_budget(
             resolution_budget_limit, aggregate_resolution_budget
         )
         try:
+            request_body = op.get("requestBody") or {}
+            if isinstance(request_body, dict) and "$ref" in request_body:
+                request_body = _resolve(raw, request_body, memo=resolution_memo, budget=resolution_budget)
+            if not isinstance(request_body, dict):
+                continue
+            content = request_body.get("content") or {}
+            if not isinstance(content, dict):
+                continue
+            ctype = _preferred_media_type(content)
+            media = content.get(ctype) or {}
+            if not isinstance(media, dict):
+                continue
+            schema = media.get("schema")
+            if not schema:
+                continue
             resolved = _resolve(raw, schema, memo=resolution_memo, budget=resolution_budget)
             if not isinstance(resolved, dict):
                 continue
             for field in ("model", "model_name", "model_id"):
-                prop = _find_property(resolved, field)
-                values = _extract_enum(prop) if prop else None
-                matched = [v for v in values or [] if v.lower().startswith(lowered)]
+                prop = _find_property(
+                    resolved,
+                    field,
+                    property_memo,
+                    _object_memo=object_memo,
+                    _property_memo=accepts_property_memo,
+                )
+                if prop is None:
+                    continue
+                match_key = (id(prop), lowered)
+                matched = match_memo.get(match_key)
+                if matched is None:
+                    values = _extract_enum(prop, enum_memo, string_memo)
+                    matched = [v for v in values or [] if v.lower().startswith(lowered)]
+                    match_memo[match_key] = matched
                 if matched:
                     hits.append((str(path)[len(PROXY_PREFIX) :], field, matched))
                     break

@@ -143,7 +143,7 @@ def test_dynamic_default_publishes_an_actual_option_key(declared_default, expect
     assert selected == expected
 
 
-def test_dynamic_selector_keeps_boolean_keys_distinct_from_integer_keys():
+def test_dynamic_selector_uses_backend_equality_for_boolean_and_integer_keys():
     object_info = copy.deepcopy(OBJECT_INFO)
     options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
     options["options"] = [
@@ -156,7 +156,7 @@ def test_dynamic_selector_keeps_boolean_keys_distinct_from_integer_keys():
 
     assert graph.widget_order_for_node("MinimaxHailuo03TextToVideoNode", wf["nodes"][0]["widgets_values"])[:2] == [
         "model",
-        "model.boolean_only",
+        "model.integer_only",
     ]
 
 
@@ -194,6 +194,21 @@ def test_missing_selector_materializes_the_whole_default_option_roster():
     _write_widget(node, "model.second", 99, default_graph, extend=True)
 
     assert node["widgets_values"] == ["MiniMax H3", 11, 99]
+
+
+def test_writing_a_missing_selector_to_its_default_materializes_its_roster():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"]
+    model[1]["default"] = "MiniMax H3"
+    model[1]["options"][0]["inputs"]["required"] = {"first": ["INT", {"default": 11}]}
+    default_graph = Graph.from_object_info(object_info)
+    node = {"id": 1, "type": "MinimaxHailuo03TextToVideoNode", "widgets_values": []}
+
+    from comfy_cli.cql.engine import _write_widget
+
+    _write_widget(node, "model", "MiniMax H3", default_graph, extend=True)
+
+    assert node["widgets_values"] == ["MiniMax H3", 11]
 
 
 def test_unknown_sub_widget_keeps_the_plain_refusal(graph):
@@ -257,7 +272,7 @@ def test_interior_write_to_a_hidden_sub_widget_is_refused(graph):
     assert "57/7.model" in msg, f"must name the interior selector address: {msg}"
 
 
-def test_replayed_hidden_sub_widget_does_not_fork_or_commit_the_op(graph):
+def test_replayed_hidden_sub_widget_commits_a_no_op_without_forking(graph):
     wf = _in_subgraph(graph)
     wf["nodes"].append(copy.deepcopy(wf["nodes"][0]) | {"id": 58})
     before = copy.deepcopy(wf)
@@ -272,13 +287,14 @@ def test_replayed_hidden_sub_widget_does_not_fork_or_commit_the_op(graph):
         inner_widget="model.prompt_expansion_mode",
     )
 
-    with pytest.raises(workflow_ops.FatalFindingError, match="does not exist"):
-        workflow_ops.apply_op(wf, op, graph)
+    workflow_ops.apply_op(wf, op, graph)
 
-    assert wf == before
+    assert wf["nodes"] == before["nodes"]
+    assert wf["definitions"] == before["definitions"]
+    assert wf["_widget_stamps"]
 
 
-def test_replayed_top_level_hidden_sub_widget_does_not_commit_the_op(graph):
+def test_replayed_top_level_hidden_sub_widget_commits_a_no_op(graph):
     wf, node_id = _fresh(graph)
     before = copy.deepcopy(wf)
     op = workflow_ops._new_op(
@@ -290,10 +306,10 @@ def test_replayed_top_level_hidden_sub_widget_does_not_commit_the_op(graph):
         value="quality",
     )
 
-    with pytest.raises(workflow_ops.FatalFindingError, match="does not exist"):
-        workflow_ops.apply_op(wf, op, graph)
+    workflow_ops.apply_op(wf, op, graph)
 
-    assert wf == before
+    assert wf["nodes"] == before["nodes"]
+    assert wf["_widget_stamps"]
 
 
 def test_dynamic_sub_widget_combo_uses_the_same_normalization_as_top_level():

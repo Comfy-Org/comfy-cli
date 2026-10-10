@@ -56,6 +56,24 @@ def test_split_payload_multipart_separates_files(tmp_path):
         payload[1].close()
 
 
+def test_send_request_encodes_form_urlencoded_values(monkeypatch):
+    ep = spec.get_endpoint("pika/generate/2.2/t2v")
+    flags = schema.flags_for(ep)
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(client.httpx, "post", fake_post)
+
+    client.send_request(ep, {"promptText": "hello"}, flags, api_key="comfyui-test")
+
+    assert captured["data"] == {"promptText": "hello"}
+    assert captured.get("files") is None
+    assert captured.get("json") is None
+
+
 def _capture_post(monkeypatch):
     captured = {}
 

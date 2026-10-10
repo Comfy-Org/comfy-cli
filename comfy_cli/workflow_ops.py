@@ -2621,7 +2621,11 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         )
         refusal = next((item for item in preflight_warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
         if refusal is not None:
-            raise FatalFindingError(refusal)
+            # Recording APIs refuse this before creating an op. During replay,
+            # however, another selector op may have hidden the target. Preserve
+            # convergence by treating that reordered write as a committed no-op.
+            _lww_commit(workflow, op)
+            return
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
@@ -2638,7 +2642,8 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     warnings = _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
     refusal = next((item for item in warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
     if refusal is not None:
-        raise FatalFindingError(refusal)
+        _lww_commit(workflow, op)
+        return
     _lww_commit(workflow, op)
 
 

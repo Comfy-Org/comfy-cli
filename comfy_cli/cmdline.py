@@ -689,10 +689,14 @@ def _scrub_url_userinfo(text: str) -> str:
             inner_start = match.end() + later_scheme.start()
             outer_at = token.rfind("@", 0, later_scheme.start())
             outer_authority = token[:first_delimiter]
+            outer_crossed_tail = token[first_delimiter:outer_at]
+            clear_outer_network_tail = (
+                _looks_like_numbered_network_authority(outer_authority)
+                and "?" in outer_crossed_tail
+                and "=" in outer_crossed_tail
+            )
             outer_has_userinfo = authority_at >= 0 or (
-                outer_at >= first_delimiter
-                and ":" in outer_authority
-                and not _looks_like_numbered_network_authority(outer_authority)
+                outer_at >= first_delimiter and ":" in outer_authority and not clear_outer_network_tail
             )
             if outer_has_userinfo and outer_at >= 0:
                 chunks.extend(
@@ -767,7 +771,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
         boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#;&,"]
         safe_end = min(boundaries) if boundaries else len(value)
         return f"{prefix}{value[:safe_end]}{_scrub_secret_tail(value[safe_end:])}"
-    already_masked = re.match(r"""[ \t]*(?:\*{3}(?=$|[\s}\]),;])|(["'])\*{3}\1(?=$|[\s}\]),;]))""", value) is not None
+    already_masked = re.match(r"""[ \t]*(?:\*{3}(?=$|[\s}\])])|(["'])\*{3}\1(?=$|[\s}\])]))""", value) is not None
     rendered_siblings = _render_assignment_siblings(prefix, value, mask_leading=not already_masked)
     if rendered_siblings is not None:
         return rendered_siblings
@@ -815,7 +819,8 @@ _SECRET_PATTERNS = (
     (
         re.compile(
             r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)"
-            r"(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+"
+            r"(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*"
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*\2?|[^\r\n]+"
             r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*)",
             re.IGNORECASE,
         ),
@@ -882,7 +887,7 @@ _SECRET_PATTERNS = (
             rf"(?P<prefix>\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
             r"\\+[\"']\s*[:=]\s*)(?P<slashes>\\+)(?P<quote>[\"'])"
             r"(?:(?:\\\\.)|\\(?![\"'])|(?!(?P=slashes)(?P=quote))[^\\])*?"
-            r"(?P<closer>(?P=slashes)(?P=quote)|[\r\n]|$)",
+            r"(?P<closer>(?P=slashes)(?P=quote)|$)",
             re.IGNORECASE,
         ),
         r"\g<prefix>\g<slashes>\g<quote>***\g<closer>",
@@ -923,7 +928,7 @@ def _internal_error_message(error: BaseException) -> str:
     scrub_input_truncated = len(detail) > detail_cap
     # ``str(error)`` necessarily materializes the exception's value, but do not
     # create a second unbounded copy merely to prepend its type name.
-    text = prefix + detail[:detail_cap]
+    text = detail[:detail_cap]
     if scrub_input_truncated:
         # A userinfo scrub needs its closing ``@``. If the input cap removed
         # that anchor, drop the incomplete credential token before earlier
@@ -965,11 +970,12 @@ def _internal_error_message(error: BaseException) -> str:
     text = _scrub_url_userinfo(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
-    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
-        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
+    visible_detail_cap = max(0, _INTERNAL_ERROR_MESSAGE_CAP - len(prefix))
+    if len(text) > visible_detail_cap:
+        text = text[: visible_detail_cap - 1] + "…"
     elif scrub_input_truncated:
-        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
-    return text
+        text = text[: visible_detail_cap - 1] + "…"
+    return prefix + text
 
 
 def _traceback_tail(error: BaseException, frames: int = 3) -> list[str]:
