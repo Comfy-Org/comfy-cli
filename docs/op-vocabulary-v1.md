@@ -116,7 +116,18 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
 Spec form: `{"op": "disconnect", "to": "$sampler.model"}`. The standalone
 command accepts the same `<node>.<input>` target. Minted fields are `link_id`
 (the occupant observed at mint time), `to_node`, and the resolved numeric
-`to_slot`.
+`to_slot`. A dynamic destination additionally carries exactly one identity
+field:
+
+* `grow` is present for a promoted subgraph input and names the declaration;
+  it claims `("input", to_node, "grow", grow.name)`.
+* `grow_id` is present for an ordinary autogrow or widget-converted input and
+  preserves the creating connect's collision-free slot identity; it claims
+  `("input", to_node, "grow_id", grow_id)`. A reconnect to that existing input
+  carries the same `grow_id` and therefore shares the register.
+
+For either dynamic form, replay uses the identity field above rather than
+treating the observed numeric `to_slot` as a concrete-slot register.
 
 `disconnect` and concrete `connect` claim the same scalar LWW register,
 `("input", to_node, to_slot)`. A winning disconnect removes whichever link
