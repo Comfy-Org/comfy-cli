@@ -86,6 +86,15 @@ history.
 
 ### Changed
 
+- Once every model byte is in, the progress line of `comfy deploy up`,
+  `comfy deploy status` (with or without `--watch`) and a watching
+  `comfy deploy promote` or `rollback` adds "finishing: putting the models in
+  place" while the deploy service sends `placingModels: true`, on every
+  provider, so a line at "7.0 GB of 7.0 GB" no longer reads as
+  stuck until the endpoint step starts. `placingModels` is documented in the
+  `progress` object of the `deploy status`, `deploy up` and `deploy_progress`
+  schemas. An older service's line is unchanged.
+
 - **Breaking:** a watching `comfy deploy up`, `promote` or `rollback` that
   another change overtook, onto a third release, now exits 1 with `deploy_update_replaced`
   and `details.replacing_release_id`, where it exited `deploy_update_failed`
