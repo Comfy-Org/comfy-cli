@@ -32,6 +32,7 @@ from comfy_cli.cql.engine import (
     _dynamic_group_row_count,
     _parse_morphism,
     _validate_dynamic_group_layout,
+    _validate_dynamic_group_schema,
 )
 
 logger = logging.getLogger(__name__)
@@ -1632,10 +1633,11 @@ def _collect_widget_inputs(
         isinstance(spec, (list, tuple))
         and spec
         and isinstance(spec[0], str)
-        and spec[0].startswith("COMFY_DYNAMICGROUP")
+        and (spec[0].startswith("COMFY_DYNAMICGROUP") or spec[0] == "COMFY_DYNAMICCOMBO_V3")
         for spec in input_specs
     ):
         morphism = _parse_morphism(node_type, schema)
+        _validate_dynamic_group_schema(morphism)
         entries = _validate_dynamic_group_layout(node, morphism) or []
         fields = {p.name: {f.name for f in _dynamic_group_fields(p)} for p in morphism.inputs if p.is_dynamic_group}
         group_prefixes = tuple(f"{name}." for name in fields)

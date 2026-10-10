@@ -1734,7 +1734,8 @@ class Graph:
         m = self._nodes.get(class_name)
         if m is None:
             return []
-        return [e.name for e in _expand_widget_entries(m, widgets_values or [])]
+        defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
+        return [e.name for e in _expand_widget_entries(m, widgets_values or [], first_key=defaults)]
 
     def editable_widget_names(self, class_name: str, widgets_values: list[Any] | None = None) -> list[str]:
         """The subset of :meth:`widget_order_for_node` a write may target —
@@ -1742,7 +1743,8 @@ class Graph:
         m = self._nodes.get(class_name)
         if m is None:
             return []
-        return _editable_widget_names(_expand_widget_entries(m, widgets_values or []))
+        defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
+        return _editable_widget_names(_expand_widget_entries(m, widgets_values or [], first_key=defaults))
 
     def frontend_injected_widget_names(self, class_name: str) -> list[str]:
         """Names in the widget order that the frontend injects with no schema
@@ -2784,7 +2786,16 @@ def _check_dynamic_group(
     errors: list[dict] = []
     warnings: list[dict] = []
     valid_keys: set[str] = set()
-    fields = _dynamic_group_fields(port)
+    try:
+        if "." in port.name:
+            raise DynamicGroupBindingError("CLI does not support DynamicGroup inside DynamicCombo")
+        _validate_dynamic_group_port(port)
+        fields = _dynamic_group_fields(port)
+    except DynamicGroupBindingError as error:
+        errors.append(
+            {"node_id": node_id, "field": port.name, "code": "invalid_dynamic_group_schema", "message": str(error)}
+        )
+        return errors, warnings, valid_keys
     field_names = {field.name for field in fields}
     rows: set[int] = set()
     maximum = port.options.max if port.options.max is not None else 20
@@ -3863,7 +3874,9 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
 
 
 def _dynamic_group_fields(port: Port, prefix: str = "") -> list[Port]:
-    template = port.options.template or {}
+    template = port.options.template
+    if not isinstance(template, dict):
+        raise DynamicGroupBindingError("DynamicGroup template must be an object")
     fields: list[Port] = []
     for section in ("required", "optional"):
         section_def = template.get(section, {})
@@ -3881,7 +3894,15 @@ def _dynamic_group_widgets(port: Port, prefix: str = "") -> list[Port]:
     for widget in _dynamic_group_fields(port, prefix):
         widgets.append(widget)
         if widget.options.control_after_generate:
-            widgets.append(Port(name=f"{widget.name}.0", type="STRING", options=PortOptions(default="fixed")))
+            widgets.append(
+                Port(
+                    name=f"{widget.name}.0",
+                    type="COMBO",
+                    enum_values=["fixed", "increment", "decrement", "randomize"],
+                    enum_declared=True,
+                    options=PortOptions(default="fixed"),
+                )
+            )
     return widgets
 
 
@@ -3896,30 +3917,61 @@ def _dynamic_group_row_count(value: Any, available: int, width: int) -> int:
     return value
 
 
+def _validate_dynamic_group_port(port: Port) -> None:
+    minimum = port.options.min if port.options.min is not None else 0
+    maximum = port.options.max if port.options.max is not None else 20
+    if (
+        isinstance(minimum, bool)
+        or isinstance(maximum, bool)
+        or not isinstance(minimum, int)
+        or not isinstance(maximum, int)
+        or not 0 <= minimum <= maximum <= 20
+        or maximum == 0
+    ):
+        raise DynamicGroupBindingError(
+            f"DynamicGroup bounds under {port.name!r} require integers 0 <= min <= max and 1 <= max <= 20"
+        )
+    if port.options.force_input or not isinstance(port.name, str) or not port.name or "." in port.name:
+        raise DynamicGroupBindingError(f"DynamicGroup controller {port.name!r} must be a non-forced, undotted widget")
+    fields = _dynamic_group_fields(port)
+    if not fields or any(
+        field.is_link
+        or field.options.force_input
+        or field.is_autogrow
+        or field.is_dynamic_group
+        or field.is_dynamic_combo
+        or field.dynamic_options
+        for field in fields
+    ):
+        raise DynamicGroupBindingError(
+            f"DynamicGroup template under {port.name!r} requires non-dynamic widgets without forceInput"
+        )
+    names = [field.name for field in fields]
+    if any(not isinstance(name, str) or not name or "." in name for name in names):
+        raise DynamicGroupBindingError(f"DynamicGroup template under {port.name!r} requires undotted field names")
+    if len(names) != len(set(names)):
+        raise DynamicGroupBindingError(f"DynamicGroup duplicate template field under {port.name!r}")
+
+
 def _validate_dynamic_group_schema(m: Morphism) -> None:
+    def reject_nested_group(port: Port, depth: int) -> None:
+        if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+            return
+        for option in port.dynamic_options:
+            for sub in _dynamic_combo_sub_ports(port.dynamic_options, option.get("key"), port.name):
+                if sub.type.startswith("COMFY_DYNAMICGROUP"):
+                    raise DynamicGroupBindingError("CLI does not support DynamicGroup inside DynamicCombo")
+                reject_nested_group(sub, depth + 1)
+
     for port in m.inputs:
+        reject_nested_group(port, 0)
         if port.type.startswith("COMFY_DYNAMICGROUP") and not port.is_dynamic_group:
             raise DynamicGroupBindingError(f"unsupported DynamicGroup schema {port.type!r} on {m.id}")
         if not port.is_dynamic_group:
             continue
         if any(p.name.startswith(f"{port.name}.") for p in m.inputs):
             raise DynamicGroupBindingError(f"DynamicGroup generated-name collision under {port.name!r} on {m.id}")
-        fields = _dynamic_group_fields(port)
-        if not fields or any(
-            field.is_link
-            or field.options.force_input
-            or field.is_autogrow
-            or field.is_dynamic_group
-            or field.is_dynamic_combo
-            or field.dynamic_options
-            for field in fields
-        ):
-            raise DynamicGroupBindingError(
-                f"DynamicGroup template under {port.name!r} on {m.id} requires non-dynamic widgets without forceInput"
-            )
-        names = [field.name for field in fields]
-        if len(names) != len(set(names)):
-            raise DynamicGroupBindingError(f"DynamicGroup duplicate template field under {port.name!r} on {m.id}")
+        _validate_dynamic_group_port(port)
 
 
 def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry] | None:
@@ -3949,6 +4001,14 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
         raise DynamicGroupBindingError("widgets_values_form does not match the available DynamicGroup schema")
     if isinstance(values, list) and len(entries) != len(values):
         raise DynamicGroupBindingError("DynamicGroup schema does not match the saved widget values")
+    for index, entry in enumerate(entries):
+        if entry.owner is None or entry.port is None or entry.port.raw_spec is not None:
+            continue
+        if isinstance(source, dict) and entry.name not in source:
+            continue
+        companion = source[entry.name] if isinstance(source, dict) else source[index]
+        if entry.port.validate_shape(companion) or entry.port.validate_catalog(companion):
+            raise DynamicGroupBindingError(f"DynamicGroup companion {entry.name!r} must use a supported control mode")
     return entries
 
 
@@ -4008,6 +4068,8 @@ def _expand_widget_entries(
                         and (len(row) == 1 or not row.startswith("0"))
                     ):
                         rows.add(row)
+                if rows and name not in widgets_values:
+                    raise DynamicGroupBindingError(f"DynamicGroup controller {name!r} is missing for saved rows")
                 count = _dynamic_group_row_count(saved_value(name, idx, 0), len(rows), 1)
                 limit = str(count)
                 count = _dynamic_group_row_count(count, sum((len(row), row) < (len(limit), limit) for row in rows), 1)
@@ -4352,10 +4414,13 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    _validate_dynamic_group_layout(node, m)
+    has_group = _validate_dynamic_group_layout(node, m) is not None
+    if has_group and "widgets_values_named" in node and not isinstance(node["widgets_values_named"], dict):
+        raise ValueError("widgets_values_named must be an object before editing widgets")
+    raw_values = node.get("widgets_values")
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     order = graph.widget_order_for_node(node_type, widgets)
-    if any(p.is_dynamic_group for p in m.inputs) and order.count(input_name) > 1:
+    if has_group and order.count(input_name) > 1:
         raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):
@@ -4384,15 +4449,6 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     if port is not None and port.is_dynamic_group:
         return _write_dynamic_group_count(node, port, widget_idx, value, entries, widgets)
 
-    if not isinstance(node.get("widgets_values"), list):
-        # Persist the positional projection so downstream re-reads (the
-        # dynamic-combo selector path re-reads from the node) see the same
-        # values this write is about to index against.
-        node["widgets_values"] = widgets
-
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, extend=extend)
-
     if widget_idx >= len(widgets):
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
@@ -4404,9 +4460,19 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         if err:
             raise ValueError(err)
         warnings = port.validate_catalog(value)
+        if any(p.is_dynamic_group and input_name.startswith(f"{p.name}.") for p in m.inputs):
+            fatal = next((finding for finding in warnings if finding.get("severity") == SEVERITY_ERROR), None)
+            if fatal:
+                raise ValueError(fatal["message"])
+
+    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
-    node["widgets_values"] = widgets
+    if isinstance(raw_values, dict) and has_group:
+        node["widgets_values"] = {**raw_values, input_name: value}
+    else:
+        node["widgets_values"] = widgets
     if "widgets_values_named" in node:
         node["widgets_values_named"][input_name] = value
     return warnings
@@ -4419,8 +4485,17 @@ def _write_dynamic_group_count(
     maximum = port.options.max if port.options.max is not None else 20
     if isinstance(count, bool) or not isinstance(count, int) or not minimum <= count <= maximum:
         raise ValueError(f"{port.name}: row count must be an integer between {minimum} and {maximum}")
+    if "inputs" in node and (
+        not isinstance(node["inputs"], list) or any(not isinstance(inp, dict) for inp in node["inputs"])
+    ):
+        raise ValueError(f"{port.name}: inputs must be an array of input objects before resizing rows")
+    raw_values = node.get("widgets_values")
     old_entries = [e for e in entries[index + 1 :] if e.owner == port.name]
-    old_values = {e.name: value for e, value in zip(old_entries, widgets[index + 1 :])}
+    old_values = (
+        {e.name: raw_values[e.name] for e in old_entries if e.name in raw_values}
+        if isinstance(raw_values, dict)
+        else {e.name: value for e, value in zip(old_entries, widgets[index + 1 :])}
+    )
     new_fields = [p for row in range(count) for p in _dynamic_group_widgets(port, f"{port.name}.{row}")]
     names = {p.name for p in new_fields}
     removed = {e.name for e in old_entries} - names
@@ -4433,18 +4508,31 @@ def _write_dynamic_group_count(
         inp.get("link") is not None and previous != current for current, (previous, inp) in enumerate(surviving_inputs)
     ):
         raise ValueError(f"{port.name}: disconnect shifted inputs before reducing their count")
-    node["widgets_values"] = (
-        widgets[:index]
-        + [count]
-        + [old_values.get(p.name, _widget_default(p)) for p in new_fields]
-        + widgets[index + 1 + len(old_entries) :]
-    )
+    old_names = {e.name for e in old_entries}
+    new_values = {
+        p.name: old_values[p.name] if p.name in old_values else _widget_default(p)
+        for p in new_fields
+        if p.name in old_values or p.name not in old_names
+    }
+    if isinstance(raw_values, dict):
+        node["widgets_values"] = {
+            **{name: value for name, value in raw_values.items() if name not in removed},
+            port.name: count,
+            **new_values,
+        }
+    else:
+        node["widgets_values"] = (
+            widgets[:index]
+            + [count]
+            + [new_values[p.name] for p in new_fields]
+            + widgets[index + 1 + len(old_entries) :]
+        )
     if "widgets_values_named" in node:
         named = node["widgets_values_named"]
         for name in removed:
             named.pop(name, None)
         named[port.name] = count
-        named.update({p.name: old_values.get(p.name, _widget_default(p)) for p in new_fields})
+        named.update(new_values)
     if "widgets_values_form" in node:
         node["widgets_values_form"]["order"] = (
             [e.name for e in entries[: index + 1]]
@@ -4508,7 +4596,15 @@ def _unknown_dynamic_sub_warning(
 
 
 def _write_dynamic_combo_selector(
-    node: dict, port: Port, input_name: str, widget_idx: int, value: Any, entries: list[_WidgetEntry], *, extend: bool
+    node: dict,
+    port: Port,
+    input_name: str,
+    widget_idx: int,
+    value: Any,
+    entries: list[_WidgetEntry],
+    widgets: list[Any],
+    *,
+    extend: bool,
 ) -> list[dict]:
     """Write a dynamic combo's selector, rebuilding the sub-widget roster when
     the selected option changes.
@@ -4520,7 +4616,8 @@ def _write_dynamic_combo_selector(
     defaults (option sub-spec ``default``; first enum option for combos), and
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
-    widgets = _widgets_as_list(node.get("widgets_values"))
+    raw_values = node.get("widgets_values")
+    preserve_named = isinstance(raw_values, dict) and any(e.port and e.port.is_dynamic_group for e in entries)
     if value not in port.enum_values:
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
@@ -4533,7 +4630,7 @@ def _write_dynamic_combo_selector(
                 raise ValueError(f"widget index {widget_idx} out of range for {node.get('type')}")
             widgets.extend([None] * (widget_idx + 1 - len(widgets)))
         widgets[widget_idx] = value
-        node["widgets_values"] = widgets
+        node["widgets_values"] = {**raw_values, input_name: value} if preserve_named else widgets
         return []
 
     # Sub-entries owned (directly or via nesting) by this combo sit contiguously
@@ -4550,7 +4647,15 @@ def _write_dynamic_combo_selector(
         head.extend([None] * (widget_idx - len(head)))
     tail = list(widgets[widget_idx + 1 + old_span :])
     new_subs, new_names = _dynamic_combo_default_values(port.dynamic_options, value, input_name)
-    node["widgets_values"] = head + [value] + new_subs + tail
+    if preserve_named:
+        old_names = {e.name for e in entries[widget_idx + 1 : widget_idx + 1 + old_span]}
+        node["widgets_values"] = {
+            **{name: saved for name, saved in raw_values.items() if name not in old_names},
+            input_name: value,
+            **dict(zip(new_names, new_subs)),
+        }
+    else:
+        node["widgets_values"] = head + [value] + new_subs + tail
     if any(entry.port and entry.port.is_dynamic_group for entry in entries):
         if "widgets_values_form" in node:
             node["widgets_values_form"]["order"] = (
