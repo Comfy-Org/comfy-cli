@@ -304,6 +304,55 @@ def _root_is_registered(defs: dict[str, dict], root: dict) -> bool:
     return any(definition is root for definition in defs.values())
 
 
+def _definition_metrics(defs: dict[str, dict], definition: dict) -> tuple[int, tuple[dict, ...]]:
+    """A definition's own serialized work and direct definition children."""
+    metrics = getattr(defs, "promotion_definition_metrics", None)
+    cached = metrics.get(id(definition)) if isinstance(metrics, dict) else None
+    if cached is not None and cached[0] is definition:
+        return cached[1], cached[2]
+    own_size = 1
+    for field_name in ("inputs", "nodes", "links"):
+        values = definition.get(field_name)
+        own_size += len(values) if isinstance(values, list) else 0
+    inputs = definition.get("inputs")
+    for entry in inputs if isinstance(inputs, list) else []:
+        if isinstance(entry, dict):
+            own_size += len(_listed_link_ids(entry))
+    children_by_id: dict[int, dict] = {}
+    raw_nodes = definition.get("nodes")
+    for node in raw_nodes if isinstance(raw_nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        node_inputs = node.get("inputs")
+        own_size += len(node_inputs) if isinstance(node_inputs, list) else 0
+        candidate = defs.get(str(node.get("type", "")))
+        if isinstance(candidate, dict):
+            children_by_id[id(candidate)] = candidate
+    children = tuple(children_by_id.values())
+    if isinstance(metrics, dict):
+        metrics[id(definition)] = (definition, own_size, children)
+    return own_size, children
+
+
+def _promotion_index_limit(defs: dict[str, dict]) -> int:
+    """One linear work allowance derived from the whole definition index."""
+    cached = getattr(defs, "promotion_visit_limit", None)
+    if isinstance(cached, int):
+        return cached
+    seen: set[int] = set()
+    graph_size = 0
+    for definition in defs.values():
+        if not isinstance(definition, dict) or id(definition) in seen:
+            continue
+        seen.add(id(definition))
+        own_size, _children = _definition_metrics(defs, definition)
+        graph_size += own_size
+    limit = max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
+    if hasattr(defs, "promotion_visit_limit"):
+        defs.promotion_visit_limit = limit
+    return limit
+
+
 def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     """A linear cap for malformed definition DAGs with exponentially many paths."""
     root_registered = _root_is_registered(defs, root)
@@ -321,57 +370,33 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
         if id(definition) in definitions:
             continue
         definitions.add(id(definition))
-        metrics = getattr(defs, "promotion_definition_metrics", None)
-        cached_metrics = metrics.get(id(definition)) if isinstance(metrics, dict) else None
-        if cached_metrics is not None and cached_metrics[0] is definition:
-            _identity, own_size, children = cached_metrics
-            graph_size += own_size
-            pending.extend(child for child in children if id(child) not in definitions)
-            continue
-        own_size = 1
-        for field_name in ("inputs", "nodes", "links"):
-            values = definition.get(field_name)
-            own_size += len(values) if isinstance(values, list) else 0
-        inputs = definition.get("inputs")
-        for entry in inputs if isinstance(inputs, list) else []:
-            if isinstance(entry, dict):
-                own_size += len(_listed_link_ids(entry))
-        children_by_id: dict[int, dict] = {}
-        raw_nodes = definition.get("nodes")
-        for node in raw_nodes if isinstance(raw_nodes, list) else []:
-            if not isinstance(node, dict):
-                continue
-            node_inputs = node.get("inputs")
-            own_size += len(node_inputs) if isinstance(node_inputs, list) else 0
-            candidate = defs.get(str(node.get("type", "")))
-            if isinstance(candidate, dict):
-                children_by_id[id(candidate)] = candidate
-        children = tuple(children_by_id.values())
-        if isinstance(metrics, dict):
-            metrics[id(definition)] = (definition, own_size, children)
+        own_size, children = _definition_metrics(defs, definition)
         graph_size += own_size
         pending.extend(child for child in children if id(child) not in definitions)
     limit = max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
     if isinstance(limits, dict):
         limits[id(root)] = limit
-    if hasattr(defs, "promotion_visit_limit") and root_registered:
-        defs.promotion_visit_limit = limit
     return limit
 
 
 def _shared_promotion_budget(defs: dict[str, dict], root: dict, attribute: str) -> list[int]:
-    """A root-local serialized-graph allowance for one resolver operation."""
-    limit = _promotion_visit_limit(defs, root)
-    budget = [limit]
-    if hasattr(defs, attribute) and _root_is_registered(defs, root):
+    """One index-wide allowance per resolver kind, preventing cross-root quadratic work."""
+    if not hasattr(defs, attribute) or not _root_is_registered(defs, root):
+        return [_promotion_visit_limit(defs, root)]
+    budget = getattr(defs, attribute)
+    if budget is None:
+        budget = [_promotion_index_limit(defs)]
         setattr(defs, attribute, budget)
     return budget
 
 
 def _shared_boundary_output_budget(defs: dict[str, dict], root: dict) -> list[int]:
-    """Bound paths materialized by one boundary-resolution operation."""
-    budget = [_MAX_BOUNDARY_MATERIALIZATIONS]
-    if hasattr(defs, "promotion_boundary_output_budget") and _root_is_registered(defs, root):
+    """One absolute materialization allowance for the whole definition index."""
+    if not hasattr(defs, "promotion_boundary_output_budget") or not _root_is_registered(defs, root):
+        return [_MAX_BOUNDARY_MATERIALIZATIONS]
+    budget = defs.promotion_boundary_output_budget
+    if budget is None:
+        budget = [_MAX_BOUNDARY_MATERIALIZATIONS]
         defs.promotion_boundary_output_budget = budget
     return budget
 
@@ -1368,7 +1393,7 @@ def _promotion_source_indexes(
                 "promotion source traversal exceeded its safe limit",
             ):
                 if str(target.get("type", "")) in defs:
-                    source = str(target.get("id")), str(entry.get("name"))
+                    source = str(target.get("id")), _input_name(entry.get("name"))
                     break
                 marker = entry.get("widget")
                 if isinstance(marker, dict) and marker.get("name"):
@@ -1379,7 +1404,7 @@ def _promotion_source_indexes(
         if source is None:
             continue
         by_input[id(inp)] = source
-        reverse.setdefault(source, str(inp.get("name")))
+        reverse.setdefault(source, _input_name(inp.get("name")))
     if cache is not None:
         cache[id(sg)] = (sg, by_input, reverse)
     return by_input, reverse

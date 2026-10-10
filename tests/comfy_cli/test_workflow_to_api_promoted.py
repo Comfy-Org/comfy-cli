@@ -899,6 +899,15 @@ def test_instance_expansion_cost_charges_each_repeated_outer_id_prefix():
     assert extra == (len(outer_id) + 1) * (2 + 2 * 2)
 
 
+def test_definition_expansion_cost_charges_link_endpoint_id_bytes():
+    definition = {
+        "nodes": [],
+        "links": [{"id": 1, "origin_id": "x" * 1000, "target_id": "y" * 2000}],
+    }
+
+    assert workflow_to_api._definition_expansion_cost(definition) >= 3001
+
+
 def test_expansion_budget_is_clamped_to_an_absolute_cap(monkeypatch):
     definition_id = "00000000-0000-4000-8000-000000000001"
     definition = {
@@ -1019,6 +1028,16 @@ def test_iteration_cap_ignores_a_non_uuid_definition_name_after_uuid_expansion()
     )
 
     assert [node["type"] for node in nodes] == ["named-definition"]
+
+
+def test_promoted_overlay_skips_non_uuid_definition_instances():
+    named = {"id": "named", "inputs": [], "nodes": [], "links": []}
+    workflow = {"nodes": [{"id": 1, "type": "named", "widgets_values": []}], "links": []}
+
+    with mock.patch("comfy_cli.cql.promoted.promoted_inputs") as resolve:
+        workflow_to_api._overlay_promoted_host_values({}, workflow, {"named": named})
+
+    resolve.assert_not_called()
 
 
 def test_input_source_budget_charges_plain_fanout_targets():
