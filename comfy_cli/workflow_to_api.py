@@ -221,7 +221,8 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         for inner in sg.get("nodes") or []:
             if not isinstance(inner, dict):
                 continue
-            inner_def = subgraph_defs.get(str(inner.get("type", "")))
+            inner_type = inner.get("type")
+            inner_def = subgraph_defs.get(str(inner_type)) if is_subgraph_uuid(inner_type) else None
             if inner_def is not None:
                 visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
         for pi in _promoted.promoted_inputs(sg, subgraph_defs):
@@ -247,7 +248,8 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     for node in workflow.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        sg = subgraph_defs.get(str(node.get("type", "")))
+        node_type = node.get("type")
+        sg = subgraph_defs.get(str(node_type)) if is_subgraph_uuid(node_type) else None
         if sg is not None:
             visit(node, sg, workflow, str(node.get("id")), 0)
 
@@ -447,7 +449,9 @@ def _definition_expansion_cost(definition: dict) -> int:
     raw_links = definition.get("links")
     nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
     links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
-    return sum(_node_expansion_cost(node) for node in nodes) + len(links)
+    return sum(_node_expansion_cost(node) for node in nodes) + sum(
+        1 + len(str(link.get("origin_id", ""))) + len(str(link.get("target_id", ""))) for link in links
+    )
 
 
 def _instance_expansion_cost(definition: dict, outer_id: Any) -> int:

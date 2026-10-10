@@ -257,7 +257,7 @@ def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
     assert promoted.boundary_widget_targets(outer, item, definitions) == []
 
 
-def test_registered_roots_receive_independent_promotion_budgets():
+def test_registered_roots_share_one_non_creditable_index_budget():
     left = {"id": "left", "inputs": [], "nodes": [], "links": []}
     right = {
         "id": "right",
@@ -269,11 +269,12 @@ def test_registered_roots_receive_independent_promotion_budgets():
     definitions.update({"left": left, "right": right})
 
     left_budget = promoted._shared_promotion_budget(definitions, left, "promotion_inputs_budget")
-    left_budget[0] = 0
+    left_budget[0] -= 1
+    remaining = left_budget[0]
     right_budget = promoted._shared_promotion_budget(definitions, right, "promotion_inputs_budget")
 
-    assert right_budget is not left_budget
-    assert right_budget[0] == promoted._promotion_visit_limit(definitions, right)
+    assert right_budget is left_budget
+    assert right_budget[0] == remaining
 
 
 def test_shared_child_definition_metrics_are_computed_once():
@@ -306,7 +307,7 @@ def test_registered_root_lookup_is_constant_time_after_limit_is_cached():
     definitions = CountingDefs()
     definitions["sg"] = definition
 
-    promoted._promotion_visit_limit(definitions, definition)
+    promoted._promotion_index_limit(definitions)
     calls = definitions.values_calls
     promoted._shared_promotion_budget(definitions, definition, "promotion_inputs_budget")
 
@@ -956,6 +957,10 @@ def test_nested_null_input_name_uses_the_normalized_source_key():
     assert item.nested is True
     assert item.source_input == ""
     assert promoted.find_promoted(child, definitions, item.source_input) is not None
+    _child_by_input, child_reverse = promoted._promotion_source_indexes(child, definitions)
+    parent_by_input, _parent_reverse = promoted._promotion_source_indexes(parent, definitions)
+    assert child_reverse[("9", "value")] == ""
+    assert parent_by_input[id(parent["inputs"][0])] == ("7", "")
 
 
 def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
