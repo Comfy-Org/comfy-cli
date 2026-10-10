@@ -540,26 +540,30 @@ event; replication starts from that snapshot.
 
 Current contract, pinned:
 
-* **Only `set_widget` is subgraph-scoped.** Three address forms are accepted
-  and normalize to ONE write target: flat promoted (`57.text`, routed through
-  the instance's `proxyWidgets`), nested interior (`57/3.steps`), and the
-  flattened UI→API alias (`57:3.cfg`). The minted op carries the **resolved**
-  `path` (e.g. `["57", "27"]`) plus `inner_widget`, so replay needs no
-  proxyWidgets logic, and the LWW target is
-  `("widget", ("57", "27"), "text")` — a flat-form and a nested-form
-  concurrent write to the same interior widget converge under 8.1.
-* **`connect` refuses subgraph scope** with a structural explanation: an
-  interior endpoint is rejected with "a link cannot cross the subgraph
-  boundary"; a promoted-widget target is rejected with "promoted widget (a
-  value), not a link input".
+* **`set_widget`, `connect`, and `disconnect` have subgraph-scoped forms.** For
+  `set_widget`, three address forms are accepted and normalize to ONE write
+  target: flat promoted (`57.text`, routed through the instance's
+  `proxyWidgets`), nested interior (`57/3.steps`), and the flattened UI→API
+  alias (`57:3.cfg`). The minted op carries the **resolved** `path` (e.g.
+  `["57", "27"]`) plus `inner_widget`, so replay needs no proxyWidgets logic,
+  and the LWW target is `("widget", ("57", "27"), "text")` — a flat-form and
+  a nested-form concurrent write to the same interior widget converge under
+  8.1.
+* **`connect` and `disconnect` permit links wholly inside one supported,
+  single-instance definition.** Their ops carry the instance `path`, and their
+  LWW input identity is scoped by that path. A link that crosses the subgraph
+  boundary is still rejected with "a link cannot cross the subgraph boundary";
+  a promoted-widget target is still rejected with "promoted widget (a value),
+  not a link input". Both operations refuse a shared definition rather than
+  silently rewiring every instance that uses it.
 * **`add_node` and `delete_node` cannot address interior nodes** at all; an
   interior id fails as node-not-found against the top-level inventory.
-* An interior write to a **shared** definition forks the definition at apply
-  time (`engine._isolate_shared_subgraph`): the definition is deep-copied
+* An interior **widget** write to a shared definition forks the definition at
+  apply time (`engine._isolate_shared_subgraph`): the definition is deep-copied
   under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
-  are never aliased.
+  are never aliased. Interior connect/disconnect use the refusal above instead.
 * **Promoted widgets are HOST writes** (`cql.promoted`). A
   `set_widget` on a promoted input carries `promoted: {instance_path,
   value_index}` instead of `path`, and its LWW target is the host register
