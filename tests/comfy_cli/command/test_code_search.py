@@ -10,12 +10,19 @@ from typer.testing import CliRunner
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
+    MAX_QUERY_BYTES,
+    MAX_RESPONSE_BYTES,
     REQUEST_TIMEOUT,
+    TOTAL_REQUEST_DEADLINE,
+    QueryRejectedError,
+    SearchUnavailableError,
     _build_query,
+    _decode_search,
     _fetch_results,
     _format_results,
     _get_stats,
     _print_results,
+    _validate_query,
     app,
 )
 
@@ -124,11 +131,11 @@ class TestBuildQuery:
 
     def test_with_repo_short_name(self):
         result = _build_query("LoadImage", "ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_repo_full_name(self):
         result = _build_query("LoadImage", "Comfy-Org/ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
 
     def test_with_custom_count(self):
         result = _build_query("LoadImage", None, 50)
@@ -136,7 +143,39 @@ class TestBuildQuery:
 
     def test_with_repo_and_count(self):
         result = _build_query("LoadImage", "ComfyUI", 100)
-        assert result == "repo:^Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
+        assert result == "repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
+
+    def test_rejects_injected_filters_and_repo_whitespace(self):
+        for query in ("count:99 x", "repo:evil x", "timeout:2s x"):
+            with pytest.raises(ValueError):
+                _validate_query(query, None)
+        with pytest.raises(ValueError):
+            _validate_query("x", "ComfyUI count:99")
+
+    def test_rejects_grouped_and_aliased_repo_filters(self):
+        """Sourcegraph supports grouped expressions and a `r:` alias for `repo:`;
+        both must be rejected at expression boundaries, not just after whitespace."""
+        for query in (
+            "foo OR (repo:github.com/other/project)",
+            "foo OR(repo:evil)",
+            "(repo:evil)",
+            "((repo:evil))",
+            "foo r:evil",
+            "foo -repo:evil",
+            "foo -r:evil",
+            "foo NOT repo:evil",
+        ):
+            with pytest.raises(ValueError):
+                _validate_query(query, None)
+
+    def test_does_not_reject_benign_lookalike_tokens(self):
+        """Filter names that merely contain 'repo' as a substring must not be rejected."""
+        for query in ("reporter:evil x", "myrepo:evil x", "repoman:evil x"):
+            _validate_query(query, None)  # must not raise
+
+    def test_rejects_query_over_byte_limit(self):
+        with pytest.raises(ValueError):
+            _validate_query("é" * (MAX_QUERY_BYTES // 2 + 1), None)
 
     def test_user_type_filter_preserved(self):
         """Don't inject type:file when the user already specified a type: filter."""
@@ -164,6 +203,7 @@ class TestFormatResults:
         assert first["file"] == "nodes.py"
         assert first["branch"] == "main"
         assert first["commit"] == "abc123def456"
+        assert first["provenance"] == "default_branch_head"
         assert first["file_url"] == "https://github.com/Comfy-Org/ComfyUI/blob/abc123def456/nodes.py"
         assert len(first["matches"]) == 2
 
@@ -204,9 +244,10 @@ class TestFormatResults:
         }
         results = _format_results(search)
         assert len(results) == 1
-        assert results[0]["branch"] == "main"
+        assert results[0]["branch"] == ""
         assert results[0]["commit"] == ""
-        assert "blob/main/" in results[0]["matches"][0]["url"]
+        assert results[0]["file_url"] == ""
+        assert results[0]["matches"][0]["url"] == ""
 
     def test_handles_completely_empty_response(self):
         assert _format_results({}) == []
@@ -261,13 +302,17 @@ class TestFetchResults:
     @patch("requests.get")
     def test_successful_fetch(self, mock_get, raw_api_response):
         mock_response = MagicMock()
-        mock_response.json.return_value = raw_api_response
+        mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
+        mock_response.is_redirect = False
+        mock_response.is_permanent_redirect = False
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
 
         result = _fetch_results("LoadImage")
 
-        mock_get.assert_called_once_with(API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT)
+        mock_get.assert_called_once_with(
+            API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True
+        )
         assert result == raw_api_response
 
     @patch("requests.get")
@@ -293,6 +338,91 @@ class TestFetchResults:
         with pytest.raises(requests.ConnectionError):
             _fetch_results("LoadImage")
 
+    @patch("requests.get")
+    def test_refuses_redirect(self, mock_get):
+        response = mock_get.return_value
+        response.is_redirect = True
+        response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        with pytest.raises(SearchUnavailableError):
+            _fetch_results("secret-query")
+
+    @patch("requests.get")
+    def test_caps_response_before_decode(self, mock_get):
+        response = mock_get.return_value
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [b"x" * (MAX_RESPONSE_BYTES + 1)]
+        with pytest.raises(SearchUnavailableError):
+            _fetch_results("x")
+
+    @patch("time.monotonic")
+    @patch("requests.get")
+    def test_enforces_total_deadline_despite_steady_trickle(self, mock_get, mock_monotonic):
+        """A service sending small chunks more often than REQUEST_TIMEOUT never
+        trips requests' inactivity timeout, but must still trip the total
+        wall-clock deadline covering connection + full body read."""
+        response = mock_get.return_value
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        # One chunk per "tick"; each tick advances well past TOTAL_REQUEST_DEADLINE
+        # in aggregate even though no single gap exceeds REQUEST_TIMEOUT.
+        clock = iter([0] + [i * (TOTAL_REQUEST_DEADLINE / 4) for i in range(1, 8)] + [TOTAL_REQUEST_DEADLINE * 10])
+        mock_monotonic.side_effect = lambda: next(clock)
+        response.iter_content.return_value = (b"x" for _ in range(8))
+
+        with pytest.raises(requests.Timeout):
+            _fetch_results("slow-trickle")
+
+    @pytest.mark.parametrize(
+        "exc_cls", [requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError]
+    )
+    @patch("requests.get")
+    def test_stream_decode_errors_become_search_unavailable(self, mock_get, exc_cls):
+        """A truncated/invalid stream must route to the classified unavailable
+        error, not surface as a raw unhandled exception."""
+        response = mock_get.return_value
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+
+        def raising_iter_content(chunk_size):
+            yield b"partial"
+            raise exc_cls("stream broke")
+
+        response.iter_content.side_effect = raising_iter_content
+        with pytest.raises(SearchUnavailableError) as exc_info:
+            _fetch_results("truncated")
+        # The raw exception text must not leak into the message shown to the user.
+        assert "stream broke" not in str(exc_info.value)
+
+
+class TestDecodeSearch:
+    def test_graphql_errors_are_query_rejected(self):
+        with pytest.raises(QueryRejectedError, match="bad regex"):
+            _decode_search({"errors": [{"message": "bad regex"}], "data": None})
+
+    def test_null_data_is_query_rejected(self):
+        with pytest.raises(QueryRejectedError):
+            _decode_search({"data": None})
+
+    def test_alert_is_query_rejected(self):
+        with pytest.raises(QueryRejectedError, match="Unknown filter"):
+            _decode_search({"data": {"search": {"results": {"alert": {"title": "Unknown filter"}}}}})
+
+    def test_empty_response_is_unavailable(self):
+        with pytest.raises(SearchUnavailableError):
+            _decode_search({})
+
+    def test_list_shaped_results_is_unavailable(self):
+        """A list-shaped `results` must not reach `.get("alert")` (AttributeError)."""
+        with pytest.raises(SearchUnavailableError):
+            _decode_search({"data": {"search": {"results": []}}})
+
+    def test_missing_results_is_unavailable(self):
+        """An absent `results` must not silently read as an empty, successful result set."""
+        with pytest.raises(SearchUnavailableError):
+            _decode_search({"data": {"search": {}}})
+
 
 # ---------------------------------------------------------------------------
 # _print_results tests
@@ -309,6 +439,7 @@ class TestPrintResults:
         parsed = json.loads(output)
         assert "stats" in parsed
         assert "results" in parsed
+        assert "untrusted advisory data" in parsed["content_note"]
         assert len(parsed["results"]) == 2
 
     def test_empty_results_message(self, capsys):
@@ -384,6 +515,43 @@ class TestPrintResults:
         assert "L   42" in visible
         assert "class LoadImage:" in visible
 
+    def test_tty_handles_missing_branch_without_style_error(self):
+        """When defaultBranch is missing, file_url and match url are "". The TTY
+        path must not build a Rich `link ` style with an empty URL (StyleSyntaxError)."""
+        import io
+
+        from rich.console import Console
+
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "__typename": "FileMatch",
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI", "defaultBranch": None},
+                        "file": {"path": "test.py"},
+                        "lineMatches": [{"preview": "hello", "lineNumber": 0, "offsetAndLengths": []}],
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        stats = _get_stats(search)
+        assert results[0]["file_url"] == ""
+        assert results[0]["matches"][0]["url"] == ""
+
+        buf = io.StringIO()
+        fake_console = Console(file=buf, force_terminal=True, width=200, color_system="truecolor")
+        with (
+            patch("comfy_cli.command.code_search.console", fake_console),
+            patch("comfy_cli.command.code_search.sys.stdout.isatty", return_value=True),
+        ):
+            # Must not raise rich.errors.StyleSyntaxError.
+            _print_results(results, stats, json_output=False)
+
+        output = buf.getvalue()
+        assert "test.py" in output
+        assert "hello" in output
+
     def test_non_tty_ignores_force_color_env(self, capsys, search_response, monkeypatch):
         """FORCE_COLOR / TTY_COMPATIBLE must not leak OSC 8 into a piped stream."""
         monkeypatch.setenv("FORCE_COLOR", "1")
@@ -420,7 +588,9 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["--repo", "ComfyUI", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with(f"repo:^Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage")
+        mock_fetch.assert_called_once_with(
+            f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        )
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_with_count(self, mock_fetch, raw_api_response):
@@ -452,12 +622,15 @@ class TestCodeSearchCLI:
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_connection_error(self, mock_fetch):
-        mock_fetch.side_effect = requests.ConnectionError("no connection")
+        secret_query = "secret-user-derived-query"
+        mock_fetch.side_effect = requests.ConnectionError(f"GET https://service.invalid/?query={secret_query} failed")
 
-        result = runner.invoke(app, ["LoadImage"])
+        result = runner.invoke(app, [secret_query])
 
         assert result.exit_code == 1
         assert "Could not connect" in result.output
+        assert secret_query not in result.output
+        assert "service.invalid" not in result.output
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_timeout_error(self, mock_fetch):
@@ -495,7 +668,7 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["-r", "ComfyUI", "-n", "30", "-j", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with("repo:^Comfy\\-Org/ComfyUI$ type:file count:30 LoadImage")
+        mock_fetch.assert_called_once_with("repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:30 LoadImage")
         parsed = json.loads(result.output)
         assert "results" in parsed
 
