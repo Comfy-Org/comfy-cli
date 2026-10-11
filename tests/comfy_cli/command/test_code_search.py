@@ -1553,6 +1553,20 @@ class TestRootCLIWiring:
         assert "code-search" in result.output
         assert "\n\u2502 cs " not in result.output
 
+    def test_cs_alias_resolves_hidden_regardless_of_rendering_mode(self):
+        """The rendered-text check above depends on rich's panel border; this
+        resolves the built command directly so the guarantee holds even
+        under plain/no-color rendering."""
+        import typer.main
+        from click import Context
+
+        from comfy_cli.cmdline import app as root_app
+
+        root_command = typer.main.get_command(root_app)
+        command = root_command.get_command(Context(root_command), "cs")
+        assert command is not None
+        assert command.hidden is True
+
     @patch("comfy_cli.tracking.prompt_tracking_consent")
     @patch("comfy_cli.cmdline.workspace_manager")
     @patch("comfy_cli.command.code_search._fetch_results")

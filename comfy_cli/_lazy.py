@@ -165,6 +165,8 @@ class LazyTyperGroup(TyperGroup):
             infos = [info for info in scratch.registered_commands if info.name == name]
             assert len(infos) == 1, f"{spec.module}.{spec.register} did not register exactly one {name!r} command"
             info = infos[0]
+            if spec.hidden:
+                info.hidden = True
         else:
             assert spec.attr, "LazyCommand needs attr or register"
             info = CommandInfo(name=name, callback=getattr(module, spec.attr), help=spec.help, hidden=spec.hidden)
