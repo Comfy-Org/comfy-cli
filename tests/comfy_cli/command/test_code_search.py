@@ -793,8 +793,8 @@ class TestFetchResults:
 
         _fetch_results("LoadImage")
 
+        _, kwargs = mock_get.call_args
         assert kwargs["headers"] == {"Comfy-Usage-Source": "comfy-cli", "Accept-Encoding": "identity"}
-        assert kwargs["headers"] == {"Accept-Encoding": "identity"}
 
     @patch("requests.get")
     def test_uses_small_chunk_size_so_deadline_check_runs_frequently(self, mock_get, raw_api_response):
