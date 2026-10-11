@@ -1544,6 +1544,15 @@ class TestRootCLIWiring:
         assert isinstance(entry, LazyCommand)
         assert entry.attr == "code_search"
 
+    def test_root_help_shows_command_but_hides_alias(self):
+        """The discoverable command is public while its short alias stays hidden."""
+        from comfy_cli.cmdline import app as root_app
+
+        result = runner.invoke(root_app, ["--help"])
+        assert result.exit_code == 0, result.output
+        assert "code-search" in result.output
+        assert "\n\u2502 cs " not in result.output
+
     @patch("comfy_cli.tracking.prompt_tracking_consent")
     @patch("comfy_cli.cmdline.workspace_manager")
     @patch("comfy_cli.command.code_search._fetch_results")
