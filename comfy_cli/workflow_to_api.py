@@ -1656,7 +1656,7 @@ def _collect_widget_inputs(
             if group_prefixes and key.startswith(group_prefixes) and key not in group_entry_names:
                 continue
             spec = _declared_input_spec(_schema_input_def(schema), key)
-            if spec and spec[0] == "COMFY_DYNAMICGROUP_V3":
+            if isinstance(spec, (list, tuple)) and spec and spec[0] == "COMFY_DYNAMICGROUP_V3":
                 continue
             if key in ("videopreview", "preview"):
                 continue

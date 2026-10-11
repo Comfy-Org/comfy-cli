@@ -121,6 +121,16 @@ def _node(node_id, node_type, *, inputs=None, outputs=None, widgets=None, mode=0
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("spec", [{"type": "STRING"}, 7, []])
+def test_named_widget_survives_non_sequence_input_spec(object_info, spec):
+    object_info["CLIPTextEncode"]["input"]["required"]["text"] = spec
+    workflow = {"nodes": [_node(1, "CLIPTextEncode", widgets={"text": "keep this text"})], "links": []}
+
+    prompt = convert_ui_to_api(workflow, object_info)
+
+    assert prompt["1"]["inputs"] == {"text": "keep this text"}
+
+
 class TestIsApiFormat:
     def test_recognizes_api(self):
         assert is_api_format({"1": {"class_type": "Foo", "inputs": {}}})

@@ -11,6 +11,96 @@ from comfy_cli.cql.widget_catalog import build_catalog
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "dynamic_group.json").read_text())
 
 
+@pytest.mark.parametrize("shape", ["array", "explicit_form", "with_upload"])
+@pytest.mark.parametrize(
+    ("node_type", "field", "flag", "filename", "extras"),
+    [
+        ("DevToolsNodeWithDynamicGroup", "image", "image_upload", "example.png", ["upload"]),
+        ("LoadAudio", "audio", "audio_upload", "example.wav", ["audioUI", "upload"]),
+    ],
+)
+def test_group_with_upload_keeps_serializable_values_editable(shape, node_type, field, flag, filename, extras):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    schema = info[node_type] = copy.deepcopy(info["DevToolsNodeWithDynamicGroup"])
+    schema["input"]["required"][field] = [[filename], {flag: True}]
+    schema["input_order"]["required"].append(field)
+    graph = Graph.from_object_info(info)
+    workflow, _ = workflow_ops.add_node({"nodes": [], "links": []}, graph, node_type)
+    node = workflow["nodes"][0]
+    if shape == "with_upload":
+        node["widgets_values"].extend(extras)
+    elif shape == "explicit_form":
+        node["widgets_values_form"] = {"order": ["before", "loras", "after", field]}
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, node["id"], "after", "edited tail")
+    prompt = workflow_to_api.convert_ui_to_api(edited, info)
+
+    assert prompt[str(node["id"])]["inputs"] == {"before": "first", "after": "edited tail", field: filename}
+    slots = graph.get_template_schema("example", edited)["slots"]
+    assert {slot["name"]: slot["current_value"] for slot in slots}["after"] == "edited tail"
+    grown, _ = workflow_ops.set_widget(edited, graph, node["id"], "loras", 1)
+    assert workflow_to_api.convert_ui_to_api(grown, info)[str(node["id"])]["inputs"] == {
+        "before": "first",
+        "after": "edited tail",
+        field: filename,
+        "loras.0.lora_name": "A.safetensors",
+        "loras.0.strength": 1,
+        "loras.0.enabled": True,
+    }
+
+
+@pytest.mark.parametrize("named", [None, [], "invalid", {"value": 1}])
+def test_plain_node_edit_leaves_named_sidecar_unchanged(named):
+    saved_named = copy.deepcopy(named)
+    graph = Graph.from_object_info({"Plain": {"input": {"required": {"value": ["INT", {"default": 1}]}}}})
+    workflow = {
+        "nodes": [{"id": 1, "type": "Plain", "widgets_values": [1], "widgets_values_named": named}],
+        "links": [],
+    }
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "value", 2)
+
+    assert edited["nodes"][0]["widgets_values"] == [2]
+    assert edited["nodes"][0]["widgets_values_named"] == saved_named
+
+
+@pytest.mark.parametrize("shape", ["array", "object", "explicit_form"])
+def test_recipe_can_lift_a_saved_dynamic_row_field(shape):
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    node = workflow["nodes"][0]
+    if shape == "object":
+        node["widgets_values"] = node["widgets_values_named"].copy()
+    elif shape == "explicit_form":
+        node["widgets_values_form"] = {"order": list(node["widgets_values_named"])}
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+
+    recipe, _ = workflow_ops.capture_recipe(workflow, graph, lift={(1, "loras.1.strength"): "gain"})
+
+    assert recipe["params"]["gain"]["default"] == 0.5
+    assert any(op.get("widget") == "loras.1.strength" and op.get("value") == "${gain}" for op in recipe["ops"])
+
+
+def test_dynamic_combo_schema_walk_has_linear_option_lookup_cost():
+    options = [{"key": str(i), "inputs": {"required": {"value": ["INT", {"default": i}]}}} for i in range(32)]
+    graph = Graph.from_object_info(
+        {"Combo": {"input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}}}}
+    )
+    lookups = []
+
+    class CountedOption(dict):
+        def get(self, key, default=None):
+            if key == "key":
+                lookups.append(key)
+            return super().get(key, default)
+
+    node = graph.node("Combo")
+    assert node is not None
+    node.inputs[0].dynamic_options = [CountedOption(option) for option in options]
+
+    assert graph.widget_order_for_node("Combo", ["31", 31]) == ["mode", "mode.value"]
+    assert 0 < len(lookups) <= 2 * len(options)
+
+
 @pytest.mark.parametrize("case_name", ["empty", "populated"])
 def test_dynamic_group_conversion_matches_frontend(case_name):
     case = FIXTURE["cases"][case_name]

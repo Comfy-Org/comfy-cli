@@ -3862,8 +3862,10 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
     lists) are included with ``is_link=True`` so callers can skip them.
     """
     option = next((o for o in dynamic_options if o.get("key") == selector), None)
-    if option is None:
-        return []
+    return _dynamic_combo_option_ports(option, prefix) if option is not None else []
+
+
+def _dynamic_combo_option_ports(option: dict, prefix: str) -> list[Port]:
     sub_def = option.get("inputs")
     if not isinstance(sub_def, dict):
         return []
@@ -3962,7 +3964,7 @@ def _validate_dynamic_group_schema(m: Morphism) -> None:
         if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
             return
         for option in port.dynamic_options:
-            for sub in _dynamic_combo_sub_ports(port.dynamic_options, option.get("key"), port.name):
+            for sub in _dynamic_combo_option_ports(option, port.name):
                 if sub.type.startswith("COMFY_DYNAMICGROUP"):
                     raise DynamicGroupBindingError("CLI does not support DynamicGroup inside DynamicCombo")
                 reject_nested_group(sub, depth + 1)
@@ -4001,6 +4003,10 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
         else:
             raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
     entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
+    saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
+    if saved_length is not None:
+        while len(entries) > saved_length and entries[-1].frontend_injected:
+            entries.pop()
     if form is not None and form["order"] != [e.name for e in entries]:
         raise DynamicGroupBindingError("widgets_values_form does not match the available DynamicGroup schema")
     if isinstance(values, list) and len(entries) != len(values):
@@ -4418,7 +4424,8 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    has_group = _validate_dynamic_group_layout(node, m) is not None
+    group_entries = _validate_dynamic_group_layout(node, m)
+    has_group = group_entries is not None
     if has_group and "widgets_values_named" in node and not isinstance(node["widgets_values_named"], dict):
         raise ValueError("widgets_values_named must be an object before editing widgets")
     raw_values = node.get("widgets_values")
@@ -4429,6 +4436,8 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):
         raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
+    if group_entries is not None:
+        entries = group_entries
     try:
         widget_idx = order.index(input_name)
     except ValueError:
@@ -4477,7 +4486,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         node["widgets_values"] = {**raw_values, input_name: value}
     else:
         node["widgets_values"] = widgets
-    if "widgets_values_named" in node:
+    if has_group and "widgets_values_named" in node:
         node["widgets_values_named"][input_name] = value
     return warnings
 

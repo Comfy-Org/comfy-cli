@@ -60,7 +60,7 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import frontend_injected_widget_error, is_wildcard_type
+from comfy_cli.cql.engine import _widgets_as_positional, frontend_injected_widget_error, is_wildcard_type
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -2124,7 +2124,9 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             )
         # Editable names only: an injected slot (``upload``) owns a position
         # but no value, and apply would refuse it anyway — say so up front.
-        if widget not in graph.editable_widget_names(node.get("type", "")):
+        node_type = node.get("type", "")
+        values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
+        if widget not in graph.editable_widget_names(node_type, values):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
 
     warnings: list[dict] = []
