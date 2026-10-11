@@ -1531,7 +1531,10 @@ class TestRootCLIWiring:
         from comfy_cli.cmdline import app as root_app
 
         mock_fetch.return_value = raw_api_response
-        result = runner.invoke(root_app, ["code-search", "--json", "LoadImage"])
+        # Preserve the reported installed-CLI regression shape: the positional
+        # query comes before its options. A lazy Click Group rejects this order;
+        # the intended LazyCommand accepts it.
+        result = runner.invoke(root_app, ["code-search", "LoadImage", "--json", "--count", "1"])
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert "results" in parsed
