@@ -414,6 +414,16 @@ class TestFormatResults:
         with pytest.raises(SearchUnavailableError):
             _format_results(search)
 
+    def test_falsy_non_string_file_path_raises(self):
+        """An empty list is falsy like a real empty string, but is not a str
+        the way a bare `or ""` fallback would assume — it must be rejected
+        rather than silently coerced to an empty path."""
+        search = {
+            "results": {"results": [{"repository": {"name": "github.com/Comfy-Org/ComfyUI"}, "file": {"path": []}}]}
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
     def test_non_int_line_number_raises(self):
         search = {
             "results": {
@@ -422,6 +432,61 @@ class TestFormatResults:
                         "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
                         "file": {"path": "x.py"},
                         "lineMatches": [{"lineNumber": "not-a-number", "preview": "x"}],
+                    }
+                ]
+            }
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_line_number_zero_is_preserved(self):
+        """`lineNumber: 0` is a real zero-based match, not an absent value —
+        it must become `line: 1`, not be silently replaced by the `or 0`
+        fallback path's own default (which would produce the same `line: 1`
+        here by coincidence, but must not do so via the wrong branch)."""
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": [{"lineNumber": 0, "preview": "x"}],
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        assert results[0]["matches"][0]["line"] == 1
+
+    def test_false_line_number_raises(self):
+        """`lineNumber: false` is falsy like a real 0, but is not an int the
+        way a bare `or 0` fallback would assume — it must be rejected rather
+        than silently coerced to a valid line number."""
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": [{"lineNumber": False, "preview": "x"}],
+                    }
+                ]
+            }
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_empty_list_preview_raises(self):
+        """An empty list is falsy like a real empty string, but is not a str
+        the way a bare `or ""` fallback would assume — it must be rejected
+        rather than silently coerced to an empty preview."""
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": [{"lineNumber": 1, "preview": []}],
                     }
                 ]
             }

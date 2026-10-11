@@ -243,7 +243,9 @@ def _format_results(search: dict) -> list[dict]:
         if file_info is not None and not isinstance(file_info, dict):
             raise SearchUnavailableError("code search returned a malformed file entry")
         file_info = file_info or {}
-        file_path = file_info.get("path") or ""
+        file_path = file_info.get("path")
+        if file_path is None:
+            file_path = ""
         if not isinstance(file_path, str):
             raise SearchUnavailableError("code search returned a malformed file path")
         file_path = _strip_control_chars(file_path)
@@ -284,11 +286,15 @@ def _format_results(search: dict) -> list[dict]:
         for m in line_matches:
             if not isinstance(m, dict):
                 raise SearchUnavailableError("code search returned a malformed line match entry")
-            line_number = m.get("lineNumber") or 0
+            line_number = m.get("lineNumber")
+            if line_number is None:
+                line_number = 0
             if not isinstance(line_number, int) or isinstance(line_number, bool):
                 raise SearchUnavailableError("code search returned a malformed line number")
             line = line_number + 1
-            preview = m.get("preview") or ""
+            preview = m.get("preview")
+            if preview is None:
+                preview = ""
             if not isinstance(preview, str):
                 raise SearchUnavailableError("code search returned a malformed line preview")
             preview = _strip_control_chars(preview.rstrip())
