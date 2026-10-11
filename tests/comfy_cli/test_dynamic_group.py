@@ -65,19 +65,104 @@ def test_plain_node_edit_leaves_named_sidecar_unchanged(named):
 
 
 @pytest.mark.parametrize("shape", ["array", "object", "explicit_form"])
-def test_recipe_can_lift_a_saved_dynamic_row_field(shape):
+@pytest.mark.parametrize(
+    ("type_id", "param_type", "supplied", "expected"),
+    [("FLOAT", "float", "0.7", 0.7), ("INT", "int", "2", 2), ("BOOLEAN", "bool", "false", False)],
+)
+def test_recipe_can_lift_a_saved_dynamic_row_field(shape, type_id, param_type, supplied, expected):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    field = info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"]["required"]["strength"]
+    field[0] = type_id
+    if type_id == "BOOLEAN":
+        field[1] = {"default": True}
     workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
     node = workflow["nodes"][0]
+    if type_id != "FLOAT":
+        node["widgets_values"][3] = node["widgets_values"][6] = 1 if type_id == "INT" else True
+        node["widgets_values_named"]["loras.0.strength"] = node["widgets_values_named"]["loras.1.strength"] = (
+            1 if type_id == "INT" else True
+        )
     if shape == "object":
         node["widgets_values"] = node["widgets_values_named"].copy()
     elif shape == "explicit_form":
         node["widgets_values_form"] = {"order": list(node["widgets_values_named"])}
-    graph = Graph.from_object_info(FIXTURE["object_info"])
+    graph = Graph.from_object_info(info)
 
     recipe, _ = workflow_ops.capture_recipe(workflow, graph, lift={(1, "loras.1.strength"): "gain"})
 
-    assert recipe["params"]["gain"]["default"] == 0.5
+    assert recipe["params"]["gain"]["type"] == param_type
+    assert recipe["params"]["gain"]["default"] == (0.5 if type_id == "FLOAT" else 1 if type_id == "INT" else True)
     assert any(op.get("widget") == "loras.1.strength" and op.get("value") == "${gain}" for op in recipe["ops"])
+    params = workflow_ops.resolve_params(recipe["params"], {"gain": supplied})
+    rebuilt, _, _ = workflow_ops.apply_specs(
+        {"nodes": [], "links": []}, graph, workflow_ops.substitute_params(recipe["ops"], params)
+    )
+    inputs = next(iter(workflow_to_api.convert_ui_to_api(rebuilt, info).values()))["inputs"]
+    assert inputs["loras.1.strength"] == expected
+    assert type(inputs["loras.1.strength"]) is type(expected)
+
+
+def test_group_row_combo_edit_normalizes_model_path_and_replays():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+
+    edited, op = workflow_ops.set_widget(workflow, graph, 1, "loras.1.lora_name", "loras/A.safetensors")
+    replayed = workflow_ops.apply_op(workflow, op, graph)
+
+    assert op["value"] == "A.safetensors"
+    assert workflow_to_api.convert_ui_to_api(edited, FIXTURE["object_info"])["1"]["inputs"]["loras.1.lora_name"] == (
+        "A.safetensors"
+    )
+    assert workflow_to_api.convert_ui_to_api(replayed, FIXTURE["object_info"]) == workflow_to_api.convert_ui_to_api(
+        edited, FIXTURE["object_info"]
+    )
+
+
+@pytest.mark.parametrize("target", ["controller", "field"])
+@pytest.mark.parametrize("operation", ["catalog", "conversion", "edit", "slots"])
+def test_group_default_input_refuses_before_binding(target, operation):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    options = info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]
+    if target == "field":
+        options = options["template"]["required"]["strength"][1]
+    options["defaultInput"] = True
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    original = copy.deepcopy(workflow)
+    graph = Graph.from_object_info(info)
+    error_type = workflow_to_api.WorkflowConversionError if operation == "conversion" else ValueError
+
+    with pytest.raises(error_type, match="DynamicGroup"):
+        if operation == "catalog":
+            build_catalog(graph)
+        elif operation == "conversion":
+            workflow_to_api.convert_ui_to_api(workflow, info)
+        elif operation == "edit":
+            workflow_ops.set_widget(workflow, graph, 1, "after", "edited")
+        else:
+            graph.get_template_schema("example", workflow)
+    assert workflow == original
+
+
+@pytest.mark.parametrize("flag", [0, "false"])
+def test_group_refuses_non_boolean_seed_control_flag(flag):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    fields = info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"]["required"]
+    fields["strength"][1]["control_after_generate"] = flag
+
+    with pytest.raises(ValueError, match="control_after_generate"):
+        build_catalog(Graph.from_object_info(info))
+
+
+@pytest.mark.parametrize("shape", ["missing", "null"])
+def test_group_conversion_refuses_missing_saved_values(shape):
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    node = workflow["nodes"][0]
+    node.pop("widgets_values")
+    if shape == "null":
+        node["widgets_values"] = None
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="DynamicGroup"):
+        workflow_to_api.convert_ui_to_api(workflow, FIXTURE["object_info"])
 
 
 def test_dynamic_combo_schema_walk_has_linear_option_lookup_cost():
@@ -754,12 +839,16 @@ def test_group_rejects_unsupported_template_fields(field_spec, operation):
 
 
 @pytest.mark.parametrize("operation", ["catalog", "array_conversion", "named_conversion"])
-def test_group_inside_dynamic_combo_is_explicitly_unsupported_by_cli(operation):
+@pytest.mark.parametrize("combo_type", ["COMFY_DYNAMICCOMBO_V3", "COMFY_COMBO_V2"])
+@pytest.mark.parametrize("group_options", [True, False])
+def test_group_inside_dynamic_combo_is_explicitly_unsupported_by_cli(operation, combo_type, group_options):
     info = copy.deepcopy(FIXTURE["object_info"])
     schema = info["DevToolsNodeWithDynamicGroup"]
     group = schema["input"]["required"].pop("loras")
+    if not group_options:
+        group = group[:1]
     schema["input"]["required"]["mode"] = [
-        "COMFY_DYNAMICCOMBO_V3",
+        combo_type,
         {"options": [{"key": "stack", "inputs": {"required": {"loras": group}}}]},
     ]
     schema["input_order"]["required"] = ["before", "mode", "after"]

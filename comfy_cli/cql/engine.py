@@ -3952,6 +3952,16 @@ def _validate_dynamic_group_port(port: Port) -> None:
         raise DynamicGroupBindingError(
             f"DynamicGroup template under {port.name!r} requires non-dynamic widgets without forceInput"
         )
+    for widget in [port, *fields]:
+        spec = widget.raw_spec
+        options = spec[1] if isinstance(spec, (list, tuple)) and len(spec) > 1 and isinstance(spec[1], dict) else {}
+        if options.get("defaultInput"):
+            raise DynamicGroupBindingError(f"DynamicGroup widget {widget.name!r} must not use defaultInput")
+        control = options.get("control_after_generate")
+        if widget is not port and control is not None and not isinstance(control, bool):
+            raise DynamicGroupBindingError(
+                f"DynamicGroup field {widget.name!r} requires a boolean control_after_generate flag"
+            )
     names = [field.name for field in fields]
     if any(not isinstance(name, str) or not name or "." in name for name in names):
         raise DynamicGroupBindingError(f"DynamicGroup template under {port.name!r} requires undotted field names")

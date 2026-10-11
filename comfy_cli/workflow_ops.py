@@ -60,7 +60,12 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import _widgets_as_positional, frontend_injected_widget_error, is_wildcard_type
+from comfy_cli.cql.engine import (
+    _dynamic_group_widgets,
+    _widgets_as_positional,
+    frontend_injected_widget_error,
+    is_wildcard_type,
+)
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -841,6 +846,20 @@ def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
     return int(bound) if bound.lstrip("-").isdigit() else bound
 
 
+def _widget_schema_port(graph, class_type: str, widget: str):
+    m = graph.node(class_type)
+    if m is None:
+        return None
+    port = next((p for p in m.inputs if p.name == widget), None)
+    if port is None:
+        group = next((p for p in m.inputs if p.is_dynamic_group and widget.startswith(f"{p.name}.")), None)
+        if group is not None:
+            row, separator, _field = widget[len(group.name) + 1 :].partition(".")
+            if separator and row.isascii() and row.isdecimal() and (len(row) == 1 or not row.startswith("0")):
+                port = next((p for p in _dynamic_group_widgets(group, f"{group.name}.{row}") if p.name == widget), None)
+    return port
+
+
 def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
     """Rewrite a mangled model/COMBO value to the real option it means so the
     model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
@@ -849,10 +868,7 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     UNAMBIGUOUS match is rewritten; anything else is left untouched so validate's
     ``unknown_enum_value`` (with ``did_you_mean``) still fires.
     """
-    m = graph.node(class_type)
-    if m is None:
-        return value, None
-    port = next((p for p in m.inputs if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
     if port is None:
         return value, None
     text = _string_widget_text(port, value)
@@ -2303,8 +2319,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
 def _widget_param_type(graph, class_type: str, widget: str) -> str:
     """Recipe param type for a widget, from its schema port type."""
-    m = graph.node(class_type)
-    port = next((p for p in (m.inputs if m else []) if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
     t = (port.type if port else "").upper()
     if t == "INT":
         return "int"
@@ -3296,18 +3311,9 @@ class FatalFindingError(ValueError):
 def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
-    from comfy_cli.cql.engine import SEVERITY_ERROR, _dynamic_group_widgets
+    from comfy_cli.cql.engine import SEVERITY_ERROR
 
-    m = graph.node(class_type)
-    if m is None:
-        return []
-    port = next((p for p in m.inputs if p.name == widget), None)
-    if port is None:
-        group = next((p for p in m.inputs if p.is_dynamic_group and widget.startswith(f"{p.name}.")), None)
-        if group is not None:
-            row, separator, _field = widget[len(group.name) + 1 :].partition(".")
-            if separator and row.isascii() and row.isdecimal() and (len(row) == 1 or not row.startswith("0")):
-                port = next((p for p in _dynamic_group_widgets(group, f"{group.name}.{row}") if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
     if port is None:
         return []
     err = port.validate_shape(value)

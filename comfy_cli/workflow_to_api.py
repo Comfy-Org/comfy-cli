@@ -30,6 +30,7 @@ from comfy_cli.cql.engine import (
     DynamicGroupBindingError,
     _dynamic_group_fields,
     _dynamic_group_row_count,
+    _is_dynamic_combo_type,
     _parse_morphism,
     _validate_dynamic_group_layout,
     _validate_dynamic_group_schema,
@@ -1608,8 +1609,6 @@ def _collect_widget_inputs(
     node: dict, node_type: str, object_info: dict, link_inputs: dict[str, list]
 ) -> dict[str, Any]:
     widget_values = node.get("widgets_values")
-    if widget_values is None:
-        return {}
     dynamic_prompt_names = _dynamic_prompt_input_names(node_type, node, object_info)
 
     def emit(name: str, value: Any) -> Any:
@@ -1633,7 +1632,7 @@ def _collect_widget_inputs(
         isinstance(spec, (list, tuple))
         and spec
         and isinstance(spec[0], str)
-        and (spec[0].startswith("COMFY_DYNAMICGROUP") or spec[0] == "COMFY_DYNAMICCOMBO_V3")
+        and (spec[0].startswith("COMFY_DYNAMICGROUP") or _is_dynamic_combo_type(spec[0]))
         for spec in input_specs
     ):
         morphism = _parse_morphism(node_type, schema)
@@ -1648,6 +1647,8 @@ def _collect_widget_inputs(
             for e in entries
             if e.owner in fields and e.name[len(e.owner) + 1 :].partition(".")[2] not in fields[e.owner]
         )
+    if widget_values is None:
+        return {}
     if isinstance(widget_values, dict):
         # Already self-describing; drop UI-only keys and respect link overrides.
         for key, value in widget_values.items():
