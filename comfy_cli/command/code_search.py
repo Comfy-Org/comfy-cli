@@ -54,11 +54,20 @@ _INJECTED_FILTER_RE = re.compile(
 # OSC 8 hyperlinks, OSC 52 clipboard writes). `preview`, `repo`, and `path`
 # come from public indexed code the service does not sanitize, so they must
 # be scrubbed before reaching the terminal. Rich's own Text already strips
-# BEL/BS/VT/FF/CR; tab and newline are excluded here (`\x09`, `\x0a`) since
-# previews are legitimately tab-indented code and this is one line, not a
-# cursor-control surface — stripping them would mangle ordinary indentation
-# without closing any ANSI/OSC gap.
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# BEL/BS/VT/FF/CR.
+#
+# Tab (`\x09`) is excluded: previews are legitimately tab-indented code and
+# tab closes no ANSI/OSC gap, so stripping it would mangle ordinary
+# indentation for no benefit.
+#
+# Newline (`\x0a`) is NOT excluded, and that is deliberate. Each preview is
+# rendered as exactly one row, so an embedded newline lets a hostile indexed
+# repository emit a second row that is byte-identical to a genuine match —
+# attributing a fabricated snippet to a repository the user trusts.
+# UNTRUSTED_CONTENT_NOTE does not mitigate that, because the forged row is
+# indistinguishable from the real ones. Sourcegraph previews are single lines
+# by contract, so removing newlines costs nothing legitimate.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
 
 
 def _strip_control_chars(text: str) -> str:
@@ -175,21 +184,70 @@ def _fetch_results(query: str) -> dict:
         raise SearchUnavailableError("code search response stream was truncated or invalid") from exc
     try:
         data = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
+    # json.JSONDecodeError subclasses ValueError but does not cover every
+    # ValueError json.loads can raise: CPython 3.11+ caps int(str) conversion
+    # at sys.get_int_max_str_digits() and raises a *plain* ValueError for a
+    # longer numeric literal. RecursionError (deeply nested input) is not a
+    # ValueError at all. Both are reachable well under MAX_RESPONSE_BYTES, so
+    # the size cap does not screen them — catch them here instead of letting a
+    # raw traceback escape.
+    except (ValueError, UnicodeDecodeError, TypeError, RecursionError) as exc:
         raise SearchUnavailableError("code search returned a malformed response") from exc
     if not isinstance(data, dict) or not data:
         raise SearchUnavailableError("code search returned an empty response")
     return data
 
 
+# Our own out-of-band channel on the validated `search` node for carrying a
+# partial-failure notice to the formatter. Underscore-prefixed because it is
+# not part of the service's schema; _decode_search always overwrites it so a
+# service that sends a field by this name cannot inject an advisory.
+_ADVISORY_KEY = "_advisory"
+
+
+def _alert_message(alert) -> str:
+    """Flatten a Sourcegraph `alert` into one advisory line."""
+    if isinstance(alert, dict):
+        return ": ".join(str(alert[key]) for key in ("title", "description") if alert.get(key))
+    return str(alert)
+
+
+def _has_usable_matches(results: dict) -> bool:
+    """True when `results` carries at least one match entry we could render.
+
+    This is the partial-result test. Sourcegraph attaches advisory alerts to
+    searches that *succeeded in part* — repositories that timed out, shards it
+    could not reach, a limit it hit — and still returns the matches it did
+    find. GraphQL likewise permits a non-empty `errors` array alongside usable
+    `data`. Treating either signal as a flat rejection discards results the
+    user asked for and reports it as a query syntax error (exit 2), so queries
+    that used to work start looking broken. Reject only when there is in fact
+    nothing to show.
+    """
+    entries = results.get("results")
+    return isinstance(entries, list) and bool(entries)
+
+
 def _decode_search(data: dict) -> dict:
+    """Validate the response envelope and return the `search` node.
+
+    Sets `search["_advisory"]` to a human-readable string when the service
+    reported a partial failure (GraphQL `errors`, or a `results.alert`) but
+    still returned usable matches. Raises QueryRejectedError when the service
+    reported a problem and there is nothing usable to show.
+    """
     errors = data.get("errors")
+    error_message = ""
     if isinstance(errors, list) and errors:
         messages = [str(item.get("message", "query rejected")) for item in errors if isinstance(item, dict)]
-        raise QueryRejectedError("; ".join(messages) or "query rejected")
+        error_message = "; ".join(messages) or "query rejected"
 
     payload = data.get("data")
     if not isinstance(payload, dict) or payload.get("search") is None:
+        # No usable payload at all, so an `errors` array here is a true
+        # rejection rather than a partial failure.
+        if error_message:
+            raise QueryRejectedError(error_message)
         if "data" in data:
             raise QueryRejectedError("query rejected by the search service")
         raise SearchUnavailableError("code search response did not contain search data")
@@ -199,13 +257,23 @@ def _decode_search(data: dict) -> dict:
     results = search.get("results")
     if not isinstance(results, dict):
         raise SearchUnavailableError("code search returned malformed results data")
+
+    usable = _has_usable_matches(results)
+    if error_message and not usable:
+        raise QueryRejectedError(error_message)
+
+    alert_message = ""
     alert = results.get("alert")
     if alert:
-        if isinstance(alert, dict):
-            message = ": ".join(str(alert[key]) for key in ("title", "description") if alert.get(key))
-        else:
-            message = str(alert)
-        raise QueryRejectedError(message or "query rejected by the search service")
+        alert_message = _alert_message(alert)
+        if not usable:
+            raise QueryRejectedError(alert_message or "query rejected by the search service")
+
+    advisory = "; ".join(part for part in (error_message, alert_message) if part)
+    # Always assign, never leave a service-supplied value in place: the key is
+    # ours, and the response is attacker-influenced, so an inbound `_advisory`
+    # must not survive into output as if we had derived it.
+    search[_ADVISORY_KEY] = advisory
     return search
 
 
@@ -330,6 +398,9 @@ def _get_stats(search: dict) -> dict:
         "approximate_count": stats.get("approximateResultCount") or "0",
         "match_count": results.get("matchCount") or 0,
         "limit_hit": bool(results.get("limitHit") or False),
+        # Set by _decode_search when the service degraded the search but still
+        # returned matches. Service-controlled text — treat as untrusted.
+        "advisory": str(search.get(_ADVISORY_KEY) or ""),
     }
 
 
@@ -339,6 +410,13 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
         return
 
     console.print(f"[yellow]{UNTRUSTED_CONTENT_NOTE}[/yellow]")
+
+    advisory = stats.get("advisory")
+    if advisory:
+        # Partial failure with usable matches: say so, next to the matches,
+        # instead of discarding them. The text is service-controlled, so it
+        # goes through the same escape/strip path as a rejection message.
+        console.print(f"[yellow]Partial results: {_safe_markup_text(advisory)}[/yellow]")
 
     if not results:
         console.print("[yellow]No results found.[/yellow]")

