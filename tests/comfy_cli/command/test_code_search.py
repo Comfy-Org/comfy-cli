@@ -8,6 +8,7 @@ import pytest
 import requests
 from typer.testing import CliRunner
 
+from comfy_cli._lazy import LazyCommand
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
@@ -1530,10 +1531,44 @@ class TestRootCLIWiring:
         from comfy_cli.cmdline import app as root_app
 
         mock_fetch.return_value = raw_api_response
-        result = runner.invoke(root_app, ["code-search", "--json", "LoadImage"])
+        # Preserve the reported installed-CLI regression shape: the positional
+        # query comes before its options. A lazy Click Group rejects this order;
+        # the intended LazyCommand accepts it.
+        result = runner.invoke(root_app, ["code-search", "LoadImage", "--json", "--count", "1"])
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert "results" in parsed
+
+    def test_installed_root_shape_does_not_require_nested_command(self):
+        """The lazy root must expose QUERY directly, not as a Typer subgroup."""
+        from comfy_cli.cmdline import _RootGroup
+
+        entry = _RootGroup.lazy_subcommands["code-search"]
+        assert isinstance(entry, LazyCommand)
+        assert entry.attr == "code_search"
+
+    def test_root_help_shows_command_but_hides_alias(self):
+        """The discoverable command is public while its short alias stays hidden."""
+        from comfy_cli.cmdline import app as root_app
+
+        result = runner.invoke(root_app, ["--help"])
+        assert result.exit_code == 0, result.output
+        assert "code-search" in result.output
+        assert "\n\u2502 cs " not in result.output
+
+    def test_cs_alias_resolves_hidden_regardless_of_rendering_mode(self):
+        """The rendered-text check above depends on rich's panel border; this
+        resolves the built command directly so the guarantee holds even
+        under plain/no-color rendering."""
+        import typer.main
+        from click import Context
+
+        from comfy_cli.cmdline import app as root_app
+
+        root_command = typer.main.get_command(root_app)
+        command = root_command.get_command(Context(root_command), "cs")
+        assert command is not None
+        assert command.hidden is True
 
     @patch("comfy_cli.tracking.prompt_tracking_consent")
     @patch("comfy_cli.cmdline.workspace_manager")

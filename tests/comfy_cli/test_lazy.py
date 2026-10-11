@@ -166,6 +166,19 @@ def test_lazy_command_renders_exactly_like_app_command(monkeypatch):
     assert "reg ['x', 'y']" in runner.invoke(lazy, ["reg", "--", "x", "y"]).output
 
 
+def test_lazy_command_hidden_applies_on_register_branch_too(monkeypatch):
+    def register_with(parent: typer.Typer) -> None:
+        @parent.command(name="reg")
+        def _reg():
+            typer.echo("reg")
+
+    _fake_module(monkeypatch, "_lz_e", register_with=register_with)
+    lazy = _lazy_root({"reg": LazyCommand("_lz_e", register="register_with", hidden=True)})
+    group = typer.main.get_command(lazy)
+    cmd = group.get_command(None, "reg")
+    assert cmd.hidden is True
+
+
 def test_lazy_group_renders_exactly_like_add_typer(monkeypatch):
     seen: list[str] = []
     sub = _sub_app("c")
