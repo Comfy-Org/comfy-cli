@@ -3675,6 +3675,7 @@ def _widgets_as_positional(widgets_values: Any, graph: Graph | None, class_type:
     onto the class's default widget order when the catalog knows it — each
     named value lands at its schema position, names the schema doesn't know are
     dropped (they have no positional home), and missing names read as ``None``.
+    Group layouts retain the count and selector defaults used by their walk.
     Without a catalog (or an unknown class) this degrades to
     :func:`_widgets_as_list`'s "no positional values known" behavior.
 
@@ -3688,10 +3689,16 @@ def _widgets_as_positional(widgets_values: Any, graph: Graph | None, class_type:
     if isinstance(widgets_values, dict) and graph is not None:
         morphism = graph.node(class_type)
         if morphism and any(p.is_dynamic_group for p in morphism.inputs):
-            return [
-                widgets_values.get(entry.name, 0 if entry.port and entry.port.is_dynamic_group else None)
-                for entry in _expand_widget_entries(morphism, widgets_values)
-            ]
+            values = []
+            for entry in _expand_widget_entries(morphism, widgets_values):
+                default = None
+                if entry.port:
+                    if entry.port.is_dynamic_group:
+                        default = 0
+                    elif _is_dynamic_combo_type(entry.port.type) and entry.port.dynamic_options:
+                        default = entry.port.options.default
+                values.append(widgets_values.get(entry.name, default))
+            return values
         order = graph.widget_order_default(class_type)
         if order:
             return [widgets_values.get(name) for name in order]

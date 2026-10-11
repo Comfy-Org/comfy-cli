@@ -4,11 +4,34 @@ from pathlib import Path
 
 import pytest
 
-from comfy_cli import workflow_ops, workflow_to_api
+from comfy_cli import workflow_ops, workflow_print, workflow_to_api
 from comfy_cli.cql.engine import Graph
 from comfy_cli.cql.widget_catalog import build_catalog
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "dynamic_group.json").read_text())
+
+
+def test_named_group_reads_keep_an_omitted_combo_selector_default():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["CompositeDynamicGroup"]["input"]["required"]["mode"][1]["default"] = "advanced"
+    workflow = copy.deepcopy(FIXTURE["cases"]["composite"]["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = node["widgets_values_named"].copy()
+    del node["widgets_values"]["mode"]
+    saved = copy.deepcopy(node["widgets_values"])
+    graph = Graph.from_object_info(info)
+
+    slots = graph.get_template_schema("example", workflow)["slots"]
+    values = {slot["name"]: slot["current_value"] for slot in slots}
+    assert values["mode"] == "advanced"
+    assert values["mode.steps"] == 7
+    assert values["weights.0.seed"] == 5
+    assert values["weights.0.weight"] == 0.25
+    assert values["after"] == "tail"
+    printed = workflow_print.render_py(workflow, graph).source
+    assert 'mode="advanced"' in printed
+    assert 'after="tail"' in printed
+    assert node["widgets_values"] == saved
 
 
 @pytest.mark.parametrize("shape", ["array", "explicit_form", "with_upload"])
