@@ -407,6 +407,43 @@ class TestFormatResults:
         with pytest.raises(SearchUnavailableError):
             _format_results(search)
 
+    def test_non_string_file_path_raises(self):
+        search = {
+            "results": {"results": [{"repository": {"name": "github.com/Comfy-Org/ComfyUI"}, "file": {"path": 123}}]}
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_int_line_number_raises(self):
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": [{"lineNumber": "not-a-number", "preview": "x"}],
+                    }
+                ]
+            }
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_string_preview_raises(self):
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": [{"lineNumber": 1, "preview": ["not-a-string"]}],
+                    }
+                ]
+            }
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
     def test_null_commit_does_not_crash(self):
         """`target.commit: null` (key present, value None) must not raise
         AttributeError — `.get("commit", {})` only falls back to `{}` when

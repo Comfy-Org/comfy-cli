@@ -244,6 +244,8 @@ def _format_results(search: dict) -> list[dict]:
             raise SearchUnavailableError("code search returned a malformed file entry")
         file_info = file_info or {}
         file_path = file_info.get("path") or ""
+        if not isinstance(file_path, str):
+            raise SearchUnavailableError("code search returned a malformed file path")
         file_path = _strip_control_chars(file_path)
 
         if not clean_name or not file_path:
@@ -282,8 +284,14 @@ def _format_results(search: dict) -> list[dict]:
         for m in line_matches:
             if not isinstance(m, dict):
                 raise SearchUnavailableError("code search returned a malformed line match entry")
-            line = (m.get("lineNumber") or 0) + 1
-            preview = _strip_control_chars((m.get("preview") or "").rstrip())
+            line_number = m.get("lineNumber") or 0
+            if not isinstance(line_number, int) or isinstance(line_number, bool):
+                raise SearchUnavailableError("code search returned a malformed line number")
+            line = line_number + 1
+            preview = m.get("preview") or ""
+            if not isinstance(preview, str):
+                raise SearchUnavailableError("code search returned a malformed line preview")
+            preview = _strip_control_chars(preview.rstrip())
             matches.append({"line": line, "preview": preview, "url": f"{file_url}#L{line}" if file_url else ""})
 
         formatted.append(
