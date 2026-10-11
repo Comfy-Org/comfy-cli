@@ -10,11 +10,13 @@ from typer.testing import CliRunner
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
+    MAX_COUNT,
     MAX_QUERY_BYTES,
     MAX_RESPONSE_BYTES,
     REQUEST_TIMEOUT,
     TOTAL_REQUEST_DEADLINE,
     QueryRejectedError,
+    ResponseTooLargeError,
     SearchUnavailableError,
     _build_query,
     _decode_search,
@@ -22,6 +24,8 @@ from comfy_cli.command.code_search import (
     _format_results,
     _get_stats,
     _print_results,
+    _safe_markup_text,
+    _strip_control_chars,
     _validate_query,
     app,
 )
@@ -127,26 +131,48 @@ def limit_hit_response(limit_hit_search):
 
 class TestBuildQuery:
     def test_simple_query(self):
-        assert _build_query("LoadImage", None, DEFAULT_COUNT) == f"type:file count:{DEFAULT_COUNT} LoadImage"
+        assert _build_query("LoadImage", None, DEFAULT_COUNT) == f"type:file count:{DEFAULT_COUNT} (LoadImage)"
 
     def test_with_repo_short_name(self):
         result = _build_query("LoadImage", "ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} (LoadImage)"
 
     def test_with_repo_full_name(self):
         result = _build_query("LoadImage", "Comfy-Org/ComfyUI", DEFAULT_COUNT)
-        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} (LoadImage)"
 
     def test_with_custom_count(self):
         result = _build_query("LoadImage", None, 50)
-        assert result == "type:file count:50 LoadImage"
+        assert result == "type:file count:50 (LoadImage)"
 
     def test_with_repo_and_count(self):
         result = _build_query("LoadImage", "ComfyUI", 100)
-        assert result == "repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:100 LoadImage"
+        assert result == "repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:100 (LoadImage)"
+
+    def test_with_repo_already_host_qualified(self):
+        """Sourcegraph reports repo names in `github.com/org/name` form (e.g.
+        copy-pasted from search output) — must not double-prepend the host."""
+        result = _build_query("LoadImage", "github.com/Comfy-Org/ComfyUI", DEFAULT_COUNT)
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} (LoadImage)"
+        assert "github.com/github" not in result
+
+    def test_with_repo_full_url(self):
+        result = _build_query("LoadImage", "https://github.com/Comfy-Org/ComfyUI", DEFAULT_COUNT)
+        assert result == f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} (LoadImage)"
+        assert "github.com/github" not in result
 
     def test_rejects_injected_filters_and_repo_whitespace(self):
-        for query in ("count:99 x", "repo:evil x", "timeout:2s x"):
+        for query in (
+            "count:99 x",
+            "repo:evil x",
+            "timeout:2s x",
+            "context:evil x",
+            "rev:evil x",
+            "revision:evil x",
+            "fork:yes x",
+            "archived:yes x",
+            "select:repo x",
+        ):
             with pytest.raises(ValueError):
                 _validate_query(query, None)
         with pytest.raises(ValueError):
@@ -164,6 +190,17 @@ class TestBuildQuery:
             "foo -repo:evil",
             "foo -r:evil",
             "foo NOT repo:evil",
+            "foo OR (context:evil)",
+            "foo OR (rev:evil)",
+            "foo OR (revision:evil)",
+            "foo OR (fork:yes)",
+            "foo OR (archived:yes)",
+            "foo OR (select:repo)",
+            "foo -context:evil",
+            "foo -rev:evil",
+            "foo -fork:yes",
+            "foo -archived:yes",
+            "foo -select:repo",
         ):
             with pytest.raises(ValueError):
                 _validate_query(query, None)
@@ -173,6 +210,27 @@ class TestBuildQuery:
         for query in ("reporter:evil x", "myrepo:evil x", "repoman:evil x"):
             _validate_query(query, None)  # must not raise
 
+    def test_does_not_reject_benign_code_tokens_matching_filter_names(self):
+        """`r:` and `timeout:` must only reject real filter syntax (value glued
+        to the colon), not ordinary code where the token happens to be followed
+        by whitespace — a real Sourcegraph filter value is never separated
+        from its colon by a space."""
+        for query in (
+            "def handler(r: Request)",
+            "lambda r: r.id",
+            "timeout: 30",
+            "def foo(timeout: int = 30)",
+        ):
+            _validate_query(query, None)  # must not raise
+
+    def test_still_rejects_real_r_and_timeout_filters(self):
+        """Sanity check that tightening the regex didn't reopen the cases it
+        was meant to close: a real filter value glued to the colon is rejected
+        even though it now requires a non-space character after the colon."""
+        for query in ("foo r:evil", "foo timeout:99s", "foo -r:evil", "(timeout:99s)"):
+            with pytest.raises(ValueError):
+                _validate_query(query, None)
+
     def test_rejects_query_over_byte_limit(self):
         with pytest.raises(ValueError):
             _validate_query("é" * (MAX_QUERY_BYTES // 2 + 1), None)
@@ -181,11 +239,26 @@ class TestBuildQuery:
         """Don't inject type:file when the user already specified a type: filter."""
         result = _build_query("type:commit fix bug", None, DEFAULT_COUNT)
         assert "type:file" not in result
-        assert result == f"count:{DEFAULT_COUNT} type:commit fix bug"
+        assert result == f"count:{DEFAULT_COUNT} (type:commit fix bug)"
 
     def test_user_type_file_not_duplicated(self):
         result = _build_query("type:file LoadImage", None, DEFAULT_COUNT)
         assert result.count("type:file") == 1
+
+    def test_ungrouped_or_does_not_escape_pinned_filters(self):
+        """An ungrouped top-level OR must not let its second branch escape the
+        pinned repo:/type:/count: filters — Sourcegraph's AND binds tighter
+        than OR, so without wrapping the query in parens,
+        `repo:^...$ type:file count:N foo OR file:x bar` would parse as
+        `(repo:... type:file count:N foo) OR (file:x bar)`, leaving the
+        second branch completely unscoped."""
+        result = _build_query("foo OR file:x bar", "ComfyUI", DEFAULT_COUNT)
+        assert result == (
+            f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} (foo OR file:x bar)"
+        )
+        # The pinned filters must sit outside a single parenthesized group
+        # that wraps the whole user query, not be interleaved with it.
+        assert result.endswith("(foo OR file:x bar)")
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +342,176 @@ class TestFormatResults:
         assert len(results) == 1
         assert results[0]["matches"] == []
 
+    # -----------------------------------------------------------------
+    # Malformed-shape hardening (finding #6): anything beyond what
+    # `_decode_search` already validated must raise SearchUnavailableError,
+    # never crash with a raw traceback (AttributeError/TypeError/KeyError).
+    # -----------------------------------------------------------------
+
+    def test_null_results_results_is_unavailable(self):
+        """`results.results` present but null must not silently become []
+        via an unguarded `or []` that also swallows real malformed shapes —
+        it must be distinguishable from a genuinely malformed non-list."""
+        search = {"results": {"results": None}}
+        assert _format_results(search) == []
+
+    def test_non_list_results_results_raises(self):
+        search = {"results": {"results": "not-a-list"}}
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_dict_result_entry_raises(self):
+        search = {"results": {"results": ["not-a-dict"]}}
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_dict_repository_raises(self):
+        search = {"results": {"results": [{"repository": "not-a-dict", "file": {"path": "x.py"}}]}}
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_dict_file_raises(self):
+        search = {
+            "results": {"results": [{"repository": {"name": "github.com/Comfy-Org/ComfyUI"}, "file": "not-a-dict"}]}
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_list_line_matches_raises(self):
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": "not-a-list",
+                    }
+                ]
+            }
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_non_dict_line_match_entry_raises(self):
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": ["not-a-dict"],
+                    }
+                ]
+            }
+        }
+        with pytest.raises(SearchUnavailableError):
+            _format_results(search)
+
+    def test_null_commit_does_not_crash(self):
+        """`target.commit: null` (key present, value None) must not raise
+        AttributeError — `.get("commit", {})` only falls back to `{}` when
+        the key is *absent*, not when it is present-but-None."""
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {
+                            "name": "github.com/Comfy-Org/ComfyUI",
+                            "defaultBranch": {"displayName": "main", "target": {"commit": None}},
+                        },
+                        "file": {"path": "x.py"},
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        assert len(results) == 1
+        assert results[0]["commit"] == ""
+        assert results[0]["branch"] == "main"
+
+    def test_null_display_name_does_not_leak_none_into_branch(self):
+        """`defaultBranch.displayName: null` must not leak a None into the
+        `branch` field (e.g. when later JSON-serialized or concatenated)."""
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {
+                            "name": "github.com/Comfy-Org/ComfyUI",
+                            "defaultBranch": {"displayName": None, "target": {"commit": {"oid": "abc123"}}},
+                        },
+                        "file": {"path": "x.py"},
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        assert len(results) == 1
+        assert results[0]["branch"] == ""
+        assert isinstance(results[0]["branch"], str)
+
+    # -----------------------------------------------------------------
+    # ANSI/control character stripping (finding #3): preview, repo, and
+    # path come from public indexed third-party code the service does not
+    # sanitize. Rich's own control-char stripping only covers BEL/BS/VT/FF/
+    # CR, not ESC (0x1B) — which drives ANSI/OSC sequences.
+    # -----------------------------------------------------------------
+
+    def test_strips_osc52_clipboard_escape_from_preview(self):
+        malicious_preview = "innocuous\x1b]52;c;ZXZpbCBjbGlwYm9hcmQ=\x07text"
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI"},
+                        "file": {"path": "x.py"},
+                        "lineMatches": [{"preview": malicious_preview, "lineNumber": 0}],
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        preview = results[0]["matches"][0]["preview"]
+        # ESC and BEL (the bytes that make this an interpretable OSC 52
+        # sequence rather than inert text) must be gone; the literal digits
+        # and semicolons left behind are harmless plain text once stripped.
+        assert "\x1b" not in preview
+        assert "\x07" not in preview
+        assert preview == "innocuous]52;c;ZXZpbCBjbGlwYm9hcmQ=text"
+
+    def test_strips_ansi_escape_from_repo_name(self):
+        malicious_repo = {"name": "github.com/evil\x1b[2Jorg/repo"}
+        search = {"results": {"results": [{"repository": malicious_repo, "file": {"path": "x.py"}}]}}
+        results = _format_results(search)
+        assert "\x1b" not in results[0]["repository"]
+
+    def test_strips_ansi_escape_from_file_path(self):
+        malicious_path = "x\x1b]8;;http://evil\x07.py"
+        search = {
+            "results": {
+                "results": [{"repository": {"name": "github.com/Comfy-Org/ComfyUI"}, "file": {"path": malicious_path}}]
+            }
+        }
+        results = _format_results(search)
+        assert "\x1b" not in results[0]["file"]
+
+    def test_strips_ansi_escape_from_branch_name(self):
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "repository": {
+                            "name": "github.com/Comfy-Org/ComfyUI",
+                            "defaultBranch": {"displayName": "ma\x1b[31min"},
+                        },
+                        "file": {"path": "x.py"},
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        assert "\x1b" not in results[0]["branch"]
+
 
 # ---------------------------------------------------------------------------
 # _get_stats tests
@@ -292,6 +535,27 @@ class TestGetStats:
         stats = _get_stats(limit_hit_search)
         assert stats["limit_hit"] is True
 
+    def test_null_stats_does_not_crash(self):
+        """`stats: null` (key present, value None) must not raise
+        AttributeError — `.get("stats", {})` only falls back to `{}` when
+        the key is *absent*, not when it is present-but-None."""
+        stats = _get_stats({"stats": None, "results": {"matchCount": 0, "limitHit": False}})
+        assert stats["approximate_count"] == "0"
+
+    def test_null_results_does_not_crash(self):
+        stats = _get_stats({"stats": {"approximateResultCount": "5"}, "results": None})
+        assert stats["approximate_count"] == "5"
+        assert stats["match_count"] == 0
+        assert stats["limit_hit"] is False
+
+    def test_non_dict_stats_raises(self):
+        with pytest.raises(SearchUnavailableError):
+            _get_stats({"stats": "not-a-dict", "results": {}})
+
+    def test_non_dict_results_raises(self):
+        with pytest.raises(SearchUnavailableError):
+            _get_stats({"stats": {}, "results": "not-a-dict"})
+
 
 # ---------------------------------------------------------------------------
 # _fetch_results tests
@@ -311,7 +575,12 @@ class TestFetchResults:
         result = _fetch_results("LoadImage")
 
         mock_get.assert_called_once_with(
-            API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True
+            API_URL,
+            params={"query": "LoadImage"},
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+            stream=True,
+            headers={"Accept-Encoding": "identity"},
         )
         assert result == raw_api_response
 
@@ -394,6 +663,90 @@ class TestFetchResults:
             _fetch_results("truncated")
         # The raw exception text must not leak into the message shown to the user.
         assert "stream broke" not in str(exc_info.value)
+
+    @patch("requests.get")
+    def test_requests_identity_encoding_to_prevent_decompression_bomb(self, mock_get, raw_api_response):
+        """Decompression happens inside iter_content before MAX_RESPONSE_BYTES
+        is checked against the decoded bytes, so a small compressed response
+        could expand far past the cap before the check fires. Refusing
+        compression via Accept-Encoding is the simplest fix (no dependency
+        pin needed)."""
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
+        mock_response.is_redirect = False
+        mock_response.is_permanent_redirect = False
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        _fetch_results("LoadImage")
+
+        _, kwargs = mock_get.call_args
+        assert kwargs["headers"] == {"Accept-Encoding": "identity"}
+
+    @patch("requests.get")
+    def test_uses_small_chunk_size_so_deadline_check_runs_frequently(self, mock_get, raw_api_response):
+        """A large chunk_size lets http.client's internal read loop absorb
+        many short recv()s — each individually within REQUEST_TIMEOUT —
+        without ever returning control to our loop, so the per-chunk
+        deadline check never runs. A small chunk_size is the fix; assert it
+        directly so a regression (someone bumping chunk_size back up for
+        'efficiency') is caught without relying on real wall-clock timing."""
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
+        mock_response.is_redirect = False
+        mock_response.is_permanent_redirect = False
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        _fetch_results("LoadImage")
+
+        _, kwargs = mock_response.iter_content.call_args
+        # Must be small enough that no single blocked read (bounded by
+        # REQUEST_TIMEOUT at the socket level) can withhold control from the
+        # deadline check for anywhere close to TOTAL_REQUEST_DEADLINE.
+        assert kwargs["chunk_size"] <= 64 * 1024 // 16
+
+    def test_blocking_read_longer_than_remaining_deadline_raises_in_bounded_time(self):
+        """End-to-end with a real (non-time-mocked) generator that simulates
+        a single slow read per chunk: no individual gap exceeds
+        REQUEST_TIMEOUT, but accumulated gaps blow through
+        TOTAL_REQUEST_DEADLINE. Must raise requests.Timeout, and must do so
+        in bounded wall-clock time for the test itself (it does not actually
+        sleep for the real deadline — it patches the module's deadline
+        constants down to a tiny fraction of a second first)."""
+        import time as time_module
+
+        from comfy_cli.command import code_search as code_search_module
+
+        with (
+            patch.object(code_search_module, "TOTAL_REQUEST_DEADLINE", 0.05),
+            patch.object(code_search_module, "REQUEST_TIMEOUT", 0.05),
+            patch("requests.get") as mock_get,
+        ):
+            response = mock_get.return_value
+            response.is_redirect = response.is_permanent_redirect = False
+            response.raise_for_status.return_value = None
+
+            def slow_trickle(chunk_size):
+                # Each individual chunk's gap is tiny (well under the
+                # patched REQUEST_TIMEOUT), but there are enough of them to
+                # blow through the patched TOTAL_REQUEST_DEADLINE in
+                # aggregate — the real-world "one byte every <30s" scenario,
+                # compressed to milliseconds so the test stays fast.
+                for _ in range(50):
+                    time_module.sleep(0.005)
+                    yield b"x"
+
+            response.iter_content.side_effect = slow_trickle
+
+            start = time_module.monotonic()
+            with pytest.raises(requests.Timeout):
+                _fetch_results("slow-trickle")
+            elapsed = time_module.monotonic() - start
+
+        # Bounded well under the real TOTAL_REQUEST_DEADLINE/REQUEST_TIMEOUT
+        # (60s/30s) — proves the fix, not just the mock.
+        assert elapsed < 2.0
 
 
 class TestDecodeSearch:
@@ -579,7 +932,7 @@ class TestCodeSearchCLI:
 
         assert result.exit_code == 0
         assert "Comfy-Org/ComfyUI" in result.output
-        mock_fetch.assert_called_once_with(f"type:file count:{DEFAULT_COUNT} LoadImage")
+        mock_fetch.assert_called_once_with(f"type:file count:{DEFAULT_COUNT} (LoadImage)")
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_with_repo(self, mock_fetch, raw_api_response):
@@ -589,7 +942,7 @@ class TestCodeSearchCLI:
 
         assert result.exit_code == 0
         mock_fetch.assert_called_once_with(
-            f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} LoadImage"
+            f"repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:{DEFAULT_COUNT} (LoadImage)"
         )
 
     @patch("comfy_cli.command.code_search._fetch_results")
@@ -599,7 +952,7 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["--count", "50", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with("type:file count:50 LoadImage")
+        mock_fetch.assert_called_once_with("type:file count:50 (LoadImage)")
 
     @patch("comfy_cli.command.code_search._fetch_results")
     def test_search_json_output(self, mock_fetch, raw_api_response):
@@ -668,9 +1021,132 @@ class TestCodeSearchCLI:
         result = runner.invoke(app, ["-r", "ComfyUI", "-n", "30", "-j", "LoadImage"])
 
         assert result.exit_code == 0
-        mock_fetch.assert_called_once_with("repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:30 LoadImage")
+        mock_fetch.assert_called_once_with("repo:^github\\.com/Comfy\\-Org/ComfyUI$ type:file count:30 (LoadImage)")
         parsed = json.loads(result.output)
         assert "results" in parsed
+
+    # -----------------------------------------------------------------
+    # Rich markup injection via service-controlled error text (finding #1)
+    # -----------------------------------------------------------------
+
+    def test_safe_markup_text_escapes_brackets(self):
+        assert _safe_markup_text("[bold red]pwned[/]") == "\\[bold red]pwned\\[/]"
+
+    def test_safe_markup_text_strips_control_chars(self):
+        assert "\x1b" not in _safe_markup_text("hello\x1bworld")
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    @patch("comfy_cli.command.code_search._decode_search")
+    def test_query_rejected_message_with_markup_does_not_raise_or_inject(self, mock_decode, mock_fetch):
+        """A crafted GraphQL error message containing Rich markup must not
+        raise MarkupError, swallow text, or render an injected [link=...] —
+        it must be escaped and shown literally."""
+        mock_fetch.return_value = {"data": None}
+        mock_decode.side_effect = QueryRejectedError(message="[link=http://evil.test]click[/link] [bold red]x")
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 2
+        # Must not crash with rich.errors.MarkupError, and the literal
+        # bracket text must survive (escaped), not be interpreted as markup
+        # or silently dropped.
+        assert "click" in result.output
+        assert "evil.test" in result.output
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    @patch("comfy_cli.command.code_search._decode_search")
+    def test_query_rejected_message_with_unbalanced_markup_does_not_crash(self, mock_decode, mock_fetch):
+        """An unbalanced/invalid markup tag is the other half of the MarkupError
+        risk (not just injection) — must not crash the CLI."""
+        mock_fetch.return_value = {"data": None}
+        mock_decode.side_effect = QueryRejectedError(message="unterminated [bold")
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 2
+        assert "unterminated" in result.output
+
+    # -----------------------------------------------------------------
+    # --count upper bound and differentiated "too large" message
+    # (finding #8)
+    # -----------------------------------------------------------------
+
+    def test_count_rejects_value_above_max(self):
+        result = runner.invoke(app, ["--count", str(MAX_COUNT + 1), "LoadImage"])
+        assert result.exit_code != 0
+
+    def test_count_accepts_max_value(self, raw_api_response):
+        with patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch:
+            result = runner.invoke(app, ["--count", str(MAX_COUNT), "LoadImage"])
+            assert result.exit_code == 0
+            mock_fetch.assert_called_once_with(f"type:file count:{MAX_COUNT} (LoadImage)")
+
+    def test_count_rejects_zero_and_negative(self):
+        for bad_count in ("0", "-1"):
+            result = runner.invoke(app, ["--count", bad_count, "LoadImage"])
+            assert result.exit_code != 0
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_response_too_large_gets_differentiated_message(self, mock_fetch):
+        """A response-too-large outcome (e.g. a large --count against a broad
+        query) must not collapse into the generic 'Code search is
+        unavailable.' message — it needs its own actionable text."""
+        mock_fetch.side_effect = ResponseTooLargeError("code search response exceeded the size limit")
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 1
+        assert "too large" in result.output
+        assert "--count" in result.output
+        assert "unavailable" not in result.output.lower()
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_other_unavailable_errors_keep_generic_message(self, mock_fetch):
+        """Non-size-related SearchUnavailableError cases must still show the
+        generic message, not the size-specific one."""
+        mock_fetch.side_effect = SearchUnavailableError("code search returned a malformed response")
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 1
+        assert "unavailable" in result.output.lower()
+        assert "too large" not in result.output
+
+    @patch("comfy_cli.command.code_search._fetch_results")
+    @patch("comfy_cli.command.code_search._decode_search")
+    def test_format_results_unavailable_error_is_caught(self, mock_decode, mock_fetch):
+        """SearchUnavailableError raised from _format_results/_get_stats
+        (malformed-shape hardening, finding #6) must route through the same
+        generic-unavailable CLI handling, not crash."""
+        mock_fetch.return_value = {"data": {"search": {"results": {"results": "not-a-list"}}}}
+        mock_decode.return_value = {"results": {"results": "not-a-list"}}
+
+        result = runner.invoke(app, ["LoadImage"])
+
+        assert result.exit_code == 1
+        assert "unavailable" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Control-char stripping helper
+# ---------------------------------------------------------------------------
+
+
+class TestStripControlChars:
+    def test_strips_esc(self):
+        assert _strip_control_chars("a\x1bb") == "ab"
+
+    def test_strips_c0_and_c1(self):
+        assert _strip_control_chars("a\x00\x1f\x7f\x9fb") == "ab"
+
+    def test_leaves_printable_text_untouched(self):
+        assert _strip_control_chars("hello world 123 !@#") == "hello world 123 !@#"
+
+    def test_preserves_tab_and_newline(self):
+        # Tab/newline are not part of the ANSI/OSC escape surface this guard
+        # closes, and previews are legitimately tab-indented code — stripping
+        # them would mangle ordinary indentation for no security benefit.
+        assert _strip_control_chars("a\nb\tc") == "a\nb\tc"
 
 
 # ---------------------------------------------------------------------------
