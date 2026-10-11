@@ -908,6 +908,7 @@ def execute_cloud(
     (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
+    from comfy_cli.command._cloud_errors import emit_status_error
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -1081,11 +1082,21 @@ def execute_cloud(
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
     except HTTPError as e:
-        renderer.error(
-            code="cloud_http_error",
+        emit_status_error(
+            renderer,
+            status=e.status,
+            retry_after=e.retry_after,
+            operation="submit",
             message=f"Cloud server rejected the workflow (HTTP {e.status}): {e.message}",
             hint="check the workflow is valid and the cloud server has the required nodes",
             details={"status": e.status, "body": e.body[:2000]},
+            # A 429 alone does not prove the submit had no effect, and the
+            # client never repeats a submit on its own. Look for the job before
+            # re-running so one that did get through is not queued twice.
+            rate_limited_next_step=(
+                "check `comfy jobs ls --where cloud` for this job before re-running, "
+                "so a submit that did go through is not queued twice"
+            ),
         )
         raise typer.Exit(code=1) from e
 
@@ -1265,13 +1276,35 @@ def execute_cloud(
             renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
             raise typer.Exit(code=1) from e
         except HTTPError as e:
-            state.status = "error"
-            state.error = {"code": "cloud_http_error", "message": str(e)}
+            follow_up = (
+                f"follow the job already submitted with `comfy jobs watch {submit.prompt_id} --where cloud`;"
+                " do not re-run, that would submit a second job"
+            )
+            if e.status == 429:
+                # Throttled polling says nothing about the job, which was
+                # accepted and may still be running. Leave the record
+                # non-terminal, like the detached watcher does, so the next
+                # successful status poll finishes it and clears this error.
+                # The outer handler drops our watcher stamp on the way out, so
+                # the stale-watcher reap won't call it crashed.
+                from comfy_cli.command._cloud_errors import rate_limited_error
+
+                state.error = rate_limited_error(
+                    "poll", e.retry_after, {"prompt_id": submit.prompt_id}, next_step=follow_up
+                )
+            else:
+                state.status = "error"
+                state.error = {"code": "cloud_http_error", "message": str(e)}
             jobs_state.write(state)
-            renderer.error(
-                code="cloud_http_error",
+            emit_status_error(
+                renderer,
+                status=e.status,
+                retry_after=e.retry_after,
+                operation="poll",
                 message=f"Cloud server error while polling (HTTP {e.status}): {e.message}",
+                hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
+                rate_limited_next_step=follow_up,
             )
             raise typer.Exit(code=1) from e
         except KeyboardInterrupt:

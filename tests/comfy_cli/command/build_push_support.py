@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+from collections.abc import Callable
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -26,6 +27,8 @@ class RecordingBuilder:
         self.always_stale = False
         # What every save answers with under ``warnings``; empty means none.
         self.save_warnings: list[JsonObject] = []
+        # The builder's vetted model directories, read before the local checks.
+        self.model_directories: list[str] = ["checkpoints", "loras", "vae"]
         self.build_targets: list[JsonObject] = [
             {"target": {"os": "linux", "gpu": "nvidia"}, "label": "Linux NVIDIA", "artifactKind": "image"},
             {"target": {"os": "linux", "gpu": "cpu"}, "label": "Linux CPU", "artifactKind": "image"},
@@ -62,6 +65,10 @@ class RecordingBuilder:
                     checked.append({"name": raw["dirName"], "repository": raw["url"]})
         return {"definition": {"customNodes": checked}, "report": {}}
 
+    def list_model_directories(self) -> list[str]:
+        # Not recorded: tests assert the order of the calls that move bytes or save.
+        return list(self.model_directories)
+
     def resolve_models(self, filenames: list[str]) -> list[JsonObject]:
         self.calls.append({"method": "resolve_models", "filenames": filenames})
         return [{"filename": filename, "candidates": self.model_candidates.get(filename, [])} for filename in filenames]
@@ -74,9 +81,12 @@ class RecordingBuilder:
         self.calls.append({"method": "create_blob", "blobId": blob_id})
         return blob_id, f"https://uploads.example/{blob_id}"
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         self.calls.append({"method": "upload_blob", "url": upload_url})
-        self.uploaded.append(path.read_bytes())
+        data = path.read_bytes()
+        if progress is not None:
+            progress(len(data))
+        self.uploaded.append(data)
 
     def create_build_response(self, name: str, definition: JsonObject, description: str | None = None) -> JsonObject:
         revision = self._revision()

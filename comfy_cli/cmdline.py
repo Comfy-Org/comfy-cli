@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import webbrowser
@@ -133,13 +134,115 @@ def _command_path(ctx: click.Context | None) -> str:
     return " ".join(reversed(names))
 
 
+def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | None) -> None:
+    """Write the terminating ``ok:false`` envelope for an exception no command caught.
+
+    `workflow set-widget` could escape with a Python
+    traceback and no envelope. Edit commands catch only ``ValueError``, and
+    nothing above them did anything with the rest. A ``--json`` caller then sees
+    a stack dump and an empty stdout, indistinguishable from a transport failure.
+    The caller re-raises, so the traceback still reaches stderr for debugging
+    and the exit code stays 1. Pretty mode is left exactly as it was.
+    """
+    try:
+        renderer = get_renderer()
+        if not renderer.is_json():
+            # The root callback installs the renderer, so a crash in it (or
+            # before it) still sees the pretty default. The root flags did
+            # parse, so decide the mode from them. No version lookup: that
+            # lookup is one of the things that can have crashed.
+            renderer = Renderer.resolve(command=_command_path(ctx), **_output_flags(ctx))
+        if not renderer.is_json() or renderer._envelope_emitted:
+            return
+        command = getattr(renderer, "command", None) or _command_path(ctx)
+        renderer.error(
+            code="internal_error",
+            message=_internal_error_message(error),
+            details={
+                "exception": type(error).__name__,
+                "command": f"comfy {command}".strip(),
+                "traceback": _traceback_tail(error),
+            },
+            exit_code=1,
+            command=command,
+        )
+    except Exception:  # noqa: BLE001 — never mask the original crash
+        pass
+
+
+#: The envelope goes to stdout, i.e. into a model's context, where the raw
+#: traceback on stderr never went. So the exception text is capped and scrubbed
+#: of the secret shapes an exception message plausibly carries: a URL query
+#: string (`?api_key=...`), a bearer token, an `Authorization:` header value
+#: (scheme and credential together), `key=value` / `key: value` token pairs,
+#: and `user:pass@` userinfo.
+_INTERNAL_ERROR_MESSAGE_CAP = 500
+_SECRET_PATTERNS = (
+    (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
+    # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
+    # (Basic, Bearer, Token, Digest with its quoted comma-separated params,
+    # ...), so scheme and credential are masked as one value. A quoted value
+    # (a dict repr) is masked up to its MATCHING quote, so the other quote
+    # kind inside it (Digest's response="...") is covered, and an escaped
+    # quote (a JSON-encoded value) does not end it; an unquoted header
+    # line is masked to the end of the line, quotes included. Both shapes are
+    # ONE alternation applied in one pass, so each value is masked exactly
+    # once: as two passes, the unquoted one re-matched the quoted one's output
+    # and swallowed the headers after it.
+    (
+        re.compile(
+            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+    ),
+    (
+        re.compile(
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
+            r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
+)
+
+
+def _internal_error_message(error: BaseException) -> str:
+    text = f"{type(error).__name__}: {error}"
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
+    return text
+
+
+def _traceback_tail(error: BaseException, frames: int = 3) -> list[str]:
+    """The innermost ``frames`` frames as ``file:line:func`` — enough to locate
+    the crash from the envelope alone, with no source text (which can hold
+    literals the caller should not see)."""
+    import traceback
+
+    tail = traceback.extract_tb(error.__traceback__)[-frames:]
+    return [f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in tail]
+
+
+def _is_click_control_flow(error: BaseException) -> bool:
+    """Click/typer's own exceptions (usage errors, ``typer.Exit``, ``Abort``) —
+    they already carry their exit semantics and are not crashes."""
+    return any(_click_error_is(error, name) for name in ("ClickException", "Exit", "Abort"))
+
+
 @contextlib.contextmanager
-def _usage_errors_as_envelopes(args: list[str] | None = None) -> Iterator[None]:
+def _usage_errors_as_envelopes(args: list[str] | None = None, ctx: click.Context | None = None) -> Iterator[None]:
     try:
         yield
     except Exception as error:
         if _click_error_is(error, "UsageError"):
             _emit_usage_error_envelope(error, args)
+        elif ctx is not None and not _is_click_control_flow(error):
+            _emit_internal_error_envelope(error, ctx)
         raise
 
 
@@ -160,7 +263,10 @@ class _RootGroup(LazyTyperGroup):
             return super().make_context(info_name, args, parent=parent, **kwargs)
 
     def invoke(self, ctx: click.Context):
-        with _usage_errors_as_envelopes():
+        # `ctx` turns on the crash envelope too: every command body runs inside
+        # this call, so an exception no command caught ends `--json` with an
+        # `internal_error` envelope instead of an empty stdout.
+        with _usage_errors_as_envelopes(ctx=ctx):
             return super().invoke(ctx)
 
 

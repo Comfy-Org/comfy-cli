@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import sys
 import urllib.error
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -11,6 +13,7 @@ import typer
 from build_push_support import envelope, make_workspace, write_spec
 from typer.testing import CliRunner
 
+from comfy_cli import error_codes
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
@@ -454,7 +457,7 @@ def test_each_mapped_refusal_reaches_the_agent_under_its_own_code(
 def test_a_mapped_code_under_another_status_keeps_the_generic_envelope(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    """All three refusals are 409 in the builder's contract, so a mapped code
+    """Every mapped refusal is 409 in the builder's contract, so a mapped code
     arriving under any other status came from something that is not the builder
     -- a proxy, a WAF page, a service that changed -- and must not hand an agent
     remediation for a limit that may not exist."""
@@ -844,6 +847,414 @@ def test_delete_refuses_an_id_that_names_no_release_before_it_reaches_the_builde
     assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
 
 
+#: The read verbs that take ``[RELEASE] [PATH]``, each with the options it needs
+#: to reach the builder, and the client call that reads the release.
+READ_VERBS = [
+    pytest.param(("show",), "get_release", id="show"),
+    pytest.param(("logs", "--target", "linux/nvidia"), "get_release_logs", id="logs"),
+    pytest.param(("manifest",), "get_release_manifest", id="manifest"),
+]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_dot_before_the_release_reads_the_newest_release_of_the_build_there(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    """`release create .`, `release ls .` and `deploy up .` all take the path
+    first, so `release show .` is what a caller types. Read as a release id, `.`
+    reached the builder as `GET /v1/releases/.` and came back an opaque 302."""
+    # Given
+    client.releases = [{"id": "release-1", "version": 1}, {"id": "release-2", "version": 2}]
+    client.statuses = [{"id": "release-2", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], ".", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-1"),
+        (read, "release-2"),
+    ]
+
+
+def test_a_build_path_before_the_release_reads_that_build_from_anywhere(
+    workspace: Path, client: ReleaseBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    client.releases = [{"id": "release-7", "version": 7}]
+    client.statuses = [{"id": "release-7", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", str(workspace))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-1"},
+        {"method": "get_release", "id": "release-7"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("   ", id="blank"),
+        pytest.param(".", id="dot"),
+        pytest.param("..", id="dot-dot"),
+    ],
+)
+def test_a_read_verb_refuses_an_id_that_names_no_release_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """With PATH given as well, a dot-only RELEASE cannot be the path, and the
+    read client joins the id into the URL unencoded, so a dot segment aims the
+    read at the collection or its parent. The empty `calls` is the load-bearing
+    half."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], release_id, ".", *verb[1:])
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
+def test_a_release_id_that_names_no_path_still_reaches_the_builder(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given
+    client.statuses = [{"id": "release-3", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", "release-3")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [{"method": "get_release", "id": "release-3"}]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize("kind", ["folder", "file"])
+def test_a_release_id_that_matches_a_name_in_the_cwd_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, kind: str
+) -> None:
+    """The builder's failure text tells a caller to run `comfy build release
+    logs <versionId> --target ...` with no PATH. A file or folder that happens
+    to share that name, and holds no build spec, must not turn the id into a
+    path."""
+    # Given
+    if kind == "folder":
+        (workspace / "rel-abc").mkdir()
+    else:
+        (workspace / "rel-abc").write_text("notes")
+    client.statuses = [{"id": "rel-abc", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "rel-abc", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, "rel-abc")]
+
+
+def test_a_bare_folder_name_that_holds_a_build_spec_is_the_build_path(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given
+    write_spec(make_workspace(workspace / "other"), build_id="build-2", revision="revision-1", models=[], nodes=[])
+    client.releases = [{"id": "release-9", "version": 9}]
+    client.statuses = [{"id": "release-9", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", "other")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-2"},
+        {"method": "get_release", "id": "release-9"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        # `stat` fails with "file name too long", which `Path.is_file` lets
+        # through before Python 3.14 (3.14 answers False).
+        pytest.param("r" * 300, id="longer-than-a-file-name"),
+        # No separator, so not path-shaped; `expanduser` raises on the unknown user.
+        pytest.param("~nosuchuser-comfy-test", id="tilde-unknown-user"),
+    ],
+)
+def test_a_release_id_the_disk_probe_cannot_read_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """Looking for a build spec behind RELEASE must never fail the read: an id
+    the file system cannot even look up is no build path, so it reaches the
+    builder as the id, as it did before RELEASE could be a path."""
+    # Given
+    client.statuses = [{"id": release_id, "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], release_id, *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, release_id)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+def test_a_release_id_that_names_an_unreadable_folder_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder
+) -> None:
+    """Probing `rel-locked/comfy-build.yaml` inside a folder the caller cannot
+    read raises `PermissionError`; the id still reaches the builder."""
+    # Given
+    locked = workspace / "rel-locked"
+    locked.mkdir()
+    client.statuses = [{"id": "rel-locked", "status": "complete"}]
+    locked.chmod(0)
+    try:
+        # When
+        result = invoke_release("show", "rel-locked")
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [{"method": "get_release", "id": "rel-locked"}]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize("release", ["locked/", "./locked/comfy-build.yaml"], ids=["folder", "spec-file"])
+def test_a_path_shaped_release_naming_an_unreadable_folder_fails_as_release_ls_does(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release: str
+) -> None:
+    """A path-shaped RELEASE is a path, so a spec the caller cannot read fails
+    the way `release ls` fails on that path. Which code that is depends on the
+    Python: `Path.is_file` raises `PermissionError` there up to 3.13, and 3.14
+    answers False, so both read it as `build_spec_not_found`."""
+    # Given
+    locked = make_workspace(workspace / "locked")
+    write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
+    locked.chmod(0)
+    try:
+        # When
+        listed = invoke_release("ls", release)
+        result = invoke_release(verb[0], release, *verb[1:])
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], client.calls) == (
+        listed.exit_code,
+        envelope(listed)["error"]["code"],
+        [],
+    )
+
+
+def test_a_path_shaped_release_longer_than_a_file_name_fails_as_release_ls_does(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shaped like a path, it is a path, refused before any request with an
+    envelope rather than a traceback, the way `release ls` refuses it. Which
+    code that is depends on the Python: looking up its spec raises "file name
+    too long" up to 3.13, and 3.14's `Path.is_file` answers False, so no spec."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+    release = "./" + "r" * 300
+
+    # When
+    listed = invoke_release("ls", release)
+    result = invoke_release("show", release)
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (
+        listed.exit_code,
+        envelope(listed)["error"]["code"],
+        [],
+    )
+
+
+def test_a_path_shaped_release_for_an_unknown_user_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`expanduser` cannot resolve it, so there is no spec path to report; it is
+    refused with an envelope rather than a traceback."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release("show", "~nosuchuser-comfy-test/build")
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "missing",
+    [
+        pytest.param("./typo-dir", id="dot-slash"),
+        pytest.param("../other-build", id="parent"),
+        pytest.param("typo-dir/.", id="trailing-dot"),
+        pytest.param("typo-dir/", id="trailing-slash"),
+        pytest.param("typo.yaml", id="spec-file"),
+    ],
+)
+def test_a_path_shaped_release_that_names_no_spec_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, missing: str
+) -> None:
+    """The read client joins the id into the URL unencoded, so `./typo-dir`
+    resolved to `GET /v1/releases/typo-dir` and `../other-build` climbed out of
+    the collection. A RELEASE shaped like a path is a path, and a path with no
+    spec behind it fails the way every other build verb does."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], missing, *verb[1:])
+
+    # Then
+    error = envelope(result)["error"]
+    assert (result.exit_code, error["code"], calls) == (1, "build_spec_not_found", [])
+    assert Path(error["details"]["path"]).is_absolute()
+
+
+def test_a_path_shaped_release_with_no_spec_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--id` picks the Build and PATH is never read, as with `release ls . --id`."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", ".", "--id", "build-9")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-9"},
+        {"method": "get_release", "id": "release-6"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_the_disk_probe_cannot_read_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str
+) -> None:
+    """`--id` picks the Build and PATH is never read, so the "file name too
+    long" from looking up a spec behind RELEASE must not fail the read."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "./" + "r" * 300, *verb[1:], "--id", "build-9")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-9"),
+        (read, "release-6"),
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_naming_an_unreadable_folder_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str
+) -> None:
+    """`--id` picks the Build and PATH is never read, so the `PermissionError`
+    from looking up `locked/comfy-build.yaml` must not fail the read."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    locked = make_workspace(tmp_path / "locked")
+    write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+    locked.chmod(0)
+    try:
+        # When
+        result = invoke_release(verb[0], "locked/", *verb[1:], "--id", "build-9")
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-9"),
+        (read, "release-6"),
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_with_a_spec_is_the_build_path(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    # Given
+    client.releases = [{"id": "release-4", "version": 4}]
+    client.statuses = [{"id": "release-4", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "./comfy-build.yaml", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-1"),
+        (read, "release-4"),
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_release_id_followed_by_a_path_reaches_the_builder_as_the_id(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    # Given
+    client.statuses = [{"id": "release-5", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "release-5", ".", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, "release-5")]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("./typo-dir", id="dot-slash"),
+        pytest.param("rel-abc/logs", id="nested"),
+    ],
+)
+def test_a_path_shaped_release_followed_by_a_path_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """With PATH given, RELEASE is the id; one with a path separator cannot name
+    a single release, and unencoded it would aim the read at another route."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], release_id, ".", *verb[1:])
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
 def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -866,3 +1277,399 @@ def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payl
         ["https://builder.test/v1/releases/release-9"],
         {"releaseId": "release-9", "deleted": True},
     )
+
+
+#: The four reasons the builder gave for model entries as people paste them.
+REFUSED_MODELS = [
+    {"field": "models[0].type", "reason": "must be a model directory under models/ (e.g. checkpoints)"},
+    {"field": "models[1].filename", "reason": "sourceUri has no file extension; set an explicit filename"},
+    {"field": "models[2].filename", "reason": "must be a safe filename"},
+    {"field": "models[3].sha256", "reason": "must be a 64-character sha256"},
+]
+
+
+def definition_refused(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    raise refusal(400, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS}, url)
+
+
+def test_a_refused_definition_leads_with_every_reason(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut's 400 carries its reasons as a list; the envelope names each one
+    rather than the code, and hands them to an agent apart."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", definition_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["details"]["invalid"] == REFUSED_MODELS
+    assert error["details"]["buildId"] == "build-1"
+    assert error["message"].startswith("the builder refused the build's definition:\n")
+    for issue in REFUSED_MODELS:
+        assert f"{issue['field']}: {issue['reason']}" in error["message"]
+    assert "INVALID_DEFINITION" not in error["message"]
+    # Re-running the same definition is refused the same way, so the cut's retry
+    # hint would send the reader the wrong way.
+    assert error["hint"] == error_codes.get("build_definition_invalid").hint
+
+
+def test_a_refused_definition_prints_one_reason_per_line(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", definition_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", agentic=False)
+
+    # Then
+    assert result.exit_code == 1
+    # Each reason starts its own line; the panel may wrap a long one after that.
+    lines = [line.strip("│ ") for line in result.output.splitlines()]
+    for issue in REFUSED_MODELS:
+        assert any(line.startswith(f"{issue['field']}: ") for line in lines), result.output
+    assert "idempotent" not in result.output
+    # The message already lists them; the list apart is for JSON.
+    assert any(line.startswith("buildId") for line in lines), result.output
+    assert not any(line.startswith("invalid") for line in lines), result.output
+
+
+def test_a_refused_definition_with_only_a_message_leads_with_the_message(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save's refusal carries one message and no list; it leads too, without the code."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    reason = "the build's configuration is invalid: baseImage: must be one of: cuda-12.8"
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, {"error": "INVALID_DEFINITION", "message": reason}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
+    assert "invalid" not in error["details"]
+
+
+def test_a_refused_definition_carries_the_status(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_definition_invalid", 400)
+
+
+def test_a_long_list_of_refused_fields_obeys_the_message_cap(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each reason is a line of the message, so a definition refused for hundreds of
+    fields would otherwise carry every one of them into the envelope."""
+    # Given
+    invalid = [{"field": f"models[{index}].sha256", "reason": "must be a 64-character sha256"} for index in range(400)]
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": invalid})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["message"].startswith("the builder refused the build's definition:\n")
+    assert len(error["message"].encode("utf-8")) <= build._BUILDER_MESSAGE_CAP
+    assert len(error["details"]["invalid"]) == 400
+
+
+class _ErrorRecorder:
+    """A renderer in one mode that keeps the error it was handed."""
+
+    def __init__(self, pretty: bool) -> None:
+        self.pretty = pretty
+        self.emitted: dict = {}
+
+    def is_pretty(self) -> bool:
+        return self.pretty
+
+    def error(self, **fields) -> None:
+        self.emitted = fields
+
+
+@pytest.mark.parametrize(
+    ("pretty", "where"),
+    [
+        pytest.param(True, "read every one with `--json`", id="pretty"),
+        pytest.param(False, "read every one in `details.invalid`", id="json"),
+    ],
+)
+def test_a_refusal_past_the_cap_ends_on_a_whole_line_and_counts_the_rest(pretty: bool, where: str) -> None:
+    """Cut at the cap, the message stopped mid-reason with nothing to say the rest
+    was dropped, and in pretty mode `details.invalid` is left out, so the rest was
+    nowhere."""
+    # Given
+    reason = "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
+    invalid = [{"field": f"models[{index}].type", "reason": reason} for index in range(80)]
+    models = [{"type": "Loras", "filename": f"lora-{index:03d}.safetensors"} for index in range(80)]
+    body = json.dumps({"error": "INVALID_DEFINITION", "invalid": invalid}).encode()
+    renderer = _ErrorRecorder(pretty)
+
+    # When
+    build._report_builder_error(
+        renderer, refusal(400, body, "https://builder.test/v1/builds"), {"buildId": "build-1"}, None, models
+    )
+
+    # Then
+    error = renderer.emitted
+    assert error["code"] == "build_definition_invalid"
+    assert len(error["message"].encode("utf-8")) <= build._BUILDER_MESSAGE_CAP
+    heading, *shown, last = error["message"].split("\n")
+    assert heading == "the builder refused the build's definition:"
+    assert shown == [f"  models[{index}].type (lora-{index:03d}.safetensors): {reason}" for index in range(len(shown))]
+    assert last == f"  ... and {80 - len(shown)} more; {where}"
+    assert 0 < len(shown) < 80
+    assert ("invalid" in error["details"]) is not pretty
+    if not pretty:
+        assert len(error["details"]["invalid"]) == 80
+
+
+def test_a_refused_definition_under_another_status_keeps_the_builder_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the builder's 400 means the definition was refused; the same body under
+    a 500 came from something else and keeps the generic envelope and its body."""
+    # Given
+    _refusing_builder(monkeypatch, 500, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", 500)
+    assert "invalid" not in error["details"]
+    assert "INVALID_DEFINITION" in error["details"]["body"]
+
+
+def test_a_reason_list_in_another_shape_falls_back_to_the_message(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    reason = "the build's configuration is invalid: baseImage: must be one of: cuda-12.8"
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": 5, "message": reason})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
+    assert "invalid" not in error["details"]
+
+
+#: The cut's refusal for a file the definition names that is not in storage, as
+#: releases_cut.go ``verifyReferencedBlobs`` words it.
+BLOB_NOT_UPLOADED = {"field": "blob:blob-7", "reason": "not uploaded"}
+
+
+@pytest.mark.parametrize(
+    ("invalid", "also_the_spec"),
+    [
+        pytest.param([BLOB_NOT_UPLOADED], False, id="only-a-blob"),
+        pytest.param([REFUSED_MODELS[3], BLOB_NOT_UPLOADED], True, id="a-blob-and-a-field"),
+    ],
+)
+def test_a_blob_never_uploaded_says_to_push_it_again(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], also_the_spec: bool
+) -> None:
+    """No edit to the spec's rules clears it: the file has to upload, and a push
+    skips an entry that already carries a ``blobId``. An entry with only the
+    ``blobId`` has nothing left to push from once it goes, so the hint names both."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, {"error": "INVALID_DEFINITION", "invalid": invalid}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert "blob:blob-7: not uploaded" in error["message"]
+    assert "delete that `blobId`" in error["hint"]
+    assert "`comfy build push`" in error["hint"]
+    assert "if that entry has no `source: local`" in error["hint"]
+    assert "`localPath`" in error["hint"]
+    assert "`sourceUri`" in error["hint"]
+    assert error["hint"].startswith("fix each named definition field in the spec") is also_the_spec
+
+
+def test_only_well_formed_reasons_are_kept() -> None:
+    body = json.dumps(
+        {
+            "error": "INVALID_DEFINITION",
+            "invalid": [
+                {"field": "models[0].type", "reason": "must be a model directory"},
+                "models[1]: must be an object",
+                {"field": "models[2].sha256"},
+                {"field": 3, "reason": "must be a 64-character sha256"},
+                {"field": "models[4].filename", "reason": None},
+            ],
+        }
+    )
+
+    assert build._builder_invalid(body) == [{"field": "models[0].type", "reason": "must be a model directory"}]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("not json", id="not-json"),
+        pytest.param(json.dumps(["models[0]"]), id="a-list"),
+        pytest.param(json.dumps({"error": "INVALID_DEFINITION", "invalid": "models[0]"}), id="invalid-not-a-list"),
+        pytest.param(json.dumps({"error": "INVALID_DEFINITION"}), id="no-invalid"),
+    ],
+)
+def test_a_body_without_a_reason_list_gives_none(body: str) -> None:
+    assert build._builder_invalid(body) == []
+
+
+def _cut_refuses(monkeypatch: pytest.MonkeyPatch, answer: dict) -> None:
+    """Every builder call answers a 400 with *answer* as its body."""
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, answer, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+
+#: The cut's refusals of its ``--target`` values, as releases_cut.go
+#: ``validateTargets`` and ``validateTargetShape`` word them.
+TARGET_REPEATED = {
+    "field": "targets[1]",
+    "reason": "linux/nvidia is already requested by targets[0]; each os/gpu pair builds one artifact",
+}
+TARGET_BAD_GPU = {"field": "targets[0].gpu", "reason": "must be nvidia, amd, cpu, or mps"}
+
+
+@pytest.mark.parametrize("issue", [TARGET_REPEATED, TARGET_BAD_GPU], ids=["repeated", "bad-gpu"])
+def test_a_refused_target_names_the_target_option_not_the_spec(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, issue: dict[str, str]
+) -> None:
+    """The cut checks the ``--target`` values under the same code as the definition;
+    no edit to the spec clears one."""
+    # Given
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": [issue]})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["message"] == f"the builder refused the release:\n  {issue['field']}: {issue['reason']}"
+    assert "`--target`" in error["hint"]
+    assert "`comfy build refs build-targets`" in error["hint"]
+    assert "spec" not in error["hint"]
+
+
+@pytest.mark.parametrize(
+    ("invalid", "parts"),
+    [
+        pytest.param([REFUSED_MODELS[3], TARGET_REPEATED], ("spec", "targets"), id="a-field-and-a-target"),
+        pytest.param([TARGET_REPEATED, BLOB_NOT_UPLOADED], ("targets", "blob"), id="a-target-and-a-blob"),
+        pytest.param(
+            [BLOB_NOT_UPLOADED, TARGET_REPEATED, REFUSED_MODELS[3]], ("spec", "targets", "blob"), id="all-three"
+        ),
+    ],
+)
+def test_a_refused_release_names_each_fix_that_applies(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], parts: tuple[str, ...]
+) -> None:
+    # Given
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": invalid})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["message"].startswith("the builder refused the release:\n")
+    found = {
+        "spec": "fix each named definition field in the spec" in error["hint"],
+        "targets": "`--target`" in error["hint"],
+        "blob": "delete that `blobId`" in error["hint"],
+    }
+    assert found == {kind: kind in parts for kind in found}
+
+
+def test_the_blob_hint_fits_a_node_as_well_as_a_model(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut checks a node's zip as well as a model's file, and a node has no
+    ``sourceUri``: the hint names the sources each can take."""
+    # Given
+    issue = {"field": "blob:node-blob-1", "reason": "uploaded content does not match declared sha256"}
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": [issue]})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    hint = envelope(result)["error"]["hint"]
+    assert "a model's `sourceUri`" in hint
+    assert "a node's `registryVersion` or `repository`" in hint
+    assert "or a `sourceUri`" not in hint
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"error": "INVALID_DEFINITION"}, id="bare"),
+        pytest.param({"error": "INVALID_DEFINITION", "invalid": [], "message": ""}, id="empty"),
+    ],
+)
+def test_a_refused_definition_with_no_reason_is_a_builder_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, body: dict
+) -> None:
+    """With nothing to list, there is no refusal to lead with: the generic envelope
+    keeps the code and the body."""
+    # Given
+    _cut_refuses(monkeypatch, body)
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert "INVALID_DEFINITION" in error["message"]
+    assert error["details"]["status"] == 400

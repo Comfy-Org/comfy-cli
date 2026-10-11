@@ -49,6 +49,8 @@ def _validator_for(name: str) -> jsonschema.Validator:
         "which.json",
         "run.json",
         "run_event.json",
+        # Three event types, each with its own required set behind an `if`/`then`.
+        "build_push_event.json",
         "download.json",
         "download_status.json",
         "downloads.json",
@@ -61,6 +63,9 @@ def _validator_for(name: str) -> jsonschema.Validator:
         # one of those unions can't ship.
         "cloud_status.json",
         "knowledge.json",
+        # The progress object is the deploy service's own and may grow fields,
+        # so the event stays open where the envelopes around it are closed.
+        "deploy_progress_event.json",
     ],
 )
 def test_schemas_are_well_formed(schema_name):

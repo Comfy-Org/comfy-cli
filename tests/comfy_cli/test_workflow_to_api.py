@@ -1416,6 +1416,96 @@ class TestImplicitSeedCompanion:
         assert result["1"]["inputs"] == {"variation_seed": 7, "mode": "fixed", "strength": 0.5}
 
 
+class TestNonExactSeedLegacyCompanion:
+    """The frontend adds an implicit ``control_after_generate`` companion only
+    for an INT named exactly ``seed``/``noise_seed`` (``useIntWidget``), and the
+    cql engine reserves a slot on the same rule. After an unflagged
+    ``image_seed``/``texture_seed`` (or a dotted ``model.seed`` sub-input) there
+    is no companion, so a following ``"fixed"`` is normally the next widget's
+    real value. Older CLIs did write a stray marker after such seeds, so the
+    converter still drops one, but only when the next widget could not hold it.
+    """
+
+    @staticmethod
+    def _convert(schema_inputs: dict, widgets_values: list) -> dict:
+        object_info = {
+            "N": {
+                "input": {"required": schema_inputs},
+                "input_order": {"required": list(schema_inputs)},
+                "output_node": True,
+                "display_name": "N",
+            }
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": "N", "inputs": [], "outputs": [], "widgets_values": widgets_values, "mode": 0}],
+            "links": [],
+        }
+        return convert_ui_to_api(workflow, object_info)["1"]["inputs"]
+
+    def test_string_widget_value_fixed_after_image_seed_is_preserved(self):
+        inputs = self._convert(
+            {
+                "image_seed": ["INT", {"default": 0}],
+                "style": ["STRING", {}],
+                "steps": ["INT", {"default": 20}],
+            },
+            [5, "fixed", 30],
+        )
+        assert inputs == {"image_seed": 5, "style": "fixed", "steps": 30}
+
+    def test_legacy_stray_fixed_after_texture_seed_before_int_is_consumed(self):
+        inputs = self._convert(
+            {
+                "texture_seed": ["INT", {"default": 0}],
+                "steps": ["INT", {"default": 20}],
+            },
+            [5, "fixed", 30],
+        )
+        assert inputs == {"texture_seed": 5, "steps": 30}
+
+    def test_legacy_stray_fixed_after_texture_seed_before_float_is_consumed(self):
+        inputs = self._convert(
+            {
+                "texture_seed": ["INT", {"default": 0}],
+                "strength": ["FLOAT", {"default": 1.0}],
+            },
+            [5, "randomize", 0.5],
+        )
+        assert inputs == {"texture_seed": 5, "strength": 0.5}
+
+    def test_exact_seed_still_strips_before_string(self):
+        # The frontend really adds the companion after ``seed``, so the marker
+        # is dropped even though the next widget is a STRING.
+        inputs = self._convert(
+            {"seed": ["INT", {"default": 0}], "style": ["STRING", {}]},
+            [5, "fixed", "watercolor"],
+        )
+        assert inputs == {"seed": 5, "style": "watercolor"}
+
+    def test_exact_noise_seed_still_strips_before_string(self):
+        inputs = self._convert(
+            {"noise_seed": ["INT", {"default": 0}], "style": ["STRING", {}]},
+            [5, "increment", "watercolor"],
+        )
+        assert inputs == {"noise_seed": 5, "style": "watercolor"}
+
+    def test_dotted_sub_seed_does_not_eat_following_top_level_string(self):
+        # ``model.seed`` is the last sub-input; the widget after it is the
+        # top-level STRING, whose saved value happens to be "fixed".
+        inputs = self._convert(
+            {
+                "model": [
+                    "COMFY_DYNAMICCOMBO_V3",
+                    {"options": [{"key": "fast", "inputs": {"required": {"seed": ["INT", {"default": 0}]}}}]},
+                ],
+                "style": ["STRING", {}],
+                "steps": ["INT", {"default": 20}],
+            },
+            ["fast", 7, "fixed", 30],
+        )
+        assert inputs == {"model": "fast", "model.seed": 7, "style": "fixed", "steps": 30}
+
+
 class TestNodeNameForSAndRAlias:
     """When a node carries ``properties["Node name for S&R"]`` pointing at a
     different class name than its ``type`` field (legacy rename / group-node

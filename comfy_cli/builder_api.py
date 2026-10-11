@@ -19,13 +19,16 @@ from __future__ import annotations
 
 import urllib.error
 import urllib.parse
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import BinaryIO
 
 import requests
 
 from comfy_cli import credentials
 from comfy_cli.builder_pagination import PAGE_LIMIT, cursor_pages
+from comfy_cli.credentials import Credential
 from comfy_cli.http import request_json
 from comfy_cli.target import Target
 
@@ -46,27 +49,106 @@ _POST_TIMEOUT = 30.0
 _WORKFLOW_IMPORT_TIMEOUT = 90.0
 
 
+# How much `_CountingReader` hands over per step when something iterates it
+# instead of calling `read`. Only the chunked path does, and only for an empty
+# file, so the size is not a tuning knob.
+_UPLOAD_ITER_BYTES = 1024 * 1024
+
+
+class _CountingReader:
+    """A file as ``requests`` sees it, reporting each block the transport pulls.
+
+    ``requests`` sizes a streamed body with ``os.fstat(body.fileno())`` and sends
+    it by calling ``read`` until it runs dry, so passing ``fileno`` and ``tell``
+    through keeps the request byte-identical to one handed the bare file: same
+    ``Content-Length``, no chunked transfer, which a presigned GCS PUT would
+    refuse. ``__iter__`` is there because its presence is how ``requests``
+    decides a body streams at all.
+
+    ``progress`` receives the size of each block as it is read, not a running
+    total. It runs once per transport block (16 KiB), so it must stay cheap.
+    """
+
+    def __init__(self, raw: BinaryIO, progress: Callable[[int], None]) -> None:
+        self._raw = raw
+        self._progress = progress
+
+    def read(self, size: int = -1) -> bytes:
+        block = self._raw.read(size)
+        if block:
+            self._progress(len(block))
+        return block
+
+    @property
+    def mode(self) -> str:
+        # `requests` reads this straight after `fileno` to warn about text mode.
+        return self._raw.mode
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def tell(self) -> int:
+        return self._raw.tell()
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
 class BuilderAuthError(Exception):
-    """No usable Cloud JWT — the user needs to run `comfy cloud login`."""
+    """No workspace API key and no usable Cloud JWT to authenticate with."""
+
+
+class BuilderCredentialRefused(urllib.error.HTTPError):
+    """The builder answered 401 to a credential no refresh can replace.
+
+    Still an ``HTTPError``, so every existing handler catches it; ``hint`` names
+    the credential this client sent and what to do about it.
+    """
+
+    def __init__(self, error: urllib.error.HTTPError, hint: str) -> None:
+        super().__init__(error.filename, error.code, error.msg, error.hdrs, error.fp)
+        self.hint = hint
 
 
 class BuilderClient:
-    """Thin authed client over the builder's /v1 API. One OAuth JWT, attached
-    as Bearer via the shared authed HTTP path (HTTPS-enforced, no credential
+    """Thin authed client over the builder's /v1 API. One credential per client:
+    a Cloud JWT attached as Bearer, or a workspace API key attached as
+    ``X-API-Key``, via the shared authed HTTP path (HTTPS-enforced, no credential
     replay on redirect, response-size capped)."""
 
-    def __init__(self, base_url: str, token: str):
-        # kind="cloud" is what makes the shared http layer attach the Bearer;
+    def __init__(self, base_url: str, token: str | None = None, *, api_key: Credential | None = None):
+        # kind="cloud" is what makes the shared http layer attach the credential;
         # path_prefix carries the /v1 base so target.url("builds") is right.
         self.target = Target(
             kind="cloud",
             base_url=base_url.rstrip("/"),
             path_prefix="/v1",
             auth_token=token,
+            api_key=api_key.value if api_key is not None else None,
         )
         # Only a client built from the stored sign-in may swap its token; one
-        # handed a token directly (COMFY_BUILDER_TOKEN) keeps it and lets a 401 surface.
+        # handed a token (COMFY_BUILDER_TOKEN) or a key keeps it and lets a 401 surface.
         self._refreshes_on_401 = False
+        # What to replace once the builder refuses this client's credential.
+        self._refused_hint = (
+            credentials.refused_key_hint(api_key)
+            if api_key is not None
+            else "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
+        )
+
+    @classmethod
+    def from_credentials(cls, base_url: str) -> BuilderClient:
+        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        key = credentials.platform_api_key()
+        if key is None:
+            try:
+                return cls.from_session(base_url)
+            except BuilderAuthError:
+                # A sign-in whose refresh failed is cleared, and a saved key may stand behind it.
+                key = credentials.platform_api_key()
+                if key is None:
+                    raise
+        return cls(base_url, api_key=key)
 
     @classmethod
     def from_session(cls, base_url: str) -> BuilderClient:
@@ -74,9 +156,10 @@ class BuilderClient:
         is near expiry (the CLI's existing rotation machinery)."""
         session = credentials.get_session(refresh=True)
         if not session or not session.access_token:
-            raise BuilderAuthError("not signed in — run `comfy cloud login`")
+            raise BuilderAuthError("not signed in: run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
         client = cls(base_url, session.access_token)
         client._refreshes_on_401 = True
+        client._refused_hint = "run `comfy cloud login` first"
         return client
 
     def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:
@@ -89,13 +172,18 @@ class BuilderClient:
         try:
             return request_json(url, self.target, **kwargs)
         except urllib.error.HTTPError as error:
-            if error.code != 401 or not self._refreshes_on_401:
+            if error.code != 401:
                 raise
-            token = credentials.refreshed_access_token(self.target.auth_token)
+            token = credentials.refreshed_access_token(self.target.auth_token) if self._refreshes_on_401 else None
             if token is None:
-                raise
-            self.target = replace(self.target, auth_token=token)
+                raise BuilderCredentialRefused(error, self._refused_hint) from error
+        self.target = replace(self.target, auth_token=token)
+        try:
             return request_json(url, self.target, **kwargs)
+        except urllib.error.HTTPError as error:
+            if error.code != 401:
+                raise
+            raise BuilderCredentialRefused(error, self._refused_hint) from error
 
     def _post(self, parts: tuple[str, ...], body: dict, *, timeout: float = _POST_TIMEOUT) -> dict:
         _, parsed = self._send(self.target.url(*parts), method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout)
@@ -118,17 +206,20 @@ class BuilderClient:
             return blob_id, None
         return blob_id, r["uploadUrl"]
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         """Stream a file to its presigned PUT URL (bytes go straight to storage).
 
         The builder signs the URL with ``x-goog-if-generation-match: 0`` (create-
         only, so re-using a blob id can't clobber bytes), and that header is part
         of the signature — GCS rejects the PUT with 400 unless the client sends it.
+
+        ``progress`` is called with the size of each block as the transport reads
+        it off disk, which is as close to "bytes sent" as a streamed PUT exposes.
         """
         with path.open("rb") as f:
             resp = requests.put(
                 upload_url,
-                data=f,
+                data=f if progress is None else _CountingReader(f, progress),
                 headers={"x-goog-if-generation-match": "0"},
                 timeout=_UPLOAD_TIMEOUT,
                 # A presigned PUT targets one exact object; a 3xx would divert the file
@@ -238,7 +329,10 @@ class BuilderClient:
         list ``versions``, so both spellings parse."""
         releases: list[dict] = []
         pages = cursor_pages(
-            lambda cursor: self._get(("builds", build_id, "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}),
+            # A Build id a person typed reaches here unchecked, so it goes as one segment.
+            lambda cursor: self._get(
+                ("builds", urllib.parse.quote(build_id, safe=""), "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}
+            ),
             "releases",
         )
         for page in pages:

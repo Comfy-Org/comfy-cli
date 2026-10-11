@@ -52,6 +52,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "fix the invocation; `details.command` plus `--help`, or `comfy --json discover`, gives the exact surface",
     ),
     ErrorCode(
+        "internal_error",
+        "The command crashed on an exception it did not handle (a comfy-cli bug, not a bad input the command "
+        "recognised). `details.exception` names the exception type and the message carries its text; the full "
+        "traceback is on stderr. Whether anything was written depends on where it crashed, so re-read state "
+        "before retrying.",
+        "re-read the file/state before retrying; if the same call crashes again, try another route and report "
+        "the message as a comfy-cli bug",
+    ),
+    ErrorCode(
         "not_in_workspace",
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
@@ -322,6 +331,24 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "cloud_http_error",
         "Cloud returned a non-2xx HTTP error. `details.status` carries the code.",
         "check `details.body` for the server's message",
+    ),
+    ErrorCode(
+        "cloud_rate_limited",
+        "Comfy Cloud only: the cloud API throttled the request (HTTP 429). Throttling is not a verdict "
+        "on the request, so do not edit it; `details.retry_after` carries the server's Retry-After seconds "
+        "when it sent one. A 429 does not by itself prove the request had no effect. A local server's 429 "
+        "is reported as `client_error` with `details.status` 429.",
+        "wait `details.retry_after` seconds (or a few seconds), then retry; before re-running a submit, "
+        "check `comfy jobs ls --where cloud` so a job that did go through is not queued twice",
+    ),
+    ErrorCode(
+        "cloud_payment_required",
+        "Comfy Cloud only: the cloud refused the request because the account's plan does not allow it "
+        "(HTTP 402, or a legacy HTTP 429 with a plan-refusal type: free generations used up, subscription "
+        "required, a partner node or model that needs a paid plan). Not throttling and not a problem with "
+        "the workflow; nothing was queued. `details.status` is the HTTP status, `details.reason` the "
+        "server's refusal type when it sent one, and `details.body` its message.",
+        "do not retry or edit the workflow: tell the user the server's message; running it needs a plan that allows it",
     ),
     ErrorCode(
         "cloud_billing_unavailable",
@@ -598,10 +625,26 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "skill_invalid",
-        "A skill path failed format validation (missing SKILL.md, frontmatter name/description, or name/dir mismatch).",
-        "a skill dir must contain SKILL.md with `name:`/`description:` frontmatter; run `comfy skills validate <path>`",
+        "A skill path failed format validation (missing SKILL.md, frontmatter name/description, or name/dir mismatch), "
+        "or its frontmatter name is a skill the CLI ships.",
+        "a skill dir must contain SKILL.md with `name:`/`description:` frontmatter and a name of its own; "
+        "run `comfy skills validate <path>`",
     ),
     # --- workflow editor -----------------------------------------------------
+    ErrorCode(
+        "link_slot_out_of_range",
+        "A `workflow validate` finding: a link row of a canvas workflow reads an output slot its source node "
+        "does not have, or targets an input slot its node does not have while an input that could take the "
+        "value sits empty. The UI→API lowering drops such a row, so the value it was drawn to carry reaches "
+        "nothing. `node_id` addresses the target (`70/2011` inside a subgraph).",
+        "re-wire it with the `connect` the hint names (it works between two nodes inside one subgraph too) — "
+        "don't retype the value the link was meant to carry",
+    ),
+    ErrorCode(
+        "link_source_missing",
+        "A `workflow validate` finding: an input is wired from a node that does not exist, so it receives nothing.",
+        "wire the input from a real node with `comfy workflow connect`",
+    ),
     ErrorCode(
         "workflow_not_frontend_format",
         "Workflow editing requires the UI export (with `nodes[]` / `links[]`); "
@@ -611,8 +654,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "workflow_print_unsupported",
         "`comfy workflow print` refused: the workflow contains something it cannot render faithfully "
-        "(legacy group node, duplicate node id, link to a missing node/slot, non-integer link slot, "
-        "link cycle, unknown `--format`). `details.reasons` lists every reason.",
+        "(legacy group node, duplicate node id, link cycle, unknown `--format`). `details.reasons` lists every "
+        "reason. A broken link (missing source node, missing output or input slot, non-integer slot) is not a "
+        "refusal: the graph prints with that input as `None`, the line marked `BROKEN`, and a warning naming the "
+        "`connect` that repairs it. A link whose target node is missing feeds nothing: it is ignored with a "
+        "warning.",
         "fix the listed reasons, or read the graph with `comfy workflow slots` / `comfy workflow ls-nodes`",
     ),
     ErrorCode(
@@ -660,6 +706,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
         "the nearest matching option was used. Surfaced in the op's `warnings`.",
         "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
+    ),
+    ErrorCode(
+        "model_unavailable",
+        "Warning (not fatal): `templates fetch` checked the template against an offline catalog and a model "
+        "file it names is not installed, with no single same-model file in another precision to use instead. "
+        "Listed under `data.unavailable_models` with the closest installed options.",
+        "pick another template, or tell the user which model is missing; a `did_you_mean` option is a "
+        "different model, not a drop-in",
     ),
     ErrorCode(
         "ui_only_node_skipped",
@@ -1009,8 +1063,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "emit_workflow_unsupported_model",
         "`generate --emit-workflow` has no ComfyUI partner-node mapping for the requested model "
         "(`details.model`); most of the proxy catalog is proxy-only. `details.supported` lists the "
-        "aliases that can be emitted — the same set `generate list` flags with `emit_supported: true`.",
-        "pick a model with `emit_supported: true` in `comfy --json generate list`, or drop "
+        "aliases that can be emitted — the same set `generate list` flags with `emit_supported: true`; "
+        "`details.suggested` is the subset producing the same media as the requested model whose required "
+        "inputs the request already carries, same partner first (empty when none fits as given).",
+        "retry with the first alias in `details.suggested`, or pick any with `emit_supported: true`, or drop "
         "--emit-workflow and call the model through the proxy",
     ),
     ErrorCode(
@@ -1189,14 +1245,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_release_not_found",
-        "A `comfy build release show`, `logs`, or `manifest` command omitted RELEASE, but the current Build "
-        "has no release to select. `details.buildId` names the Build whose exhaustive release list was empty.",
+        "A `comfy build release show`, `logs`, or `manifest` command was asked for a Build's newest release "
+        "(RELEASE omitted, or given as a build path such as `.`), but that Build has no release to select. "
+        "`details.buildId` names the Build whose exhaustive release list was empty.",
         "run `comfy build release create --target <os>/<gpu>` first, or pass an existing RELEASE id",
     ),
     ErrorCode(
         "build_spec_invalid",
         "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
-        "`details.path` carries the path when one is available.",
+        "`details.path` carries the path when one is available. When `validate` or `push` found model "
+        "entries the builder would refuse (a type that is not a model directory, an unsafe filename, a link "
+        "with no file extension and no filename, a malformed sha256), the message lists every one and "
+        "`details.invalid` carries each as `{field, reason, model}`, `model` naming the entry. `push` checks "
+        "the link a local model keeps after it hashes the model's file, so a bad kept link is reported once "
+        "the other problems are fixed.",
         "fix the named field, or regenerate the file with `comfy build init`",
     ),
     ErrorCode(
@@ -1207,9 +1269,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_not_signed_in",
-        "A Builder-backed `comfy build` command found no usable Cloud JWT — the builder authenticates with "
-        "the OAuth session token, and there isn't a valid one.",
-        "run `comfy cloud login` first",
+        "A Builder-backed `comfy build` command found no workspace API key and no usable Cloud JWT, or the "
+        "builder refused the one it sent with HTTP 401.",
+        "run `comfy cloud login`, or set COMFY_CLOUD_API_KEY to a workspace API key",
     ),
     ErrorCode(
         "build_builder_error",
@@ -1242,6 +1304,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(
+        "build_definition_invalid",
+        "The builder refused the build's definition, most often at `push --release` or `release create`. "
+        "When the builder lists its reasons, the message lists each problem as `<field>: <reason>`, and "
+        "`details.invalid` carries each as `{field, reason}`; otherwise the message is the builder's own "
+        "and `details.invalid` is absent. `models[<n>]` counts the models as the spec file lists them after a push, and "
+        "under `push --release` each such line and entry also names its model (`model`: its filename, "
+        "else its link without query, fragment or userinfo, else its local path). "
+        "The cut refuses two things under this code that are not the definition, and the message then "
+        "says the builder refused the release: a `targets[<n>]` field (a repeated os/gpu pair, one the "
+        "builder cannot build) is the n-th `--target` value, and the hint points at "
+        "`comfy build refs build-targets`; a `blob:<id>` field (`not uploaded`, `unknown blob`, an uploaded "
+        "size or content that does not match) is a model's file or a node's zip that never reached the "
+        "builder whole, and the hint says to delete that `blobId` from its entry and push again, which "
+        "uploads the file; an entry with no `source: local` first needs one, with a `localPath`, or "
+        "another source it can take (a model's `sourceUri`, a node's `registryVersion` or `repository`). "
+        "A refusal of several kinds names each fix.",
+        "fix each named field in the spec, then push again; a retry of the same definition is refused the same way",
+    ),
+    ErrorCode(
         "build_release_held",
         "`comfy build push --release` saved the build, but the save warned about a model link a deployment "
         "could not download, so no release was cut. `details` carries the saved `id`, `syncedRevision` and "
@@ -1259,6 +1340,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "written into the spec on disk before the refusal.",
         "delete a release with `comfy build release delete`, or delete a whole build to give up every "
         "release it holds, then cut again",
+    ),
+    ErrorCode(
+        "build_limit",
+        "The builder refused to create a build because the workspace already holds as many builds as its "
+        "limit allows. The limit counts every member's builds, while `comfy build ls` lists only your own "
+        "outside the enterprise plan, so a full workspace can show a short or empty list. `message` is the "
+        "builder's own wording, read as text and never parsed. `comfy build push` reaches this code when "
+        "neither the spec nor `--id` names a build, so it creates one; `details` carries the status and the "
+        "raw body. The spec's files were uploaded "
+        "and their ids written into the spec on disk before the refusal, so a retry once there is room "
+        "uploads nothing twice.",
+        "teammates' builds count but `comfy build ls` lists only yours outside the enterprise plan: delete "
+        "one with `comfy build delete --id <build>`, which takes its releases too, or ask a teammate to "
+        "delete one, then push again",
     ),
     ErrorCode(
         "build_release_in_use",
@@ -1358,9 +1453,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_ambiguous_deployment",
-        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time. "
-        "`details.candidateIds` lists every indistinguishable deployment id.",
-        "pass `--deployment <id>` to select one deployment explicitly",
+        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time, "
+        "or `comfy deploy up`, with deployment updates on, `rollback`, `rename` or `cancel`, given no "
+        "`--deployment`, found more than one deployment of the Build to act on. `details.candidateIds` lists every "
+        "candidate deployment id, and on `up`, `rollback`, `rename` and `cancel` `details.candidates` lists each "
+        "one's id, name, release and status.",
+        "pass `--deployment <name|id>` to select one deployment explicitly",
     ),
     ErrorCode(
         "deploy_unrelated_deployment",
@@ -1369,6 +1467,47 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "only those on the release it is reconciling, so an id can be refused by one and accepted by the other. "
         "`details.candidateIds` lists the ids that are in scope, and `details.deploymentId` echoes the one asked for.",
         "pick one of `details.candidateIds`, which lists every deployment this command can act on -- or when that list is empty, drop `--deployment` to let the command pick or create one",
+    ),
+    ErrorCode(
+        "deploy_name_not_found",
+        "`--deployment`, or an argument of `comfy deploy promote`, named a deployment by a name no live deployment "
+        "of the Build holds. `details.names` lists the names the Build's live deployments hold, and "
+        "`details.buildId` says which Build was searched. An empty list means none of them has a name, because "
+        "they predate names or comfy-deploy does not serve names yet, or the Build has no live deployment.",
+        "pick one of `details.names`, or pass the deployment's id",
+    ),
+    ErrorCode(
+        "deploy_build_not_found",
+        "comfy-cli could not tell which Build a deployment name belongs to: `<build>/<name>` named a Build no "
+        "Build in the workspace has as its name or id, or a bare name was given outside any Build's folder.",
+        "run the command from the Build's folder, or name the Build as `<build>/<name>`; `comfy build ls` lists "
+        "each Build's name and id",
+    ),
+    ErrorCode(
+        "deploy_ambiguous_build",
+        "`<build>/<name>` named a Build by a name two or more Builds share, since a Build's name is not unique in "
+        "a workspace. `details.buildIds` lists each Build with that name.",
+        "name the Build by its id, as `<build id>/<name>`",
+    ),
+    ErrorCode(
+        "deploy_invalid_name",
+        "`comfy deploy up --name` or `comfy deploy rename` was given a name comfy-deploy would refuse. A name is 1 "
+        "to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit, and never "
+        "starting with `dep-`. "
+        "comfy-cli refuses it before calling comfy-deploy, so nothing was created or renamed.",
+        "pick a name such as `staging` or `canary-2`",
+    ),
+    ErrorCode(
+        "deploy_name_taken",
+        "comfy-deploy refused a name another live deployment of the same Build holds, on `up --name` or `rename`. "
+        "`details.name` echoes it.",
+        "pick another name, or rename that deployment first with `comfy deploy rename`",
+    ),
+    ErrorCode(
+        "deploy_names_unavailable",
+        "`comfy deploy rename` reached a comfy-deploy that does not serve deployment names yet: it refused the "
+        "rename as a request it does not know, or answered without the name. Nothing was renamed.",
+        "wait until comfy-deploy serves names; until then a deployment is reached by its id",
     ),
     ErrorCode(
         "deploy_missing_input",
@@ -1385,13 +1524,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_server_error",
-        "A deploy control-plane request failed in transport or returned an HTTP 5xx. Mutating requests are not retried because their outcome may be unknown.",
+        "A deploy control-plane request failed in transport or returned an HTTP 5xx. Mutating requests are not retried because their outcome may be unknown; a watch's reads are retried first (see `deploy_watch_lost`).",
         "check network access and COMFY_DEPLOY_URL; retry only after confirming the deployment state",
     ),
     ErrorCode(
         "deploy_not_signed_in",
-        "A deploy control-plane request found no usable Cloud JWT, or the server rejected it with HTTP 401.",
-        "run `comfy cloud login`, then retry",
+        "A deploy control-plane request found no workspace API key and no usable Cloud JWT, or the server "
+        "rejected the one it sent with HTTP 401.",
+        "run `comfy cloud login`, or set COMFY_CLOUD_API_KEY to a workspace API key, then retry",
     ),
     ErrorCode(
         "deploy_not_found",
@@ -1440,9 +1580,57 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.status` names the state. The two commands differ, deliberately: `comfy deploy status` "
         "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
         "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
-        "asked to bring up and that is stopped did not come up.",
+        "asked to bring up and that is stopped did not come up, and `unhealthy`, because one that came up and "
+        "then degraded is billing without serving and `up` does not change it. `comfy deploy promote` and "
+        "`comfy deploy rollback` judge a deployment they moved as `up` does, and report one they left unchanged "
+        "without judging it.",
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
-        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`",
+        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
+        "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
+    ),
+    ErrorCode(
+        "deploy_watch_lost",
+        "The deploy control plane left the reads of a watch (`comfy deploy up`, `promote`, `rollback`, "
+        "`comfy deploy status --watch`) unanswered, with an HTTP 5xx or no response, for the whole retry window "
+        "of about a minute, or `up`, `promote` or `rollback` followed a move onto another release for an hour "
+        "without it landing. Only the watch "
+        "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
+        "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
+        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
+        "after a move, read `comfy deploy show --deployment <id>` instead: the move has landed once it shows no "
+        "pendingUpdate and its releaseId is the release asked for",
+    ),
+    ErrorCode(
+        "deploy_update_failed",
+        "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and the watch saw "
+        "the move fail: the new release's copy failed to come up, or the update ended before it landed, which "
+        "a `comfy deploy cancel`, a move back to the release it served, or the service dropping it does. The "
+        "deployment keeps its id and URL and still serves the release it served before. "
+        "`details.serving_release_id` names that release and `details.release_id` the one that failed.",
+        "inspect `comfy deploy events --deployment <id>`, which covers the new release's copy; `logs` shows the "
+        "release still serving",
+    ),
+    ErrorCode(
+        "deploy_update_replaced",
+        "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and before the "
+        "move landed a newer update replaced it: someone ran another `up`, `promote` or `rollback` on the same "
+        "deployment, and the service cancelled this one. The deployment keeps its id and URL. "
+        "`details.release_id` names the release this move asked for and `details.replacing_release_id` the one "
+        "the newer update moves to.",
+        "run `comfy deploy status --deployment <id>` to see the newer update, and, while it still waits, "
+        "`comfy deploy cancel --deployment <id>` to end it",
+    ),
+    ErrorCode(
+        "deploy_updates_unavailable",
+        "The command needs deployment updates, which are not on for this workspace yet: the deployment "
+        "carries no `revision`. `comfy deploy promote` and `rollback` need it to move a deployment in place, "
+        "`history` needs it to list the releases a deployment ran, and `comfy deploy events --release` needs it, "
+        "since only there does each event say which release made it. `comfy deploy cancel` answers it too where "
+        "the deploy service is too old to cancel an update. "
+        "`details.deployment_id` names the deployment that was read.",
+        "for `events --release`, run it without `--release`; for `history`, read `comfy deploy events`; for "
+        "`promote` or `rollback`, run the hint's `comfy deploy up --create --release <id>` to start a separate "
+        "deployment on that release; for `cancel`, wait until the update lands or fails",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",
@@ -1478,6 +1666,18 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.node_errors` carries structured per-node failures only when the server sent them, which "
         "this route usually does not.",
         "fix the workflow as `message` describes, then submit again with a new idempotency key",
+    ),
+    ErrorCode(
+        "deploy_workflow_too_large",
+        "The job submission is larger than a deployment accepts, 10,000,000 bytes (10 MB), so no job was "
+        "created. Usually raised locally before the job request is sent, with `details.request_bytes` and "
+        "`details.limit_bytes`; an HTTP 413 from the deployment, which refuses the request before creating a "
+        "job, maps here too. Files the workflow names may already have been uploaded as assets by then; a "
+        "resubmit finds them by hash and does not upload them again. The size is almost always data held inline in the workflow, such as an embedded "
+        "base64 image or a long text value. Files the workflow names by path are uploaded separately and do "
+        "not count.",
+        "make the workflow smaller: move large inline data into a file under the install's input/ directory "
+        "and name that file in the node's input where the node accepts one, then submit again",
     ),
     ErrorCode(
         "deploy_workflow_empty",
@@ -1526,8 +1726,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_job_submit_unknown",
-        "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. The v2 API has no job-list endpoint, idempotency-key lookup, or client-supplied job id with which to find it.",
-        "do not resubmit automatically because the possibly-created job cannot be found through the v2 API",
+        "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. No job id "
+        "came back, and the CLI has no command that finds a job by its idempotency key, so it cannot say whether "
+        "the job was created. `details.idempotency_key` is the key sent with the submission.",
+        "do not resubmit automatically: every `comfy deploy run` uses a new idempotency key, so a resubmit is a "
+        "second billed job if the first one was created",
     ),
     ErrorCode(
         "deploy_job_failed",

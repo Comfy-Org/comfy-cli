@@ -60,10 +60,18 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
     """
     if isinstance(e, workflow_ops.FatalFindingError):
         f = e.finding
+        if f.get("best_match") is not None:
+            # One option shares the rejected value's leading token (the ratio
+            # in '16:9 (Landscape)'): lead with it rather than a flat list.
+            finding_hint = f"use {f['best_match']!r} — the only option with the same leading token"
+        elif f.get("did_you_mean"):
+            finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?"
+        else:
+            finding_hint = hint
         renderer.error(
             code=f.get("code", "workflow_edit_invalid"),
             message=f.get("message", str(e)),
-            hint=(f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?" if f.get("did_you_mean") else hint),
+            hint=finding_hint,
             details={k: v for k, v in f.items() if k != "message"},
         )
         return
@@ -181,6 +189,10 @@ def add_node_cmd(
         str | None,
         typer.Option("--at", show_default=False, help="Canvas position 'x,y' for the new node."),
     ] = None,
+    title: Annotated[
+        str | None,
+        typer.Option("--title", show_default=False, help="Custom display title for the new node."),
+    ] = None,
     allow_deprecated: Annotated[
         bool,
         typer.Option(
@@ -216,6 +228,7 @@ def add_node_cmd(
             graph,
             class_type,
             pos=pos,
+            title=title,
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
@@ -232,7 +245,9 @@ def add_node_cmd(
         # Same envelope shape as `nodes show` so a caller can self-correct from
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
-        if e.ui_only:
+        if e.ui_only and e.class_type in workflow_ops.NOTE_NODE_TYPES:
+            hint = workflow_ops.note_insert_hint(e.class_type)
+        elif e.ui_only:
             hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
         elif e.subgraph_id:
             hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
@@ -295,6 +310,9 @@ def set_widget_cmd(
         workflow, op = workflow_ops.set_widget(
             workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
         )
+    except workflow_ops.NoteTextNotWritable as e:
+        _emit_edit_error(renderer, e, hint=e.hint)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         _emit_edit_error(
             renderer,
@@ -304,6 +322,69 @@ def set_widget_cmd(
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-widget")
+
+
+# ---------------------------------------------------------------------------
+# set-node-field (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def set_node_field_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    node: Annotated[str, typer.Argument(help="Node id.")],
+    field: Annotated[
+        str,
+        typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
+    ],
+    value: Annotated[
+        str | None,
+        typer.Argument(
+            show_default=False,
+            help="New value (parsed as JSON, else literal string). Omit and pass --clear to clear the field.",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", show_default=False, help="Clear the field back to absent."),
+    ] = False,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    """Set, or clear, one durable node field; emits a ``set_node_field`` op.
+
+    PROPOSED: ``set_node_field`` is not yet part of the ratified
+    docs/op-vocabulary-v1.md contract — see that document's §1.8. It
+    supersedes the withdrawn, title-only ``set_title`` proposal and mirrors
+    comfy-multi-player#235's merged ``set_node_field`` CRDT op.
+    """
+    renderer = get_renderer()
+    renderer.command = "workflow set-node-field"
+    if clear == (value is not None):
+        renderer.error(
+            code="workflow_edit_invalid",
+            message="pass exactly one of VALUE or --clear",
+            hint='`comfy workflow set-node-field <file> <node_id> <field> "value"` or '
+            "`comfy workflow set-node-field <file> <node_id> <field> --clear`",
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # No catalog is needed to write these fields (unlike set-widget): none of
+    # `title`/`mode`/`flags.collapsed`/`flags.pinned` is a catalogued widget.
+    node_id: Any = int(node) if node.lstrip("-").isdigit() else node
+    try:
+        workflow, op = workflow_ops.set_node_field(
+            workflow, node_id, field, None if clear else _parse_value(value), actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")
 
 
 # ---------------------------------------------------------------------------
@@ -471,9 +552,9 @@ def _load_clearable_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[st
     API-format document (``workflow_not_frontend_format``), because slot
     addressing needs ``nodes[]``/``links[]``. ``clear`` and ``reset-doc`` do
     not: the result is the empty frontend document either way. Gating them on
-    the format of what is being thrown away locked a tab in prod — a
+    the format of what is being thrown away could lock a tab — a
     ``generate --emit-workflow`` API-format draft could then be neither edited
-    NOR cleared, and the agent abandoned the tab.
+    NOR cleared, leaving the caller nothing to do but abandon the tab.
 
     An API-format file is replaced by the empty frontend baseline (the same
     shape ``foreach`` mints a fresh document from) so the op applies to a
@@ -610,6 +691,17 @@ def ls_nodes_cmd(
         # Emitted only when set, so a normal node stays a single clean row.
         if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
             row["mode"] = label
+        # A row's `type` reads like an addable class. Two kinds are not: a
+        # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
+        # instance, whose `type` is its definition uuid. Both stay listed (the
+        # graph must still be understood); the flag says `add-node` / `nodes
+        # show` cannot take that type. Only set when true, like `mode`.
+        node_type = n.get("type")
+        if isinstance(node_type, str):
+            if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
+                row["ui_only"] = True
+            elif workflow_ops._UUID_RE.match(node_type):
+                row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():

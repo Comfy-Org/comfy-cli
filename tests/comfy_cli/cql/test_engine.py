@@ -590,22 +590,24 @@ def _prefixed_dynamic_combo_object_info() -> dict:
 
 
 class TestDynamicComboImplicitControlAfterGenerate:
-    """Sub-input seed/noise_seed widgets companion a control_after_generate
-    marker even without the schema flag — same rule as the UI→API converter."""
+    """An unflagged sub-input seed gets NO control_after_generate marker: the
+    frontend names it ``mode.seed``, so ``useIntWidget``'s exact
+    ``seed``/``noise_seed`` rule never matches (saved TextGenerate templates
+    carry no marker after ``sampling_mode.seed``)."""
 
     @pytest.fixture
     def seed_graph(self) -> Graph:
         return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
 
-    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
-        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
-        assert order == ["mode", "mode.seed", "control_after_generate"]
+    def test_value_aware_order_has_no_implicit_sub_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0])
+        assert order == ["mode", "mode.seed"]
 
-    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+    def test_roster_rebuild_writes_no_implicit_sub_marker(self, seed_graph: Graph):
         wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
         out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
         assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
-        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0]
 
     def test_roster_rebuild_respects_extend_false(self):
         graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())
@@ -2185,11 +2187,11 @@ class TestValidateUnmarkedInputFileCombo:
     """A COMBO whose options are the server's INPUT-FOLDER listing is upload-
     backed even when object_info carries no ``<kind>_upload`` marker.
 
-    Found in prod (Langfuse 2026-08-25, 3 ``run`` failures, one user): the
-    agent uploaded eight ``.mp4`` shots to Comfy Cloud, wired each content hash
-    into a ``VHS_LoadVideo.video`` widget, and ``comfy run`` refused every node
-    with ``unknown_enum_value '<64hex>.mp4' not in 1 known options for video
-    (did you mean: bedroom.mp4?)``. The whole assembly never rendered.
+    For example: an agent uploads several ``.mp4`` shots to Comfy Cloud, wires
+    each content hash into a ``VHS_LoadVideo.video`` widget, and ``comfy run``
+    refused every node with ``unknown_enum_value '<64hex>.mp4' not in 1 known
+    options for video (did you mean: bedroom.mp4?)``, so the whole assembly
+    never rendered.
 
     The marker is the frontend's contract for CORE loaders only. VideoHelperSuite
     builds ``video`` from ``folder_paths.get_input_directory()`` filtered by its
@@ -3402,7 +3404,8 @@ class TestDynamicComboInputs:
 
     def test_required_missing_hint_truncates_many_selection_keys(self):
         """A dynamic combo with hundreds of options must not dump them all
-        into the required_input_missing hint — first 8, then a count."""
+        into the required_input_missing error — the first few, a count, and
+        the query that lists the rest."""
         options = [{"key": f"ckpt-{i:03d}", "inputs": {"required": {}, "optional": {}}} for i in range(30)]
         info = {
             "Loader": {
@@ -3419,9 +3422,12 @@ class TestDynamicComboInputs:
         result = g.validate_workflow({"1": {"class_type": "Loader", "inputs": {}}})
         err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
         hint = err["hint"]
-        assert "ckpt-007" in hint
-        assert "ckpt-008" not in hint
-        assert "and 22 more" in hint
+        assert err["suggestions"] == ["ckpt-000", "ckpt-001", "ckpt-002", "ckpt-003", "ckpt-004"]
+        assert err["option_count"] == 30
+        assert "valid_options" not in err
+        assert "ckpt-005" not in json.dumps(err)
+        assert "of 30 options" in hint
+        assert 'inputs.#(name=="model").selection_keys' in hint
 
     def test_stale_sub_key_warning_survives_on_unreachable_node(self):
         """dyn_errors/dyn_warnings used to be bundled into one reachability
@@ -3823,9 +3829,9 @@ class TestMatchTypeWildcard:
     """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
     resolved at runtime from whatever it is wired to. It was not recognised as a
     wildcard, so every edge touching one was reported as edge_type_mismatch —
-    ~30 spurious warnings in a single 48h prod window on graphs that were
-    correct (ComfySwitchNode, ResizeImageMaskNode). The agent explained them away
-    in nearly every reply, which teaches it to discount validator output.
+    spurious warnings on graphs that were correct (ComfySwitchNode,
+    ResizeImageMaskNode). An agent then explains them away in nearly every
+    reply, which teaches it to discount validator output.
     """
 
     @staticmethod
@@ -3927,11 +3933,10 @@ class TestMultiTypeEdge:
     ``INT,FLOAT`` input — a connection the frontend's ``isValidConnection``
     accepts and the server runs — was reported as ``edge_type_mismatch``.
 
-    Langfuse 2026-08-25..28: 23 ``edge_type_mismatch`` warnings across 55
-    validate calls, 12 of them exactly this shape (``input 'b' expects
-    INT,FLOAT but PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d'
-    expects FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
-    FILE_3D_GLB``). Shapes copied from the cloud catalog (``SimpleMath+``,
+    Typical warnings of this shape: ``input 'b' expects INT,FLOAT but
+    PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d' expects
+    FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
+    FILE_3D_GLB``. Shapes copied from the cloud catalog (``SimpleMath+``,
     ``PrimitiveFloat``).
     """
 
@@ -4289,10 +4294,9 @@ class TestUnreachableNodeIsVisible:
     check here skips pruned nodes — so such a graph could validate as
     "0 errors, 0 warnings" while doing nothing the author intended.
 
-    Prod repro: a depth-ControlNet whose output was never wired into the sampler
-    validated completely clean. The graph then ran twice, produced an image with
-    no pose applied, and cost two paid GPU runs and three turns of "it does
-    nothing" / "still no pose" before the dangling link was found.
+    Repro: a depth-ControlNet whose output was never wired into the sampler
+    validated completely clean. The graph would then run, produce an image with
+    no pose applied, and cost paid GPU runs before the dangling link was found.
     """
 
     @staticmethod

@@ -227,7 +227,7 @@ def _object_info_with_inputcount() -> dict[str, Any]:
     present so an unrelated node with a coincidental ``foo_1`` input is never
     misclassified. Bare 1-based keys (``image_3``) are the CORRECT wire
     address for this family — unlike autogrow's dotted ``base.elemN`` — which
-    is exactly what prod agents were sending and the CLI wrongly refused.
+    is exactly what agents send and the CLI used to wrongly refuse.
     """
     info = copy.deepcopy(_object_info())
     info["ImageBatchMulti"] = {
@@ -679,6 +679,18 @@ class TestAddNode:
         assert wf["nodes"][-1]["pos"] == [400, 200]
         assert op["pos"] == [400, 200]
 
+    def test_add_node_can_set_title_at_creation(self):
+        """Applying a title when creating a node should show the requested
+        title immediately, not the node's default class-derived title."""
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, op = workflow_ops.add_node(wf, g, "KSampler", title="My Sampler")
+        node = wf["nodes"][-1]
+        assert node.get("title") == "My Sampler"
+        # The op is the unit of replay (P1 fidelity) — a title set at
+        # creation must be frozen into it, not just the local node dict.
+        assert op.get("title") == "My Sampler"
+
     def test_add_node_size_reflects_widget_count(self):
         """Size is estimated from the node's real inputs/outputs/widgets, not
         the old blind [210, 100] default."""
@@ -1085,8 +1097,8 @@ class TestConnect:
         """A dotted autogrow target that is not the next sequential slot — an index gap
         (images.image2), a doubled prefix (images.images.image0), a stray element
         (images.foo), or a trailing dot — is rejected with the fix, not silently grown
-        into a key the server cannot map. Regression: prod connects mis-addressed
-        autogrow slots and the CLI grew bogus inputs that failed only at submit time."""
+        into a key the server cannot map. Regression: connects that mis-addressed
+        autogrow slots made the CLI grow bogus inputs that failed only at submit time."""
         path = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
         src = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
         batch = _run(["add-node", str(path), "BatchImagesNode"], capsys)["data"]["op"]["node_id"]
@@ -1195,8 +1207,8 @@ class TestConnect:
     def test_inputcount_family_bare_key_grows_and_bumps_count(self):
         """kijai ``inputcount`` family (ImageBatchMulti et al.): bare 1-based
         ``image_3`` IS the correct wire address (unlike autogrow's dotted
-        ``base.elemN``) — prod agents sent exactly this and the CLI wrongly
-        refused it. Growing the slot must ALSO bump the ``inputcount`` widget
+        ``base.elemN``) — agents send exactly this and the CLI used to wrongly
+        refuse it. Growing the slot must ALSO bump the ``inputcount`` widget
         to N, or the node never reads the new slot at runtime. Detection
         signal pinned against ImageBatchMulti's real object_info entry (see
         ``_object_info_with_inputcount``): a required INT ``inputcount``
@@ -1339,11 +1351,11 @@ class TestClear:
         on_disk = json.loads(path.read_text())
         assert on_disk["nodes"] == [] and on_disk["links"] == [] and on_disk["groups"] == []
 
-    # Prod (Langfuse 2026-08-26): `generate --emit-workflow` left an API-format
-    # draft in the tab's scratch file; `apply_ops` then `clear_canvas` both
-    # failed `workflow_not_frontend_format`, and the agent had to abandon the
-    # tab. Clearing discards the content, so its format cannot be a reason to
-    # refuse — the empty document that results is frontend-format regardless.
+    # `generate --emit-workflow` can leave an API-format draft in a tab's
+    # scratch file; `apply_ops` then `clear_canvas` both failed
+    # `workflow_not_frontend_format`, leaving the tab unusable. Clearing
+    # discards the content, so its format cannot be a reason to refuse — the
+    # empty document that results is frontend-format regardless.
     _API_DRAFT = {
         "1": {"class_type": "GeminiImageNode", "inputs": {"prompt": "a fox", "seed": 1}},
         "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "generate"}},

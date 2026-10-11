@@ -449,7 +449,7 @@ def status_cmd(
     plans_body, _ = _billing_get_optional(target.url("billing", "plans"), target)
 
     balance_micros = billing.select_effective_balance_micros(balance_body if isinstance(balance_body, dict) else None)
-    balance_usd = billing.micros_to_usd(balance_micros)
+    balance_usd = billing.cents_to_usd(balance_micros)
     balance_credits = billing.usd_to_credits(balance_usd)
 
     subscription_status = status_body.get("subscription_status")
