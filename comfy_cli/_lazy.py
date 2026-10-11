@@ -102,6 +102,7 @@ class LazyCommand:
     attr: str | None = None
     register: str | None = None
     help: str | None = None
+    hidden: bool = False
 
 
 class LazyTyperGroup(TyperGroup):
@@ -166,7 +167,7 @@ class LazyTyperGroup(TyperGroup):
             info = infos[0]
         else:
             assert spec.attr, "LazyCommand needs attr or register"
-            info = CommandInfo(name=name, callback=getattr(module, spec.attr), help=spec.help)
+            info = CommandInfo(name=name, callback=getattr(module, spec.attr), help=spec.help, hidden=spec.hidden)
         return typer.main.get_command_from_info(info, **self._factory_kwargs(typer.main.get_command_from_info))
 
     def _build_group(self, name: str, spec: LazySubcommand) -> click.Command:
