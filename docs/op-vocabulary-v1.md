@@ -1109,6 +1109,14 @@ Interior links wholly inside one eligible, single-instance definition carry
 the instance path in that identity. Links that cross a subgraph boundary, and
 links inside a shared definition, remain refused.
 
+The `grow_id` rule deliberately re-scopes a reconnect-shaped `connect` from
+the older concrete `("input", to_node, to_slot)` target to
+`("input", to_node, "grow_id", grow_id)`. It is therefore a coordinated
+applier upgrade: an older replica that does not recognize `connect.grow_id`
+must not participate in mixed-version replay with v1.8. Downstream appliers
+must add the same target before moving their pinned vocabulary SHA to this
+amendment.
+
 The replay path also retains a winning reconnect that arrives before the
 connect which materializes its grown input, then applies that pending write
 when the stable `grow_id` slot appears. Tests cover both replay orders for

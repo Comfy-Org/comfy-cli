@@ -279,6 +279,50 @@ def test_disconnect_shared_interior_definition_is_refused(tmp_path, capsys):
     assert "2 instances" in env["error"]["message"]
 
 
+def test_disconnect_legacy_name_keyed_shared_definition_is_refused(tmp_path, capsys):
+    wf = _workflow(instances=2)
+    definition = _sg(wf)
+    definition.pop("id")
+    definition["name"] = "Legacy region prompts"
+    for host in wf["nodes"]:
+        host["type"] = definition["name"]
+    _node(wf, 2011)["inputs"][1]["link"] = 9001
+    definition["links"][0]["target_slot"] = 1
+    path = _write(tmp_path, wf)
+
+    env = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert env["ok"] is False
+    assert "2 instances" in env["error"]["message"]
+
+
+def test_replayed_disconnect_refuses_a_definition_that_became_shared():
+    graph = _graph()
+    wired, _ = workflow_ops.connect(copy.deepcopy(_workflow()), graph, "70/2005", "STRING", "70/2011", "text")
+    _, disconnect = workflow_ops.disconnect(copy.deepcopy(wired), graph, "70/2011", "text", base_version=9)
+    shared = copy.deepcopy(wired)
+    shared["nodes"].append({"id": 71, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []})
+
+    workflow_ops.apply_op(shared, disconnect, graph)
+
+    assert _node(shared, 2011)["inputs"][1]["link"] == disconnect["link_id"]
+
+
+def test_replayed_disconnect_does_not_remove_a_new_boundary_link():
+    graph = _graph()
+    wired, _ = workflow_ops.connect(copy.deepcopy(_workflow()), graph, "70/2005", "STRING", "70/2011", "text")
+    _, disconnect = workflow_ops.disconnect(copy.deepcopy(wired), graph, "70/2011", "text", base_version=9)
+    definition = _sg(wired)
+    link = next(row for row in definition["links"] if row["id"] == disconnect["link_id"])
+    link["origin_id"] = -10
+    definition["inputs"] = [{"id": "in-1", "name": "prompt", "type": "STRING", "linkIds": [disconnect["link_id"]]}]
+
+    workflow_ops.apply_op(wired, disconnect, graph)
+
+    assert _node(wired, 2011)["inputs"][1]["link"] == disconnect["link_id"]
+    assert disconnect["link_id"] in definition["inputs"][0]["linkIds"]
+
+
 def test_interior_connect_type_mismatch_is_refused(tmp_path, capsys):
     path = _write(tmp_path, _workflow())
     env = _run(["connect", str(path), "70/2012.MODEL", "70/2011.clip"], capsys)

@@ -479,6 +479,30 @@ def test_dynamic_disconnect_tombstone_survives_reversed_replay(grow: dict[str, A
         assert grown["widget"] == {"name": grow["widget"]}
 
 
+def test_promoted_disconnect_materializes_the_winning_empty_register():
+    create = _grow_connect("pr1", AGENT, 5, 9761, 500)
+    create["grow"] = {"name": "declared.image", "type": "IMAGE", "promoted": True}
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("pr2"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": 9761,
+        "to_node": 700,
+        "to_slot": 1,
+        "grow": copy.deepcopy(create["grow"]),
+    }
+
+    forward = _run(_autogrow_base(), [create, disconnect])
+    reverse = _run(_autogrow_base(), [disconnect, create])
+
+    assert _comparable(forward) == _comparable(reverse)
+    promoted = next(i for i in forward["nodes"][-1]["inputs"] if i.get("name") == "declared.image")
+    assert promoted["link"] is None
+    assert promoted["grow_id"] == 9761
+
+
 def test_grown_input_reconnect_and_disconnect_share_one_register():
     base = _autogrow_base()
     grown = base["nodes"][-1]["inputs"][0]
@@ -553,6 +577,85 @@ def test_grown_input_reconnect_waits_for_its_creating_connect(grow: dict[str, An
     assert "_pending_dynamic_connects" not in reverse
 
 
+def test_pending_reconnect_survives_when_the_creating_source_was_deleted():
+    create = _grow_connect("src1", AGENT, 1, 9751, 500)
+    reconnect = _connect("src2", AGENT, 9, 9752, 510, to_node=700, to_slot=1)
+    reconnect["grow_id"] = 9751
+    reconnect["link_type"] = "IMAGE"
+    delete_source = _delete("src3", HUMAN, 11, 500, [9751])
+
+    forward = _run(_autogrow_base(), [create, reconnect, delete_source])
+    reverse = _run(_autogrow_base(), [reconnect, delete_source, create])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == [9752]
+    assert "_pending_dynamic_connects" not in forward
+    assert "_pending_dynamic_connects" not in reverse
+
+
+def test_pending_reconnect_bookkeeping_is_transient_and_bounded(monkeypatch):
+    reconnect = _connect("pend1", AGENT, 9, 9752, 510, to_node=700, to_slot=1)
+    reconnect["grow_id"] = 9751
+    reconnect["link_type"] = "IMAGE"
+    pending = _run(_autogrow_base(), [reconnect])
+    assert "_pending_dynamic_connects" in pending
+
+    saved = copy.deepcopy(pending)
+    ops.strip_internal(saved)
+    assert "_pending_dynamic_connects" not in saved
+
+    deleted = copy.deepcopy(pending)
+    ops.apply_op(deleted, _delete("pend2", HUMAN, 10, 700, []), None)
+    assert "_pending_dynamic_connects" not in deleted
+
+    cleared = copy.deepcopy(pending)
+    ops.clear(cleared, actor=HUMAN, base_version=10)
+    assert "_pending_dynamic_connects" not in cleared
+
+    original_find = ops._find_by_str
+
+    def fail_on_reconnect_source(workflow, node_id):
+        if str(node_id) == "510":
+            raise RuntimeError("injected after pending pop")
+        return original_find(workflow, node_id)
+
+    monkeypatch.setattr(ops, "_find_by_str", fail_on_reconnect_source)
+    creator = _grow_connect("pend3", AGENT, 1, 9751, 500)
+    before = copy.deepcopy(pending["_pending_dynamic_connects"])
+    with pytest.raises(RuntimeError, match="injected"):
+        ops.apply_op(pending, creator, None)
+    assert pending["_pending_dynamic_connects"] == before
+
+
+def test_disconnect_is_total_over_a_malformed_input_entry():
+    malformed = _autogrow_base()
+    malformed["nodes"][-1]["inputs"] = [None]
+    with pytest.raises(ValueError, match="malformed"):
+        ops.disconnect(copy.deepcopy(malformed), None, 700, 0)
+
+    op = {
+        "op": "disconnect",
+        "op_id": _op_id("bad1"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": 9751,
+        "to_node": 700,
+        "to_slot": 0,
+        "grow_id": 9751,
+    }
+    assert ops.apply_op(copy.deepcopy(malformed), op, None)["nodes"][-1]["inputs"] == [None]
+
+
+def test_apply_specs_rejects_two_writes_to_one_input_in_one_batch():
+    specs = [
+        {"op": "disconnect", "to": "200.positive"},
+        {"op": "connect", "from": "300.0", "to": "200.positive"},
+    ]
+    with pytest.raises(ValueError, match="already written earlier in this batch"):
+        ops.apply_specs(_wired_base(), None, specs, actor=AGENT, base_version=5)
+
+
 # ---------------------------------------------------------------------------
 # 5. generated interleavings — breadth over the hand-picked cases
 # ---------------------------------------------------------------------------
@@ -617,11 +720,10 @@ def test_known_gap_out_links_order():
     assert sorted(out_links([a, b])) == sorted(out_links([b, a]))
 
 
-def test_known_gap_autogrow_racing_a_delete_of_its_source():
-    """KNOWN GAP amendment v1.2 does NOT close: an autogrow connect grows a
-    STRUCTURAL slot rather than writing a register, so racing a delete of its
-    source leaves the grown slot present in one order and absent in the other.
-    Filed as the autogrow-shaped sibling of FINDING 1."""
+def test_autogrow_racing_a_delete_of_its_source_materializes_in_both_orders():
+    """A grow's structural slot is independent of whether its source survives.
+    Materializing it in both orders lets a later reconnect to that grow_id be
+    replayed deterministically instead of being parked forever."""
     grow = _grow_connect("m1", AGENT, 5, 9701, 500)
     delete = _delete("m2", HUMAN, 9, 500, [9701])
 
@@ -630,7 +732,7 @@ def test_known_gap_autogrow_racing_a_delete_of_its_source():
         return [i["name"] for i in next(n for n in wf["nodes"] if n["id"] == 700)["inputs"]]
 
     assert slots([grow, delete]) == ["images.image0", "images.image1"]
-    assert slots([delete, grow]) == ["images.image0"]
+    assert slots([delete, grow]) == ["images.image0", "images.image1"]
 
 
 # ---------------------------------------------------------------------------

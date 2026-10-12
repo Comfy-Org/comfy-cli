@@ -1453,6 +1453,8 @@ def disconnect(
         dst = _require(workflow, to_node)
         in_idx = _resolve_input_slot(dst, graph, to_slot)
         inp = (dst.get("inputs") or [])[in_idx]
+        if not isinstance(inp, dict):
+            raise ValueError(f"input {to_slot!r} on node {to_node} is malformed")
         link_id = inp.get("link")
         if link_id is None:
             raise ValueError(f"input {to_slot!r} on node {to_node} is not connected")
@@ -1467,7 +1469,25 @@ def disconnect(
         promoted = _resolve_promoted_target(workflow, dst, to_slot, None)
         if promoted is not None:
             op["grow"] = promoted
-        elif inp.get("grow_id") is not None:
+        else:
+            # Dynamic-combo link inputs use the same name-keyed promoted
+            # register as connect, even after the socket has materialized.
+            # Falling through to grow_id/to_slot gives the two operations
+            # different registers and makes their winner arrival-ordered.
+            dynamic = None
+            name = inp.get("name")
+            if graph is not None and isinstance(name, str) and "." in name:
+                try:
+                    dynamic = _resolve_dynamic_link_input(dst, graph, name, None)
+                except ValueError:
+                    # A stale socket for a no-longer-selected option is an
+                    # ordinary saved input, matching connect's fallback.
+                    dynamic = None
+            if dynamic is not None:
+                _unused_idx, dynamic_grow = dynamic
+                if dynamic_grow is not None:
+                    op["grow"] = dynamic_grow
+        if "grow" not in op and inp.get("grow_id") is not None:
             # Dynamic inputs do not have a stable numeric index until their
             # creating connect materializes them. Preserve their convergence
             # identity so a disconnect replayed first can tombstone that link.
@@ -1585,7 +1605,7 @@ def _interior_link_scope(workflow: dict, from_node: Any, to_node: Any) -> dict |
     src, dst = nodes.get(str(src_path[-1])), nodes.get(str(dst_path[-1]))
     if src is None or dst is None:
         return None  # the boundary error names what the definition holds
-    instances = _definition_instance_count(workflow, str(definition.get("id")))
+    instances = _definition_instance_count(workflow, str(host.get("type", "")))
     if instances > 1:
         raise ValueError(
             f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
@@ -1633,7 +1653,7 @@ def _interior_disconnect_scope(workflow: dict, to_node: Any) -> dict | None:
     )
     if dst is None:
         return None
-    instances = _definition_instance_count(workflow, str(definition.get("id")))
+    instances = _definition_instance_count(workflow, str(host.get("type", "")))
     if instances > 1:
         raise ValueError(
             f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
@@ -1862,6 +1882,15 @@ def _interior_link_id(link: Any) -> Any:
     if isinstance(link, list) and link:
         return link[0]
     return None
+
+
+def _interior_link_endpoints(link: Any) -> tuple[Any, Any, Any]:
+    """Return (origin node, target node, target slot) for either link shape."""
+    if isinstance(link, dict):
+        return link.get("origin_id"), link.get("target_id"), link.get("target_slot")
+    if isinstance(link, list) and len(link) >= 5:
+        return link[1], link[3], link[4]
+    return None, None, None
 
 
 def _remove_interior_link(definition: dict, link_id: Any) -> None:
@@ -2551,6 +2580,7 @@ def apply_specs(
     pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
+    input_targets: set[str] = set()
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:
@@ -2619,6 +2649,22 @@ def apply_specs(
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            if kind in {"connect", "disconnect"}:
+                grow = op.get("grow")
+                if grow is not None and not grow.get("promoted"):
+                    # An ordinary grow creates its own register. A later
+                    # reconnect/disconnect in this batch addresses that same
+                    # register by the creator's link id.
+                    target = ("input", str(op["to_node"]), "grow_id", op["link_id"])
+                else:
+                    target = _write_target(op)
+                encoded_target = json.dumps(target, default=str)
+                if encoded_target in input_targets:
+                    raise ValueError(
+                        f"spec #{i} ({kind}) writes an input already written earlier in this batch; "
+                        "split same-input connect/disconnect edits into separate batches so their versions order them"
+                    )
+                input_targets.add(encoded_target)
             ops.append(op)
     except (NotBatchableError, DeprecatedNodeType):
         # Already carries a registered code and a hint that says what to do
@@ -2661,6 +2707,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # the poison state: a retry of the identical op loses to the failed
     # attempt's own stamp and is silently dropped forever.
     stamps_before = dict(workflow.get("_widget_stamps") or {})
+    pending_was_present = "_pending_dynamic_connects" in workflow
+    pending_before = copy.deepcopy(workflow.get("_pending_dynamic_connects"))
     try:
         if kind == "add_node":
             _apply_add_node(workflow, op)
@@ -2683,6 +2731,10 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     except BaseException:
         if stamps_before or "_widget_stamps" in workflow:
             workflow["_widget_stamps"] = stamps_before
+        if pending_was_present:
+            workflow["_pending_dynamic_connects"] = pending_before
+        else:
+            workflow.pop("_pending_dynamic_connects", None)
         raise
     # NOT ``applied.append`` — ``_apply_reset_doc`` REPLACES ``_applied_ops``
     # with a fresh list (that is what makes it a history barrier), so the local
@@ -2889,8 +2941,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # whether the concurrent delete of this op's source had arrived yet.
         # Delete wins over the LINK, not over the claim — the entry is left
         # empty at the ``src is None`` check further down.
-        if not grow.get("promoted") and _find_by_str(workflow, op["from_node"]) is None:
-            return
         # Autogrow: grow a concrete slot and wire it. Keyed by ``grow_id`` (the
         # link id) so replay is idempotent AND non-clobbering — a concurrent
         # autogrow that minted the same requested name gets its own fresh slot
@@ -2907,7 +2957,7 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
             # decided by stamp, not arrival order, and the doc-host applier
             # (comfy-multi-player) converges with this replica. The claim is
             # unconditional once the gate passes (see the concrete branch).
-            if to_idx is None and not _lww_gate(workflow, op):
+            if not _lww_gate(workflow, op):
                 return
             _lww_commit(workflow, op)
             if to_idx is None:
@@ -3146,15 +3196,38 @@ def _apply_disconnect(workflow: dict, op: dict) -> None:
         _lww_commit(workflow, op)
         _pop_pending_dynamic_connect(workflow, op)
         if not isinstance(ins, list):
-            return
+            if grow is None or not grow.get("promoted"):
+                return
+            ins = []
+            dst["inputs"] = ins
         if grow_id is not None:
-            to_idx = next((i for i, inp in enumerate(ins) if inp.get("grow_id") == grow_id), None)
+            to_idx = next(
+                (i for i, inp in enumerate(ins) if isinstance(inp, dict) and inp.get("grow_id") == grow_id), None
+            )
         else:
-            to_idx = next((i for i, inp in enumerate(ins) if inp.get("name") == grow["name"]), None)
+            to_idx = next(
+                (i for i, inp in enumerate(ins) if isinstance(inp, dict) and inp.get("name") == grow["name"]), None
+            )
+            if to_idx is None:
+                entry = {
+                    "name": grow["name"],
+                    "type": grow["type"],
+                    "link": None,
+                    "grow_id": op["link_id"],
+                }
+                if grow.get("widget"):
+                    entry["widget"] = {"name": grow["widget"]}
+                ins.append(entry)
+                to_idx = len(ins) - 1
         if to_idx is not None:
             current = ins[to_idx].get("link")
             if current is not None:
                 _remove_link(workflow, current)
+            if grow is not None and grow.get("promoted"):
+                # A promoted input is one materialized register. Its logical
+                # identity follows whichever connect/disconnect wins so both
+                # replay orders produce the same saved slot.
+                ins[to_idx]["grow_id"] = op["link_id"]
         return
     to_idx = op["to_slot"]
     if (
@@ -3185,6 +3258,8 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
     definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
     if definition is None:
         return
+    if _definition_instance_count(workflow, str(host.get("type", ""))) > 1:
+        return
     dst = next(
         (
             node
@@ -3198,9 +3273,6 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
     ins = dst.get("inputs")
     grow_id = op.get("grow_id")
     if grow_id is not None:
-        if not _lww_gate(workflow, op):
-            return
-        _lww_commit(workflow, op)
         if not isinstance(ins, list):
             return
         to_idx = next(
@@ -3219,11 +3291,16 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
         or not isinstance(ins[to_idx], dict)
     ):
         return
-    if grow_id is None:
-        if not _lww_gate(workflow, op):
-            return
-        _lww_commit(workflow, op)
     current = ins[to_idx].get("link")
+    if current is not None:
+        link = next((row for row in definition.get("links") or [] if _interior_link_id(row) == current), None)
+        origin_id, target_id, target_slot = _interior_link_endpoints(link)
+        node_ids = {str(node.get("id")) for node in definition.get("nodes") or [] if isinstance(node, dict)}
+        if str(origin_id) not in node_ids or str(target_id) != str(dst.get("id")) or target_slot != to_idx:
+            return
+    if not _lww_gate(workflow, op):
+        return
+    _lww_commit(workflow, op)
     if current is not None:
         _remove_interior_link(definition, current)
 
@@ -3246,6 +3323,13 @@ def _apply_delete_node(workflow: dict, op: dict) -> None:
                 inp["link"] = None
         for out in n.get("outputs") or []:
             out["links"] = [lid for lid in (out.get("links") or []) if lid in kept_ids]
+    pending = workflow.get("_pending_dynamic_connects")
+    if isinstance(pending, dict):
+        for key, deferred in list(pending.items()):
+            if not isinstance(deferred, dict) or str(deferred.get("to_node")) == node_id:
+                pending.pop(key, None)
+        if not pending:
+            workflow.pop("_pending_dynamic_connects", None)
 
 
 def _apply_clear(workflow: dict, op: dict) -> None:
@@ -3253,6 +3337,7 @@ def _apply_clear(workflow: dict, op: dict) -> None:
     workflow["links"] = []
     if "groups" in workflow:
         workflow["groups"] = []
+    workflow.pop("_pending_dynamic_connects", None)
 
 
 #: Document-identity keys a ``reset_doc`` keeps. Everything else is discarded:
@@ -3497,6 +3582,7 @@ def strip_internal(workflow: dict) -> dict:
     """
     workflow.pop("_applied_ops", None)
     workflow.pop("_widget_stamps", None)
+    workflow.pop("_pending_dynamic_connects", None)
     return complete_save_format(workflow)
 
 
