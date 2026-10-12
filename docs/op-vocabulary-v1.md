@@ -1093,3 +1093,28 @@ target it — and neither depends on the other landing.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 17. Amendment v1.8 — 2026-09-22 (`disconnect`)
+
+This amendment adds `disconnect` as the ninth frozen op kind so a caller can
+remove an input link without replacing the whole workflow or deleting either
+endpoint. It is batchable, has the standalone `comfy workflow disconnect`
+command, and shares each destination input's last-write-wins register with
+`connect`; §1.2.1 defines the wire shape and replay semantics.
+
+Dynamic inputs keep their logical identity instead of treating a shifted
+numeric slot as the register. Promoted inputs use `grow.name`; ordinary
+autogrow and widget-converted inputs use the creating connect's `grow_id`.
+Interior links wholly inside one eligible, single-instance definition carry
+the instance path in that identity. Links that cross a subgraph boundary, and
+links inside a shared definition, remain refused.
+
+The replay path also retains a winning reconnect that arrives before the
+connect which materializes its grown input, then applies that pending write
+when the stable `grow_id` slot appears. Tests cover both replay orders for
+ordinary autogrow and widget-converted inputs, concrete and promoted inputs,
+and path-scoped interior links.
+
+`FROZEN_OPS` and `BATCHABLE_OPS`, the spec and replay dispatch tables, the
+standalone CLI, and this contract change together as required by §9.
+`DEFERRED_OPS` remains empty; no existing op kind is removed.

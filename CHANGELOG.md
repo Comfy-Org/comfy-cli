@@ -77,6 +77,11 @@ history.
   (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
   instance `path`. A link that crosses the subgraph boundary is still refused,
   and so is a link inside a definition shared by several instances.
+- `comfy workflow disconnect <file> <node>.<input>` removes an input link and
+  emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
+  autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
+  identity across replay order; boundary-crossing and shared-definition links
+  remain refused.
 - `comfy workflow validate` reports broken link rows of a canvas workflow as
   `link_slot_out_of_range` / `link_source_missing` errors, each with the
   `connect` that repairs it. The UI→API lowering used to drop such a row and
