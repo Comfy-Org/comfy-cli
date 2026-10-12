@@ -699,7 +699,7 @@ class TestFetchResults:
         assert result == raw_api_response
 
     @patch("requests.get")
-    def test_agent_origin_uses_private_service_path_without_query_logging(self, mock_get, raw_api_response):
+    def test_agent_origin_sends_advisory_service_header(self, mock_get, raw_api_response):
         mock_response = MagicMock()
         mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
         mock_response.is_redirect = False

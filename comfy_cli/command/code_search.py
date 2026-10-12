@@ -494,7 +494,10 @@ def code_search(
         bool,
         typer.Option(
             "--agent",
-            help="Mark an agent-authored query so the service excludes it from query tracking and trending",
+            help=(
+                "Mark an agent-authored query with a best-effort service hint "
+                "for exclusion from query tracking and trending"
+            ),
         ),
     ] = False,
 ):
