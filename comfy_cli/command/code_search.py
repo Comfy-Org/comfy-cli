@@ -13,6 +13,7 @@ from rich.markup import escape as escape_markup
 from rich.text import Text
 
 from comfy_cli import tracking
+from comfy_cli.caller import detect_caller
 from comfy_cli.http import USAGE_SOURCE_HEADERS
 
 app = typer.Typer()
@@ -139,7 +140,7 @@ def _build_query(query: str, repo: str | None, count: int) -> str:
     return " ".join(parts)
 
 
-def _fetch_results(query: str) -> dict:
+def _fetch_results(query: str, *, agent_origin: bool = False) -> dict:
     # Imported lazily: requests costs ~30ms to import and this module is on
     # the import path of every CLI invocation.
     import time
@@ -158,7 +159,11 @@ def _fetch_results(query: str) -> dict:
         # is checked against the decoded bytes, so a compressed response could
         # otherwise expand far past the cap before the check fires (a
         # decompression bomb). Refuse compression altogether instead.
-        headers={**USAGE_SOURCE_HEADERS, "Accept-Encoding": "identity"},
+        headers={
+            **USAGE_SOURCE_HEADERS,
+            "Accept-Encoding": "identity",
+            **({"X-Comfy-Code-Search-Origin": "agent"} if agent_origin else {}),
+        },
     )
     response.raise_for_status()
     if response.is_redirect or response.is_permanent_redirect:
@@ -488,6 +493,16 @@ def code_search(
         bool,
         typer.Option("--json", "-j", help="Output results as JSON"),
     ] = False,
+    agent: Annotated[
+        bool,
+        typer.Option(
+            "--agent",
+            help=(
+                "Mark an agent-authored query with a best-effort service hint "
+                "for exclusion from query tracking and trending"
+            ),
+        ),
+    ] = False,
 ):
     """Search code across ComfyUI repositories."""
     import requests  # deferred; see _fetch_results
@@ -498,9 +513,11 @@ def code_search(
         console.print(f"[bold red]Error: {exc}[/bold red]")
         raise typer.Exit(code=2)
     built_query = _build_query(query, repo, count)
+    caller = detect_caller()
+    agent_origin = agent or (caller.agentic and caller.source_env is not None)
 
     try:
-        data = _fetch_results(built_query)
+        data = _fetch_results(built_query, agent_origin=True) if agent_origin else _fetch_results(built_query)
     except requests.ConnectionError:
         console.print("[bold red]Error: Could not connect to the code search service.[/bold red]")
         raise typer.Exit(code=1)

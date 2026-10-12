@@ -8,6 +8,7 @@ import pytest
 import requests
 from typer.testing import CliRunner
 
+from comfy_cli._lazy import LazyCommand
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
@@ -694,6 +695,32 @@ class TestFetchResults:
             allow_redirects=False,
             stream=True,
             headers={"Comfy-Usage-Source": "comfy-cli", "Accept-Encoding": "identity"},
+        )
+        assert result == raw_api_response
+
+    @patch("requests.get")
+    def test_agent_origin_sends_advisory_service_header(self, mock_get, raw_api_response):
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
+        mock_response.is_redirect = False
+        mock_response.is_permanent_redirect = False
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        private_query = "unpublished_custom_node_secret"
+        result = _fetch_results(private_query, agent_origin=True)
+
+        mock_get.assert_called_once_with(
+            API_URL,
+            params={"query": private_query},
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+            stream=True,
+            headers={
+                "Comfy-Usage-Source": "comfy-cli",
+                "Accept-Encoding": "identity",
+                "X-Comfy-Code-Search-Origin": "agent",
+            },
         )
         assert result == raw_api_response
 
@@ -1438,6 +1465,35 @@ class TestCodeSearchCLI:
             assert result.exit_code == 0
             mock_fetch.assert_called_once_with(f"type:file count:{MAX_COUNT} (LoadImage)")
 
+    def test_agent_flag_selects_private_service_path(self, raw_api_response):
+        with patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch:
+            result = runner.invoke(app, ["--agent", "--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)", agent_origin=True)
+
+    def test_env_attributed_agent_automatically_sends_service_hint(self, raw_api_response):
+        caller = MagicMock(agentic=True, source_env="AI_AGENT")
+        with (
+            patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+            patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch,
+        ):
+            result = runner.invoke(app, ["--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)", agent_origin=True)
+
+    def test_plain_pipe_does_not_automatically_send_service_hint(self, raw_api_response):
+        caller = MagicMock(agentic=True, source_env=None)
+        with (
+            patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+            patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch,
+        ):
+            result = runner.invoke(app, ["--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)")
+
     def test_count_rejects_zero_and_negative(self):
         for bad_count in ("0", "-1"):
             result = runner.invoke(app, ["--count", bad_count, "LoadImage"])
@@ -1530,10 +1586,44 @@ class TestRootCLIWiring:
         from comfy_cli.cmdline import app as root_app
 
         mock_fetch.return_value = raw_api_response
-        result = runner.invoke(root_app, ["code-search", "--json", "LoadImage"])
+        # Preserve the reported installed-CLI regression shape: the positional
+        # query comes before its options. A lazy Click Group rejects this order;
+        # the intended LazyCommand accepts it.
+        result = runner.invoke(root_app, ["code-search", "LoadImage", "--json", "--count", "1"])
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert "results" in parsed
+
+    def test_installed_root_shape_does_not_require_nested_command(self):
+        """The lazy root must expose QUERY directly, not as a Typer subgroup."""
+        from comfy_cli.cmdline import _RootGroup
+
+        entry = _RootGroup.lazy_subcommands["code-search"]
+        assert isinstance(entry, LazyCommand)
+        assert entry.attr == "code_search"
+
+    def test_root_help_shows_command_but_hides_alias(self):
+        """The discoverable command is public while its short alias stays hidden."""
+        from comfy_cli.cmdline import app as root_app
+
+        result = runner.invoke(root_app, ["--help"])
+        assert result.exit_code == 0, result.output
+        assert "code-search" in result.output
+        assert "\n\u2502 cs " not in result.output
+
+    def test_cs_alias_resolves_hidden_regardless_of_rendering_mode(self):
+        """The rendered-text check above depends on rich's panel border; this
+        resolves the built command directly so the guarantee holds even
+        under plain/no-color rendering."""
+        import typer.main
+        from click import Context
+
+        from comfy_cli.cmdline import app as root_app
+
+        root_command = typer.main.get_command(root_app)
+        command = root_command.get_command(Context(root_command), "cs")
+        assert command is not None
+        assert command.hidden is True
 
     @patch("comfy_cli.tracking.prompt_tracking_consent")
     @patch("comfy_cli.cmdline.workspace_manager")
