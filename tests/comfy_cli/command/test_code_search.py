@@ -1471,6 +1471,28 @@ class TestCodeSearchCLI:
             assert result.exit_code == 0, result.output
             mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)", agent_origin=True)
 
+    def test_env_attributed_agent_automatically_sends_service_hint(self, raw_api_response):
+        caller = MagicMock(agentic=True, source_env="AI_AGENT")
+        with (
+            patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+            patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch,
+        ):
+            result = runner.invoke(app, ["--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)", agent_origin=True)
+
+    def test_plain_pipe_does_not_automatically_send_service_hint(self, raw_api_response):
+        caller = MagicMock(agentic=True, source_env=None)
+        with (
+            patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+            patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch,
+        ):
+            result = runner.invoke(app, ["--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)")
+
     def test_count_rejects_zero_and_negative(self):
         for bad_count in ("0", "-1"):
             result = runner.invoke(app, ["--count", bad_count, "LoadImage"])

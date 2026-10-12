@@ -13,6 +13,7 @@ from rich.markup import escape as escape_markup
 from rich.text import Text
 
 from comfy_cli import tracking
+from comfy_cli.caller import detect_caller
 
 app = typer.Typer()
 console = Console()
@@ -510,9 +511,11 @@ def code_search(
         console.print(f"[bold red]Error: {exc}[/bold red]")
         raise typer.Exit(code=2)
     built_query = _build_query(query, repo, count)
+    caller = detect_caller()
+    agent_origin = agent or (caller.agentic and caller.source_env is not None)
 
     try:
-        data = _fetch_results(built_query, agent_origin=True) if agent else _fetch_results(built_query)
+        data = _fetch_results(built_query, agent_origin=True) if agent_origin else _fetch_results(built_query)
     except requests.ConnectionError:
         console.print("[bold red]Error: Could not connect to the code search service.[/bold red]")
         raise typer.Exit(code=1)
