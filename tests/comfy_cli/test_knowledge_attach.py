@@ -1177,6 +1177,7 @@ class TestRepeatedWordKeys:
             ("replace the person in this video with a character from another video", None),
             ("make a video of a video game character", None),
             ("compare video to videogame graphics", None),
+            ("compare video to videogame graphics in another video", None),
             # The keys that are actually worded still resolve.
             ("video edit", "video-edit"),
             ("editing this video", "video-edit"),

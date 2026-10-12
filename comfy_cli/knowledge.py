@@ -256,6 +256,20 @@ def _query_counts(s: str) -> Counter[str]:
     return counts
 
 
+def _contains_normalized_word_span(query: str, key_norm: str) -> bool:
+    """Whether complete adjacent query words normalize exactly to ``key_norm``."""
+    words = _split(query)
+    for start in range(len(words)):
+        span = ""
+        for word in words[start:]:
+            span += word
+            if span == key_norm:
+                return True
+            if len(span) >= len(key_norm):
+                break
+    return False
+
+
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
     """``_normalize(key) -> target``, with every spelling two targets share left out.
 
@@ -709,7 +723,9 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
         # may also be a prefix of a longer word ("video to videogame").  A
         # repeated-word key is literal only when the query contains enough
         # distinct word tokens to satisfy its multiplicity.
-        literal_hit = key_norm in literal and not (key_counts - counts)
+        literal_hit = (
+            key_norm in literal and _contains_normalized_word_span(query, key_norm) and not (key_counts - counts)
+        )
         query_counts = counts if literal_hit else Counter(words)
         overlap = key_counts & query_counts
         hit = sum(overlap.values())
