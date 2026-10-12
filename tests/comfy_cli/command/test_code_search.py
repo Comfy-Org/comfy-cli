@@ -699,6 +699,31 @@ class TestFetchResults:
         assert result == raw_api_response
 
     @patch("requests.get")
+    def test_agent_origin_sends_advisory_service_header(self, mock_get, raw_api_response):
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [json.dumps(raw_api_response).encode()]
+        mock_response.is_redirect = False
+        mock_response.is_permanent_redirect = False
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+
+        private_query = "unpublished_custom_node_secret"
+        result = _fetch_results(private_query, agent_origin=True)
+
+        mock_get.assert_called_once_with(
+            API_URL,
+            params={"query": private_query},
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+            stream=True,
+            headers={
+                "Accept-Encoding": "identity",
+                "X-Comfy-Code-Search-Origin": "agent",
+            },
+        )
+        assert result == raw_api_response
+
+    @patch("requests.get")
     def test_http_error_propagates(self, mock_get):
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.HTTPError(response=MagicMock(status_code=500))
@@ -1438,6 +1463,35 @@ class TestCodeSearchCLI:
             result = runner.invoke(app, ["--count", str(MAX_COUNT), "LoadImage"])
             assert result.exit_code == 0
             mock_fetch.assert_called_once_with(f"type:file count:{MAX_COUNT} (LoadImage)")
+
+    def test_agent_flag_selects_private_service_path(self, raw_api_response):
+        with patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch:
+            result = runner.invoke(app, ["--agent", "--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)", agent_origin=True)
+
+    def test_env_attributed_agent_automatically_sends_service_hint(self, raw_api_response):
+        caller = MagicMock(agentic=True, source_env="AI_AGENT")
+        with (
+            patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+            patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch,
+        ):
+            result = runner.invoke(app, ["--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)", agent_origin=True)
+
+    def test_plain_pipe_does_not_automatically_send_service_hint(self, raw_api_response):
+        caller = MagicMock(agentic=True, source_env=None)
+        with (
+            patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+            patch("comfy_cli.command.code_search._fetch_results", return_value=raw_api_response) as mock_fetch,
+        ):
+            result = runner.invoke(app, ["--json", "LoadImage"])
+
+            assert result.exit_code == 0, result.output
+            mock_fetch.assert_called_once_with("type:file count:20 (LoadImage)")
 
     def test_count_rejects_zero_and_negative(self):
         for bad_count in ("0", "-1"):
