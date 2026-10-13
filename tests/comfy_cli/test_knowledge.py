@@ -800,8 +800,69 @@ class TestCli:
         assert data["env_file"] == str(path)
         assert data["url"] == knowledge.default_url()
         assert data["ttl_seconds"] == knowledge.DEFAULT_TTL_SECONDS
-        assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 23, "deprecations": 2}
+        assert data["counts"] == {
+            "models": 5,
+            "capabilities": 2,
+            "aliases": 23,
+            "deprecations": 2,
+            "custom_node_authoring": 0,
+        }
         _validate(data)
+
+    def test_authoring_uses_only_requested_canonical_slice(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["custom_node_authoring"] = {
+            "api-schema": {
+                "content": "API ONLY",
+                "applies_to": "ComfyUI >= 0.4",
+                "provenance": {"url": "https://docs.comfy.org/custom-nodes"},
+            },
+            "validation": {"content": "VALIDATION MUST NOT LEAK"},
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+
+        rc, env = _run(["authoring", "api-schema"], capsys)
+
+        assert rc == 0
+        payload = env["data"]
+        assert payload["content"] == "API ONLY"
+        assert "VALIDATION MUST NOT LEAK" not in json.dumps(payload)
+        assert payload["source"] == "comfy-knowledge"
+        assert payload["degraded"] is False
+        assert payload["provenance"]["url"].startswith("https://docs.comfy.org/")
+        _validate(payload)
+
+    def test_authoring_unavailable_uses_visible_bounded_fallback(self, capsys):
+        rc, env = _run(["authoring", "validation"], capsys)
+        assert rc == 0
+        payload = env["data"]
+        assert payload["source"] == "packaged-fallback"
+        assert payload["degraded"] is True
+        assert payload["degraded_reason"] == "knowledge bundle unavailable"
+        assert "filesystem presence is never proof" in payload["content"]
+        assert len(payload["content"].encode()) < 2500
+        _validate(payload)
+
+    def test_authoring_stale_bundle_uses_fallback(self, monkeypatch, capsys):
+        _seed_cache(age_seconds=knowledge.DEFAULT_TTL_SECONDS + 1)
+        monkeypatch.setattr(knowledge, "_http_get", lambda _url: (_ for _ in ()).throw(RuntimeError("offline")))
+        rc, env = _run(["authoring", "api-schema"], capsys)
+        assert rc == 0
+        assert env["data"]["degraded_reason"] == "knowledge bundle is stale"
+        assert env["data"]["source"] == "packaged-fallback"
+
+    def test_authoring_oversized_slice_is_rejected_to_fallback(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["custom_node_authoring"] = {"validation": {"content": "x" * 9000}}
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+        rc, env = _run(["authoring", "validation"], capsys)
+        assert rc == 0
+        assert env["data"]["degraded"] is True
+        assert "has no 'validation' authoring slice" in env["data"]["degraded_reason"]
 
     def test_status_with_nothing(self, capsys):
         rc, env = _run(["status"], capsys)

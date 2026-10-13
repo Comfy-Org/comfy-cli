@@ -58,6 +58,15 @@ MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
+MAX_AUTHORING_SLICE_BYTES = 8192
+AUTHORING_CLASSES = (
+    "invocation",
+    "ecosystem-search",
+    "api-schema",
+    "validation",
+    "dependencies-capabilities",
+    "troubleshooting",
+)
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 # `knowledge pick --check-local` reasons, kept short: each flagged pick repeats one.
@@ -114,6 +123,7 @@ class Bundle:
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
     model_capabilities: dict[str, list[str]]  # model id -> capability ids that rank it
+    custom_node_authoring: dict[str, dict]
     # _normalize(alias) -> id. A key two ids would share is left out, so only the
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
@@ -563,6 +573,19 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         if isinstance(caps_raw, dict)
         else {}
     )
+    authoring_raw = data.get("custom_node_authoring")
+    custom_node_authoring = (
+        {
+            key: value
+            for key, value in authoring_raw.items()
+            if key in AUTHORING_CLASSES
+            and isinstance(value, dict)
+            and isinstance(value.get("content"), str)
+            and len(value["content"].encode("utf-8")) <= MAX_AUTHORING_SLICE_BYTES
+        }
+        if isinstance(authoring_raw, dict)
+        else {}
+    )
     deps_raw = data.get("deprecations")
     deprecations = (
         {d["id"]: d for d in deps_raw if isinstance(d, dict) and isinstance(d.get("id"), str)}
@@ -637,6 +660,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         templates=templates,
         nodes=nodes,
         model_capabilities=model_capabilities,
+        custom_node_authoring=custom_node_authoring,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
         capability_tokens=capability_tokens,

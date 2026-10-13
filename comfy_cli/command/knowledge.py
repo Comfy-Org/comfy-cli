@@ -22,6 +22,15 @@ from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Inspect the curated model-knowledge bundle.")
 
+_AUTHORING_FALLBACKS = {
+    "invocation": "comfy-custom-nodes-invocation",
+    "ecosystem-search": "comfy-custom-nodes-search",
+    "api-schema": "comfy-custom-nodes-api-schema",
+    "validation": "comfy-custom-nodes-validation",
+    "dependencies-capabilities": "comfy-custom-nodes-dependencies",
+    "troubleshooting": "comfy-custom-nodes-troubleshooting",
+}
+
 
 def _env_context() -> dict[str, Any]:
     return {
@@ -93,6 +102,7 @@ def status_cmd(
                 "capabilities": len(bundle.capabilities),
                 "aliases": len(bundle.aliases),
                 "deprecations": len(bundle.deprecations),
+                "custom_node_authoring": len(bundle.custom_node_authoring),
             },
         }
     if renderer.is_pretty():
@@ -101,6 +111,62 @@ def status_cmd(
                 value = ", ".join(f"{k}={v}" for k, v in value.items())
             rprint(f"[bold]{key}[/bold]: {sanitize_markup(value)}")
     renderer.emit(payload, command="knowledge status")
+
+
+@app.command("authoring", help="Load one bounded custom-node authoring knowledge slice.")
+@tracking.track_command("knowledge")
+def authoring_cmd(
+    knowledge_class: Annotated[
+        str,
+        typer.Argument(help="One of: " + ", ".join(knowledge.AUTHORING_CLASSES)),
+    ],
+):
+    """Return canonical JIT guidance, with an explicit packaged fallback."""
+    renderer = get_renderer()
+    if knowledge_class not in knowledge.AUTHORING_CLASSES:
+        raise typer.BadParameter(
+            f"unknown authoring class {knowledge_class!r}; choose one of: {', '.join(knowledge.AUTHORING_CLASSES)}"
+        )
+    bundle = knowledge.load_bundle()
+    row = None if bundle is None or bundle.stale else bundle.custom_node_authoring.get(knowledge_class)
+    if row is not None:
+        payload = {
+            "class": knowledge_class,
+            "content": row["content"],
+            "applies_to": row.get("applies_to"),
+            "provenance": row.get("provenance"),
+            "bundle_version": bundle.version,
+            "compiled_at": bundle.compiled_at,
+            "source": "comfy-knowledge",
+            "degraded": False,
+        }
+    else:
+        from comfy_cli.skills import skill_content
+
+        reason = (
+            "knowledge bundle unavailable"
+            if bundle is None
+            else "knowledge bundle is stale"
+            if bundle.stale
+            else f"bundle has no {knowledge_class!r} authoring slice"
+        )
+        fallback = _AUTHORING_FALLBACKS[knowledge_class]
+        payload = {
+            "class": knowledge_class,
+            "content": skill_content(fallback),
+            "applies_to": "packaged CLI version",
+            "provenance": {"kind": "packaged-fallback", "skill": fallback},
+            "bundle_version": bundle.version if bundle else "packaged",
+            "compiled_at": bundle.compiled_at if bundle else None,
+            "source": "packaged-fallback",
+            "degraded": True,
+            "degraded_reason": reason,
+        }
+    if renderer.is_pretty():
+        rprint(payload["content"])
+        if payload["degraded"]:
+            rprint(f"[yellow]degraded:[/yellow] {sanitize_markup(payload['degraded_reason'])}")
+    renderer.emit(payload, command="knowledge authoring")
 
 
 @app.command("resolve", help="Resolve a model alias or id (e.g. 'Kling 3.0', minimax-h3) to its knowledge row.")
