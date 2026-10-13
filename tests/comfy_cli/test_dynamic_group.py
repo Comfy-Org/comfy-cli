@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from comfy_cli import workflow_ops, workflow_print, workflow_to_api
+from comfy_cli import model_variants, workflow_ops, workflow_print, workflow_to_api
 from comfy_cli.cql.engine import Graph
 from comfy_cli.cql.widget_catalog import build_catalog
 
@@ -483,21 +483,109 @@ def test_dynamic_group_ambiguous_named_edit_does_not_pick_first_occurrence():
     assert workflow_ops.canonical(workflow) == workflow_ops.canonical(original)
 
 
-@pytest.mark.parametrize("changed_field", ["added", "removed"])
-def test_dynamic_group_schema_width_skew_is_refused_instead_of_shifting_trailing_widget(changed_field):
+@pytest.mark.parametrize("changed_field", ["added", "removed", "renamed"])
+@pytest.mark.parametrize("operation", ["conversion", "edit", "capture", "lift", "print", "connect", "models"])
+def test_dynamic_group_schema_skew_is_refused_before_reading_or_editing(changed_field, operation):
     info = copy.deepcopy(FIXTURE["object_info"])
     fields = info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"]["optional"]
     if changed_field == "added":
         fields["extra"] = ["STRING", {"default": "new"}]
-    else:
+    elif changed_field == "removed":
         del fields["enabled"]
+    else:
+        fields["active"] = fields.pop("enabled")
     workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    if changed_field == "renamed":
+        workflow["nodes"][0]["widgets_values_form"] = {"order": list(workflow["nodes"][0]["widgets_values_named"])}
+    original = copy.deepcopy(workflow)
     graph = Graph.from_object_info(info)
 
-    with pytest.raises(workflow_to_api.WorkflowConversionError, match="DynamicGroup"):
-        workflow_to_api.convert_ui_to_api(workflow, info)
-    with pytest.raises(ValueError, match="DynamicGroup"):
-        workflow_ops.set_widget(workflow, graph, 1, "loras.0.strength", 0.9)
+    error_type = {
+        "conversion": workflow_to_api.WorkflowConversionError,
+        "capture": workflow_ops.RecipeError,
+        "lift": workflow_ops.RecipeError,
+        "print": workflow_print.PrintUnsupported,
+    }.get(operation, ValueError)
+    with pytest.raises(error_type, match="DynamicGroup"):
+        if operation == "conversion":
+            workflow_to_api.convert_ui_to_api(workflow, info)
+        elif operation == "edit":
+            workflow_ops.set_widget(workflow, graph, 1, "loras.0.strength", 0.9)
+        elif operation in {"capture", "lift"}:
+            lift = {(1, "after"): "tail"} if operation == "lift" else None
+            workflow_ops.capture_recipe(workflow, graph, lift=lift)
+        elif operation == "print":
+            workflow_print.render_py(workflow, graph)
+        elif operation == "connect":
+            workflow_ops.connect(workflow, graph, 1, "rows", 1, "after")
+        else:
+            model_variants.resolve_workflow_models(workflow, graph)
+    assert workflow_ops.canonical(workflow) == workflow_ops.canonical(original)
+
+
+@pytest.mark.parametrize("value", [None, False])
+def test_named_group_print_distinguishes_omitted_fields_from_saved_values(value):
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = node["widgets_values_named"].copy()
+    del node["widgets_values"]["loras.0.enabled"]
+    node["widgets_values"]["loras.1.enabled"] = value
+    original = copy.deepcopy(workflow)
+
+    printed = workflow_print.render_py(workflow, Graph.from_object_info(FIXTURE["object_info"])).source
+
+    assert "loras.0.enabled" not in printed
+    assert f'"loras.1.enabled": {value!r}' in printed
+    assert 'after="tail"' in printed
+    assert workflow == original
+
+
+@pytest.mark.parametrize("minimum", [0, 1])
+def test_recipe_with_an_omitted_seed_companion_keeps_executable_values(minimum):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["CompositeDynamicGroup"]["input"]["required"]["weights"][1]["min"] = minimum
+    workflow = copy.deepcopy(FIXTURE["cases"]["composite"]["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = node["widgets_values_named"].copy()
+    del node["widgets_values"]["weights.0.seed.0"]
+    graph = Graph.from_object_info(info)
+
+    recipe, _ = workflow_ops.capture_recipe(workflow, graph)
+    rebuilt, _, _ = workflow_ops.apply_specs({"nodes": [], "links": []}, graph, recipe["ops"])
+
+    assert not any(op.get("widget") == "weights.0.seed.0" for op in recipe["ops"])
+    inputs = next(iter(workflow_to_api.convert_ui_to_api(rebuilt, info).values()))["inputs"]
+    assert inputs == FIXTURE["cases"]["composite"]["expected_inputs"]
+
+
+def test_recipe_cannot_lift_an_omitted_seed_companion_as_none():
+    workflow = copy.deepcopy(FIXTURE["cases"]["composite"]["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = node["widgets_values_named"].copy()
+    del node["widgets_values"]["weights.0.seed.0"]
+
+    with pytest.raises(workflow_ops.RecipeError, match="no saved DynamicGroup value to lift"):
+        workflow_ops.capture_recipe(
+            workflow,
+            Graph.from_object_info(FIXTURE["object_info"]),
+            lift={(1, "weights.0.seed.0"): "control"},
+        )
+
+
+@pytest.mark.parametrize("lift", [None, {(1, "loras.0.enabled"): "enabled"}, {(1, "after"): "tail"}])
+@pytest.mark.parametrize("minimum", [0, 1])
+def test_recipe_refuses_to_materialize_an_omitted_named_row_field(lift, minimum):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["min"] = minimum
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = node["widgets_values_named"].copy()
+    del node["widgets_values"]["loras.0.enabled"]
+    original = copy.deepcopy(workflow)
+
+    with pytest.raises(workflow_ops.RecipeError, match=r"omitted DynamicGroup field.*loras\.0\.enabled"):
+        workflow_ops.capture_recipe(workflow, Graph.from_object_info(info), lift=lift)
+    assert workflow == original
 
 
 @pytest.mark.parametrize("operation", ["conversion", "edit", "catalog"])

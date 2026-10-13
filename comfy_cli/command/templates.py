@@ -844,7 +844,7 @@ def _resolve_template_models(wf: Any, input_path: str | None) -> dict[str, Any]:
     """
     if not isinstance(wf, dict) or not (input_path or os.environ.get("COMFY_OBJECT_INFO_FILE")):
         return {}
-    from comfy_cli.cql.engine import Graph
+    from comfy_cli.cql.engine import DynamicGroupBindingError, Graph
     from comfy_cli.cql.loader import resilient_load_object_info
     from comfy_cli.model_variants import resolve_workflow_models
 
@@ -852,7 +852,10 @@ def _resolve_template_models(wf: Any, input_path: str | None) -> dict[str, Any]:
         graph = Graph.from_object_info(resilient_load_object_info(input_path=input_path))
     except Exception as e:  # noqa: BLE001 — a missing catalog only skips the check
         return {"model_check_skipped": f"could not load object_info: {e}"}
-    subs, unavailable = resolve_workflow_models(wf, graph)
+    try:
+        subs, unavailable = resolve_workflow_models(wf, graph)
+    except DynamicGroupBindingError as e:
+        return {"model_check_skipped": f"could not bind saved widgets: {e}"}
     notes: dict[str, Any] = {}
     if subs:
         notes["model_substitutions"] = subs
