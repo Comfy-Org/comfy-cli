@@ -1180,3 +1180,94 @@ def test_group_row_replacement_edits_an_interior_node():
     interior = edited["definitions"]["subgraphs"][0]["nodes"][0]
     assert interior["widgets_values"] == ["head", 1, "B.safetensors", 1.0, True, "tail"]
     assert all(op.get("path") == ["9", "1"] for op in ops)
+
+
+def _group_in_subgraph(properties=None):
+    node = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]["nodes"][0])
+    return {
+        "last_node_id": 9,
+        "last_link_id": 0,
+        "nodes": [
+            {"id": 9, "type": "group-def", "pos": [0, 0], "inputs": [], "outputs": [], "properties": properties or {}}
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": "group-def", "name": "Group", "inputs": [], "outputs": [], "nodes": [node], "links": []}
+            ]
+        },
+    }
+
+
+def test_group_row_replacement_leaves_a_direct_caller_unchanged_on_a_refused_value():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    original = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match="strength"):
+        workflow_ops.set_dynamic_group_rows(
+            workflow, graph, 1, "loras", [{"lora_name": "B.safetensors"}, {"lora_name": "A.safetensors", "strength": 5}]
+        )
+    assert workflow == original
+
+
+def test_group_row_replacement_rewrites_seed_control_modes_with_their_rows():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"] = {
+        "required": {"seed": ["INT", {"default": 5, "control_after_generate": True}]}
+    }
+    graph = Graph.from_object_info(info)
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    workflow, _ = workflow_ops.set_widget(workflow, graph, 1, "loras", 2)
+    workflow, _ = workflow_ops.set_widget(workflow, graph, 1, "loras.0.seed.0", "randomize")
+
+    edited, ops = workflow_ops.set_dynamic_group_rows(
+        workflow, graph, 1, "loras", [{"seed": 7}, {"seed": 9, "seed.0": "increment"}], base_version=1
+    )
+
+    assert edited["nodes"][0]["widgets_values"] == ["first", 2, 7, "fixed", 9, "increment", "last"]
+    assert [op["widget"] for op in ops] == ["loras", "loras.0.seed", "loras.0.seed.0", "loras.1.seed", "loras.1.seed.0"]
+
+
+def test_group_row_replacement_accepts_the_template_id_of_an_inserted_node():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["id"] = "insert:op1:root:node:1"
+
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}])
+
+    assert edited["nodes"][0]["widgets_values"] == ["head", 1, "B.safetensors", 1.0, True, "tail"]
+    assert {op["node_id"] for op in ops} == {"insert:op1:root:node:1"}
+
+
+def test_group_row_replacement_pins_a_row_connected_by_widget_name_only():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4].update(name="LoRA #2 strength", link=10)
+
+    with pytest.raises(ValueError, match=r"loras\.1 is connected"):
+        _replace_rows(workflow, [])
+
+
+def test_group_row_replacement_pins_a_row_promoted_by_legacy_proxy_widgets():
+    workflow = _group_in_subgraph({"proxyWidgets": [["1", "loras.1.strength"]]})
+
+    with pytest.raises(ValueError, match=r"loras\.1 is connected"):
+        _replace_rows(workflow, [], node="9/1")
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}], node="9/1")
+
+    interior = edited["definitions"]["subgraphs"][0]["nodes"][0]
+    assert interior["widgets_values"][1:8] == [2, "B.safetensors", 1.0, True, "C.safetensors", 0.5, False]
+    assert not any(op["widget"].startswith("loras.1.") for op in ops)
+
+
+def test_group_row_replacement_requires_a_field_without_a_default():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"]["required"]["lora_name"] = [
+        "COMBO",
+        {"options": []},
+    ]
+    graph = Graph.from_object_info(info)
+
+    with pytest.raises(ValueError, match="'lora_name' has no default"):
+        workflow_ops.set_dynamic_group_rows(
+            copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, 1, "loras", [{"strength": 0.5}]
+        )
