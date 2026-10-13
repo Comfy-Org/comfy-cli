@@ -426,6 +426,17 @@ comfy --json workflow apply wf.json --ops ops.json $CAT   # or --ops - to read s
 # → data.ops[] (all minted ids), data.aliases{ckpt,ks}. Atomic: nothing writes if any spec fails.
 ```
 
+**Adding, removing or reordering DynamicGroup rows** (e.g. a LoRA stack's `loras`):
+send the complete desired row list in one `set_dynamic_group_rows` spec instead of
+editing the count and numbered fields separately. Omitted fields take the template
+default. A row with a connected field keeps its index and values; your rows fill the
+other positions in order, so the batch fails if a connected row would have to move.
+
+```json
+{"op":"set_dynamic_group_rows","node":12,"group":"loras",
+ "rows":[{"lora_name":"style.safetensors","strength":0.8},{"lora_name":"detail.safetensors"}]}
+```
+
 **Reusable recipes (the reuse path — prefer this over fragments/compose).** A recipe
 is an ops file with a `params` header and `${param}` holes:
 

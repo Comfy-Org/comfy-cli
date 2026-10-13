@@ -761,6 +761,80 @@ def set_widget(
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
 
 
+def set_dynamic_group_rows(
+    workflow: dict,
+    graph,
+    node_id: Any,
+    group: str,
+    rows: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, list[dict]]:
+    """Replace a DynamicGroup's rows with ``rows``, expressed as ordinary
+    ``set_widget`` ops: the row count first, then every field of each written
+    row. Omitted fields take the template default.
+
+    A row with a connected field (including a subgraph promotion) keeps its
+    index and values; ``rows`` fill the other positions in order. Links are
+    never moved, so ``rows`` must cover every free position before the last
+    connected row.
+    """
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    target = _resolve_widget_write(workflow, graph, node_id, group)
+    if target.kind == "top" and target.redirected_from is None:
+        node = target.node
+    elif target.kind == "interior" and target.redirected_from is None:
+        node = _promoted._navigate(workflow, target.segments, _promoted.defs_by_id(workflow))
+    else:
+        raise ValueError(
+            f"{group}: replace rows on the node that owns the DynamicGroup, not a promoted or linked address"
+        )
+    m = graph.node(node.get("type", ""))
+    port = next((p for p in m.inputs if p.name == group and p.is_dynamic_group), None) if m else None
+    if port is None:
+        raise ValueError(f"{group!r} is not a DynamicGroup on node {node_id}")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"{group}: rows must be a list of objects keyed by row field")
+    fields = _engine._dynamic_group_fields(port)
+    names = [field.name for field in fields]
+    for i, row in enumerate(rows):
+        unknown = [key for key in row if key not in names]
+        if unknown:
+            raise ValueError(f"{group}: row {i} has unknown field(s) {unknown}; row fields: {', '.join(names)}")
+
+    entries = _engine._validate_dynamic_group_layout(node, m) or []
+    width = len(_engine._dynamic_group_widgets(port, f"{group}.0"))
+    current = sum(1 for e in entries if e.owner == group) // width
+    linked = {
+        inp.get("name") for inp in node.get("inputs") or [] if isinstance(inp, dict) and inp.get("link") is not None
+    }
+    pinned = [r for r in range(current) if any(f"{group}.{r}.{name}" in linked for name in names)]
+    free_before_last = pinned[-1] + 1 - len(pinned) if pinned else 0
+    if len(rows) < free_before_last:
+        raise ValueError(
+            f"{group}.{pinned[-1]} is connected and keeps its position; supply at least "
+            f"{free_before_last} row(s) or disconnect it first"
+        )
+    supplied = iter(rows)
+    plan = [None if index in pinned else next(supplied) for index in range(len(rows) + len(pinned))]
+
+    workflow, op = set_widget(workflow, graph, node_id, group, len(plan), actor=actor, base_version=base_version)
+    ops = [op]
+    for index, row in enumerate(plan):
+        if row is None:
+            continue
+        for field in fields:
+            value = row[field.name] if field.name in row else _engine._widget_default(field)
+            workflow, op = set_widget(
+                workflow, graph, node_id, f"{group}.{index}.{field.name}", value, actor=actor, base_version=base_version
+            )
+            ops.append(op)
+    return workflow, ops
+
+
 def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     """The top-level ``insert:<op>:root:node:<id>`` node a bare template id means.
 
@@ -2487,6 +2561,18 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                elif kind == "set_dynamic_group_rows":
+                    workflow, row_ops = set_dynamic_group_rows(
+                        workflow,
+                        graph,
+                        resolve_ref(spec["node"], aliases),
+                        spec["group"],
+                        spec["rows"],
+                        actor=actor,
+                        base_version=base_version,
+                    )
+                    ops.extend(row_ops)
+                    continue
                 elif kind == "set_node_field":
                     workflow, op = set_node_field(
                         workflow,

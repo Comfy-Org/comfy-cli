@@ -1070,3 +1070,113 @@ def test_dynamic_group_prompt_validation_checks_only_submitted_rows(inputs, mini
     else:
         assert not result["valid"]
         assert error_field in {error["field"] for error in result["errors"]}
+
+
+def _replace_rows(workflow, rows, node=1):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    return workflow_ops.apply_specs(
+        workflow, graph, [{"op": "set_dynamic_group_rows", "node": node, "group": "loras", "rows": rows}]
+    )
+
+
+def _replay(ops):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    replayed = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    for op in ops:
+        workflow_ops.apply_op(replayed, op, graph)
+    return replayed
+
+
+def test_group_row_replacement_rewrites_every_row_as_set_widget_ops():
+    rows = [
+        {"lora_name": "B.safetensors", "strength": 0.3},
+        {"lora_name": "A.safetensors"},
+        {"lora_name": "C.safetensors", "enabled": False},
+    ]
+    edited, ops, _ = _replace_rows(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), rows)
+
+    assert {op["op"] for op in ops} == {"set_widget"}
+    assert (ops[0]["widget"], ops[0]["value"]) == ("loras", 3)
+    assert [op["widget"] for op in ops[1:]] == [
+        f"loras.{r}.{f}" for r in range(3) for f in ("lora_name", "strength", "enabled")
+    ]
+    assert workflow_to_api.convert_ui_to_api(edited, FIXTURE["object_info"])["1"]["inputs"] == {
+        "before": "head",
+        "loras.0.lora_name": "B.safetensors",
+        "loras.0.strength": 0.3,
+        "loras.0.enabled": True,
+        "loras.1.lora_name": "A.safetensors",
+        "loras.1.strength": 1.0,
+        "loras.1.enabled": True,
+        "loras.2.lora_name": "C.safetensors",
+        "loras.2.strength": 1.0,
+        "loras.2.enabled": False,
+        "after": "tail",
+    }
+    assert workflow_ops.canonical(_replay(ops)) == workflow_ops.canonical(edited)
+
+
+def test_group_row_replacement_removes_a_middle_row_without_index_ops():
+    rows = [{"lora_name": "C.safetensors", "strength": 0.5, "enabled": False}]
+    edited, ops, _ = _replace_rows(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), rows)
+
+    assert edited["nodes"][0]["widgets_values"] == ["head", 1, "C.safetensors", 0.5, False, "tail"]
+    assert workflow_ops.canonical(_replay(ops)) == workflow_ops.canonical(edited)
+
+
+def test_group_row_replacement_keeps_a_connected_row_in_place():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}, {"lora_name": "A.safetensors"}])
+
+    assert edited["nodes"][0]["widgets_values"] == [
+        "head", 3, "B.safetensors", 1.0, True, "C.safetensors", 0.5, False, "A.safetensors", 1.0, True, "tail",
+    ]  # fmt: skip
+    assert not any(op["widget"].startswith("loras.1.") for op in ops)
+    assert edited["nodes"][0]["inputs"][4] == {**workflow["nodes"][0]["inputs"][4], "link": 10}
+
+
+def test_group_row_replacement_refuses_to_move_a_connected_row():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+    original = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match=r"loras\.1 is connected"):
+        _replace_rows(workflow, [])
+    assert workflow == original
+
+
+@pytest.mark.parametrize(
+    ("rows", "match"),
+    [
+        ([{"lora": "A.safetensors"}], "unknown field"),
+        ({"lora_name": "A.safetensors"}, "list of objects"),
+        ([{"lora_name": "A.safetensors"}] * 4, "between 0 and 3"),
+        ([{"lora_name": "A.safetensors", "strength": 5}], "strength"),
+    ],
+)
+def test_group_row_replacement_refuses_invalid_rows(rows, match):
+    with pytest.raises(ValueError, match=match):
+        _replace_rows(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), rows)
+
+
+def test_group_row_replacement_edits_an_interior_node():
+    node = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]["nodes"][0])
+    workflow = {
+        "last_node_id": 9,
+        "last_link_id": 0,
+        "nodes": [{"id": 9, "type": "group-def", "pos": [0, 0], "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": "group-def", "name": "Group", "inputs": [], "outputs": [], "nodes": [node], "links": []}
+            ]
+        },
+    }
+
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}], node="9/1")
+
+    interior = edited["definitions"]["subgraphs"][0]["nodes"][0]
+    assert interior["widgets_values"] == ["head", 1, "B.safetensors", 1.0, True, "tail"]
+    assert all(op.get("path") == ["9", "1"] for op in ops)
