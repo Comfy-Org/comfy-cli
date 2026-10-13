@@ -1,9 +1,9 @@
 ---
 name: comfy-custom-nodes
-description: Use when writing, fixing, or reviewing a ComfyUI custom node pack — choosing V3 or compatible V1, adapting Core and ecosystem references, inputs, outputs, widgets, dependencies, validation, restart/discovery, troubleshooting, and publishing.
+description: Use when writing, fixing, or reviewing a ComfyUI custom node pack — nodes 2.0, io.ComfyNode, io.Schema, comfy_entrypoint, NODE_CLASS_MAPPINGS, choosing V3 or compatible V1, inputs, outputs, widgets, dependencies, validation, restart/discovery, troubleshooting, and publishing.
 ---
 
-# Custom nodes for ComfyUI (V3 API)
+# Custom nodes for ComfyUI
 
 Prefer the **V3 schema** — `io.ComfyNode`, `io.Schema`, `ComfyExtension`,
 `comfy_entrypoint` — for a new self-contained pack. V1 (`INPUT_TYPES` /
@@ -16,14 +16,17 @@ https://docs.comfy.org/custom-nodes/v3_migration
 
 ## Choose evidence before code
 
-First inspect the installed node catalog (`comfy --json nodes search <term>
---expand-top 3` and `comfy --json nodes show <node_id>`). It is authoritative
-for the schemas actually loaded here. Then decide whether public code search is
-worth the extra latency and potentially stale evidence:
+First inspect the local node catalog (`comfy --json nodes search <term>
+--expand-top 3 --where local` and `comfy --json nodes show <node_id> --where
+local`). It describes the schemas returned by that local target. If the result
+contains an `object_info_stale` warning, treat the cached catalog as
+non-authoritative until ComfyUI restarts and a fresh query succeeds. Then decide
+whether public code search is worth the extra latency and potentially stale
+evidence:
 
 | Route | Cues | Action |
 |---|---|---|
-| **SEARCH_REQUIRED** | The user names an existing node/pack to extend; a model, integration, file format, frontend widget, or failure belongs to an external ecosystem implementation | Run `comfy --json code-search --repo <owner/repo> <query>` when a repository is known; otherwise search narrowly, cite the repository/path, and adapt rather than paste |
+| **SEARCH_REQUIRED** | The user names an existing node/pack to extend; a model, integration, file format, frontend widget, or failure belongs to an external ecosystem implementation | Run `comfy code-search --json --repo <owner/repo> <query>` when a repository is known; otherwise search narrowly, cite the repository/path, and adapt rather than paste |
 | **SEARCH_OPTIONAL** | A Core interaction pattern, unfamiliar Comfy datatype, cache/lazy behavior, or compatibility detail could change the design | Search `Comfy-Org/ComfyUI` or the relevant known repository only if the local catalog and this skill do not settle it |
 | **SEARCH_AVOID** | Pure, self-contained tensor/string/arithmetic logic whose inputs and outputs are already known; syntax already covered here | Do not search by default; implement and validate locally |
 
@@ -148,7 +151,9 @@ interaction. For an adjustable ramp, angled comparison slider, or dynamic
 canvas control, first search for the named Core/ecosystem widget pattern, keep
 the saved widget value JSON-like and stable across save/reload, and keep the
 Python input id aligned with the persisted widget. A custom visual must not be
-the only place a required value exists.
+the only place a required value exists. Never put credentials in widget values:
+saved workflows and output PNG metadata can retain them. Read API keys and
+tokens from the environment or ComfyUI configuration instead.
 
 ## Models, integrations, and dependencies
 
@@ -169,8 +174,10 @@ the only place a required value exists.
 ## Test before you say it works
 
 1. Before importing generated code, inspect it statically: Python parses; the
-   pack declares exactly one registration form; stable node/input/output ids
-   are non-empty and unique; the declared callable exists; dependency and
+   pack declares exactly one registration form; the node id and V3 input ids
+   are non-empty and unique; V1 inputs have unique names; outputs match their
+   declared types and positions (`RETURN_TYPES` / `RETURN_NAMES` in V1, the
+   `outputs` list in V3); the declared callable exists; dependency and
    filesystem/network behavior is reported. A static scan cannot prove that
    dynamic behavior is absent.
 2. Syntax: `python -m py_compile nodes.py` with any Python you can run.

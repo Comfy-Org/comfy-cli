@@ -189,39 +189,35 @@ def test_comfy_debug_skill_covers_common_error_codes():
         assert code in text, f"comfy-debug skill should mention {code}"
 
 
-def test_custom_node_skill_snapshot_keeps_runtime_contract():
-    """Guard the loaded artifact, not a program-repo design document.
-
-    Each phrase represents a distinct failure seen in the story/rule audit. A
-    prose rewrite may change the wording, but it must retain an equally precise
-    assertion here rather than weakening this list.
-    """
-    text = skill_content("comfy-custom-nodes")
+def _assert_custom_node_runtime_contract(text: str) -> None:
+    """Check meaning-bearing guidance without depending on Markdown wrapping."""
+    normalized = " ".join(text.split())
     required = (
-        "V1 (`INPUT_TYPES` /\n`NODE_CLASS_MAPPINGS`) is legacy but still supported",
-        "Use exactly\none registration form per pack",
-        "installed node catalog",
+        "V1 (`INPUT_TYPES` / `NODE_CLASS_MAPPINGS`) is legacy but still supported",
+        "Use exactly one registration form per pack",
+        "local node catalog",
+        "--where local",
+        "object_info_stale",
         "SEARCH_REQUIRED",
         "SEARCH_OPTIONAL",
         "SEARCH_AVOID",
         "reference fidelity is unverified",
         "saved widget value JSON-like and stable across save/reload",
-        "do not\n  add a seed to a deterministic detector",
+        "Never put credentials in widget values",
+        "do not add a seed to a deterministic detector",
         "Cloud compatibility is a separate verdict",
-        "filesystem presence is never proof that\nthe node loaded",
+        "filesystem presence is never proof that the node loaded",
         "Do not promise hot reload",
     )
-    missing = [needle for needle in required if needle not in text]
+    missing = [needle for needle in required if needle not in normalized]
     assert not missing, f"custom-node runtime guidance lost: {missing}"
 
-    forbidden = ("read it,\ndo not write it", "V3-only generation is mandatory")
-    present = [needle for needle in forbidden if needle in text]
+    forbidden = ("read it, do not write it", "V3-only generation is mandatory")
+    present = [needle for needle in forbidden if needle in normalized]
     assert not present, f"custom-node guidance restored a v3-only conflict: {present}"
 
 
-def test_custom_node_search_routes_have_positive_and_negative_controls():
-    """A search cue without an avoid control teaches indiscriminate search."""
-    text = skill_content("comfy-custom-nodes")
+def _assert_custom_node_search_routes(text: str) -> None:
     required_row = re.search(r"\| \*\*SEARCH_REQUIRED\*\* \|(?P<cues>.*?)\|(?P<action>.*?)\|", text)
     optional_row = re.search(r"\| \*\*SEARCH_OPTIONAL\*\* \|(?P<cues>.*?)\|(?P<action>.*?)\|", text)
     avoid_row = re.search(r"\| \*\*SEARCH_AVOID\*\* \|(?P<cues>.*?)\|(?P<action>.*?)\|", text)
@@ -232,10 +228,20 @@ def test_custom_node_search_routes_have_positive_and_negative_controls():
     assert "self-contained" in avoid_row["cues"]
     assert "Do not search by default" in avoid_row["action"]
 
-    # Observed-red mutation: removing the negative action must invalidate the
-    # same oracle rather than leaving a self-referential snapshot green.
-    mutated = avoid_row["action"].replace("Do not search by default", "Search first")
-    assert "Do not search by default" not in mutated
+
+def test_custom_node_skill_snapshot_keeps_runtime_contract():
+    """Guard the loaded artifact, not a program-repo design document."""
+    _assert_custom_node_runtime_contract(skill_content("comfy-custom-nodes"))
+
+
+def test_custom_node_search_routes_have_positive_and_negative_controls():
+    """A search cue without an avoid control teaches indiscriminate search."""
+    text = skill_content("comfy-custom-nodes")
+    _assert_custom_node_search_routes(text)
+
+    mutated = text.replace("Do not search by default", "Search first")
+    with pytest.raises(AssertionError, match="Do not search by default"):
+        _assert_custom_node_search_routes(mutated)
 
 
 def test_comfy_skill_covers_cloud_setup_and_routing():
