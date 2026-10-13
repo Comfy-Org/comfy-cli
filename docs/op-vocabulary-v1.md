@@ -43,7 +43,9 @@ naming the standalone command. Nothing from such a batch is applied.
 DynamicGroup's rows (`{"op": "set_dynamic_group_rows", "node": ..., "group":
 "loras", "rows": [{...}]}`) and emits only `set_widget` ops: the row count, then
 every widget of each written row, including a field's `<field>.0` control mode.
-Rows with a connected or promoted field keep their index and are not rewritten.
+Rows with a connected or promoted field keep their index, are not rewritten, and
+are left out of `rows`. The ops must replay in order, since the row writes address
+rows the count creates; an earlier write to the group in the same batch is refused.
 
 Every op carries the common envelope stamped by `_new_op`:
 

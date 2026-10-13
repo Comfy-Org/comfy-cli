@@ -776,11 +776,15 @@ def set_dynamic_group_rows(
     row, including a field's ``<field>.0`` control mode. Omitted widgets take
     the template default.
 
-    A row with a connected or promoted field keeps its index and values;
-    ``rows`` fill the other positions in order. Links are never moved, so
-    ``rows`` must cover every free position before the last pinned row.
+    A row with a connected or promoted field keeps its index and values and
+    is left out of ``rows``, which fill the other positions in order. Links
+    are never moved, so ``rows`` must cover every free position before the
+    last pinned row.
 
     The writes run on a copy, so ``workflow`` is unchanged when any is refused.
+    The ops share one stamp, so an earlier write to the group at the same
+    stamp is refused rather than left to the ``op_id`` tiebreak, and replay
+    must apply them in order: the row writes address rows the count creates.
     """
     from comfy_cli.cql import engine as _engine
     from comfy_cli.cql import promoted as _promoted
@@ -819,27 +823,51 @@ def set_dynamic_group_rows(
     linked = set()
     for inp in node.get("inputs") or []:
         if isinstance(inp, dict) and inp.get("link") is not None:
-            linked.add(inp.get("name"))
-            if isinstance(inp.get("widget"), dict):
-                linked.add(inp["widget"].get("name"))
+            widget = inp.get("widget")
+            linked.update(
+                name
+                for name in (inp.get("name"), widget.get("name") if isinstance(widget, dict) else None)
+                if isinstance(name, str)
+            )
     fields = [field.name for field in _engine._dynamic_group_fields(port)]
 
-    def is_pinned(row: int) -> bool:
+    def pin_reason(row: int) -> str | None:
         # A link, or a promotion whose write lands on the host (a subgraph
         # input or a legacy proxyWidgets entry), owns the row's value.
         for name in fields:
             address = f"{group}.{row}.{name}"
-            if address in linked or _promoted.resolve_write(workflow, graph, segments, address).redirected_from:
-                return True
-        return False
+            if address in linked:
+                return "is connected; disconnect it first"
+            if _promoted.resolve_write(workflow, graph, segments, address).redirected_from:
+                return "is promoted to the parent subgraph; unpromote it first"
+        return None
 
-    pinned = [r for r in range(current) if is_pinned(r)]
-    free_before_last = pinned[-1] + 1 - len(pinned) if pinned else 0
+    pinned = {r: reason for r in range(current) if (reason := pin_reason(r))}
+    last = max(pinned, default=None)
+    free_before_last = last + 1 - len(pinned) if pinned else 0
     if len(rows) < free_before_last:
         raise ValueError(
-            f"{group}.{pinned[-1]} is connected and keeps its position; supply at least "
-            f"{free_before_last} row(s) or disconnect it first"
+            f"{group}.{last} keeps its position and is left out of rows; supply at least "
+            f"{free_before_last} row(s), or {group}.{last} {pinned[last]}"
         )
+    maximum = port.options.max if port.options.max is not None else 20
+    if len(rows) + len(pinned) > maximum:
+        raise ValueError(
+            f"{group}: {len(rows)} row(s) plus {len(pinned)} connected or promoted row(s) exceed the maximum of {maximum}"
+        )
+    register = segments if len(segments) > 1 else str(node_id)
+    for key, stamp in (workflow.get("_widget_stamps") or {}).items():
+        kind, where, written = json.loads(key)[:3]
+        if (
+            kind == "widget"
+            and where == register
+            and isinstance(written, str)
+            and (written == group or written.startswith(f"{group}."))
+            and list(stamp[:2]) >= [base_version, actor]
+        ):
+            raise ValueError(
+                f"{group}: this batch already writes {written}; replace the rows without other writes to {group}"
+            )
     supplied = iter(rows)
     plan = [None if index in pinned else next(supplied) for index in range(len(rows) + len(pinned))]
 
