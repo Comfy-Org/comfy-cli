@@ -772,22 +772,28 @@ def set_dynamic_group_rows(
     base_version: int = 0,
 ) -> tuple[dict, list[dict]]:
     """Replace a DynamicGroup's rows with ``rows``, expressed as ordinary
-    ``set_widget`` ops: the row count first, then every field of each written
-    row. Omitted fields take the template default.
+    ``set_widget`` ops: the row count first, then every widget of each written
+    row, including a field's ``<field>.0`` control mode. Omitted widgets take
+    the template default.
 
-    A row with a connected field (including a subgraph promotion) keeps its
-    index and values; ``rows`` fill the other positions in order. Links are
-    never moved, so ``rows`` must cover every free position before the last
-    connected row.
+    A row with a connected or promoted field keeps its index and values;
+    ``rows`` fill the other positions in order. Links are never moved, so
+    ``rows`` must cover every free position before the last pinned row.
+
+    The writes run on a copy, so ``workflow`` is unchanged when any is refused.
     """
     from comfy_cli.cql import engine as _engine
     from comfy_cli.cql import promoted as _promoted
 
+    workflow = copy.deepcopy(workflow)
+    node_id = _template_id(workflow, node_id, graph)
     target = _resolve_widget_write(workflow, graph, node_id, group)
     if target.kind == "top" and target.redirected_from is None:
         node = target.node
+        segments = [str(node.get("id"))]
     elif target.kind == "interior" and target.redirected_from is None:
         node = _promoted._navigate(workflow, target.segments, _promoted.defs_by_id(workflow))
+        segments = target.segments
     else:
         raise ValueError(
             f"{group}: replace rows on the node that owns the DynamicGroup, not a promoted or linked address"
@@ -798,20 +804,36 @@ def set_dynamic_group_rows(
         raise ValueError(f"{group!r} is not a DynamicGroup on node {node_id}")
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError(f"{group}: rows must be a list of objects keyed by row field")
-    fields = _engine._dynamic_group_fields(port)
-    names = [field.name for field in fields]
+    widgets = _engine._dynamic_group_widgets(port)
+    names = [widget.name for widget in widgets]
     for i, row in enumerate(rows):
         unknown = [key for key in row if key not in names]
         if unknown:
             raise ValueError(f"{group}: row {i} has unknown field(s) {unknown}; row fields: {', '.join(names)}")
+        for widget in widgets:
+            if widget.name not in row and _engine._widget_default(widget) is None:
+                raise ValueError(f"{group}: field {widget.name!r} has no default; supply it in row {i}")
 
     entries = _engine._validate_dynamic_group_layout(node, m) or []
-    width = len(_engine._dynamic_group_widgets(port, f"{group}.0"))
-    current = sum(1 for e in entries if e.owner == group) // width
-    linked = {
-        inp.get("name") for inp in node.get("inputs") or [] if isinstance(inp, dict) and inp.get("link") is not None
-    }
-    pinned = [r for r in range(current) if any(f"{group}.{r}.{name}" in linked for name in names)]
+    current = sum(1 for e in entries if e.owner == group) // len(widgets)
+    linked = set()
+    for inp in node.get("inputs") or []:
+        if isinstance(inp, dict) and inp.get("link") is not None:
+            linked.add(inp.get("name"))
+            if isinstance(inp.get("widget"), dict):
+                linked.add(inp["widget"].get("name"))
+    fields = [field.name for field in _engine._dynamic_group_fields(port)]
+
+    def is_pinned(row: int) -> bool:
+        # A link, or a promotion whose write lands on the host (a subgraph
+        # input or a legacy proxyWidgets entry), owns the row's value.
+        for name in fields:
+            address = f"{group}.{row}.{name}"
+            if address in linked or _promoted.resolve_write(workflow, graph, segments, address).redirected_from:
+                return True
+        return False
+
+    pinned = [r for r in range(current) if is_pinned(r)]
     free_before_last = pinned[-1] + 1 - len(pinned) if pinned else 0
     if len(rows) < free_before_last:
         raise ValueError(
@@ -826,10 +848,16 @@ def set_dynamic_group_rows(
     for index, row in enumerate(plan):
         if row is None:
             continue
-        for field in fields:
-            value = row[field.name] if field.name in row else _engine._widget_default(field)
+        for widget in widgets:
+            value = row[widget.name] if widget.name in row else _engine._widget_default(widget)
             workflow, op = set_widget(
-                workflow, graph, node_id, f"{group}.{index}.{field.name}", value, actor=actor, base_version=base_version
+                workflow,
+                graph,
+                node_id,
+                f"{group}.{index}.{widget.name}",
+                value,
+                actor=actor,
+                base_version=base_version,
             )
             ops.append(op)
     return workflow, ops

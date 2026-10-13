@@ -42,8 +42,8 @@ naming the standalone command. Nothing from such a batch is applied.
 `set_dynamic_group_rows` is a batch spec, not an op kind. It replaces a
 DynamicGroup's rows (`{"op": "set_dynamic_group_rows", "node": ..., "group":
 "loras", "rows": [{...}]}`) and emits only `set_widget` ops: the row count, then
-every field of each written row. Rows with a connected field keep their index and
-are not rewritten.
+every widget of each written row, including a field's `<field>.0` control mode.
+Rows with a connected or promoted field keep their index and are not rewritten.
 
 Every op carries the common envelope stamped by `_new_op`:
 
