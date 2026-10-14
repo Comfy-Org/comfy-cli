@@ -112,6 +112,8 @@ _SENSITIVE_EXACT = frozenset(
         "from_workflow",
         "workflow",
         "capability",
+        "query",
+        "repo",
     }
 )
 

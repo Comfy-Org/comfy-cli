@@ -17,7 +17,9 @@ from comfy_cli.cql.engine import (
     Graph,
     Port,
     _apply_one_slot,
+    _count_instances,
     _extract_frontend_slots,
+    _subgraph_defs_by_id,
     _write_widget,
 )
 
@@ -4385,3 +4387,108 @@ class TestUnreachableNodeIsVisible:
         assert any(e["code"] == "prompt_no_outputs" for e in result["errors"])
         warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
         assert warns == [], "prompt_no_outputs already says it; don't pile on"
+
+
+# ---------------------------------------------------------------------------
+# _subgraph_defs_by_id / _count_instances — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+class TestSubgraphDefsByIdShapeChecks:
+    """A hand-edited or truncated save can put anything under ``definitions``.
+
+    The old ``(workflow.get("definitions") or {}).get("subgraphs") or []`` only
+    replaced FALSY values, so a truthy wrong-typed one survived and crashed the
+    caller (``comfy workflow slots`` exited on a traceback with no envelope).
+    The agreed degradation is an empty index: a document with no readable
+    definitions has no subgraph instances to resolve, and every caller already
+    handles ``{}``.
+    """
+
+    @pytest.mark.parametrize(
+        "definitions",
+        [5, "definitions", ["x"], 0.0, True],
+        ids=["int", "str", "list", "float", "bool"],
+    )
+    def test_non_dict_definitions_reads_as_no_definitions(self, definitions):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": definitions}) == {}
+
+    @pytest.mark.parametrize(
+        "subgraphs",
+        [5, {"a": 1}, 3.5, True],
+        ids=["int", "dict", "float", "bool"],
+    )
+    def test_non_list_subgraphs_reads_as_no_definitions(self, subgraphs):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": subgraphs}}) == {}
+
+    def test_string_subgraphs_is_not_walked_per_character(self):
+        """A string is iterable, so a naive guard silently walks it character by
+        character. It happens to yield ``{}`` too (single chars aren't dicts),
+        so this case documents INTENT: the isinstance branch must reject the
+        string outright rather than arrive at ``{}`` by accident."""
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": "abc"}}) == {}
+
+    def test_missing_containers_still_read_as_empty(self):
+        assert _subgraph_defs_by_id({"nodes": []}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": None}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {}}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": []}}) == {}
+        # A top-level ``subgraphs`` with no ``definitions`` wrapper is not the
+        # block this helper reads; it must not be picked up by accident.
+        assert _subgraph_defs_by_id({"subgraphs": {"a": 1}}) == {}
+        assert _subgraph_defs_by_id({"subgraphs": [{"id": "u1"}]}) == {}
+
+    def test_well_formed_definitions_still_index_by_id_and_name(self):
+        """Positive control: the shape checks must not cost the happy path."""
+        wf = {"definitions": {"subgraphs": [{"id": "u1", "name": "A", "nodes": []}]}}
+        by_id = _subgraph_defs_by_id(wf)
+        assert by_id["u1"] is wf["definitions"]["subgraphs"][0]
+        assert by_id["A"] is wf["definitions"]["subgraphs"][0], "unambiguous name stays a fallback key"
+
+    def test_non_dict_entries_are_still_skipped(self):
+        """The per-entry guard is unchanged: junk beside a real def is dropped,
+        the real def is kept."""
+        wf = {"definitions": {"subgraphs": ["junk", None, 7, {"id": "u1", "name": "A", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "A"}
+
+
+class TestCountInstancesShapeChecks:
+    def test_non_dict_definitions_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": 5}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_non_list_subgraphs_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": {"subgraphs": "abc"}}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_well_formed_definitions_still_count_interior_instances(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2
+
+
+class TestSubgraphDefNodesShapeChecks:
+    """One level deeper: a def whose ``nodes`` is truthy but not a list.
+
+    Every caller walks ``sg.get("nodes") or []``, which only replaces a falsy
+    value, so ``{"nodes": 5}`` raised ``TypeError`` once an instance resolved
+    to it (``slots``) or once a sibling def was scanned (``_count_instances``).
+    """
+
+    @pytest.mark.parametrize("nodes", [5, True, "abc", {"a": 1}], ids=["int", "bool", "str", "dict"])
+    def test_def_with_non_list_nodes_is_not_indexed(self, nodes):
+        wf = {"definitions": {"subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1"}
+
+    def test_def_with_missing_or_null_nodes_is_still_indexed(self):
+        wf = {"definitions": {"subgraphs": [{"id": "u1"}, {"id": "u2", "nodes": None}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "u2"}
+
+    def test_count_instances_skips_a_sibling_def_with_non_list_nodes(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "bad", "nodes": 5}, {"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2
