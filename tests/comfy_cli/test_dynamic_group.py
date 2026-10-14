@@ -1289,7 +1289,7 @@ def test_group_row_replacement_refuses_an_earlier_write_to_the_group_in_its_batc
         {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
     ]
 
-    with pytest.raises(ValueError, match=r"loras(\.0\.strength)? is already written at base_version 0 by cli"):
+    with pytest.raises(ValueError, match=r"loras(\.0\.strength)? is already written at stamp \[0, cli\]"):
         workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
 
 
@@ -1301,8 +1301,11 @@ def test_group_row_replacement_counts_pinned_rows_against_the_maximum():
         _replace_rows(workflow, [{"lora_name": "A.safetensors"}] * 3)
 
 
-@pytest.mark.parametrize(("widget", "value"), [("loras", 1), ("loras.0.strength", 0.2)])
-def test_group_row_replacement_refuses_a_later_write_to_the_group_in_its_batch(widget, value):
+@pytest.mark.parametrize(
+    ("widget", "value", "hint"),
+    [("loras", 1, "change the number of rows"), ("loras.0.strength", 0.2, "put the value in its rows")],
+)
+def test_group_row_replacement_refuses_a_later_write_to_the_group_in_its_batch(widget, value, hint):
     graph = Graph.from_object_info(FIXTURE["object_info"])
     specs = [
         {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
@@ -1310,7 +1313,7 @@ def test_group_row_replacement_refuses_a_later_write_to_the_group_in_its_batch(w
         {"op": "set_widget", "node": 1, "widget": widget, "value": value},
     ]
 
-    with pytest.raises(ValueError, match=rf"spec #2: {re.escape(widget)} was replaced earlier in this batch"):
+    with pytest.raises(ValueError, match=rf"spec #2: {re.escape(widget)} was replaced earlier in this batch.*{hint}"):
         workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
 
 
@@ -1327,3 +1330,43 @@ def test_group_row_replacement_writes_a_recreated_row_on_the_interior_despite_a_
     assert all(op.get("path") == ["9", "1"] and "promoted" not in op for op in ops)
     assert edited["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][8:10] == ["C.safetensors", 0.4]
     assert edited["nodes"][0]["inputs"] == []
+
+
+def test_group_row_replacement_reports_the_stamp_that_holds_the_group():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    workflow, _ = workflow_ops.set_widget(
+        copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, 1, "loras", 1, actor="doc", base_version=5
+    )
+
+    with pytest.raises(ValueError, match=r"loras is already written at stamp \[5, doc\]"):
+        workflow_ops.set_dynamic_group_rows(workflow, graph, 1, "loras", [], base_version=2)
+
+
+def test_group_row_replacement_accepts_a_later_write_to_a_pinned_row():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+        {"op": "set_widget", "node": 1, "widget": "loras.1.lora_name", "value": "A.safetensors"},
+    ]
+
+    edited, _, _ = workflow_ops.apply_specs(workflow, graph, specs)
+
+    assert edited["nodes"][0]["widgets_values"][5] == "A.safetensors"
+
+
+def test_group_row_replacement_names_a_subgraph_input_promotion():
+    workflow = _group_in_subgraph()
+    definition = workflow["definitions"]["subgraphs"][0]
+    definition["inputs"] = [{"id": "in-1", "name": "strength", "type": "FLOAT", "linkIds": [1]}]
+    definition["links"] = [
+        {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 4, "type": "FLOAT"}
+    ]
+    definition["nodes"][0]["inputs"][4]["link"] = 1
+    workflow["nodes"][0]["inputs"] = [
+        {"name": "strength", "type": "FLOAT", "link": None, "widget": {"name": "strength"}}
+    ]
+
+    with pytest.raises(ValueError, match=r"loras\.1 is promoted to the parent subgraph; unpromote it first"):
+        _replace_rows(workflow, [], node="9/1")
