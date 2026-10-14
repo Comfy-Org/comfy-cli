@@ -45,7 +45,7 @@ def _renderer_lifecycle():
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch) -> Path:
-    """A fake home with no credential store in it, and the data dir outside it."""
+    """A fake home, so the default data dir (``~/.comfy-agent``) is a temp dir."""
     h = tmp_path / "home"
     h.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: h))
@@ -290,6 +290,25 @@ def test_cli_permissions_lists_pending_and_points_at_the_agent_panel(tmp_path: P
     flat = " ".join(out.split())
     assert NOTE in flat
     assert "agent allow" not in flat and "agent deny" not in flat
+
+
+@pytest.mark.parametrize("from_env", [False, True])
+def test_cli_permissions_reads_the_agents_default_data_dir(home: Path, tmp_path: Path, monkeypatch, from_env: bool):
+    # A bare `comfy agent permissions` is what the skill tells users to run: it
+    # must read the dir the agent uses (AGENT_DATA_DIR, else ~/.comfy-agent),
+    # or it shows nothing waiting while a request is.
+    root = tmp_path / "agent-data" if from_env else home / ".comfy-agent"
+    if from_env:
+        monkeypatch.setenv("AGENT_DATA_DIR", str(root))
+    else:
+        monkeypatch.delenv("AGENT_DATA_DIR", raising=False)
+    req = _req("0123456789abcdef", "path", "/refs")
+    _write_pending(root, req)
+    res = CliRunner().invoke(app, ["permissions"])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["data_dir"] == str(root)
+    assert data["pending"] == [req]
 
 
 def test_cli_permissions_prints_no_panel_note_with_nothing_pending(tmp_path: Path):

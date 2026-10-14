@@ -36,13 +36,15 @@ ask; it can never make the answer.
 |---|---|---|
 | A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting in the agent panel; retry only after it is approved |
 | A host (`egress denied: <host>`; from a CLI command, `Tunnel connection failed: 403`, which is the same refusal) | call `request_host` with the host and what the download or install is for. The host is missing from the list and does not indicate the shell is cut off from the network | same; rerun the command after the approval |
-| A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: approving is refused, so the request would wait forever | say the host stays refused and find another source, or ask the user for the file |
+| A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: the agent refuses the request as soon as it is made | say the host stays refused and find another source, or ask the user for the file |
 | No shell on this machine | say that the environment block names the start-time setting that enables one | the user restarts the agent with it |
 
 The user approves or refuses the request in the agent panel: it shows up in
 the chat as a card with Allow and Deny buttons. There is no command to approve
 a request or grant a folder or host, so do not look for one and do not hand
-the user one; tell them the request is waiting in the panel. To see what is
+the user one; tell them the request is waiting in the panel. If the card
+closes unanswered (it times out, or the turn ends), the request stays pending:
+ask for the same target again in a later turn and a new card answers it. To see what is
 waiting and what is already approved, run:
 
 ```

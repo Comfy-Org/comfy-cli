@@ -127,7 +127,9 @@ history.
   agent panel. `comfy agent permissions` still lists what is waiting and what
   is approved; its `--json` payload drops `grant` and carries a `note` naming
   the panel. The error codes `agent_state_unwritable`, `agent_bad_args`,
-  `agent_refused` and `agent_unknown_request` are gone with them.
+  `agent_refused` and `agent_unknown_request` are gone with them. To let the
+  agent reach a folder or host ahead of time, set `AGENT_SANDBOX_ALLOW_PATHS`
+  or `AGENT_EGRESS_ALLOW_HOSTS` and restart it.
 
 ### Fixed
 

@@ -44,7 +44,10 @@ _DATA_DIR_OPT = Annotated[
     ),
 ]
 
-NOTE = "approve or deny a pending request in the agent panel; the agent cannot approve its own requests"
+NOTE = (
+    "approve or deny a pending request on its card in the agent panel; the agent cannot approve its own "
+    "requests. A request whose card closed unanswered gets a new card when the agent asks for it again"
+)
 
 
 def _age(requested_at: object, now: datetime | None = None) -> str:
