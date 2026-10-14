@@ -2184,6 +2184,10 @@ class _WatchState:
     outputs: list[str] = field(default_factory=list)
     end_reason: str | None = None
     end_details: Any = None
+    # The WS `execution_error` event payload, when the watch ended on one. The
+    # poll/snapshot exits carry the same record under `end_details["error"]`;
+    # both are surfaced as the envelope's `execution_error`.
+    execution_error: dict[str, Any] | None = None
     terminal: bool = False
     # Nodes whose final (100% / errored) `progress` line has already been
     # emitted. `progress_state` repeats EVERY non-pending node on every
@@ -2320,6 +2324,7 @@ def _watch_execution_error(state: _WatchState, data: dict[str, Any]) -> None:
     _absorb_executed_list(state, data)
     state.end_reason = "error"
     state.end_details = data
+    state.execution_error = data
     state.terminal = True
 
 
@@ -2629,6 +2634,11 @@ def watch_cmd(
         if final_status == "error" and isinstance(details.get("error"), dict):
             payload["execution_error"] = details.pop("error")
         payload["details"] = details
+    if final_status == "error" and "execution_error" not in payload and isinstance(state.execution_error, dict):
+        # Live exit: the event itself is the structured record (the same shape
+        # `/history` stores under `status.messages`), so promote it too — one
+        # key for the failure whichever way the watch ended.
+        payload["execution_error"] = dict(state.execution_error)
     if not saw_any_event and final_status == "unknown":
         payload["hint"] = "watch returned without events; the prompt may already have completed"
     _emit_terminal(renderer, payload, command="jobs watch")

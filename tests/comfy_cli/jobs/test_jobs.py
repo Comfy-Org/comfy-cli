@@ -3601,6 +3601,43 @@ def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
     assert env["data"]["attached"] is True and env["data"]["client_id"] == "cid-sub"
 
 
+def test_watch_live_execution_error_is_promoted_to_execution_error(monkeypatch, capsys):
+    """An attached watch that ends on the WS `execution_error` event publishes
+    the failure under `execution_error`, the same key the poll exits use — the
+    event payload itself has no `error` key to lift."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+    frames = [f"frame{i}" for i in range(6)]
+    event = {
+        "prompt_id": "pid-w",
+        "node_id": "5",
+        "node_type": "KSampler",
+        "exception_message": "boom",
+        "exception_type": "RuntimeError",
+        "traceback": frames,
+        "current_inputs": {"seed": 42},
+        "executed": ["1"],
+    }
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[{"type": "execution_error", "data": event}])
+
+    assert result.exit_code == 1, result.output
+    assert "clientId=cid-sub" in ws.url
+    env = lines[-1]
+    assert env["ok"] is False and env["error"]["code"] == "execution_error"
+    payload = env["error"]["details"]
+    assert payload["status"] == "error" and payload["attached"] is True
+    record = payload["execution_error"]
+    assert record["node_type"] == "KSampler" and record["node_id"] == "5"
+    assert record["exception_message"] == "boom"
+    # Same envelope hygiene as the poll exit: widget values redacted, traceback
+    # capped to its tail.
+    assert "current_inputs" not in record
+    assert record["traceback"] == frames[-2:]
+
+
 def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkeypatch, capsys):
     """Symptom 2 is independent of streaming: even with zero WS events, the
     envelope's `completed_nodes` comes from the server's own /history record."""
