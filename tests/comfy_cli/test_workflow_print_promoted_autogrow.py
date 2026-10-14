@@ -142,11 +142,10 @@ def test_wired_autogrow_slots_print_as_links_then_the_next_free_slot(autogrow_gr
     _parses(res.source)
     line = _line(res.source, b)
     kwargs = _kwargs(line)
-    # each grown slot references the loader wired into it (binding names are
-    # assigned in print order, so resolve them through `bindings`)
+    # Each grown slot references one loader. Concurrent-safe autogrow ranks
+    # names by the op stamp, so either loader may receive either slot name.
     refs = dict(re.findall(r'"(model\.images\.image_\d+)": (\w+)\.IMAGE', kwargs))
-    assert res.bindings[refs["model.images.image_1"]] == str(a)
-    assert res.bindings[refs["model.images.image_2"]] == str(c)
+    assert {res.bindings[refs["model.images.image_1"]], res.bindings[refs["model.images.image_2"]]} == {str(a), str(c)}
     assert '"model.images.image_3": None' in kwargs
     assert '"model.images.image_4"' not in kwargs
     # the wired group shifted nothing: the widgets still read at their names

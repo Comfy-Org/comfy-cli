@@ -2162,6 +2162,44 @@ class TestOpModel:
         # ...and the two orders converge.
         assert ops.canonical(ab) == ops.canonical(ba)
 
+    def test_p9_autogrow_display_order_uses_total_stamp_rank(self):
+        """Concurrent grows get identical names/order in both replay orders."""
+        ops = self._ops()
+        g = _graph()
+        base = _autogrow_workflow()
+        _, lower = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a", base_version=4)
+        _, higher = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="a", base_version=4)
+        lower["op_id"] = "0" * 32
+        higher["op_id"] = "f" * 32
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), lower, g), higher, g)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), higher, g), lower, g)
+
+        def display(workflow):
+            node = next(n for n in workflow["nodes"] if n["id"] == 10)
+            return [(i["name"], i.get("grow_id"), i.get("link")) for i in node["inputs"]]
+
+        assert display(ab) == display(ba)
+        assert [name for name, grow_id, _ in display(ab) if grow_id is not None] == [
+            "images.image0",
+            "images.image1",
+        ]
+        assert ops.canonical(ab) == ops.canonical(ba)
+        assert ops.detect_conflict(lower, higher) is False
+
+    def test_autogrow_replay_with_existing_slot_is_idempotent(self):
+        """A replay can reach an existing grow slot after applied-op history is lost."""
+        ops = self._ops()
+        graph = _graph_with_autogrow_template({"prefix": "frame"})
+        base = _autogrow_workflow()
+        applied, op = ops.connect(base, graph, 20, "IMAGE", 10, "images", actor="a")
+        expected = ops.canonical(applied)
+
+        applied.pop("_applied_ops", None)
+        replayed = ops.apply_op(applied, op, graph)
+
+        assert ops.canonical(replayed) == expected
+
     def test_autogrow_uses_schema_prefix_zero_based(self):
         """A ``{"prefix": "frame"}`` template names grown slots verbatim from
         the schema, 0-based (images.frame0, images.frame1) — a prefix that
@@ -2270,6 +2308,24 @@ class TestOpModel:
             ins = next(n for n in out["nodes"] if n["id"] == 10)["inputs"]
             names = {i["name"] for i in ins if str(i["name"]).startswith("images.")}
             assert names == {"images.first", "images.second"}, names
+        assert ops.canonical(ab) == ops.canonical(ba)
+
+    def test_p9_autogrow_template_converges_without_catalog(self):
+        """The mint-time template travels with an op so catalog-free replicas
+        preserve schema names while reranking concurrent grows."""
+        ops = self._ops()
+        graph = _graph_with_autogrow_template({"prefix": "frame"})
+        base = _autogrow_workflow()
+        _, op1 = ops.connect(copy.deepcopy(base), graph, 20, "IMAGE", 10, "images", actor="a")
+        _, op2 = ops.connect(copy.deepcopy(base), graph, 21, "IMAGE", 10, "images", actor="b")
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), op1, None), op2, None)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), op2, None), op1, None)
+
+        for out in (ab, ba):
+            inputs = next(node for node in out["nodes"] if node["id"] == 10)["inputs"]
+            names = {item["name"] for item in inputs if item.get("grow_id") is not None}
+            assert names == {"images.frame0", "images.frame1"}
         assert ops.canonical(ab) == ops.canonical(ba)
 
     def test_p9_autogrow_grow_id_survives_api_conversion(self):
