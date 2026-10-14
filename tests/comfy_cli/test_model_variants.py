@@ -407,6 +407,28 @@ class TestTemplatesFetch:
         assert "could not load object_info" in env["data"]["model_check_skipped"]
         assert json.loads(out.read_text()) == _template()
 
+    def test_group_layout_skew_skips_model_rewrites_without_failing_fetch(
+        self, tmp_path: Path, patched_fetch, monkeypatch, capsys
+    ):
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "dynamic_group.json").read_text())
+        info = {**_object_info(), **fixture["object_info"]}
+        del info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"]["optional"]["enabled"]
+        workflow = _template()
+        group_node = fixture["cases"]["populated"]["workflow"]["nodes"][0]
+        group_node["id"] = 99
+        workflow["definitions"]["subgraphs"][0]["nodes"].append(group_node)
+        monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", lambda name, **kw: json.dumps(workflow).encode())
+        catalog = tmp_path / "object_info.json"
+        catalog.write_text(json.dumps(info))
+        out = tmp_path / "workflow.json"
+
+        env = _run(["fetch", "video_minimax_h3_i2v", "-o", str(out), "--input", str(catalog)], capsys)
+
+        assert env["ok"] is True, env
+        assert "DynamicGroup" in env["data"]["model_check_skipped"]
+        assert "model_substitutions" not in env["data"]
+        assert json.loads(out.read_text()) == workflow
+
 
 # ---------------------------------------------------------------------------
 # validate
