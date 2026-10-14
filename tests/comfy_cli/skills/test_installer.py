@@ -207,6 +207,11 @@ def test_custom_node_skill_snapshot_keeps_runtime_contract():
         "Cloud-incompatible",
         "filesystem presence is never proof",
         "Do not promise hot reload",
+        "comfy node publish --token",
+        "WEB_DIRECTORY",
+        "node_replacement",
+        "Never put credentials in widget values",
+        "object_info_stale",
     ):
         assert needle in corpus
 
@@ -233,7 +238,7 @@ def test_custom_node_initial_context_and_jit_budget_fixture():
     jit_bytes = [len(body.encode()) for body in slices]
     fixture_order = (
         "invocation",
-        "ecosystem-search",
+        "ecosystem-reference",
         "api-schema",
         "validation",
         "dependencies-capabilities",
@@ -255,6 +260,7 @@ def test_loaded_custom_node_skill_routes_without_preloading_authoring_body(tmp_p
     assert "io.ComfyNode" not in loaded
 
     mutated = loaded.replace("knowledge authoring invocation", "knowledge model invocation")
+    assert "knowledge authoring invocation" in loaded
     assert "knowledge authoring invocation" not in mutated
 
 

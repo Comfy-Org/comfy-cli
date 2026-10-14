@@ -3,14 +3,14 @@
   "parent": "2b93a06179a11a65507e1f0c36d0c2da4a9448f5",
   "initial_context": {
     "before": { "bytes": 12971, "tokens": 1627 },
-    "after": { "bytes": 1863, "tokens": 230 }
+    "after": { "bytes": 2032, "tokens": 252 }
   },
   "jit_added": {
-    "invocation": { "bytes": 603, "tokens": 87 },
-    "ecosystem-search": { "bytes": 807, "tokens": 102 },
-    "api-schema": { "bytes": 679, "tokens": 76 },
-    "validation": { "bytes": 654, "tokens": 84 },
-    "dependencies-capabilities": { "bytes": 650, "tokens": 77 },
+    "invocation": { "bytes": 1016, "tokens": 145 },
+    "ecosystem-reference": { "bytes": 807, "tokens": 102 },
+    "api-schema": { "bytes": 1143, "tokens": 137 },
+    "validation": { "bytes": 826, "tokens": 109 },
+    "dependencies-capabilities": { "bytes": 830, "tokens": 102 },
     "troubleshooting": { "bytes": 651, "tokens": 82 }
   }
 }

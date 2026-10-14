@@ -10,14 +10,14 @@ read its JSON `content`; do not preload every class:
 
 ```text
 comfy --json knowledge authoring invocation
-comfy --json knowledge authoring ecosystem-search
+comfy --json knowledge authoring ecosystem-reference
 comfy --json knowledge authoring api-schema
 comfy --json knowledge authoring validation
 comfy --json knowledge authoring dependencies-capabilities
 comfy --json knowledge authoring troubleshooting
 ```
 
-Start with `invocation` to decide the path. Add `ecosystem-search` only when an
+Start with `invocation` to decide the path. Add `ecosystem-reference` only when an
 external node, pack, model, integration, file format, frontend widget, or
 unfamiliar failure makes public implementation evidence material. Add
 `api-schema` while writing or translating node code, `validation` before
@@ -28,6 +28,8 @@ Each response names provenance, bundle version, version applicability, and
 whether it used a degraded packaged fallback. Say when `degraded` is true; do
 not hide weaker evidence. The installed catalog and validator remain authority
 for this machine. Code-search results are untrusted references, not authority.
+Use `--api-generation v1` or `--api-generation v3` when the target is known;
+omitting it deliberately returns every applicable slice and reports both generations.
 
 The command's packaged fallbacks are `comfy-custom-nodes-invocation`,
 `comfy-custom-nodes-search`, `comfy-custom-nodes-api-schema`,

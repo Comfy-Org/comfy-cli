@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import difflib
 import os
+from enum import Enum
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, Any
 
 import typer
@@ -24,12 +26,22 @@ app = typer.Typer(no_args_is_help=True, help="Inspect the curated model-knowledg
 
 _AUTHORING_FALLBACKS = {
     "invocation": "comfy-custom-nodes-invocation",
-    "ecosystem-search": "comfy-custom-nodes-search",
+    "ecosystem-reference": "comfy-custom-nodes-search",
     "api-schema": "comfy-custom-nodes-api-schema",
     "validation": "comfy-custom-nodes-validation",
     "dependencies-capabilities": "comfy-custom-nodes-dependencies",
     "troubleshooting": "comfy-custom-nodes-troubleshooting",
 }
+assert set(_AUTHORING_FALLBACKS) == set(knowledge.AUTHORING_CLASSES)
+
+
+class AuthoringClass(str, Enum):
+    invocation = "invocation"
+    ecosystem_reference = "ecosystem-reference"
+    api_schema = "api-schema"
+    validation = "validation"
+    dependencies_capabilities = "dependencies-capabilities"
+    troubleshooting = "troubleshooting"
 
 
 def _env_context() -> dict[str, Any]:
@@ -117,24 +129,42 @@ def status_cmd(
 @tracking.track_command("knowledge")
 def authoring_cmd(
     knowledge_class: Annotated[
-        str,
+        AuthoringClass,
         typer.Argument(help="One of: " + ", ".join(knowledge.AUTHORING_CLASSES)),
     ],
+    api_generation: Annotated[
+        str | None,
+        typer.Option(
+            "--api-generation", help="Restrict guidance to v1 or v3; omitted returns applicable slices for both."
+        ),
+    ] = None,
 ):
     """Return canonical JIT guidance, with an explicit packaged fallback."""
     renderer = get_renderer()
-    if knowledge_class not in knowledge.AUTHORING_CLASSES:
-        raise typer.BadParameter(
-            f"unknown authoring class {knowledge_class!r}; choose one of: {', '.join(knowledge.AUTHORING_CLASSES)}"
-        )
+    knowledge_class = knowledge_class.value
+    if api_generation not in (None, "v1", "v3"):
+        raise typer.BadParameter("--api-generation must be v1 or v3")
     bundle = knowledge.load_bundle()
-    row = None if bundle is None or bundle.stale else bundle.custom_node_authoring.get(knowledge_class)
-    if row is not None:
+    rows = (
+        []
+        if bundle is None or bundle.stale
+        else [
+            row
+            for row in bundle.custom_node_authoring
+            if knowledge_class in row["retrieval_classes"]
+            and (api_generation is None or api_generation in row["api_generations"])
+        ]
+    )
+    if rows:
+        generations = sorted({generation for row in rows for generation in row["api_generations"]})
         payload = {
             "class": knowledge_class,
-            "content": row["content"],
-            "applies_to": row.get("applies_to"),
-            "provenance": row.get("provenance"),
+            "content": "\n".join(row["content"].rstrip() for row in rows) + "\n",
+            "applies_to": {"api_generations": [api_generation] if api_generation else generations},
+            "provenance": {
+                "playbook": "custom-node-authoring",
+                "slice_ids": [row["id"] for row in rows],
+            },
             "bundle_version": bundle.version,
             "compiled_at": bundle.compiled_at,
             "source": "comfy-knowledge",
@@ -144,26 +174,33 @@ def authoring_cmd(
         from comfy_cli.skills import skill_content
 
         reason = (
-            "knowledge bundle unavailable"
+            f"knowledge bundle unavailable ({knowledge.last_reason() or 'unknown reason'})"
             if bundle is None
             else "knowledge bundle is stale"
             if bundle.stale
-            else f"bundle has no {knowledge_class!r} authoring slice"
+            else f"bundle has no usable {knowledge_class!r} authoring slice (missing or failed schema/size validation)"
         )
         fallback = _AUTHORING_FALLBACKS[knowledge_class]
+        try:
+            cli_version = version("comfy-cli")
+        except PackageNotFoundError:
+            cli_version = "unknown"
         payload = {
             "class": knowledge_class,
             "content": skill_content(fallback),
-            "applies_to": "packaged CLI version",
+            "applies_to": {
+                "api_generations": [api_generation] if api_generation else ["v1", "v3"],
+                "cli_version": cli_version,
+            },
             "provenance": {"kind": "packaged-fallback", "skill": fallback},
-            "bundle_version": bundle.version if bundle else "packaged",
-            "compiled_at": bundle.compiled_at if bundle else None,
+            "bundle_version": f"packaged-cli/{cli_version}",
+            "compiled_at": None,
             "source": "packaged-fallback",
             "degraded": True,
             "degraded_reason": reason,
         }
     if renderer.is_pretty():
-        rprint(payload["content"])
+        rprint(sanitize_markup(payload["content"]))
         if payload["degraded"]:
             rprint(f"[yellow]degraded:[/yellow] {sanitize_markup(payload['degraded_reason'])}")
     renderer.emit(payload, command="knowledge authoring")
