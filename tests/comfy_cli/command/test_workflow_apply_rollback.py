@@ -1,19 +1,17 @@
 """A FAILED atomic `workflow apply` batch must not advertise node ids that the
 rollback discards.
 
-Regression guard for a bug measured in prod comfy-agent Langfuse traces
-(2026-07-27). Sequence in trace ff11b86931f3fbaa:
+Regression guard. An illustrative sequence:
 
-  03:34:58 apply_ops  ok=false  "batch failed: input 'image' not found on node
-                                868300940744052; inputs: ['images','files'].
-                                Nodes in this workflow: 3686911078754972
-                                (LoadImage), 868300940744052 (GeminiNanoBanana2),
-                                4045462123562940 (KlingStartEndFrameNode), …"
-  03:35:13 connect    ok=false  "node 3686911078754972 not found in workflow"
-  … six more connects, all "not found", every one using an id from that hint
+  apply_ops  ok=false  "batch failed: input 'image' not found on node 2;
+                        inputs: ['images','files']. Nodes in this workflow:
+                        1 (LoadImage), 2 (GeminiNanoBanana2),
+                        3 (KlingStartEndFrameNode), …"
+  connect    ok=false  "node 1 not found in workflow"
+  … more connects, all "not found", every one using an id from that hint
 
-Across the 78-trace prod sample, 16/16 (100%) of "node <id> not found in
-workflow" edit failures used an id that an earlier FAILED batch had advertised.
+A "node <id> not found in workflow" edit failure of this kind uses an id that
+only an earlier FAILED batch ever advertised.
 
 Cause: `apply_specs` threads an accumulating `workflow` dict through the batch,
 so when spec #N fails that dict already holds the nodes added by specs #0..N-1,
@@ -41,7 +39,7 @@ from test_workflow_edit import (  # type: ignore[import-not-found]
 def _failing_batch(tmp_path) -> Path:
     """add VAEDecode + BatchImagesNode, then connect into 'image' — which does
     not exist on BatchImagesNode (its autogrow input is 'images'). Same shape as
-    the prod failure: two adds succeed in memory, the third spec fails."""
+    the sequence above: two adds succeed in memory, the third spec fails."""
     ops = tmp_path / "ops.json"
     ops.write_text(
         json.dumps(

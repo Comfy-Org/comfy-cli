@@ -8,12 +8,12 @@ out_links`, then raises `TypeError: argument of type 'NoneType' is not
 iterable`.
 
 This hits EVERY connect from a loaded/fetched real workflow's unwired output
-slot, not just one node/type. Prod argv:
+slot, not just one node/type. For example:
 
     workflow connect workflow.json --actor ... --base-version 3 --where cloud \
         -- 301.audio 349.audio
 
-5 prod failures. Fix: an explicit `None` check before appending, instead of
+Fix: an explicit `None` check before appending, instead of
 relying on `setdefault`'s "key missing" semantics.
 """
 

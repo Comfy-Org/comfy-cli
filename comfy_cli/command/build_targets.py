@@ -1,7 +1,7 @@
 """The ``<os>/<gpu>`` build-target vocabulary shared by every release-cutting command.
 
 A target belongs to a *release*, never to a push (build design lines 253-279):
-an implicit target spends build minutes the caller never asked for, so nothing
+an implicit target builds an artifact the caller never asked for, so nothing
 here ever substitutes a default. ``--target os/gpu`` is the single spelling, and
 a value that is not exactly two non-empty segments is refused rather than
 guessed at.

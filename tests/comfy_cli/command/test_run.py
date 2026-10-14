@@ -3014,7 +3014,7 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
         mock_exec.executed_node_ids = []
-        # `_emit_queued` hands these to `json.dumps` in NDJSON mode. Unstubbed
+        # `_emit_queued_event` hands these to `json.dumps` in NDJSON mode. Unstubbed
         # MagicMocks make its `default` hook recurse forever on `isoformat`,
         # retaining every child mock — ~28GB, and the OOM killed the suite.
         mock_exec.validation_warnings = []

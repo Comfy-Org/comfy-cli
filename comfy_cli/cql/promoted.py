@@ -80,12 +80,31 @@ def defs_by_id(workflow: dict) -> dict[str, dict]:
     return _subgraph_defs_by_id(workflow)
 
 
-def promoted_inputs(sg: dict, defs: dict[str, dict], depth: int = 0) -> list[PromotedInput]:
+def _nested_definition(target: dict, defs: dict[str, dict], stack: tuple[int, ...]) -> dict | None:
+    """The definition interior node ``target`` instantiates, or ``None`` for a
+    plain node. A definition already on ``stack`` (being walked) is a cycle —
+    a definition cannot contain itself — so the target is the plain node it
+    must be rather than an instance to recurse into."""
+    inner_def = defs.get(str(target.get("type", "")))
+    if inner_def is None or id(inner_def) in stack:
+        return None
+    return inner_def
+
+
+def promoted_inputs(
+    sg: dict, defs: dict[str, dict], depth: int = 0, _stack: tuple[int, ...] = ()
+) -> list[PromotedInput]:
     """Every declared input of definition ``sg`` in declaration order, with the
     host value slot each widget-backed one owns — the frontend's own rule
     (``SubgraphNode._resolveInputWidget``): walk the input's ``linkIds`` in
     order and take the first boundary link whose interior target is a
-    widget-backed input, or a nested instance's promoted widget input."""
+    widget-backed input, or a nested instance's promoted widget input.
+
+    ``_stack`` holds the definitions already being walked: a target that
+    resolves to one of them is a cycle (a definition cannot contain itself),
+    so it is treated as the plain node it must be rather than recursed into —
+    recursing fans out once per linked input per level and never finishes."""
+    _stack = (*_stack, id(sg))
     inner = {str(n.get("id")): n for n in sg.get("nodes") or [] if isinstance(n, dict)}
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
     # rather than crashing conversion of the whole workflow.
@@ -119,13 +138,13 @@ def promoted_inputs(sg: dict, defs: dict[str, dict], depth: int = 0) -> list[Pro
             entry = target_inputs[slot] if isinstance(slot, int) and 0 <= slot < len(target_inputs) else None
             if not isinstance(entry, dict):
                 continue
-            inner_def = defs.get(str(target.get("type", "")))
+            inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
                 # The target is itself a subgraph instance: its input entry
                 # carries a widget marker when promoted, but the concrete
                 # widget lives deeper — resolve through its own promotion.
                 if depth < _MAX_NESTED_PROMOTION_DEPTH:
-                    inner_by_name = {p.name: p for p in promoted_inputs(inner_def, defs, depth + 1)}
+                    inner_by_name = {p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack)}
                     inner_pi = inner_by_name.get(str(entry.get("name")))
                     if inner_pi is not None and inner_pi.is_widget:
                         source = (str(target.get("id")), str(entry.get("name")), None, True)
@@ -550,6 +569,15 @@ def resolve_write(
         raise ValueError(f"node {node_str} not found in workflow")
     sg = defs.get(str(node.get("type", "")))
     if sg is None:
+        if str(node.get("type", "")) == LEGACY_PRIMITIVE_TYPE:
+            # Schema-less: its one widget is named by its output's marker (the
+            # input it feeds), or `value`. Either name addresses it — the same
+            # write a redirect through the fed input lands (trace_upstream_write).
+            outputs = node.get("outputs") or []
+            marker = outputs[0].get("widget") if outputs and isinstance(outputs[0], dict) else None
+            name = marker.get("name") if isinstance(marker, dict) and marker.get("name") else "value"
+            if widget in (name, "value"):
+                return WriteTarget("legacy_primitive", node=node, widget=str(name), redirected_from=redirected_from)
         return WriteTarget("top", node=node, widget=widget, redirected_from=redirected_from)
     given = f"{node_str}.{widget}"
     pi = find_promoted(sg, defs, widget)
@@ -1516,9 +1544,12 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
     return _boundary_targets(sg, inp, defs, 0)
 
 
-def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) -> list[tuple[list[str], str]]:
+def _boundary_targets(
+    sg: dict, inp: dict, defs: dict[str, dict], depth: int, _stack: tuple[int, ...] = ()
+) -> list[tuple[list[str], str]]:
     if depth > _MAX_NESTED_PROMOTION_DEPTH:
         return []
+    _stack = (*_stack, id(sg))
     links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
     out: list[tuple[list[str], str]] = []
     for link_id in inp.get("linkIds") or []:
@@ -1532,7 +1563,7 @@ def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) ->
         if not isinstance(entry, dict):
             continue
         tid = str(target.get("id"))
-        inner_def = defs.get(str(target.get("type", "")))
+        inner_def = _nested_definition(target, defs, _stack)
         if inner_def is not None:
             inner_inp = next(
                 (
@@ -1543,7 +1574,9 @@ def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) ->
                 None,
             )
             if inner_inp is not None:
-                out.extend(([tid, *path], w) for path, w in _boundary_targets(inner_def, inner_inp, defs, depth + 1))
+                out.extend(
+                    ([tid, *path], w) for path, w in _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack)
+                )
             continue
         marker = entry.get("widget")
         if marker:

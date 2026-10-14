@@ -5,6 +5,7 @@ import importlib
 import json
 from pathlib import Path
 
+import jsonschema
 import pytest
 from deploy_up_support import FakeBuilder, deployment, option_names, write_spec
 from typer.testing import CliRunner
@@ -63,6 +64,11 @@ def _install_clients(monkeypatch, builder: FakeBuilder, client: ReadDeploy) -> N
 
 def _invoke_json(command: str, *args: str):
     return CliRunner().invoke(app, ["--json", "deploy", command, *args])
+
+
+def _schema(name: str) -> JsonObject:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _envelope(result) -> JsonObject:
@@ -187,6 +193,13 @@ def test_unprobed_logs_explicitly_say_not_captured_yet(monkeypatch) -> None:
     # Then
     assert result.exit_code == 0
     assert "capturedAt: not captured yet" in result.stdout
+    # An empty log means the health check has not finished, which is as true of a
+    # deployment still booting as of one that died before a container ran, so the
+    # line must not tell the first of those that nothing ever started.
+    assert "No log yet" in result.stdout
+    assert "still coming up has none yet" in result.stdout
+    assert "No container has started, so there is no log" not in result.stdout
+    assert "comfy deploy events --deployment dep-read" in result.stdout
 
 
 def test_events_render_in_server_order_without_false_complete_framing(monkeypatch) -> None:
@@ -275,3 +288,196 @@ def test_both_output_modes_reject_the_same_malformed_events(payload, output_flag
     assert "deploy_server_error" in result.stdout
     if output_flag == "--json":
         assert _envelope(result)["error"]["code"] == "deploy_server_error"
+
+
+def _release(version: int) -> JsonObject:
+    return {"id": f"release-{version}", "buildId": "build-1", "version": version, "deployable": True}
+
+
+def _moved_deploy() -> ReadDeploy:
+    """A deployment inside the updates rollout that moved from release 4 to 5."""
+    client = ReadDeploy()
+    client.detail["revision"] = 2
+    client.events["events"] = [
+        {"at": "2026-10-07T12:00:00Z", "status": "starting", "releaseId": "release-4"},
+        {"at": "2026-10-07T12:01:00Z", "status": "ready", "releaseId": "release-4"},
+        {"at": "2026-10-07T13:00:00Z", "status": "starting", "releaseId": "release-5"},
+        {"at": "2026-10-07T13:02:00Z", "status": "ready", "releaseId": "release-5"},
+    ]
+    return client
+
+
+@pytest.mark.parametrize("selector", ["v4", "4", "release-4"])
+def test_events_of_one_release_keep_only_its_copys_events(selector: str, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), _moved_deploy())
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", selector)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    assert data["release"] == {"id": "release-4", "version": 4}
+    assert [event["at"] for event in data["events"]] == ["2026-10-07T12:00:00Z", "2026-10-07T12:01:00Z"]
+    jsonschema.Draft202012Validator(_schema("deploy_events.json")).validate(data)
+
+
+def test_events_of_a_release_with_none_say_so(monkeypatch) -> None:
+    # Given a release of the Build the deployment never ran
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(4), _release(5)]), _moved_deploy())
+
+    # When
+    result = CliRunner().invoke(
+        app, ["--no-json", "deploy", "events", "--deployment", "dep-read", "--release", "v3"], env={"COLUMNS": "400"}
+    )
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "No events from release v3." in result.stdout
+
+
+def test_events_of_a_release_the_build_lacks_are_refused(monkeypatch) -> None:
+    # Given
+    client = _moved_deploy()
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), client)
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", "v9")
+
+    # Then the events are never read
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_bad_request"
+    assert "has no release v9" in error["message"]
+    assert error["details"] == {"buildId": "build-1", "release": "v9"}
+
+
+def test_events_by_release_outside_the_rollout_are_refused(monkeypatch) -> None:
+    # Given a read with no revision: events there carry no release
+    client = ReadDeploy()
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), client)
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", "v5")
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_updates_unavailable"
+    assert error["details"] == {"deployment_id": "dep-read"}
+    assert ("events", "dep-read") not in client.calls
+
+
+def test_events_without_release_are_unchanged_inside_the_rollout(monkeypatch) -> None:
+    # Given
+    client = _moved_deploy()
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), client)
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read")
+
+    # Then every copy's events come back, with no release echoed and no extra read
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    assert len(data["events"]) == 4
+    assert "release" not in data
+    assert ("show", "dep-read") not in client.calls
+
+
+def test_events_of_a_deleted_release_are_found_by_the_id_they_carry(monkeypatch) -> None:
+    # Given release 4 deleted after the move, so the Build lists only release 5
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), _moved_deploy())
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", "release-4")
+
+    # Then its events still come back, named by id alone
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    assert data["release"] == {"id": "release-4"}
+    assert len(data["events"]) == 2
+    jsonschema.Draft202012Validator(_schema("deploy_events.json")).validate(data)
+
+
+@pytest.mark.parametrize("selector", ["", "  "])
+def test_an_empty_release_is_refused_rather_than_ignored(selector: str, monkeypatch) -> None:
+    # Given
+    client = _moved_deploy()
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), client)
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", selector)
+
+    # Then
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "deploy_bad_request"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("selector", ["\u00b2", "v\u00b3"])
+def test_a_non_ascii_digit_reads_as_an_id_not_a_crash(selector: str, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), _moved_deploy())
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", selector)
+
+    # Then
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "deploy_bad_request"
+
+
+def test_a_padded_version_still_names_the_release(monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), _moved_deploy())
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", " v4 ")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["release"] == {"id": "release-4", "version": 4}
+
+
+def test_a_release_without_a_version_is_named_by_id(monkeypatch) -> None:
+    # Given the Build lists release 4 with no version
+    versionless = {"id": "release-4", "buildId": "build-1", "deployable": True}
+    _install_clients(monkeypatch, FakeBuilder([versionless, _release(5)]), _moved_deploy())
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read", "--release", "release-4")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["release"] == {"id": "release-4"}
+
+
+def test_each_printed_event_names_the_release_that_made_it(monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), _moved_deploy())
+
+    # When
+    result = CliRunner().invoke(
+        app, ["--no-json", "deploy", "events", "--deployment", "dep-read"], env={"COLUMNS": "400"}
+    )
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "2026-10-07T12:00:00Z  starting  release release-4" in result.stdout
+    assert "2026-10-07T13:00:00Z  starting  release release-5" in result.stdout
+
+
+@pytest.mark.parametrize("release_id", [None, "", 5])
+def test_an_event_with_an_invalid_release_is_refused(release_id, monkeypatch) -> None:
+    # Given
+    client = _moved_deploy()
+    client.events["events"][0]["releaseId"] = release_id
+    _install_clients(monkeypatch, FakeBuilder([_release(4), _release(5)]), client)
+
+    # When
+    result = _invoke_json("events", "--deployment", "dep-read")
+
+    # Then
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "deploy_server_error"

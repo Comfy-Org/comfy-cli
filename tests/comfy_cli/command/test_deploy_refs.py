@@ -140,3 +140,45 @@ def test_unknown_region_returns_an_empty_region_list(monkeypatch) -> None:
     data = _data(result)
     assert result.exit_code == 0
     assert data == {"catalogVersion": "future-1", "regions": []}
+
+
+TREE_CATALOG: JsonObject = {
+    "regions": [
+        {
+            "region": "anywhere",
+            "label": "Anywhere",
+            "level": "global",
+            "gpus": [{"gpuClass": "b200", "label": "B200", "vramGb": 180}],
+        },
+        {
+            "region": "us",
+            "label": "United States",
+            "level": "country",
+            "parent": "anywhere",
+            "gpus": [{"gpuClass": "b200", "label": "B200", "vramGb": 180}],
+        },
+        {
+            "region": "US-NE-1",
+            "label": "US-NE-1",
+            "level": "datacenter",
+            "parent": "us",
+            "gpus": [{"gpuClass": "rtx-pro-6000-server", "label": "RTX PRO 6000", "vramGb": 96}],
+        },
+    ],
+}
+
+
+def test_pretty_table_shows_each_location_level_and_parent(monkeypatch) -> None:
+    # Given
+    _install_client(monkeypatch, ComputeClient(TREE_CATALOG))
+
+    # When
+    result = _invoke(pretty=True)
+
+    # Then
+    assert result.exit_code == 0
+    us_row = next(line for line in result.stdout.splitlines() if "United States" in line)
+    datacenter_row = next(line for line in result.stdout.splitlines() if "RTX PRO 6000" in line)
+    assert "country" in us_row and "anywhere" in us_row
+    assert "datacenter" in datacenter_row and "us" in datacenter_row.split("US-NE-1", 2)[-1]
+    assert "B200" in us_row

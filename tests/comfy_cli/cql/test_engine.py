@@ -17,7 +17,9 @@ from comfy_cli.cql.engine import (
     Graph,
     Port,
     _apply_one_slot,
+    _count_instances,
     _extract_frontend_slots,
+    _subgraph_defs_by_id,
     _write_widget,
 )
 
@@ -590,22 +592,24 @@ def _prefixed_dynamic_combo_object_info() -> dict:
 
 
 class TestDynamicComboImplicitControlAfterGenerate:
-    """Sub-input seed/noise_seed widgets companion a control_after_generate
-    marker even without the schema flag — same rule as the UI→API converter."""
+    """An unflagged sub-input seed gets NO control_after_generate marker: the
+    frontend names it ``mode.seed``, so ``useIntWidget``'s exact
+    ``seed``/``noise_seed`` rule never matches (saved TextGenerate templates
+    carry no marker after ``sampling_mode.seed``)."""
 
     @pytest.fixture
     def seed_graph(self) -> Graph:
         return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
 
-    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
-        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
-        assert order == ["mode", "mode.seed", "control_after_generate"]
+    def test_value_aware_order_has_no_implicit_sub_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0])
+        assert order == ["mode", "mode.seed"]
 
-    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+    def test_roster_rebuild_writes_no_implicit_sub_marker(self, seed_graph: Graph):
         wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
         out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
         assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
-        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0]
 
     def test_roster_rebuild_respects_extend_false(self):
         graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())
@@ -1013,15 +1017,21 @@ class TestValidateWorkflow:
         assert result["valid"] is True
         assert result["errors"] == []
 
-    def test_non_node_key_warns(self, graph: Graph):
-        """An unrecognized non-node key should produce a warning, not an error."""
+    def test_dict_key_without_class_type_errors(self, graph: Graph):
+        """A dict key with no class_type is a REJECT, not a stray annotation.
+
+        This asserted a warning and a valid verdict until the server was asked:
+        it answers 400 `missing_node_type` ("Node 'ID #notanode' has no
+        class_type") for exactly this workflow, whether or not an output
+        reaches the key. A non-dict value is still only a warning — see
+        test_non_dict_node_value_warns, which the server 500s on (its own bug).
+        """
         wf = {**self._valid_workflow(), "notanode": {"title": "My Workflow"}}
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True, result["errors"]
-        non_node = [w for w in result["warnings"] if w["code"] == "non_node_key"]
-        assert len(non_node) == 1
-        assert non_node[0]["node_id"] == "notanode"
-        assert non_node[0]["field"] == "notanode"
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "missing_class_type"]
+        assert len(missing) == 1
+        assert missing[0]["node_id"] == "notanode"
 
     def test_meta_provenance_key_is_not_warned(self, graph: Graph):
         """`_meta` is the compose/run provenance block (stripped before submit),
@@ -1101,10 +1111,14 @@ class TestValidateWorkflow:
                 "class_type": "KSampler",
                 "inputs": {"model": ["99", 0]},
             },
+            # Reachable from an output, so the server would validate it: an
+            # unreachable node is pruned and its edges are advisory.
+            "2": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["99", 2]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
-        errs = [e for e in result["errors"] if e["code"] == "dangling_edge"]
+        errs = [e for e in result["errors"] if e["code"] == "dangling_edge" and e["node_id"] == "1"]
         assert len(errs) == 1
         assert "99" in errs[0]["message"]
 
@@ -1121,6 +1135,8 @@ class TestValidateWorkflow:
                 # Index 5 is out of range
                 "inputs": {"model": ["1", 5]},
             },
+            "3": {"class_type": "VAEDecode", "inputs": {"samples": ["2", 0], "vae": ["1", 2]}},
+            "4": {"class_type": "SaveImage", "inputs": {"images": ["3", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -1311,10 +1327,12 @@ class TestValidateWorkflow:
                     "latent_image": ["97", 0],  # dangling
                 },
             },
+            "2": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["96", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
-        dangling = [e for e in result["errors"] if e["code"] == "dangling_edge"]
+        dangling = [e for e in result["errors"] if e["code"] == "dangling_edge" and e["node_id"] == "1"]
         assert len(dangling) == 3
 
     def test_below_min_error(self, graph: Graph):
@@ -1423,6 +1441,9 @@ class TestAutogrowInputs:
                 "class_type": "BatchImagesNode",
                 "inputs": {"images.image0": ["99", 0]},
             },
+            # Output-reachable, so the server validates it: on a pruned node
+            # the server never resolves the link and accepts the prompt.
+            "21": {"class_type": "SaveImage", "inputs": {"images": ["20", 0]}},
         }
         result = graph.validate_workflow(wf)
         codes = [e["code"] for e in result["errors"]]
@@ -2168,11 +2189,11 @@ class TestValidateUnmarkedInputFileCombo:
     """A COMBO whose options are the server's INPUT-FOLDER listing is upload-
     backed even when object_info carries no ``<kind>_upload`` marker.
 
-    Found in prod (Langfuse 2026-08-25, 3 ``run`` failures, one user): the
-    agent uploaded eight ``.mp4`` shots to Comfy Cloud, wired each content hash
-    into a ``VHS_LoadVideo.video`` widget, and ``comfy run`` refused every node
-    with ``unknown_enum_value '<64hex>.mp4' not in 1 known options for video
-    (did you mean: bedroom.mp4?)``. The whole assembly never rendered.
+    For example: an agent uploads several ``.mp4`` shots to Comfy Cloud, wires
+    each content hash into a ``VHS_LoadVideo.video`` widget, and ``comfy run``
+    refused every node with ``unknown_enum_value '<64hex>.mp4' not in 1 known
+    options for video (did you mean: bedroom.mp4?)``, so the whole assembly
+    never rendered.
 
     The marker is the frontend's contract for CORE loaders only. VideoHelperSuite
     builds ``video`` from ``folder_paths.get_input_directory()`` filtered by its
@@ -3385,7 +3406,8 @@ class TestDynamicComboInputs:
 
     def test_required_missing_hint_truncates_many_selection_keys(self):
         """A dynamic combo with hundreds of options must not dump them all
-        into the required_input_missing hint — first 8, then a count."""
+        into the required_input_missing error — the first few, a count, and
+        the query that lists the rest."""
         options = [{"key": f"ckpt-{i:03d}", "inputs": {"required": {}, "optional": {}}} for i in range(30)]
         info = {
             "Loader": {
@@ -3402,9 +3424,12 @@ class TestDynamicComboInputs:
         result = g.validate_workflow({"1": {"class_type": "Loader", "inputs": {}}})
         err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
         hint = err["hint"]
-        assert "ckpt-007" in hint
-        assert "ckpt-008" not in hint
-        assert "and 22 more" in hint
+        assert err["suggestions"] == ["ckpt-000", "ckpt-001", "ckpt-002", "ckpt-003", "ckpt-004"]
+        assert err["option_count"] == 30
+        assert "valid_options" not in err
+        assert "ckpt-005" not in json.dumps(err)
+        assert "of 30 options" in hint
+        assert 'inputs.#(name=="model").selection_keys' in hint
 
     def test_stale_sub_key_warning_survives_on_unreachable_node(self):
         """dyn_errors/dyn_warnings used to be bundled into one reachability
@@ -3806,9 +3831,9 @@ class TestMatchTypeWildcard:
     """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
     resolved at runtime from whatever it is wired to. It was not recognised as a
     wildcard, so every edge touching one was reported as edge_type_mismatch —
-    ~30 spurious warnings in a single 48h prod window on graphs that were
-    correct (ComfySwitchNode, ResizeImageMaskNode). The agent explained them away
-    in nearly every reply, which teaches it to discount validator output.
+    spurious warnings on graphs that were correct (ComfySwitchNode,
+    ResizeImageMaskNode). An agent then explains them away in nearly every
+    reply, which teaches it to discount validator output.
     """
 
     @staticmethod
@@ -3894,13 +3919,13 @@ class TestMatchTypeWildcard:
     def test_future_matchtype_revisions_are_wildcards_too(self):
         """Prefix match, so a V4 match-type cannot silently reintroduce the
         false warnings this exists to prevent."""
-        from comfy_cli.cql.engine import _is_wildcard_type
+        from comfy_cli.cql.engine import is_wildcard_type
 
-        assert _is_wildcard_type("*")
-        assert _is_wildcard_type("COMFY_MATCHTYPE_V3")
-        assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
-        assert not _is_wildcard_type("IMAGE")
-        assert not _is_wildcard_type("")
+        assert is_wildcard_type("*")
+        assert is_wildcard_type("COMFY_MATCHTYPE_V3")
+        assert is_wildcard_type("COMFY_MATCHTYPE_V4")
+        assert not is_wildcard_type("IMAGE")
+        assert not is_wildcard_type("")
 
 
 class TestMultiTypeEdge:
@@ -3910,11 +3935,10 @@ class TestMultiTypeEdge:
     ``INT,FLOAT`` input — a connection the frontend's ``isValidConnection``
     accepts and the server runs — was reported as ``edge_type_mismatch``.
 
-    Langfuse 2026-08-25..28: 23 ``edge_type_mismatch`` warnings across 55
-    validate calls, 12 of them exactly this shape (``input 'b' expects
-    INT,FLOAT but PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d'
-    expects FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
-    FILE_3D_GLB``). Shapes copied from the cloud catalog (``SimpleMath+``,
+    Typical warnings of this shape: ``input 'b' expects INT,FLOAT but
+    PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d' expects
+    FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
+    FILE_3D_GLB``. Shapes copied from the cloud catalog (``SimpleMath+``,
     ``PrimitiveFloat``).
     """
 
@@ -4272,10 +4296,9 @@ class TestUnreachableNodeIsVisible:
     check here skips pruned nodes — so such a graph could validate as
     "0 errors, 0 warnings" while doing nothing the author intended.
 
-    Prod repro: a depth-ControlNet whose output was never wired into the sampler
-    validated completely clean. The graph then ran twice, produced an image with
-    no pose applied, and cost two paid GPU runs and three turns of "it does
-    nothing" / "still no pose" before the dangling link was found.
+    Repro: a depth-ControlNet whose output was never wired into the sampler
+    validated completely clean. The graph would then run, produce an image with
+    no pose applied, and cost paid GPU runs before the dangling link was found.
     """
 
     @staticmethod
@@ -4364,3 +4387,108 @@ class TestUnreachableNodeIsVisible:
         assert any(e["code"] == "prompt_no_outputs" for e in result["errors"])
         warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
         assert warns == [], "prompt_no_outputs already says it; don't pile on"
+
+
+# ---------------------------------------------------------------------------
+# _subgraph_defs_by_id / _count_instances — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+class TestSubgraphDefsByIdShapeChecks:
+    """A hand-edited or truncated save can put anything under ``definitions``.
+
+    The old ``(workflow.get("definitions") or {}).get("subgraphs") or []`` only
+    replaced FALSY values, so a truthy wrong-typed one survived and crashed the
+    caller (``comfy workflow slots`` exited on a traceback with no envelope).
+    The agreed degradation is an empty index: a document with no readable
+    definitions has no subgraph instances to resolve, and every caller already
+    handles ``{}``.
+    """
+
+    @pytest.mark.parametrize(
+        "definitions",
+        [5, "definitions", ["x"], 0.0, True],
+        ids=["int", "str", "list", "float", "bool"],
+    )
+    def test_non_dict_definitions_reads_as_no_definitions(self, definitions):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": definitions}) == {}
+
+    @pytest.mark.parametrize(
+        "subgraphs",
+        [5, {"a": 1}, 3.5, True],
+        ids=["int", "dict", "float", "bool"],
+    )
+    def test_non_list_subgraphs_reads_as_no_definitions(self, subgraphs):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": subgraphs}}) == {}
+
+    def test_string_subgraphs_is_not_walked_per_character(self):
+        """A string is iterable, so a naive guard silently walks it character by
+        character. It happens to yield ``{}`` too (single chars aren't dicts),
+        so this case documents INTENT: the isinstance branch must reject the
+        string outright rather than arrive at ``{}`` by accident."""
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": "abc"}}) == {}
+
+    def test_missing_containers_still_read_as_empty(self):
+        assert _subgraph_defs_by_id({"nodes": []}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": None}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {}}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": []}}) == {}
+        # A top-level ``subgraphs`` with no ``definitions`` wrapper is not the
+        # block this helper reads; it must not be picked up by accident.
+        assert _subgraph_defs_by_id({"subgraphs": {"a": 1}}) == {}
+        assert _subgraph_defs_by_id({"subgraphs": [{"id": "u1"}]}) == {}
+
+    def test_well_formed_definitions_still_index_by_id_and_name(self):
+        """Positive control: the shape checks must not cost the happy path."""
+        wf = {"definitions": {"subgraphs": [{"id": "u1", "name": "A", "nodes": []}]}}
+        by_id = _subgraph_defs_by_id(wf)
+        assert by_id["u1"] is wf["definitions"]["subgraphs"][0]
+        assert by_id["A"] is wf["definitions"]["subgraphs"][0], "unambiguous name stays a fallback key"
+
+    def test_non_dict_entries_are_still_skipped(self):
+        """The per-entry guard is unchanged: junk beside a real def is dropped,
+        the real def is kept."""
+        wf = {"definitions": {"subgraphs": ["junk", None, 7, {"id": "u1", "name": "A", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "A"}
+
+
+class TestCountInstancesShapeChecks:
+    def test_non_dict_definitions_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": 5}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_non_list_subgraphs_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": {"subgraphs": "abc"}}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_well_formed_definitions_still_count_interior_instances(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2
+
+
+class TestSubgraphDefNodesShapeChecks:
+    """One level deeper: a def whose ``nodes`` is truthy but not a list.
+
+    Every caller walks ``sg.get("nodes") or []``, which only replaces a falsy
+    value, so ``{"nodes": 5}`` raised ``TypeError`` once an instance resolved
+    to it (``slots``) or once a sibling def was scanned (``_count_instances``).
+    """
+
+    @pytest.mark.parametrize("nodes", [5, True, "abc", {"a": 1}], ids=["int", "bool", "str", "dict"])
+    def test_def_with_non_list_nodes_is_not_indexed(self, nodes):
+        wf = {"definitions": {"subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1"}
+
+    def test_def_with_missing_or_null_nodes_is_still_indexed(self):
+        wf = {"definitions": {"subgraphs": [{"id": "u1"}, {"id": "u2", "nodes": None}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "u2"}
+
+    def test_count_instances_skips_a_sibling_def_with_non_list_nodes(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "bad", "nodes": 5}, {"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2

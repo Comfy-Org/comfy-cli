@@ -186,6 +186,32 @@ class TestAckDefaultUnchanged:
 
 
 class TestAckSummaryPartialFailure:
+    def test_ack_summary_not_batchable_reports_index_and_code(self, patched_graph, tmp_path, capsys):
+        path = _empty(tmp_path)
+        ops_path = _ops_file(tmp_path, [{"op": "insert_workflow", "workflow": {}}])
+
+        env = _run(["apply", str(path), "--ops", str(ops_path), "--ack", "summary"], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert env["error"]["details"] == {
+            "failed": {
+                "index": 0,
+                "op": "insert_workflow",
+                "code": "workflow_insert_workflow_not_batchable",
+            },
+            "applied_count": 0,
+        }
+
+    def test_full_mode_not_batchable_failure_envelope_unchanged(self, patched_graph, tmp_path, capsys):
+        path = _empty(tmp_path)
+        ops_path = _ops_file(tmp_path, [{"op": "insert_workflow", "workflow": {}}])
+
+        env = _run(["apply", str(path), "--ops", str(ops_path)], capsys)
+
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert env["error"]["details"] is None
+
     def test_ack_summary_partial_failure_reports_index_and_code(self, patched_graph, tmp_path, capsys):
         """Op 2 of 3 (0-based index 1) fails → same code/atomicity as full
         mode, plus a structured receipt: failed.{index,op,code} + applied_count.

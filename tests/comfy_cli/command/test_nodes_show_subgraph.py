@@ -1,8 +1,7 @@
 """`nodes show <uuid>` must name the UUID as a subgraph type, not "not found".
 
-Measured on prod comfy-agent traces (2026-08-05, session 0cc9d03b): the agent
-read a subgraph instance's `type` — its definition UUID — out of `ls-nodes` and
-asked `show_node` about it, seven times:
+An agent can read a subgraph instance's `type` — its definition UUID — out of
+`ls-nodes` and ask `show_node` about it, repeatedly:
 
   show_node "84e2cf3f-de93-40ef-ab22-b9375296917b"
   => "Node class '84e2cf3f-…' not found in the loaded environment."

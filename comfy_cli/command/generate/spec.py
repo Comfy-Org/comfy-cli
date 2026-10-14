@@ -4,8 +4,29 @@ Lookup order on disk:
 1. ``~/.comfy/openapi-cache.yml`` if fresher than CACHE_TTL_DAYS
 2. The vendored copy under ``comfy_cli/command/generate/spec/openapi.yml``
 
+The vendored copy is the body ``https://api.comfy.org/openapi`` serves, plus one
+trailing newline the repo's ``end-of-file-fixer`` pre-commit hook requires and
+that the served body does not carry. That endpoint is public and needs no token,
+so a refresh is a reproducible download rather than a hand-edit. ``--fail`` and
+the temp file keep an HTTP error page from ever replacing the vendored copy:
+
+    f=comfy_cli/command/generate/spec/openapi.yml
+    curl -fsS https://api.comfy.org/openapi -o "$f.tmp" &&
+        printf '\n' >> "$f.tmp" &&   # end-of-file-fixer
+        mv "$f.tmp" "$f"
+
+Nothing else is edited into the file, so it stays comparable against upstream —
+but mind the newline when you compare, or every check reports a spurious diff:
+
+    curl -fsS https://api.comfy.org/openapi | { cat; printf '\n'; } |
+        cmp - comfy_cli/command/generate/spec/openapi.yml
+
+The body is minified JSON rather than block YAML despite the ``.yml`` name;
+JSON is a subset of YAML 1.2, so the same loader reads either, and the on-disk
+user cache ``comfy generate refresh`` writes is already that same JSON.
+
 The parsed spec is cached in-process via functools.lru_cache so repeated lookups
-inside a single CLI invocation don't re-parse the 30k-line YAML.
+inside a single CLI invocation don't re-parse the ~1 MB document.
 """
 
 from __future__ import annotations
@@ -89,20 +110,12 @@ _ALIASES: dict[str, str] = {
     "flux-kontext-max": "bfl/flux-kontext-max/generate",
     "flux-fill": "bfl/flux-pro-1.0-fill/generate",
     "flux-expand": "bfl/flux-pro-1.0-expand/generate",
-    "flux-canny": "bfl/flux-pro-1.0-canny/generate",
-    "flux-depth": "bfl/flux-pro-1.0-depth/generate",
     # Ideogram
     "ideogram": "ideogram/ideogram-v3/generate",
     "ideogram-edit": "ideogram/ideogram-v3/edit",
     "ideogram-remix": "ideogram/ideogram-v3/remix",
     "ideogram-reframe": "ideogram/ideogram-v3/reframe",
     "ideogram-bg": "ideogram/ideogram-v3/replace-background",
-    # Stability
-    "stability-ultra": "stability/v2beta/stable-image/generate/ultra",
-    "stability-sd3": "stability/v2beta/stable-image/generate/sd3",
-    "stability-upscale": "stability/v2beta/stable-image/upscale/conservative",
-    "stability-upscale-creative": "stability/v2beta/stable-image/upscale/creative",
-    "stability-upscale-fast": "stability/v2beta/stable-image/upscale/fast",
     # Recraft
     "recraft": "recraft/image_generation",
     "recraft-vectorize": "recraft/images/vectorize",
@@ -205,20 +218,12 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     ("bfl/flux-2-pro/generate", "text-to-image", "bfl"),
     ("bfl/flux-pro-1.0-fill/generate", "inpaint", "bfl"),
     ("bfl/flux-pro-1.0-expand/generate", "outpaint", "bfl"),
-    ("bfl/flux-pro-1.0-canny/generate", "controlnet", "bfl"),
-    ("bfl/flux-pro-1.0-depth/generate", "controlnet", "bfl"),
     # Ideogram
     ("ideogram/ideogram-v3/generate", "text-to-image", None),
     ("ideogram/ideogram-v3/edit", "image-edit", None),
     ("ideogram/ideogram-v3/remix", "image-edit", None),
     ("ideogram/ideogram-v3/reframe", "image-edit", None),
     ("ideogram/ideogram-v3/replace-background", "image-edit", None),
-    # Stability
-    ("stability/v2beta/stable-image/generate/ultra", "text-to-image", None),
-    ("stability/v2beta/stable-image/generate/sd3", "text-to-image", None),
-    ("stability/v2beta/stable-image/upscale/conservative", "upscale", None),
-    ("stability/v2beta/stable-image/upscale/creative", "upscale", None),
-    ("stability/v2beta/stable-image/upscale/fast", "upscale", None),
     # Recraft
     ("recraft/image_generation", "text-to-image", None),
     ("recraft/images/vectorize", "vectorize", None),
@@ -345,7 +350,12 @@ def _registry() -> dict[str, Endpoint]:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
         if not node:
-            continue  # spec drift — skip silently, surfaced via `comfy generate list`
+            # Spec drift. Skipping keeps `generate` usable against a stale user
+            # cache instead of crashing on one missing node; the BUNDLED spec is
+            # held to the stricter rule by
+            # test_every_allowlisted_endpoint_exists_in_vendored_spec, so drift
+            # is loud at test time rather than silent at runtime.
+            continue
         # All image endpoints are POST; pick the first defined method anyway.
         method = "post" if "post" in node else next(iter(node.keys()))
         op = node[method]
@@ -492,8 +502,96 @@ def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
     return None
 
 
+# OpenAI's image request schema types `model` as a free string (no enum), so
+# these names cannot be read off the spec the way other partners' models are
+# (see _model_name_hint). They are the ids ComfyUI's OpenAI image nodes send
+# to the same /proxy/openai/images/* routes the `dalle` aliases call. The value
+# is the Cloud partner node that takes the id as its `model` (None: no node).
+_OPENAI_IMAGE_MODELS: dict[str, str | None] = {
+    "gpt-image-1": "OpenAIGPTImageNodeV2",
+    "gpt-image-1.5": "OpenAIGPTImageNodeV2",
+    "gpt-image-2": "OpenAIGPTImageNodeV2",
+    "dall-e-2": None,
+    "dall-e-3": None,
+}
+
+
+def _direct_route(alias: str, model_id: str) -> str:
+    """The `comfy generate <alias> --model <id>` line, saying whether it can
+    also `--emit-workflow`. A caller building a workflow runs `generate` with
+    `--emit-workflow`, so a route that cannot emit must say so or the hint is a
+    dead end for it."""
+    from comfy_cli.command.generate import emit
+
+    route = f"`comfy generate {alias} --model {model_id} ...`"
+    if emit.is_supported(alias):
+        return f"{route} (also with --emit-workflow)"
+    return f"{route} runs it directly; that alias has no --emit-workflow, so use a partner node for a workflow"
+
+
+def _model_name_hint(name: str) -> str | None:
+    """Explain a name that is a partner MODEL rather than a `generate` alias.
+
+    Agents ask for the model they know ("gpt-image-1", "seedream"), not the
+    alias. `comfy generate <name>` used to give a bare "Unknown model" for the
+    first, and for the second only "Did you mean: seedance", the VIDEO model.
+    The workflow route (a partner node) leads; the direct `comfy generate`
+    route follows. Returns ``None`` when the name matches no known model.
+    """
+    lowered = name.strip().lower()
+    if lowered in _OPENAI_IMAGE_MODELS:
+        node = _OPENAI_IMAGE_MODELS[lowered]
+        direct = _direct_route("dalle", lowered)
+        if node is None:
+            return f"{lowered!r} is an OpenAI image model, not an alias. {direct}."
+        return (
+            f"{lowered!r} is an OpenAI image model, not an alias. For a workflow, add the partner node "
+            f"{node} (`comfy nodes show {node}`) and set its model to {lowered!r}. Without a workflow: {direct} "
+            "(image edits: `dalle-edit`)."
+        )
+    if len(lowered) < 4:
+        return None
+    # Every other partner declares its model ids as an enum on the request
+    # body's `model` field. A name equal to or prefixing one of them is that
+    # partner's model family, whichever route serves it.
+    raw = load_raw_spec()
+    aliased = {v: k for k, v in _ALIASES.items()}
+    hits: list[tuple[str, list[str]]] = []
+    for path, node in (raw.get("paths") or {}).items():
+        if not str(path).startswith(PROXY_PREFIX) or not isinstance(node, dict):
+            continue
+        op = node.get("post")
+        if not isinstance(op, dict):
+            continue
+        content = (op.get("requestBody") or {}).get("content") or {}
+        schema = next((c.get("schema") for c in content.values() if isinstance(c, dict) and c.get("schema")), None)
+        if not schema:
+            continue
+        prop = _find_property(_resolve(raw, schema), "model")
+        values = _extract_enum(prop) if prop else None
+        matched = [v for v in values or [] if v.lower().startswith(lowered)]
+        if matched:
+            hits.append((str(path)[len(PROXY_PREFIX) :], matched))
+    if not hits:
+        return None
+    lines = [
+        f"Partner models matching {lowered!r} (for a workflow, find the partner node: `comfy nodes search {lowered}`):"
+    ]
+    for endpoint_id, values in hits:
+        shown = ", ".join(values[:6])
+        alias = aliased.get(endpoint_id)
+        if alias is not None:
+            lines.append(f"- {shown}: {_direct_route(alias, '<id>')}.")
+        else:
+            lines.append(f"- {shown}: served at {endpoint_id}, which has no `comfy generate` alias.")
+    return "\n".join(lines)
+
+
 def _unknown_endpoint_message(endpoint_id: str) -> str:
-    """Build a helpful error suggesting close matches."""
+    """Build a helpful error: close alias matches first, then (when the name is
+    a partner model id or prefix) where that model is served. The model hint is
+    appended, never a replacement — "flux" prefixes recraft's flux1dev ids but
+    is far more likely a typo of the flux-* aliases."""
     import difflib
     import re
 
@@ -509,6 +607,9 @@ def _unknown_endpoint_message(endpoint_id: str) -> str:
     msg = f"Unknown model: {endpoint_id!r}."
     if close:
         msg += "\nDid you mean: " + ", ".join(close) + "?"
+    model_hint = _model_name_hint(endpoint_id)
+    if model_hint is not None:
+        msg += "\n" + model_hint
     msg += "\nRun `comfy generate list` to see available models."
     return msg
 

@@ -20,6 +20,8 @@ Backed by the pure-Python CQL engine (``comfy_cli.cql.engine.Graph``).
 from __future__ import annotations
 
 import difflib
+import json
+import shlex
 from typing import Annotated, Any
 
 import typer
@@ -154,6 +156,52 @@ def _category_matches(category: str | None, pat: str) -> bool:
 # ---------------------------------------------------------------------------
 # ls
 # ---------------------------------------------------------------------------
+
+
+#: A combo input's ``choices`` longer than this are capped in ``nodes show`` /
+#: ``nodes search --expand-top``. A loader's choices are every installed file
+#: (600+ LoRAs on cloud, ~31KB in one show), and a caller wiring the node
+#: needs one of them, by a name it usually already has.
+CHOICES_INLINE_MAX = 20
+
+
+def _cap_choices(payload: dict[str, Any]) -> dict[str, Any]:
+    """Cap every long ``choices`` list in a show payload (recursing into
+    dynamic-combo sub-inputs) to its first :data:`CHOICES_INLINE_MAX` entries,
+    with ``choices_total`` and ``choices_truncated``. Adds a top-level
+    ``choices_note`` naming how to read or filter the full list, once."""
+    capped: list[str] = []
+    top_level: list[str] = []
+
+    def walk(inputs: Any, nested: bool = False) -> None:
+        if not isinstance(inputs, list):
+            return
+        for entry in inputs:
+            if not isinstance(entry, dict):
+                continue
+            choices = entry.get("choices")
+            if isinstance(choices, list) and len(choices) > CHOICES_INLINE_MAX:
+                entry["choices_total"] = len(choices)
+                entry["choices"] = choices[:CHOICES_INLINE_MAX]
+                entry["choices_truncated"] = True
+                capped.append(str(entry.get("name")))
+                if not nested:
+                    top_level.append(str(entry.get("name")))
+            for option in entry.get("dynamic_options") or []:
+                if isinstance(option, dict):
+                    walk(option.get("inputs"), nested=True)
+
+    walk(payload.get("inputs"))
+    if capped:
+        name = shlex.quote(str(payload["name"])) if payload.get("name") else "<class>"
+        note = f"{', '.join(capped)}: only the first {CHOICES_INLINE_MAX} choices are listed (see choices_total). "
+        if top_level:
+            # A nested (dynamic-combo) input is not under top-level `inputs`,
+            # so only a top-level one gets the filter query.
+            query = shlex.quote(f'inputs.#(name=={json.dumps(top_level[0])}).choices.#(%"*<text>*")#')
+            note += f"Check or find one with `comfy nodes show {name} --select {query}`; "
+        payload["choices_note"] = note + "--all-choices lists every choice."
+    return payload
 
 
 @app.command(
@@ -374,9 +422,18 @@ def show_cmd(
         typer.Option(
             "--select",
             show_default=False,
-            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select.",
+            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select, "
+            'row query (inputs.#(name=="ckpt_name").choices). Projects the full schema, every choice included.',
         ),
     ] = None,
+    all_choices: Annotated[
+        bool,
+        typer.Option(
+            "--all-choices",
+            help=f"List every choice of a combo input. By default a list longer than {CHOICES_INLINE_MAX} is cut "
+            "to its first entries, with `choices_total`.",
+        ),
+    ] = False,
 ):
     renderer = get_renderer()
     _stale: dict = {}
@@ -394,10 +451,25 @@ def show_cmd(
         # prints that verbatim — so callers ask show for a "class" the catalog
         # can never have. `workflow add-node` already names this shape
         # (UnknownNodeType subgraph_id); show was left behind with the generic
-        # miss, and prod agents retried it verbatim. Say what the UUID is and
+        # miss, and callers retried it verbatim. Say what the UUID is and
         # which surface CAN inspect it. difflib against a UUID is pure noise.
-        from comfy_cli.workflow_ops import _UUID_RE
+        from comfy_cli.workflow_ops import _UUID_RE, UI_ONLY_NODE_TYPES, UnknownNodeType
 
+        # Reroute/Note/PrimitiveNode/GetNode/SetNode are frontend-only: they sit
+        # on canvases (so a caller meets the name) but no object_info carries
+        # them. Checking before `add-node` must get the same answer add-node
+        # gives, not a generic miss with difflib noise.
+        if name.strip() in UI_ONLY_NODE_TYPES:
+            renderer.error(
+                code="node_not_found",
+                message=f"{UnknownNodeType(name.strip(), ui_only=True)} — the node catalog has no schema for it.",
+                hint=(
+                    "pick a real node class from `comfy nodes search <text>`; a UI-only node on an existing "
+                    "canvas is only read (print/ls-nodes), never added"
+                ),
+                details={"requested": name, "ui_only": True},
+            )
+            raise typer.Exit(code=1)
         if _UUID_RE.match(name.strip()):
             renderer.error(
                 code="node_not_found",
@@ -442,6 +514,8 @@ def show_cmd(
         from comfy_cli.selector import emit_selected
 
         return emit_selected(renderer, payload, select, command="nodes show")
+    if not all_choices:
+        _cap_choices(payload)
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -513,6 +587,14 @@ def search_cmd(
             ),
         ),
     ] = 0,
+    all_choices: Annotated[
+        bool,
+        typer.Option(
+            "--all-choices",
+            help=f"With --expand-top: list every choice of a combo input (default: the first {CHOICES_INLINE_MAX}, "
+            "with `choices_total`).",
+        ),
+    ] = False,
     include_deprecated: IncludeDeprecatedOpt = False,
     input_path: Annotated[
         str | None,
@@ -630,10 +712,10 @@ def search_cmd(
         ],
     }
 
-    # --expand-top N: kill the search → show × N loop (measured on prod agent
-    # traces: the follow-up `show` args are overwhelmingly a verbatim copy of the
-    # hit name). The top-N returned rows are re-resolved through the SAME catalog
-    # path `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
+    # --expand-top N: kill the search → show × N loop (the follow-up `show`
+    # args are almost always a verbatim copy of the hit name). The top-N
+    # returned rows are re-resolved through the SAME catalog path
+    # `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
     # exactly the show payload plus a `class_type` key to join back on the row.
     # A per-hit miss degrades to a per-hit error entry — it never fails the
     # search, since the rows themselves are still perfectly good results.
@@ -652,7 +734,8 @@ def search_cmd(
                     }
                 )
                 continue
-            expanded.append({"class_type": m.id, **graph.morphism_to_dict(resolved)})
+            schema = graph.morphism_to_dict(resolved)
+            expanded.append({"class_type": m.id, **(schema if all_choices else _cap_choices(schema))})
         payload["expanded"] = expanded
 
     if _stale:

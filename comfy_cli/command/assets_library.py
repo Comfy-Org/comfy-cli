@@ -9,12 +9,14 @@ emitting a JSON envelope via the renderer. Cloud-only — there is no local
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
 
 import typer
 
 from comfy_cli import tracking
 from comfy_cli.command.cloud_http import (
+    ResponseUnparseable,
     cloud_target_or_local_error,
     handle_cloud_http_error,
     http_request,
@@ -22,6 +24,105 @@ from comfy_cli.command.cloud_http import (
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow).")
+
+# A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in
+# the canonical ``blake3:<hex>`` wire form. Comfy Cloud's from-hash lookup
+# matches every stored form of the content only for ``blake3:<hex>``.
+_HASH_WITH_EXT_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{64})\.[A-Za-z0-9]+$")
+
+
+# A value that reads as a hex hash even when mangled: optional ``blake3:``,
+# 16-80 hex chars (a garbled copy can gain or lose a few), optional extension.
+_HEXISH_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{16,80})(?:\.[A-Za-z0-9]+)?$")
+_HEX_DIGEST_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})(?:\.[A-Za-z0-9]+)?$")
+# Evidence a missing hash is a mangled copy of a stored one: a shared prefix
+# this long (chance of a random match across a page of hashes is ~1e-16; a
+# 4-char prefix, by contrast, matches by chance in a sizable library), or a
+# single inserted / dropped / changed character anywhere.
+_MIN_SHARED_PREFIX = 16
+_MAX_SUGGESTIONS = 3
+# One page at the API's maximum, newest first. Never paged: a suggestion is a
+# best-effort hint on an error path, so it gets exactly one bounded request.
+_SUGGESTION_SCAN_LIMIT = 500
+# The listing only feeds an optional hint, so it must not hold the error for
+# the default 30s request timeout.
+_SUGGESTION_TIMEOUT_SECONDS = 5.0
+
+
+def _within_one_edit(a: str, b: str) -> bool:
+    """True when ``a`` and ``b`` differ by at most one inserted, dropped or
+    changed character (the common ways a copied hash picks up a typo)."""
+    import os.path
+
+    if abs(len(a) - len(b)) > 1:
+        return False
+    prefix = len(os.path.commonprefix([a, b]))
+    suffix = len(os.path.commonprefix([a[::-1], b[::-1]]))
+    if len(a) == len(b):
+        return prefix + suffix >= len(a) - 1
+    return prefix + suffix >= min(len(a), len(b))
+
+
+def _near_hash_suggestions(value: str, target) -> list[dict]:
+    """Library assets whose hash the not-found ``value`` is almost certainly a
+    mangled copy of: within one character edit of it, or sharing a prefix of
+    at least :data:`_MIN_SHARED_PREFIX` hex chars.
+
+    ``[]`` without a request unless ``value`` looks like a MANGLED hex hash: a
+    well-formed digest (64 lowercase hex, bare, canonical or with an
+    extension) that is not found is simply absent, and an ordinary file name
+    is not a hash. Otherwise one request lists the newest
+    :data:`_SUGGESTION_SCAN_LIMIT` assets you own; any failure there yields
+    ``[]`` so the not-found envelope is never lost to it.
+    """
+    import os.path
+    import urllib.parse
+
+    m = _HEXISH_RE.match(value)
+    if not m or _HEX_DIGEST_RE.match(value):
+        return []
+    wanted = m.group(1).lower()
+    query = urllib.parse.urlencode(
+        {"limit": _SUGGESTION_SCAN_LIMIT, "sort": "created_at", "order": "desc", "include_public": "false"}
+    )
+    try:
+        _, body = http_request(target.url("assets") + "?" + query, target, timeout=_SUGGESTION_TIMEOUT_SECONDS)
+        rows = (body or {}).get("assets") or []
+    except Exception:  # noqa: BLE001 — best-effort hint on an error path
+        return []
+
+    scored = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict) or not isinstance(r.get("hash"), str):
+            continue
+        hm = _HEX_DIGEST_RE.match(r["hash"])
+        if not hm:
+            continue
+        stored = hm.group(1)
+        shared = len(os.path.commonprefix([wanted, stored]))
+        one_edit = _within_one_edit(wanted, stored)
+        if one_edit or shared >= _MIN_SHARED_PREFIX:
+            scored.append(((one_edit, shared), shared, r))
+    scored.sort(key=lambda t: t[0], reverse=True)  # stable: ties keep newest-first order
+    return [
+        {"hash": r["hash"], "name": r.get("name"), "id": r.get("id"), "shared_prefix": shared}
+        for _, shared, r in scored[:_MAX_SUGGESTIONS]
+    ]
+
+
+def _normalize_content_hash(value: str) -> str:
+    """Map ``<hash>.<ext>`` — the stored file name an agent tends to pass — to
+    the canonical ``blake3:<hex>`` hash; leave anything else untouched.
+
+    A direct upload stores its blob under ``<hex>.<ext>``, so that is the name
+    the agent sees, but ``/api/assets/from-hash`` matches its input exactly
+    unless it is the canonical ``blake3:<hex>``, which matches every storage
+    shape of that content (bare hex, ``<hex>.<ext>``, canonical). Only a value
+    whose remainder is a full 64-hex digest is rewritten, so an ordinary file
+    name (``photo.png``) still reaches the server as given.
+    """
+    m = _HASH_WITH_EXT_RE.match(value)
+    return f"blake3:{m.group(1).lower()}" if m else value
 
 
 @app.command("ls", help="List your assets on Comfy Cloud.")
@@ -56,29 +157,98 @@ def ls_cmd(
     url = target.url("assets") + "?" + urllib.parse.urlencode(params)
 
     try:
-        _, body = http_request(url, target)
+        # `strict_json` so a 200 carrying a proxy/captive-portal error page is
+        # reported as malformed rather than collapsed to `None`, which is
+        # indistinguishable here from a genuinely empty body — and would render
+        # a broken response as a successful EMPTY library, the same masquerade
+        # the shape guards below refuse to make.
+        _, body = http_request(url, target, strict_json=True)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         raise handle_cloud_http_error(renderer, e, operation="list") from e
+    except ResponseUnparseable as e:
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response from /api/assets (body was not valid JSON)",
+            hint="check whether a proxy or captive portal is intercepting the request",
+            details={"operation": "list"},
+        )
+        raise typer.Exit(code=1) from e
 
-    rows = (body or {}).get("assets") or []
+    # A non-empty body decodes here only if it was valid JSON, but valid JSON is
+    # not necessarily the shape we asked for: a proxy or error page can answer 200
+    # with an array or a scalar, and `b.get(...)` would then raise a raw
+    # `AttributeError` past the `except` above — a traceback instead of an error
+    # envelope. Guard it the way `workflow list` guards the same failure on the
+    # sibling endpoint. An empty body stays a legitimate `None` (→ no rows).
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/assets (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    b = body or {}
+    # A missing/empty `assets` is a legitimately-empty listing; a present non-list
+    # `assets` is malformed the same way, and `len(rows)` would raise `TypeError`.
+    rows = b.get("assets")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/assets (assets must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
+    assets = [
+        {
+            "id": r.get("id"),
+            "name": r.get("name"),
+            "hash": r.get("hash"),
+            "mime_type": r.get("mime_type"),
+            "size": r.get("size"),
+            "tags": r.get("tags"),
+            "preview_url": r.get("preview_url"),
+            "job_id": r.get("job_id"),
+            "created_at": r.get("created_at"),
+        }
+        for r in rows
+        if isinstance(r, dict)
+    ]
     payload = {
-        "count": len(rows),
-        "assets": [
-            {
-                "id": r.get("id"),
-                "name": r.get("name"),
-                "hash": r.get("hash"),
-                "mime_type": r.get("mime_type"),
-                "size": r.get("size"),
-                "tags": r.get("tags"),
-                "preview_url": r.get("preview_url"),
-                "job_id": r.get("job_id"),
-                "created_at": r.get("created_at"),
-            }
-            for r in rows
-            if isinstance(r, dict)
-        ],
+        # `count` describes the array actually emitted, not the raw server rows.
+        # A non-dict row is dropped from `assets` above, so counting raw rows
+        # reported more items than the payload carries — and a knowingly-skewed
+        # `count` sitting next to a forwarded `total` undercuts the point of
+        # forwarding an authoritative count at all. Identical to the old value
+        # for every well-formed response; it differs only where the old value
+        # was simply wrong. Matches the repo convention in
+        # `comfy_cli/command/nodes.py`, where `count` is over the emitted rows.
+        "count": len(assets),
+        "assets": assets,
     }
+    # Forward the server's own truncation signal instead of making callers infer
+    # it from an exactly-full page: `has_more`/`total` are both `required` on the
+    # cloud API's `ListAssetsResponse`, and `has_more` comes off a limit+1
+    # sentinel row rather than off the returned row count, so it stays correct
+    # on a page that comes back short. Only forward what the server actually
+    # sent — an older or local server may omit them, and a JSON `null` in the
+    # envelope would poison a consumer's type assertion, so omit the key rather
+    # than emitting None.
+    #
+    # Each field is checked against its OWN type, not a shared bool-or-int test:
+    # `bool` is a subclass of `int` in Python, so one shared check would forward
+    # `has_more: 0` and `total: false` and emit an envelope that violates
+    # schemas/assets_library.json — the very contract this command publishes.
+    if isinstance(b.get("has_more"), bool):
+        payload["has_more"] = b["has_more"]
+    total = b.get("total")
+    # `>= 0` because the schema publishes `total` as a non-negative integer, and a
+    # guard looser than the declared contract is how the envelope ends up violating
+    # its own schema.
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        payload["total"] = total
     renderer.emit(payload, command="assets library ls", where="cloud")
 
 
@@ -99,34 +269,47 @@ def ensure_cmd(
 
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] or ["input"]
     url = target.url("assets/from-hash")
+    normalized_hash = _normalize_content_hash(hash)
     try:
-        status, body = http_request(url, target, method="POST", body={"hash": hash, "tags": tag_list})
+        status, body = http_request(url, target, method="POST", body={"hash": normalized_hash, "tags": tag_list})
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         # The parameterized helper, not `cloud_http`'s: that one hardcodes the
         # saved-workflow vocabulary, so a 404 here read "workflow not found
         # (ensure)" with a hint to list workflows — for a request that never
-        # named a workflow. Seen in prod when an agent passed a file name where
-        # the content hash belongs.
+        # named a workflow — e.g. when a caller passed a file name where the
+        # content hash belongs.
         from comfy_cli.command._cloud_errors import handle_cloud_http_error as _handle_cloud_http_error
 
+        not_found_hint = (
+            "pass the `hash` from `comfy --json assets library ls --name <file>` "
+            "(a file name is not a hash), or upload the file first with `comfy upload <file> --where cloud`"
+        )
+        extra = None
+        if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            suggestions = _near_hash_suggestions(hash, target)
+            if suggestions:
+                best = suggestions[0]
+                extra = {"suggestions": suggestions}
+                not_found_hint = (
+                    f"did you mean {best['hash']} ({best['name']})? copy the hash exactly from "
+                    "`comfy --json assets library ls` — see `details.suggestions`"
+                )
         raise _handle_cloud_http_error(
             renderer,
             e,
             operation="ensure",
             not_found_code="asset_not_found",
             not_found_message=f"no asset with content hash {hash!r} in your Comfy Cloud library",
-            not_found_hint=(
-                "pass the `hash` from `comfy --json assets library ls --name <file>` "
-                "(a file name is not a hash), or upload the file first with `comfy upload <file> --where cloud`"
-            ),
+            not_found_hint=not_found_hint,
             id_label="hash",
             resource_id=hash,
+            not_found_details=extra,
         ) from e
 
     b = body or {}
     payload = {
         "id": b.get("id"),
-        "hash": b.get("hash", hash),
+        "hash": b.get("hash", normalized_hash),
         "created_new": status == 201,
     }
     renderer.emit(payload, command="assets library ensure", where="cloud")
