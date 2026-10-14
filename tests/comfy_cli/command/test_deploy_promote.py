@@ -16,6 +16,7 @@ from comfy_cli.command.build_spec import JsonObject
 _RELEASES = [
     {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
     {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+    {"id": "release-6", "buildId": "build-1", "version": 6, "deployable": True},
 ]
 
 
@@ -249,6 +250,29 @@ def test_a_failed_promote_exits_1_naming_the_release_still_serving(monkeypatch) 
     assert result.exit_code == 1
     assert error["code"] == "deploy_update_failed"
     assert error["details"]["serving_release_id"] == "release-4"
+
+
+def test_a_promote_a_newer_update_replaced_exits_1_as_replaced(monkeypatch) -> None:
+    # Given a newer update to v6 replacing the promote of v5 while it waits
+    replaced = {
+        "pendingUpdate": {
+            "releaseId": "release-6",
+            "baseRevision": 3,
+            "status": "provisioning",
+            "since": "x",
+        }
+    }
+    client = _staging_and_production(move="pending", get_patches=[replaced])
+
+    # When
+    result = _promote(monkeypatch, client, "dep-staging", "dep-prod")
+
+    # Then
+    error = _envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_update_replaced"
+    assert error["details"]["replacing_release_id"] == "release-6"
+    assert error["message"].endswith("was replaced by an update to release v6")
 
 
 def test_a_stopping_target_is_refused_as_promote(monkeypatch) -> None:

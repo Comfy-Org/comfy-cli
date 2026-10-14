@@ -61,6 +61,9 @@ class _BuilderReleaseAdapter:
     def list_releases(self, build_id: str) -> list[JsonObject]:
         return _refusal_as_deploy_error(lambda: self.client.list_releases(build_id))
 
+    def list_builds(self) -> list[JsonObject]:
+        return _refusal_as_deploy_error(self.client.list_builds)
+
 
 def _refusal_as_deploy_error(call: Callable[[], T]) -> T:
     """Report the builder refusing this command's credential the way the deploy service would.
