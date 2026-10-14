@@ -813,10 +813,10 @@ def set_dynamic_group_rows(
     for i, row in enumerate(rows):
         unknown = [key for key in row if key not in names]
         if unknown:
-            raise ValueError(f"{group}: row {i} has unknown field(s) {unknown}; row fields: {', '.join(names)}")
+            raise ValueError(f"{group}: rows[{i}] has unknown field(s) {unknown}; row fields: {', '.join(names)}")
         for widget in widgets:
             if widget.name not in row and _engine._widget_default(widget) is None:
-                raise ValueError(f"{group}: field {widget.name!r} has no default; supply it in row {i}")
+                raise ValueError(f"{group}: field {widget.name!r} has no default; supply it in rows[{i}]")
 
     entries = _engine._validate_dynamic_group_layout(node, m) or []
     current = sum(1 for e in entries if e.owner == group) // len(widgets)
@@ -837,10 +837,10 @@ def set_dynamic_group_rows(
         for name in fields:
             address = f"{group}.{row}.{name}"
             try:
-                redirected = _promoted.resolve_write(workflow, graph, segments, address).redirected_from
+                target = _promoted.resolve_write(workflow, graph, segments, address)
             except ValueError:  # fed by another interior node: a plain link
-                redirected = None
-            if redirected:
+                target = None
+            if target is not None and (target.redirected_from or target.kind not in ("top", "interior")):
                 return "is promoted to the parent subgraph; unpromote it first"
             if address in linked:
                 return "is connected; disconnect it first"
@@ -861,10 +861,19 @@ def set_dynamic_group_rows(
         )
     supplied = iter(rows)
     plan = [None if index in pinned else next(supplied) for index in range(len(rows) + len(pinned))]
+    for index in range(current, len(plan)):
+        # A shrink can leave a link on an input it did not match by name.
+        if any(f"{group}.{index}.{name}" in linked for name in fields):
+            raise ValueError(f"{group}.{index} still has a link from an earlier row; disconnect it first")
     address = "/".join(segments) if len(segments) > 1 else node_id
     where = segments if len(segments) > 1 else str(node_id)
     stamps = workflow.get("_widget_stamps") or {}
-    claimed = [group] + [f"{group}.{i}.{w.name}" for i, row in enumerate(plan) if row is not None for w in widgets]
+    claimed = [group] + [
+        f"{group}.{i}.{w.name}"
+        for i in range(max(len(plan), current))
+        if i >= len(plan) or plan[i] is not None
+        for w in widgets
+    ]
     for written in claimed:
         prior = stamps.get(json.dumps(["widget", where, written]))
         if prior is not None and list(prior[:2]) >= [base_version, actor]:
@@ -873,14 +882,15 @@ def set_dynamic_group_rows(
                 f"per batch (a stamp left by an earlier apply needs a higher base_version)"
             )
 
-    workflow, op = set_widget(workflow, graph, address, group, len(plan), actor=actor, base_version=base_version)
+    # The address is resolved, so skip set_widget's retry on another node.
+    workflow, op = _set_widget_impl(workflow, graph, address, group, len(plan), actor=actor, base_version=base_version)
     ops = [op]
     for index, row in enumerate(plan):
         if row is None:
             continue
         for widget in widgets:
             value = row[widget.name] if widget.name in row else _engine._widget_default(widget)
-            workflow, op = set_widget(
+            workflow, op = _set_widget_impl(
                 workflow,
                 graph,
                 address,
@@ -2578,7 +2588,7 @@ def apply_specs(
     pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
-    replaced: set[tuple] = set()
+    replaced: dict[tuple, bool] = {}
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:
@@ -2633,7 +2643,7 @@ def apply_specs(
                         base_version=base_version,
                     )
                     ops.extend(row_ops)
-                    replaced.update(_write_target(row_op) for row_op in row_ops)
+                    replaced.update({_write_target(row_op): row_op is row_ops[0] for row_op in row_ops})
                     continue
                 elif kind == "set_node_field":
                     workflow, op = set_node_field(
@@ -2661,12 +2671,11 @@ def apply_specs(
             # and be settled by the random op_id.
             target = _write_target(op) if op.get("op") == "set_widget" else None
             if target in replaced:
-                count = "." not in target[2]
                 raise ValueError(
                     f"spec #{i}: {target[2]} was replaced earlier in this batch by set_dynamic_group_rows; "
                     + (
                         "change the number of rows in that spec instead"
-                        if count
+                        if replaced[target]
                         else "put the value in its rows instead"
                     )
                 )

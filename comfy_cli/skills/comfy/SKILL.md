@@ -429,7 +429,7 @@ comfy --json workflow apply wf.json --ops ops.json $CAT   # or --ops - to read s
 **Adding, removing or reordering DynamicGroup rows** (e.g. a LoRA stack's `loras`):
 send the desired row list in one `set_dynamic_group_rows` spec instead of
 editing the count and numbered fields separately. Omitted fields take the template
-default (a field with no default must be supplied); a seed field's control mode is
+default (a combo without one takes its first option, so name the LoRA explicitly; a field with no default at all must be supplied); a seed field's control mode is
 `"<field>.0"` in the row. A row with a connected or promoted field keeps its index and
 values; leave it out of `rows`, which fill the other positions in order, so the batch
 fails if that row would have to move. Do not write the same group elsewhere in the batch.
