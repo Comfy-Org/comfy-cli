@@ -1061,42 +1061,42 @@ class TestSubmitRefusesAClaimedDestination:
 
         assert json_renderer()["error"]["details"]["download_id"] == live.id
 
-    def test_a_claim_that_landed_first_wins_the_post_write_recheck(
-        self, workspace, no_spawn, monkeypatch, json_renderer
-    ):
+    def test_a_claim_that_landed_first_wins_the_claim_lock(self, workspace, no_spawn, monkeypatch, json_renderer):
         """The pre-flight scan is check-then-act: filename resolution and, for a
         Hugging Face url, a whole `check_unauthorized` round trip sit between it
         and the state write, so two near-simultaneous submissions can both pass
         it, both stream a full copy, and the later `os.replace` can silently
-        overwrite the earlier. The record each one writes is its claim; the
-        re-scan after that write is what turns two winners into one.
+        overwrite the earlier. What turns two winners into one is the
+        destination's claim lock, taken after the record is written.
 
-        Scope: this plants the competitor's claim *before* the re-scan, so the
-        re-scan can see it. The interleaving where a competitor's write lands
-        after our scan is not covered here because it is not covered by the code
-        either — see `_submit_background_download`, which narrows that race
-        rather than closing it.
+        The competitor lands in exactly the window the pre-flight scan cannot
+        see — after it, before our lock — and holds the lock. Nothing here
+        depends on our ever reading its record in a scan: the held lock refuses
+        us, and its record is read only to word the refusal.
         """
         dest = self._dest(workspace)
         competitor = _state(dest=str(dest), status="downloading", pid=1234)
-        competitor.started_at = "2000-01-01T00:00:00+00:00"  # claimed first
+        competitor.started_at = "2999-01-01T00:00:00+00:00"  # `_claim_order` would crown us
 
         real_write = download_state.write
-        planted: list = []
+        held: list = []
 
         def write_then_race(ws, state):
             path = real_write(ws, state)
-            if not planted:
-                # The competitor's claim lands in exactly the window between our
-                # own claim and the re-check — the race this exists to lose.
-                planted.append(real_write(ws, competitor))
+            if not held:
+                real_write(ws, competitor)
+                held.append(_hold_claim(workspace, dest, competitor.id))
             return path
 
         monkeypatch.setattr(download_state, "write", write_then_race)
 
-        with patch("comfy_cli.utils.is_running", return_value=True):
-            with pytest.raises(typer.Exit) as exc:
-                self._download(background=True)
+        try:
+            with patch("comfy_cli.utils.is_running", return_value=True):
+                with pytest.raises(typer.Exit) as exc:
+                    self._download(background=True)
+        finally:
+            for lock in held:
+                lock.release()
 
         assert exc.value.exit_code == 1
         env = json_renderer()
@@ -1107,9 +1107,10 @@ class TestSubmitRefusesAClaimedDestination:
         assert [s.id for s in download_state.list_all(workspace)] == [competitor.id]
 
     def test_a_claim_that_landed_second_does_not_take_the_destination(self, workspace, monkeypatch, json_renderer):
-        """The other side of the same race: both racers compute `_claim_order`
-        over the same two records, so the one that claimed first proceeds rather
-        than both backing off and neither download happening."""
+        """The other side of the same race: a competitor whose record lands after
+        ours but who has not taken the lock owns nothing yet, so we proceed — it
+        is the one that will find the lock held — rather than both backing off
+        and neither download happening."""
         dest = self._dest(workspace)
         latecomer = _state(dest=str(dest), status="starting", pid=None)
         latecomer.started_at = "2999-01-01T00:00:00+00:00"  # claimed second
@@ -1170,6 +1171,19 @@ def _is_lockable(path: Path) -> bool:
     return True
 
 
+def _hold_claim(workspace, dest: Path, download_id: str) -> download_state.ClaimLock:
+    """Take and stamp ``dest``'s claim in-process, as a live owner does. The caller releases it.
+
+    A second descriptor in the same process contends for the lock exactly as
+    another process would (flock / msvcrt locks belong to the open file, not the
+    process), so this stands in for an owner without a subprocess.
+    """
+    lock = download_state.lock_claim(download_state.claim_path(workspace, models._dest_key(dest)))
+    assert lock is not None, "the claim was already held"
+    lock.write_payload(download_id, str(dest))
+    return lock
+
+
 # The repo root, so a helper process started with `-c` can import `comfy_cli`
 # without depending on how pytest was invoked.
 _REPO_ROOT = str(Path(download_state.__file__).resolve().parents[1])
@@ -1225,6 +1239,98 @@ except BaseException:
     sys.exit(3)
 sys.exit(0)
 """
+
+
+# One real *foreground* `comfy model download` (the command body, minus the
+# telemetry wrapper), with only the byte transfer faked: it signals `started/` and
+# then holds the transfer open until `release` appears. Exit 0 = it transferred,
+# 3 = refused with `model_download_in_flight`, anything else = a bug. The config
+# dir is pointed at a scratch path first, as the autouse fixture does in-process.
+_FOREGROUND_DOWNLOAD_SCRIPT = """
+import os, pathlib, sys, time
+sys.path.insert(0, sys.argv[1])
+root, ws, cfg, ready, gate, started, release = (pathlib.Path(a) for a in sys.argv[1:8])
+from comfy_cli import constants
+for key in list(constants.DEFAULT_CONFIG):
+    constants.DEFAULT_CONFIG[key] = str(cfg)
+import typer
+from comfy_cli.command.models import models
+models.get_workspace = lambda: ws
+refused = []
+real_in_flight = models._in_flight_failure
+def in_flight(*args, **kwargs):
+    refused.append(True)
+    return real_in_flight(*args, **kwargs)
+models._in_flight_failure = in_flight
+def download_file(url, dest, headers, downloader=None, progress_callback=None):
+    (started / str(os.getpid())).touch()
+    deadline = time.monotonic() + 60
+    while not release.exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("never released")
+        time.sleep(0.01)
+models.download_file = download_file
+(ready / str(os.getpid())).touch()
+deadline = time.monotonic() + 60
+while not gate.exists():
+    if time.monotonic() > deadline:
+        sys.exit(4)
+    time.sleep(0.001)
+try:
+    models.download.__wrapped__(
+        None,
+        url="https://example.com/m.safetensors",
+        relative_path="models/loras",
+        filename="m.safetensors",
+        downloader="httpx",
+    )
+except typer.Exit:
+    sys.exit(3 if refused else 5)
+sys.exit(0)
+"""
+
+
+def _foreground_download_process(workspace: Path, tmp_path: Path, *, open_gate: bool = True) -> subprocess.Popen:
+    """Start one real foreground download (see the script above). The caller reaps it."""
+    for name in ("ready", "started", "cfg"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    if open_gate:
+        (tmp_path / "gate").touch()
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _FOREGROUND_DOWNLOAD_SCRIPT,
+            _REPO_ROOT,
+            str(workspace),
+            str(tmp_path / "cfg"),
+            str(tmp_path / "ready"),
+            str(tmp_path / "gate"),
+            str(tmp_path / "started"),
+            str(tmp_path / "release"),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _reap(procs: list[subprocess.Popen]) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            proc.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=30)
+        proc.stderr.close()
+
+
+def _wait_for(predicate, what: str, procs: list[subprocess.Popen], timeout: float = 120) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        dead = [p for p in procs if p.poll() is not None]
+        assert not dead, f"a process exited while waiting for {what}: {dead[0].stderr.read()!r}"
+        time.sleep(0.02)
 
 
 @contextlib.contextmanager
@@ -1515,7 +1621,16 @@ class TestAtomicDestinationClaim:
         self._no_spawn(monkeypatch)
 
         with patch("comfy_cli.utils.is_running", return_value=False):
-            self._submit(dest)
+            # Through the command rather than `_submit`: the persisted demotion
+            # comes from its pre-flight scan, which reconciles every record for
+            # this destination — the claim path itself only judges the payload.
+            models.download(
+                None,
+                url="https://example.com/m.safetensors",
+                relative_path=self.DEST[0],
+                filename=self.DEST[1],
+                background=True,
+            )
 
         env = json_renderer()
         assert env["ok"] is True
@@ -1785,26 +1900,41 @@ class TestAtomicDestinationClaim:
         assert download_state.read_claim(claims[0]) is None
         assert _is_lockable(claims[0])
 
-    def test_a_live_foreground_competitor_is_refused_before_any_claim_is_taken(
-        self, workspace, monkeypatch, json_renderer
-    ):
-        """A foreground transfer writes a record but no claim file, so the only
-        thing that can see it is the advisory re-scan — which is exactly why that
-        re-scan survives, and why it runs *before* the claim rather than after.
-        Losing it here must leave no claim file behind: a claim taken and then
-        abandoned would wedge the destination for everybody until it aged out."""
+    def test_a_live_foreground_holder_refuses_a_background_submit(self, workspace, monkeypatch, json_renderer):
+        """A foreground transfer holds the claim lock for its whole transfer, in
+        the CLI process itself, so a background submit is refused by the kernel —
+        not by finding its record in a re-scan, which this path no longer runs.
+
+        Its record is dated *later* than ours could be, so `_claim_order` would
+        crown the submit: the lock, not the order, decides. The holder is a real
+        separate process. Losing must leave the holder's claim untouched and our
+        record withdrawn."""
         dest = self._dest(workspace)
-        foreground = _state(dest=str(dest), status="downloading", pid=1234, kind="foreground")
-        foreground.started_at = "2000-01-01T00:00:00+00:00"
-        download_state.write(workspace, foreground)
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
         self._no_spawn(monkeypatch)
 
-        with patch("comfy_cli.utils.is_running", return_value=True):
+        with _claim_holder_process(claim, "ffffffffffff", str(dest)) as holder_proc:
+            foreground = _state(
+                id="ffffffffffff",
+                dest=str(dest),
+                status="downloading",
+                kind="foreground",
+                pid=holder_proc.pid,
+                pid_create_time=download_state.process_create_time(holder_proc.pid),
+            )
+            foreground.started_at = "2999-01-01T00:00:00+00:00"
+            download_state.write(workspace, foreground)
+
             with pytest.raises(typer.Exit):
                 self._submit(dest)
 
-        assert json_renderer()["error"]["details"]["download_id"] == foreground.id
-        assert _claim_files(workspace) == []
+            assert not _is_lockable(claim)
+
+        error = json_renderer()["error"]
+        assert error["code"] == "model_download_in_flight"
+        assert error["details"]["download_id"] == foreground.id
+        assert error["details"]["kind"] == "foreground"
+        assert download_state.read_claim(claim) == foreground.id
         assert [s.id for s in download_state.list_all(workspace)] == [foreground.id]
 
     def test_the_claims_directory_is_owner_only_and_invisible_to_the_verbs(self, workspace, monkeypatch, json_renderer):
@@ -2866,31 +2996,52 @@ class TestForegroundClaimsItsDestination:
         assert download_state.read(workspace, stale.id).status == "failed"
         assert len(download_state.list_all(workspace)) == 2
 
-    # -- claim-then-check, foreground side ------------------------------------
+    # -- the held claim lock, foreground side ----------------------------------
 
-    def _race(self, monkeypatch, rival):
-        """Plant `rival`'s claim in the window between our write and the re-scan."""
+    def _claim(self, workspace) -> Path:
+        return download_state.claim_path(workspace, models._dest_key(self._dest(workspace)))
+
+    def _race(self, monkeypatch, workspace, rival, *, holds_lock=True) -> list:
+        """Land `rival` in the window between our record write and our lock.
+
+        That window is invisible to the pre-flight scan, which has already run.
+        With ``holds_lock`` the rival also takes and stamps the claim, as a live
+        owner of either kind does; the returned list carries that lock, and the
+        caller must release it.
+        """
         real_write = download_state.write
+        held: list = []
         planted: list = []
 
         def write_then_race(ws, state):
             path = real_write(ws, state)
             if not planted:
                 planted.append(real_write(ws, rival))
+                if holds_lock:
+                    held.append(_hold_claim(workspace, self._dest(workspace), rival.id))
             return path
 
         monkeypatch.setattr(download_state, "write", write_then_race)
+        return held
 
-    def test_an_earlier_rival_takes_the_destination(self, workspace, monkeypatch, json_renderer):
-        """Ticket case 2: we lose, and we take our own claim back off disk."""
+    def test_a_rival_holding_the_lock_takes_the_destination(self, workspace, monkeypatch, json_renderer):
+        """We lose to a held lock, and we take our own record back off disk.
+
+        The rival is dated *after* us, so the record order (`_claim_order`) that
+        used to decide this would have crowned us. It no longer decides: the
+        held lock does."""
         rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
-        rival.started_at = "2000-01-01T00:00:00+00:00"
-        self._race(monkeypatch, rival)
+        rival.started_at = "2999-01-01T00:00:00+00:00"
+        held = self._race(monkeypatch, workspace, rival)
         monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
 
-        with patch("comfy_cli.utils.is_running", return_value=True):
-            with pytest.raises(typer.Exit) as exc:
-                self._download()
+        try:
+            with patch("comfy_cli.utils.is_running", return_value=True):
+                with pytest.raises(typer.Exit) as exc:
+                    self._download()
+        finally:
+            for lock in held:
+                lock.release()
 
         assert exc.value.exit_code == 1
         assert json_renderer()["error"]["details"]["download_id"] == rival.id
@@ -2898,12 +3049,15 @@ class TestForegroundClaimsItsDestination:
         # behind would refuse every later submission to this destination.
         assert [s.id for s in download_state.list_all(workspace)] == [rival.id]
         assert download_state.read(workspace, rival.id).status == "downloading"
+        assert download_state.read_claim(self._claim(workspace)) == rival.id
 
-    def test_a_later_rival_does_not_take_the_destination(self, workspace, monkeypatch, capsys):
-        """Ticket case 3: we win and the transfer proceeds."""
+    def test_a_rival_record_without_the_lock_does_not_take_the_destination(self, workspace, monkeypatch, capsys):
+        """A rival that has written its record but not taken the lock owns
+        nothing yet — it is the one that will find the lock held. We proceed,
+        even though it is dated *before* us and `_claim_order` would crown it."""
         rival = _state(dest=str(self._dest(workspace)), status="starting", pid=None)
-        rival.started_at = "2999-01-01T00:00:00+00:00"
-        self._race(monkeypatch, rival)
+        rival.started_at = "2000-01-01T00:00:00+00:00"
+        self._race(monkeypatch, workspace, rival, holds_lock=False)
         calls = self._transfer(monkeypatch)
 
         self._download()
@@ -2911,56 +3065,48 @@ class TestForegroundClaimsItsDestination:
         assert len(calls) == 1
 
     @pytest.mark.parametrize(
-        ("rival_id", "we_win"),
-        [("zzzzzzzzzzzz", True), ("000000000000", False)],
-        ids=["our-id-sorts-first", "rival-id-sorts-first"],
+        "rival_id", ["zzzzzzzzzzzz", "000000000000"], ids=["ours-sorts-first", "rival-sorts-first"]
     )
+    @pytest.mark.parametrize("rival_holds_lock", [True, False], ids=["rival-locked", "rival-unlocked"])
     def test_identical_timestamps_produce_exactly_one_winner(
-        self, workspace, monkeypatch, json_renderer, capsys, rival_id, we_win
+        self, workspace, monkeypatch, json_renderer, capsys, rival_id, rival_holds_lock
     ):
-        """Ticket case 4, the mutual-refusal regression.
+        """The mutual-refusal regression, now decided without the record order.
 
         `started_at` is second-resolution, so two racers colliding inside the same
-        second is the *common* tie, not an exotic one. Without the `id` term in
-        `_claim_order` each would see the other as an equally-ranked live claim,
-        both would back off, and the destination would be wedged for the user with
-        no download running at all — a worse outcome than the race itself. The
-        order is total, so the tie resolves the same way from both sides: exactly
-        one proceeds, and it is the lower id.
+        second is the *common* tie. When record order decided, the `id` term in
+        `_claim_order` was what kept both from backing off and wedging the
+        destination. Now the lock decides, so the id order is irrelevant either
+        way: whoever holds the lock wins, whichever way the ids sort, and a rival
+        that has not taken it never makes us back off.
         """
         rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
         rival.id = rival_id
         monkeypatch.setattr(download_state, "new_id", lambda: "mmmmmmmmmmmm")
-
-        real_write = download_state.write
-        planted: list = []
-
-        def write_then_race(ws, state):
-            path = real_write(ws, state)
-            if not planted:
-                # Same second, differing id — the tie the `id` term breaks.
-                rival.started_at = state.started_at
-                planted.append(real_write(ws, rival))
-            return path
-
-        monkeypatch.setattr(download_state, "write", write_then_race)
+        monkeypatch.setattr(download_state, "_now_iso", lambda: "2026-01-01T00:00:00+00:00")
+        rival.started_at = "2026-01-01T00:00:00+00:00"
+        held = self._race(monkeypatch, workspace, rival, holds_lock=rival_holds_lock)
         calls = self._transfer(monkeypatch)
 
-        with patch("comfy_cli.utils.is_running", return_value=True):
-            if we_win:
-                self._download()
-            else:
-                with pytest.raises(typer.Exit) as exc:
+        try:
+            with patch("comfy_cli.utils.is_running", return_value=True):
+                if rival_holds_lock:
+                    with pytest.raises(typer.Exit) as exc:
+                        self._download()
+                else:
                     self._download()
+        finally:
+            for lock in held:
+                lock.release()
 
-        if we_win:
-            assert len(calls) == 1
-            assert download_state.read(workspace, "mmmmmmmmmmmm").status == "completed"
-        else:
+        if rival_holds_lock:
             assert calls == []
             assert exc.value.exit_code == 1
             assert json_renderer()["error"]["details"]["download_id"] == rival.id
             assert download_state.read(workspace, "mmmmmmmmmmmm") is None
+        else:
+            assert len(calls) == 1
+            assert download_state.read(workspace, "mmmmmmmmmmmm").status == "completed"
 
     def test_a_claim_we_cannot_unlink_is_made_inert_instead(self, workspace, monkeypatch, json_renderer):
         """Withdrawing the claim is the point of losing; the unlink is only how.
@@ -2972,19 +3118,238 @@ class TestForegroundClaimsItsDestination:
         back to that.
         """
         rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
-        rival.started_at = "2000-01-01T00:00:00+00:00"
-        self._race(monkeypatch, rival)
+        held = self._race(monkeypatch, workspace, rival)
         monkeypatch.setattr(download_state, "delete", lambda workspace, download_id: False)
         monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
 
-        with patch("comfy_cli.utils.is_running", return_value=True):
-            with pytest.raises(typer.Exit):
-                self._download()
+        try:
+            with patch("comfy_cli.utils.is_running", return_value=True):
+                with pytest.raises(typer.Exit):
+                    self._download()
+        finally:
+            for lock in held:
+                lock.release()
 
         assert json_renderer()["error"]["details"]["download_id"] == rival.id
         ours = [s for s in download_state.list_all(workspace) if s.id != rival.id]
         assert [s.status for s in ours] == ["failed"]
         assert download_state.read(workspace, rival.id).status == "downloading"
+
+    @pytest.mark.parametrize(
+        ("outcome", "raises"),
+        [(None, None), (DownloadException("reset"), typer.Exit), (KeyboardInterrupt(), KeyboardInterrupt)],
+        ids=["success", "failure", "ctrl-c"],
+    )
+    def test_the_lock_is_held_for_the_transfer_and_released_after_the_terminal_write(
+        self, workspace, monkeypatch, capsys, outcome, raises
+    ):
+        """Held from before the first byte to after the terminal status — on
+        every way out, Ctrl-C included. Released *after* the terminal write: a
+        competitor that takes the lock the instant we drop it judges our id by
+        our record, and must find it finished rather than `downloading`."""
+        claim = self._claim(workspace)
+        held_during: list = []
+
+        def transfer(*args, **kwargs):
+            held_during.append(not _is_lockable(claim))
+            if outcome is not None:
+                raise outcome
+
+        self._transfer(monkeypatch, transfer)
+        status_at_release: list = []
+        real_release = download_state.ClaimLock.release
+
+        def release(lock):
+            if lock.held:
+                (record,) = download_state.list_all(workspace)
+                status_at_release.append(record.status)
+            real_release(lock)
+
+        monkeypatch.setattr(download_state.ClaimLock, "release", release)
+
+        if raises is None:
+            self._download()
+        else:
+            with pytest.raises(raises):
+                self._download()
+
+        assert held_during == [True]
+        assert _is_lockable(claim)
+        (record,) = download_state.list_all(workspace)
+        assert download_state.read_claim(claim) == record.id
+        assert status_at_release[-1] == ("completed" if outcome is None else "failed")
+
+    def test_a_running_background_worker_refuses_a_foreground_run(self, workspace, monkeypatch, json_renderer):
+        """bg -> fg: a worker holds the claim for its transfer, and that alone
+        refuses us. The pre-flight scan is blinded here so nothing depends on
+        when the worker's record became visible to it."""
+        dest = self._dest(workspace)
+        claim = self._claim(workspace)
+        monkeypatch.setattr(models, "_active_download_for", lambda *a, **k: None)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with _claim_holder_process(claim, "bbbbbbbbbbbb", str(dest)) as holder_proc:
+            worker = _state(
+                id="bbbbbbbbbbbb",
+                dest=str(dest),
+                status="downloading",
+                pid=holder_proc.pid,
+                pid_create_time=download_state.process_create_time(holder_proc.pid),
+            )
+            download_state.write(workspace, worker)
+            with pytest.raises(typer.Exit) as exc:
+                self._download()
+
+        assert exc.value.exit_code == 1
+        error = json_renderer()["error"]
+        assert error["code"] == "model_download_in_flight"
+        assert error["details"]["download_id"] == worker.id
+        assert error["details"]["kind"] == "background"
+        assert [s.id for s in download_state.list_all(workspace)] == [worker.id]
+
+    def test_a_foreground_run_refuses_a_background_submit(self, workspace, monkeypatch, json_renderer):
+        """fg -> bg, end to end through the command: while a foreground transfer
+        is running, a `--background` submit is refused by its held lock — with
+        the pre-flight scan blinded, so not by finding its record."""
+        attempts: list = []
+
+        def submit_mid_transfer(*args, **kwargs):
+            # Our own lock is held right now; a background submit must lose to it.
+            monkeypatch.setattr(models, "_active_download_for", lambda *a, **k: None)
+            monkeypatch.setattr(models, "_spawn_download_worker", MagicMock(side_effect=AssertionError("spawned")))
+            with pytest.raises(typer.Exit):
+                self._download(background=True)
+            attempts.append(json_renderer()["error"])
+            _reset_envelope()
+
+        self._transfer(monkeypatch, submit_mid_transfer)
+
+        self._download()
+
+        (error,) = attempts
+        assert error["code"] == "model_download_in_flight"
+        assert error["details"]["kind"] == "foreground"
+        (record,) = download_state.list_all(workspace)
+        assert record.kind == "foreground" and record.status == "completed"
+        assert error["details"]["download_id"] == record.id
+
+    def test_a_background_submit_inside_its_spawn_gap_refuses_a_foreground_run(
+        self, workspace, monkeypatch, json_renderer
+    ):
+        """The one window the lock alone cannot see: a background submitter has
+        stamped the claim and released it, and its worker has not taken it yet.
+        Its young, active record in the payload is what refuses us."""
+        dest = self._dest(workspace)
+        submitted = _state(dest=str(dest), status="starting", pid=None)
+        download_state.write(workspace, submitted)
+        _plant_claim(self._claim(workspace), submitted.id, str(dest))
+        monkeypatch.setattr(models, "_active_download_for", lambda *a, **k: None)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with pytest.raises(typer.Exit):
+            self._download()
+
+        assert json_renderer()["error"]["details"]["download_id"] == submitted.id
+        assert [s.id for s in download_state.list_all(workspace)] == [submitted.id]
+        assert download_state.read_claim(self._claim(workspace)) == submitted.id
+
+    def test_a_stale_foreground_payload_is_never_a_spawn_gap(self, workspace):
+        """A foreground run holds the lock from before it stamps the payload until
+        after its terminal write, so a lockable claim naming one is stale even if
+        its record still reads young and active (a terminal write that failed, a
+        process still exiting) — it must not wedge the destination for a grace."""
+        record = _state(status="downloading", kind="foreground", pid=os.getpid())
+        assert not models._in_spawn_gap(record)
+        record.kind = "background"
+        assert models._in_spawn_gap(record)
+
+    def test_an_unusable_claims_directory_still_downloads(self, workspace, monkeypatch, json_renderer):
+        """Claims are bookkeeping: with no claims directory the foreground run
+        degrades to the record re-scan it used before it held a lock, rather
+        than turning a download that used to work into an error..."""
+        monkeypatch.setattr(download_state, "claim_path", MagicMock(side_effect=OSError("read-only file system")))
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+        assert len(calls) == 1
+
+        # ...and that re-scan still refuses an earlier rival whose record landed
+        # after the pre-flight scan.
+        rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        rival.started_at = "2000-01-01T00:00:00+00:00"
+        self._race(monkeypatch, workspace, rival, holds_lock=False)
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit):
+                self._download()
+        assert json_renderer()["error"]["details"]["download_id"] == rival.id
+        assert len(calls) == 1
+
+    def test_a_filesystem_that_cannot_lock_still_downloads(self, workspace, monkeypatch, capsys):
+        """Same degradation when the claim exists but cannot be locked at all."""
+        monkeypatch.setattr(models, "_claims_degraded_reported", False)
+        monkeypatch.setattr(
+            download_state, "lock_claim", MagicMock(side_effect=OSError(errno.ENOLCK, "no locks available"))
+        )
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+        (record,) = download_state.list_all(workspace)
+        assert record.status == "completed"
+
+    def test_four_real_foreground_runs_racing_one_destination_transfer_exactly_once(self, workspace, tmp_path):
+        """Real processes, released together: exactly one transfers, and every
+        other is refused with `model_download_in_flight` (exit 3 in the script).
+        The winner holds its transfer open until all the losers have exited, so a
+        refusal can never be a merely sequential run."""
+        procs = [_foreground_download_process(workspace, tmp_path, open_gate=False) for _ in range(4)]
+        try:
+            _wait_for(lambda: len(list((tmp_path / "ready").iterdir())) == 4, "the racers", procs)
+            (tmp_path / "gate").touch()
+            deadline = time.monotonic() + 120
+            while sum(p.poll() is not None for p in procs) < 3:
+                assert time.monotonic() < deadline, "the losers never exited"
+                time.sleep(0.02)
+            assert len(list((tmp_path / "started").iterdir())) == 1
+            (tmp_path / "release").touch()
+            codes = [p.wait(timeout=120) for p in procs]
+        finally:
+            _reap(procs)
+
+        assert sorted(codes) == [0, 3, 3, 3], codes
+        records = download_state.list_all(workspace)
+        assert [r.status for r in records] == ["completed"], [(r.id, r.status) for r in records]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL has no Windows equivalent")
+    def test_a_sigkilled_foreground_run_frees_the_destination_immediately(
+        self, workspace, tmp_path, monkeypatch, json_renderer
+    ):
+        """No `finally` runs on SIGKILL, so nothing in Python releases the claim
+        or writes a terminal status — the kernel drops the lock, and the next
+        submit takes the destination at once, with no grace wait and no sweep."""
+        proc = _foreground_download_process(workspace, tmp_path)
+        try:
+            _wait_for(lambda: any((tmp_path / "started").iterdir()), "the transfer to start", [proc])
+            assert not _is_lockable(self._claim(workspace)), "the foreground run is not holding its claim"
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=30)
+        finally:
+            _reap([proc])
+
+        (killed,) = download_state.list_all(workspace)
+        assert killed.status == "downloading"  # nothing ran to say otherwise
+        monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
+
+        started = time.monotonic()
+        self._download(background=True)
+        elapsed = time.monotonic() - started
+
+        env = json_renderer()
+        assert env["ok"] is True
+        assert env["data"]["download_id"] != killed.id
+        assert download_state.read_claim(self._claim(workspace)) == env["data"]["download_id"]
+        assert elapsed < download_state.STARTUP_GRACE_S / 2, f"the submit waited {elapsed:.1f}s"
 
     def test_an_unwritable_state_directory_still_downloads(self, workspace, monkeypatch, capsys):
         """The claim is bookkeeping. An unwritable workspace must degrade to the

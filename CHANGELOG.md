@@ -117,6 +117,12 @@ history.
 
 ### Fixed
 
+- Two `comfy model download` runs aimed at the same file — both in the
+  foreground, or one foreground and one `--background` — no longer both
+  download it. A foreground run now holds the destination's claim lock for its
+  whole transfer, as a background worker does, so exactly one proceeds and the
+  other is refused with `model_download_in_flight`. A foreground run killed
+  with SIGKILL frees the destination at once.
 - `comfy build release show .` (and `release logs .`, `release manifest .`)
   reads `.` as the build path, the way `release create .` does, and shows that
   Build's newest release. It used to send `.` to the builder as a release id
