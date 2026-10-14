@@ -1,6 +1,6 @@
 ---
 name: comfy-agent-permissions
-description: Use when a permission blocks the local comfy agent — a folder it cannot read or write, a host a download was refused for, a shell it does not have — to know what the agent may reach by default, how a request is recorded (request_path, request_host) and how only the user approves it (`comfy agent allow --approve`, a panel button), the start-time settings, and what can never be granted.
+description: Use when a permission blocks the local comfy agent — a folder it cannot read or write, a host a download was refused for, a shell it does not have — to know what the agent may reach by default, how a request is recorded (request_path, request_host) and how only the user approves it (the Allow/Deny card in the agent panel; no CLI command approves or grants), the start-time settings, and what can never be granted.
 ---
 
 # Permissions on the local comfy agent
@@ -34,38 +34,23 @@ ask; it can never make the answer.
 
 | Blocked | Do | Then |
 |---|---|---|
-| A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting and how to approve it; retry only after it is approved |
+| A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting in the agent panel; retry only after it is approved |
 | A host (`egress denied: <host>`; from a CLI command, `Tunnel connection failed: 403`, which is the same refusal) | call `request_host` with the host and what the download or install is for. The host is missing from the list and does not indicate the shell is cut off from the network | same; rerun the command after the approval |
 | A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: approving is refused, so the request would wait forever | say the host stays refused and find another source, or ask the user for the file |
 | No shell on this machine | say that the environment block names the start-time setting that enables one | the user restarts the agent with it |
 
-The user approves or refuses from a terminal, naming the request by the id
-the tool returned, or from a panel button when the frontend ships one:
+The user approves or refuses the request in the agent panel: it shows up in
+the chat as a card with Allow and Deny buttons. There is no command to approve
+a request or grant a folder or host, so do not look for one and do not hand
+the user one; tell them the request is waiting in the panel. To see what is
+waiting and what is already approved, run:
 
 ```
 comfy agent permissions                       # what is waiting (id, kind, target, reason, age), what is approved
-comfy agent allow --approve <id>              # approve that request's exact target
-comfy agent deny <id>                         # drop it; nothing is approved
 ```
 
-**Hand over the command the CLI prints, not one you compose.** Run
-`comfy --json agent permissions` yourself and copy `grant.approve` /
-`grant.deny`, replacing `<id>`. Those strings already name this CLI the way it
-can be called and carry `--data-dir` whenever the agent's dir is not the one a
-bare terminal resolves (`AGENT_DATA_DIR`, else `~/.comfy-agent`) — without it
-their `--approve` answers `agent_unknown_request` and `permissions` shows the
-agent `not running`, though the request is waiting. Point to a panel button
-only when you know this panel has one; otherwise the command is the way.
-
-Approving vets the target the way a direct grant does (below) and then records
-it; a target that can never be granted stays pending until denied. The user
-can also grant outright, without a request (hand over `grant.path` /
-`grant.host`, for the same reason):
-
-```
-comfy agent allow --path "C:\Users\me\Pictures" --reason "reference photos"
-comfy agent allow --host models.example.com --reason "a VAE the user asked for"
-```
+The agent vets the target when the user approves it: a target that can never
+be granted (below) is not approved.
 
 An approval is remembered for every later start (`<data dir>/permissions.json`,
 `<data dir>/egress-allow.json`). A running agent applies it within about

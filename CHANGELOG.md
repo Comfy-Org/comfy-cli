@@ -119,6 +119,16 @@ history.
   the `connect` that repairs it. A stale row whose value already reaches the
   node through another link is reported as a leftover.
 
+### Removed
+
+- `comfy agent allow` and `comfy agent deny`. The local agent's model can run
+  comfy-cli, so a script it ran could approve the agent's own requests or grant
+  it a folder or host. The user now approves or denies a request only in the
+  agent panel. `comfy agent permissions` still lists what is waiting and what
+  is approved; its `--json` payload drops `grant` and carries a `note` naming
+  the panel. The error codes `agent_state_unwritable`, `agent_bad_args`,
+  `agent_refused` and `agent_unknown_request` are gone with them.
+
 ### Fixed
 
 - `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
