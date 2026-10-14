@@ -129,6 +129,14 @@ history.
   before a PATH as `build_missing_input`, both before any request. A release id
   the file system cannot look up (longer than a file name, naming a folder you
   cannot read, or `~name` for no such user) still reaches the builder as the id.
+- The knowledge capability matcher preserves repeated words in keys, so
+  `video-edit`'s alias "Video to Video" no longer collapses to the single word
+  "video" and full-matches every query that mentions a video. Repeated query
+  nouns do not satisfy that alias unless its wording is literally present. The
+  capability a phrase names still resolves ("video edit", "video to video",
+  "extend this video"); a phrase that names nothing now resolves to nothing and
+  gets the `no curated knowledge for …` nudge, as `_resolve_tokens` already
+  documented for "4K video generation".
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another
