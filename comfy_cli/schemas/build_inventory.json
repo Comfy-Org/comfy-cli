@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_inventory.json",
+  "title": "comfy build inventory --json data payload",
+  "description": "What one workflow loads, which of those files are on this machine, and whether stock Comfy Cloud runs it. `cloud`, `local_server`, `models_roots` and `models_not_on_disk` appear only when --cloud, --server and --models-root/--desktop ask for them.",
+  "type": "object",
+  "required": ["workflow", "format", "classes", "packs", "models", "embeddings", "inputs", "skipped", "implicit", "warnings", "node_versions"],
+  "additionalProperties": true,
+  "properties": {
+    "workflow": {"type": "string"},
+    "format": {"enum": ["ui", "api"]},
+    "classes": {
+      "type": "object",
+      "description": "Active node classes (muted/bypassed nodes excluded): count, the pack that recorded them, and the versions recorded.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["count", "pack", "ver"],
+        "properties": {
+          "count": {"type": "integer"},
+          "pack": {"type": "string"},
+          "ver": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "packs": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["value", "path", "basename", "subfolder", "node", "node_id"],
+        "properties": {
+          "value": {"type": ["string", "null"], "description": "The widget value as saved."},
+          "path": {"type": "string", "description": "`value` with Windows separators turned into `/`."},
+          "basename": {"type": "string"},
+          "subfolder": {"type": ["string", "null"]},
+          "url_hint": {"type": ["string", "null"]},
+          "node": {"type": "string"},
+          "node_id": {},
+          "local": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    },
+    "embeddings": {"type": "array", "items": {"type": "object"}},
+    "inputs": {"type": "array", "items": {"type": "object"}},
+    "skipped": {"type": "array", "items": {"type": "object"}},
+    "implicit": {"type": "array", "items": {"type": "object", "required": ["class", "note"]}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "node_versions": {"type": "object"},
+    "models_roots": {"type": "array", "items": {"type": "string"}},
+    "models_not_on_disk": {"type": "array", "items": {"type": "string"}},
+    "local_server": {"type": "object"},
+    "cloud": {
+      "type": "object",
+      "required": ["verdict", "blocking", "missing_classes", "cloud_disabled", "models", "unverified"],
+      "properties": {
+        "verdict": {"enum": ["covered", "covered_with_remaps", "covered_needs_check", "needs_build"]},
+        "blocking": {"type": "array", "items": {"type": "string"}},
+        "missing_classes": {"type": "array", "items": {"type": "string"}},
+        "cloud_disabled": {"type": "array", "items": {"type": "string"}},
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "status"],
+            "properties": {"status": {"enum": ["present", "remap", "absent", "node_missing"]}}
+          }
+        },
+        "unverified": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

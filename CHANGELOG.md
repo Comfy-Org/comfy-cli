@@ -17,6 +17,22 @@ history.
 
 ### Added
 
+- A `comfy-run-on-cloud` skill, installed by default, takes one local workflow
+  onto Comfy Cloud: stock Cloud when it already has every node and model, an
+  existing workspace Build next, and a workflow-scoped custom build only for
+  what is left. It asks once per file before uploading anything from disk, and
+  asks before freeing a release, Build or deployment slot. Its reference skill
+  `comfy-run-on-cloud-local-install` covers finding the install behind a
+  workflow, Comfy Desktop's split layout included.
+- `comfy build inventory <workflow>` (hidden while the skill above is its only
+  caller) reports what one workflow loads: active classes and the packs and
+  versions it recorded, model values with their subfolders, `embedding:`
+  references, input files, muted and bypassed nodes, and loaders that pull
+  weights no widget names. `--models-root` (repeatable), `--desktop` and
+  `--hash` find each model on disk; `--server` joins a running ComfyUI's
+  classes; `--cloud` reports whether stock Comfy Cloud runs it as-is, with
+  dropdown remaps (`set_widget`), or needs a build (`cloud.verdict`,
+  `cloud.blocking`).
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
