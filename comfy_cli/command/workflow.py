@@ -215,9 +215,14 @@ def slots_cmd(
         input_path, host, port, on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err)
     )
 
+    from comfy_cli.cql.engine import DynamicGroupBindingError
+
     template_id = template_id or p.stem
     try:
         schema = graph.get_template_schema(template_id, workflow)
+    except DynamicGroupBindingError as e:
+        renderer.error(code=e.code, message=f"Could not extract slots: {e}")
+        raise typer.Exit(code=1) from e
     except (ValueError, KeyError) as e:
         renderer.error(code="workflow_slot_invalid", message=f"Could not extract slots: {e}")
         raise typer.Exit(code=1) from e
@@ -1741,7 +1746,7 @@ def validate_api_workflow(
         except WorkflowConversionError as e:
             renderer.error(
                 command=command,
-                code="workflow_not_api_format",
+                code=e.code or "workflow_not_api_format",
                 message=f"Workflow is a UI export that could not be converted to API format: {e}",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
             )
