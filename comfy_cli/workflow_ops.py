@@ -836,10 +836,14 @@ def set_dynamic_group_rows(
         # input or a legacy proxyWidgets entry), owns the row's value.
         for name in fields:
             address = f"{group}.{row}.{name}"
+            try:
+                redirected = _promoted.resolve_write(workflow, graph, segments, address).redirected_from
+            except ValueError:  # fed by another interior node: a plain link
+                redirected = None
+            if redirected:
+                return "is promoted to the parent subgraph; unpromote it first"
             if address in linked:
                 return "is connected; disconnect it first"
-            if _promoted.resolve_write(workflow, graph, segments, address).redirected_from:
-                return "is promoted to the parent subgraph; unpromote it first"
         return None
 
     pinned = {r: reason for r in range(current) if (reason := pin_reason(r))}
@@ -865,8 +869,8 @@ def set_dynamic_group_rows(
         prior = stamps.get(json.dumps(["widget", where, written]))
         if prior is not None and list(prior[:2]) >= [base_version, actor]:
             raise ValueError(
-                f"{group}: {written} is already written at base_version {base_version} by {actor}; "
-                f"write the group once per batch, or apply with a higher base_version"
+                f"{group}: {written} is already written at stamp [{prior[0]}, {prior[1]}]; write the group once "
+                f"per batch (a stamp left by an earlier apply needs a higher base_version)"
             )
 
     workflow, op = set_widget(workflow, graph, address, group, len(plan), actor=actor, base_version=base_version)
@@ -2572,7 +2576,7 @@ def apply_specs(
     pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
-    replaced: list[tuple] = []
+    replaced: set[tuple] = set()
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:
@@ -2627,7 +2631,7 @@ def apply_specs(
                         base_version=base_version,
                     )
                     ops.extend(row_ops)
-                    replaced.append(_write_target(row_ops[0]))
+                    replaced.update(_write_target(row_op) for row_op in row_ops)
                     continue
                 elif kind == "set_node_field":
                     workflow, op = set_node_field(
@@ -2654,13 +2658,15 @@ def apply_specs(
             # A later write at the batch's stamp would tie with the replacement
             # and be settled by the random op_id.
             target = _write_target(op) if op.get("op") == "set_widget" else None
-            if target and any(
-                target[1] == where and (target[2] == group or target[2].startswith(f"{group}."))
-                for _, where, group in replaced
-            ):
+            if target in replaced:
+                count = "." not in target[2]
                 raise ValueError(
                     f"spec #{i}: {target[2]} was replaced earlier in this batch by set_dynamic_group_rows; "
-                    f"put the value in its rows instead"
+                    + (
+                        "change the number of rows in that spec instead"
+                        if count
+                        else "put the value in its rows instead"
+                    )
                 )
             ops.append(op)
     except (NotBatchableError, DeprecatedNodeType):
