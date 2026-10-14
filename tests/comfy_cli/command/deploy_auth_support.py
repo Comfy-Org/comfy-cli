@@ -30,7 +30,9 @@ class DeployFixtureKind(Enum):
     UP = "up"
     PROMOTE = "promote"
     ROLLBACK = "rollback"
+    RENAME = "rename"
     HISTORY = "history"
+    CANCEL = "cancel"
     STATUS = "status"
     LS = "ls"
     SHOW = "show"
@@ -108,6 +110,10 @@ class DeployRecordingTransport:
                 200,
                 {"id": DEPLOYMENT_ID, "revision": 2, "releaseId": RELEASE_ID, "kind": "update"},
             ),
+            ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}/pending-update"): (
+                200,
+                {**row, "cancelledUpdate": {"releaseId": RELEASE_ID, "baseRevision": 1, "kind": "update"}},
+            ),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/stop"): (202, {**row, "status": "stopping"}),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/start"): (202, {**row, "status": "queued"}),
             ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}"): (204, {}),
@@ -122,7 +128,7 @@ class DeployRecordingTransport:
             ("GET", "/v1/compute-catalog"): (200, {"regions": []}),
         }
         if method == "PATCH" and path == f"/v1/deployments/{DEPLOYMENT_ID}":
-            return 200, copy.deepcopy(row)
+            return 200, copy.deepcopy({**row, **(body or {})})
         route = routes.get((method, path))
         if route is None:
             pytest.fail(f"unexpected deploy control-plane call: {method} {url}")
@@ -167,8 +173,12 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
             return ["deploy", "promote", "dep-source", DEPLOYMENT_ID, "--no-watch"]
         case DeployFixtureKind.ROLLBACK:
             return ["deploy", "rollback", "--deployment", DEPLOYMENT_ID, "--no-watch"]
+        case DeployFixtureKind.RENAME:
+            return ["deploy", "rename", "--deployment", DEPLOYMENT_ID, "canary"]
         case DeployFixtureKind.HISTORY:
             return ["deploy", "history", "--deployment", DEPLOYMENT_ID]
+        case DeployFixtureKind.CANCEL:
+            return ["deploy", "cancel", "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.STATUS:
             write_spec(root, build_id=BUILD_ID, models=[], nodes=[])
             return ["deploy", "status", str(root)]

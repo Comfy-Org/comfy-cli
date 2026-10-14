@@ -464,6 +464,24 @@ def test_create_release_falls_back_to_buildversionid(monkeypatch):
     assert client.create_release("d1", [{"os": "linux", "gpu": "nvidia"}]) == ("v1", "https://s")
 
 
+@pytest.mark.parametrize(("build_id", "segment"), [("a b", "a%20b"), ("a?b", "a%3Fb"), ("x/y", "x%2Fy")])
+def test_list_releases_sends_the_build_id_as_one_path_segment(monkeypatch, build_id, segment):
+    # Given a Build id a person typed, which the Build list did not name
+    seen: list[str] = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        seen.append(url)
+        return 200, {"releases": []}
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+
+    # When
+    BuilderClient(_BASE_URL, "jwt-token").list_releases(build_id)
+
+    # Then
+    assert seen == [f"{_BASE}/v1/builds/{segment}/releases?limit=100"]
+
+
 def test_list_releases_falls_back_to_the_versions_key(monkeypatch):
     """The same generation gap on the list read: an older builder keys the page
     ``versions``. A single page (no ``nextCursor``) keeps this pinned on the key

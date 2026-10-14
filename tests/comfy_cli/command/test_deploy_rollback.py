@@ -320,6 +320,22 @@ def test_a_rollback_read_caught_as_it_lands_still_lands(monkeypatch) -> None:
     assert _envelope(result)["data"]["deployment"]["revision"] == 3
 
 
+def test_a_rollback_a_newer_update_replaced_exits_1_as_replaced(monkeypatch) -> None:
+    # Given a newer update to v1 replacing the rollback to v2 while it waits
+    replaced = {"pendingUpdate": {"releaseId": "release-1", "baseRevision": 3, "status": "provisioning", "since": "x"}}
+    client = _moved_through(1, 2, 3, move="pending", get_patches=[replaced])
+
+    # When
+    result = _invoke(monkeypatch, client, "rollback", "--deployment", "dep-prod")
+
+    # Then
+    error = _envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_update_replaced"
+    assert error["details"]["replacing_release_id"] == "release-1"
+    assert error["message"].endswith("was replaced by an update to release v1")
+
+
 def test_a_waiting_rollback_not_followed_says_it_waits(monkeypatch) -> None:
     # Given v1's copy starting again
     client = _moved_through(1, 2, move="pending")

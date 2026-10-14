@@ -1909,3 +1909,44 @@ def test_ls_pretty_table_escapes_gallery_markup(tmp_path, monkeypatch):
     result = _run_ls(str(gf), tmp_path, monkeypatch, ["--local-only"])
     assert result.exit_code == 0, result.output
     assert "[/bold]" in result.output
+
+
+# ---------------------------------------------------------------------------
+# _workflow_node_types — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "definitions",
+    [5, "definitions", ["x"], {"subgraphs": 5}, {"subgraphs": "abc"}],
+    ids=["int", "str", "list", "non-list-subgraphs", "str-subgraphs"],
+)
+def test_workflow_node_types_tolerates_corrupt_definitions(definitions):
+    """A wrong-typed ``definitions``/``subgraphs`` reads as "no definitions".
+
+    ``or`` only replaced falsy values, so a truthy wrong-typed one reached
+    ``.get``/the loop and raised. Top-level nodes are still collected.
+    """
+    wf = {"nodes": [{"id": 1, "type": "KSampler"}], "definitions": definitions}
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler"}
+
+
+def test_workflow_node_types_still_reads_well_formed_subgraph_nodes():
+    """Positive control: the shape checks must not cost the happy path."""
+    wf = {
+        "nodes": [{"id": 1, "type": "KSampler"}],
+        "definitions": {"subgraphs": [{"id": "u1", "nodes": [{"id": 9, "type": "CLIPTextEncode"}]}]},
+    }
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler", "CLIPTextEncode"}
+
+
+@pytest.mark.parametrize("nodes", [5, True, "abc"], ids=["int", "bool", "str"])
+def test_workflow_node_types_skips_a_subgraph_with_non_list_nodes(nodes):
+    """A truthy non-list per-subgraph ``nodes`` is skipped, not iterated."""
+    wf = {
+        "nodes": [{"id": 1, "type": "KSampler"}],
+        "definitions": {
+            "subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": [{"id": 9, "type": "VAEDecode"}]}]
+        },
+    }
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler", "VAEDecode"}
