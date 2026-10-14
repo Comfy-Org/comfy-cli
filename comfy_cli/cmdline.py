@@ -16,7 +16,7 @@ from comfy_cli import cancellation, constants, env_checker, logging, tracking, u
 from comfy_cli import where as where_module
 from comfy_cli._lazy import LazyCommand, LazyModule, LazySubcommand, LazyTyperGroup
 from comfy_cli._safe_exec import resolve_required_binary
-from comfy_cli.caller import stream_is_tty
+from comfy_cli.caller import detect_caller, stream_is_tty
 from comfy_cli.command.version_validators import validate_optional_version, validate_version
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
@@ -291,7 +291,13 @@ def main():
     # non-zero exit code at the OS level — otherwise the envelope says
     # ok:false but the shell sees 0 and downstream tools think we succeeded.
     try:
-        app()
+        # On Windows, Click rewrites every argument before the CLI reads it: a
+        # leading ~, %VAR%/$VAR and glob patterns (cmd.exe does none of this, so
+        # for a person it is the only globbing). An agent's arguments are
+        # exact, and a supervising agent checks them as written: expanded, a
+        # checked word can become another command, option or path. So an
+        # agentic caller's arguments are taken as written.
+        app(windows_expand_args=not detect_caller().agentic)
     except KeyboardInterrupt:
         # SIGINT path: emit a cancelled envelope if one hasn't been written yet.
         try:
