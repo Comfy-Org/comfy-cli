@@ -855,23 +855,21 @@ def set_dynamic_group_rows(
         raise ValueError(
             f"{group}: {len(rows)} row(s) plus {len(pinned)} connected or promoted row(s) exceed the maximum of {maximum}"
         )
-    register = segments if len(segments) > 1 else str(node_id)
-    for key, stamp in (workflow.get("_widget_stamps") or {}).items():
-        kind, where, written = json.loads(key)[:3]
-        if (
-            kind == "widget"
-            and where == register
-            and isinstance(written, str)
-            and (written == group or written.startswith(f"{group}."))
-            and list(stamp[:2]) >= [base_version, actor]
-        ):
-            raise ValueError(
-                f"{group}: this batch already writes {written}; replace the rows without other writes to {group}"
-            )
     supplied = iter(rows)
     plan = [None if index in pinned else next(supplied) for index in range(len(rows) + len(pinned))]
+    address = "/".join(segments) if len(segments) > 1 else node_id
+    where = segments if len(segments) > 1 else str(node_id)
+    stamps = workflow.get("_widget_stamps") or {}
+    claimed = [group] + [f"{group}.{i}.{w.name}" for i, row in enumerate(plan) if row is not None for w in widgets]
+    for written in claimed:
+        prior = stamps.get(json.dumps(["widget", where, written]))
+        if prior is not None and list(prior[:2]) >= [base_version, actor]:
+            raise ValueError(
+                f"{group}: {written} is already written at base_version {base_version} by {actor}; "
+                f"write the group once per batch, or apply with a higher base_version"
+            )
 
-    workflow, op = set_widget(workflow, graph, node_id, group, len(plan), actor=actor, base_version=base_version)
+    workflow, op = set_widget(workflow, graph, address, group, len(plan), actor=actor, base_version=base_version)
     ops = [op]
     for index, row in enumerate(plan):
         if row is None:
@@ -881,7 +879,7 @@ def set_dynamic_group_rows(
             workflow, op = set_widget(
                 workflow,
                 graph,
-                node_id,
+                address,
                 f"{group}.{index}.{widget.name}",
                 value,
                 actor=actor,
@@ -2574,6 +2572,7 @@ def apply_specs(
     pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
+    replaced: list[tuple] = []
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:
@@ -2628,6 +2627,7 @@ def apply_specs(
                         base_version=base_version,
                     )
                     ops.extend(row_ops)
+                    replaced.append(_write_target(row_ops[0]))
                     continue
                 elif kind == "set_node_field":
                     workflow, op = set_node_field(
@@ -2651,6 +2651,17 @@ def apply_specs(
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            # A later write at the batch's stamp would tie with the replacement
+            # and be settled by the random op_id.
+            target = _write_target(op) if op.get("op") == "set_widget" else None
+            if target and any(
+                target[1] == where and (target[2] == group or target[2].startswith(f"{group}."))
+                for _, where, group in replaced
+            ):
+                raise ValueError(
+                    f"spec #{i}: {target[2]} was replaced earlier in this batch by set_dynamic_group_rows; "
+                    f"put the value in its rows instead"
+                )
             ops.append(op)
     except (NotBatchableError, DeprecatedNodeType):
         # Already carries a registered code and a hint that says what to do
