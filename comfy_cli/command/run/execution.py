@@ -300,7 +300,7 @@ class WorkflowExecution:
         # validation but others passed — surface as warnings, not a failure.
         # Stored rather than emitted here: the contractual `queued` event is
         # emitted by the caller once the job state file exists (see
-        # ``validation_warnings`` above and ``run._emit_queued``).
+        # ``validation_warnings`` above and ``run._emit_queued_event``).
         node_errors = body.get("node_errors") if isinstance(body, dict) else None
         self.validation_warnings = _node_errors_to_list(node_errors)
 
