@@ -49,6 +49,7 @@ comfy code-search
 comfy cs	[hidden]
 comfy dependency	[hidden]
 comfy deploy
+comfy deploy cancel
 comfy deploy delete
 comfy deploy events
 comfy deploy history
