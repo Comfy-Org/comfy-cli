@@ -17,10 +17,37 @@ history.
 
 ### Added
 
+- `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
+  deployment waits on and keeps it serving the release it served; `--json`
+  names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
+  with `changed: false`. A watching `up`, `promote` or `rollback` whose update
+  a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
+  release, rather than reading as failed.
+- `comfy deploy up --create --name staging` names the deployment it creates,
+  and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
+  A name outside comfy-deploy's rule is refused before any call
+  (`deploy_invalid_name`), and one another deployment holds is named
+  (`deploy_name_taken`). `up`, `rollback` and `rename` refusing two or more
+  deployments list each one's name, release and status in
+  `details.candidates`, and `up --json` carries the deployment's `name`.
+- Every command that takes `--deployment`, and both arguments of `comfy deploy
+  promote`, take a deployment's name as well as its id: `--deployment staging`
+  in a Build's folder, or `--deployment flux-pipeline/staging`, the Build given
+  by its name or id, which needs no folder except for `status`, and `up`
+  without `--release`. A name no live deployment holds is refused with the
+  names held (`deploy_name_not_found`).
+- `comfy deploy ls` leads each row with the deployment's name, and `comfy
+  deploy status` reports `Deployment production (dep-…): ready`. `ls` prints
+  `-` for a deployment with no name and `status` its id alone, and `--json`
+  carries `name`, null where there is none.
 - `comfy deploy rollback [--to vN]` moves a deployment back to an earlier
   release, keeping its id and URL, and follows the move as `up` does; `comfy
   deploy history` lists the releases a deployment ran, newest first, with what
   moved it and who. Both need deployment updates on.
+- `comfy deploy run` prints the version of the release that ran the job,
+  `Deployment job job-1 (release v7) is succeeded`, and `--json` carries it as
+  `job.releaseVersion`, once the platform gateway names it. Against a gateway
+  that does not, the output is as before.
 - `comfy deploy promote --json` and `comfy deploy rollback --json` say
   `waiting: true` while the move waits for its release's copy, so a
   `--no-watch` caller can tell a waiting move from one that landed.
@@ -59,6 +86,11 @@ history.
 
 ### Changed
 
+- **Breaking:** a watching `comfy deploy up`, `promote` or `rollback` that
+  another change overtook, onto a third release, now exits 1 with `deploy_update_replaced`
+  and `details.replacing_release_id`, where it exited `deploy_update_failed`
+  with `details.serving_release_id`.
+
 - Inside the rollout of deployment updates, `comfy deploy up` refuses a Build
   with two or more running deployments until `--deployment` names one, and
   refuses `--min`/`--max` with `--no-watch` on a move, since bounds apply only
@@ -85,6 +117,26 @@ history.
 
 ### Fixed
 
+- `comfy build release show .` (and `release logs .`, `release manifest .`)
+  reads `.` as the build path, the way `release create .` does, and shows that
+  Build's newest release. It used to send `.` to the builder as a release id
+  and fail with an opaque `builder call failed (302)`. RELEASE is read as a
+  path only when it looks like one: `.` or `..`, a name with a `/`, a
+  `.yaml`/`.json` spec file, or a folder holding `comfy-build.yaml`; any other
+  name stays a release id even when a file of that name sits in the current
+  folder. A path-shaped RELEASE with no spec behind it fails as
+  `build_spec_not_found`, and a blank, dot-only or path-shaped release id given
+  before a PATH as `build_missing_input`, both before any request. A release id
+  the file system cannot look up (longer than a file name, naming a folder you
+  cannot read, or `~name` for no such user) still reaches the builder as the id.
+- The knowledge capability matcher preserves repeated words in keys, so
+  `video-edit`'s alias "Video to Video" no longer collapses to the single word
+  "video" and full-matches every query that mentions a video. Repeated query
+  nouns do not satisfy that alias unless its wording is literally present. The
+  capability a phrase names still resolves ("video edit", "video to video",
+  "extend this video"); a phrase that names nothing now resolves to nothing and
+  gets the `no curated knowledge for …` nudge, as `_resolve_tokens` already
+  documented for "4K video generation".
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another

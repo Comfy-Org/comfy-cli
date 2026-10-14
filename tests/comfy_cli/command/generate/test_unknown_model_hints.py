@@ -59,7 +59,7 @@ def test_seedream_names_its_route_and_partner_node_search():
 
 @pytest.mark.parametrize(
     ("name", "alias"),
-    [("flux", "flux-pro"), ("stable", "stability-sd3"), ("minimax", "minimax/video_generation"), ("seed", "seedance")],
+    [("flux", "flux-pro"), ("recraf", "recraft"), ("minimax", "minimax/video_generation"), ("seed", "seedance")],
 )
 def test_alias_typos_keep_did_you_mean_even_when_a_model_hint_applies(name, alias):
     """A short name that prefixes some partner's model ids ("flux" → recraft's

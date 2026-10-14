@@ -85,6 +85,9 @@ class _RunResult:
         output_values: list[JsonValue] = [*self.outputs]
         deployment: JsonObject = {"id": self.deployment_id, "endpointUrl": self.endpoint_origin}
         job: JsonObject = {"id": required_string(self.job, "id"), "status": required_string(self.job, "status")}
+        release_version = _release_version(self.job)
+        if release_version is not None:
+            job["releaseVersion"] = release_version
         assets: JsonValue = self.assets.payload()
         metric_values: JsonValue = metrics
         return {
@@ -94,6 +97,29 @@ class _RunResult:
             "outputs": output_values,
             "metrics": metric_values,
         }
+
+
+def _release_version(job: JsonObject) -> int | None:
+    """The version of the release that ran the job, when the gateway names a usable one.
+
+    A gateway older than the field, or one that could not look the version up, leaves
+    it out; the result then reads as it did before rather than failing the run.
+    """
+    value = job.get("release_version")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _with_release_version(job: JsonObject, submitted: JsonObject) -> JsonObject:
+    """The finished job, naming the submit answer's release version where its own read named none.
+
+    A job's release never changes, so a version the final read could not look up
+    is still the one the submit answer named.
+    """
+    if _release_version(job) is not None or _release_version(submitted) is None:
+        return job
+    return {**job, "release_version": submitted["release_version"]}
 
 
 @dataclass(slots=True)
@@ -153,8 +179,10 @@ def _emit_cancelled(renderer: Renderer, state: _RunState) -> None:
 def _emit_result(renderer: Renderer, result: _RunResult) -> None:
     payload = result.payload()
     if renderer.is_pretty():
+        job = payload["job"]
+        release = f" (release v{job['releaseVersion']})" if isinstance(job, dict) and "releaseVersion" in job else ""
         renderer.success(
-            f"Deployment job {required_string(result.job, 'id')} is {required_string(result.job, 'status')}"
+            f"Deployment job {required_string(result.job, 'id')}{release} is {required_string(result.job, 'status')}"
         )
     renderer.emit(payload, command="deploy run", changed=True)
 
@@ -235,7 +263,10 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             OutputDownloadRequest(tuple(watched.outputs), endpoint_origin, data_credential, request.output_dir),
             renderer,
         )
-        _emit_result(renderer, _RunResult(deployment_id, endpoint_origin, watched.job, assets, outputs))
+        _emit_result(
+            renderer,
+            _RunResult(deployment_id, endpoint_origin, _with_release_version(watched.job, submitted), assets, outputs),
+        )
     except KeyboardInterrupt as error:
         try:
             _cancel_once(state, renderer)

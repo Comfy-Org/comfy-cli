@@ -329,7 +329,10 @@ class BuilderClient:
         list ``versions``, so both spellings parse."""
         releases: list[dict] = []
         pages = cursor_pages(
-            lambda cursor: self._get(("builds", build_id, "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}),
+            # A Build id a person typed reaches here unchecked, so it goes as one segment.
+            lambda cursor: self._get(
+                ("builds", urllib.parse.quote(build_id, safe=""), "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}
+            ),
             "releases",
         )
         for page in pages:

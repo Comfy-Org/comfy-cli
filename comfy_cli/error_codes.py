@@ -900,24 +900,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "model_download_claim_contested",
-        "`comfy model download --background` lost the race for a destination it had just judged "
-        "free: the stale claim it cleared was re-taken by another submitter before its own retry, "
-        "and that new claim does not (yet) resolve to a live download record. `details.path` is the "
-        "destination; `details.download_id` names the new claim's holder when its claim file was "
-        "readable, and is null otherwise. Unlike `model_download_in_flight` there is no `status`/"
-        "`kind` to report — the competitor's record was not visible at refusal time.",
+        "`comfy model download --background` found the destination's claim lock held by another "
+        "process, and that holder does not resolve to a readable download record. Holding the lock "
+        "is what proves the destination is taken, so the refusal stands regardless — but there is "
+        "no record to quote, which is why this is a distinct code rather than a "
+        "`model_download_in_flight` missing its `status`/`kind` fields. `details.path` is the "
+        "destination, `details.claim_file` the claim the lock is held on, and "
+        "`details.download_id` the holder's recorded id when the claim payload was readable "
+        "(null otherwise — it may be a rewrite in progress, or locked against reading on Windows).",
         "check `comfy model downloads`, then retry",
-    ),
-    ErrorCode(
-        "model_download_claim_unclearable",
-        "`comfy model download --background` found a stale destination claim it could not remove "
-        "(`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
-        "directory) sits at the claim path. Every submission to `details.path` will be refused "
-        "until the claim file is cleared, so the command reports the real obstacle rather than a "
-        "phantom in-flight download. `details.download_id` is the stale claim's recorded holder, "
-        "null when the claim was unreadable.",
-        "remove the claim file by hand (check its ownership and the permissions on the `claims/` "
-        "directory), then retry",
     ),
     ErrorCode(
         "model_download_foreground_cancel",
@@ -1245,8 +1236,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_release_not_found",
-        "A `comfy build release show`, `logs`, or `manifest` command omitted RELEASE, but the current Build "
-        "has no release to select. `details.buildId` names the Build whose exhaustive release list was empty.",
+        "A `comfy build release show`, `logs`, or `manifest` command was asked for a Build's newest release "
+        "(RELEASE omitted, or given as a build path such as `.`), but that Build has no release to select. "
+        "`details.buildId` names the Build whose exhaustive release list was empty.",
         "run `comfy build release create --target <os>/<gpu>` first, or pass an existing RELEASE id",
     ),
     ErrorCode(
@@ -1453,9 +1445,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_ambiguous_deployment",
         "Deployment resolution found multiple rows tied at the highest status rank and newest creation time, "
-        "or `comfy deploy up`, with deployment updates on, found more than one deployment of the Build to update. "
-        "`details.candidateIds` lists every candidate deployment id.",
-        "pass `--deployment <id>` to select one deployment explicitly",
+        "or `comfy deploy up`, with deployment updates on, `rollback`, `rename` or `cancel`, given no "
+        "`--deployment`, found more than one deployment of the Build to act on. `details.candidateIds` lists every "
+        "candidate deployment id, and on `up`, `rollback`, `rename` and `cancel` `details.candidates` lists each "
+        "one's id, name, release and status.",
+        "pass `--deployment <name|id>` to select one deployment explicitly",
     ),
     ErrorCode(
         "deploy_unrelated_deployment",
@@ -1464,6 +1458,47 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "only those on the release it is reconciling, so an id can be refused by one and accepted by the other. "
         "`details.candidateIds` lists the ids that are in scope, and `details.deploymentId` echoes the one asked for.",
         "pick one of `details.candidateIds`, which lists every deployment this command can act on -- or when that list is empty, drop `--deployment` to let the command pick or create one",
+    ),
+    ErrorCode(
+        "deploy_name_not_found",
+        "`--deployment`, or an argument of `comfy deploy promote`, named a deployment by a name no live deployment "
+        "of the Build holds. `details.names` lists the names the Build's live deployments hold, and "
+        "`details.buildId` says which Build was searched. An empty list means none of them has a name, because "
+        "they predate names or comfy-deploy does not serve names yet, or the Build has no live deployment.",
+        "pick one of `details.names`, or pass the deployment's id",
+    ),
+    ErrorCode(
+        "deploy_build_not_found",
+        "comfy-cli could not tell which Build a deployment name belongs to: `<build>/<name>` named a Build no "
+        "Build in the workspace has as its name or id, or a bare name was given outside any Build's folder.",
+        "run the command from the Build's folder, or name the Build as `<build>/<name>`; `comfy build ls` lists "
+        "each Build's name and id",
+    ),
+    ErrorCode(
+        "deploy_ambiguous_build",
+        "`<build>/<name>` named a Build by a name two or more Builds share, since a Build's name is not unique in "
+        "a workspace. `details.buildIds` lists each Build with that name.",
+        "name the Build by its id, as `<build id>/<name>`",
+    ),
+    ErrorCode(
+        "deploy_invalid_name",
+        "`comfy deploy up --name` or `comfy deploy rename` was given a name comfy-deploy would refuse. A name is 1 "
+        "to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit, and never "
+        "starting with `dep-`. "
+        "comfy-cli refuses it before calling comfy-deploy, so nothing was created or renamed.",
+        "pick a name such as `staging` or `canary-2`",
+    ),
+    ErrorCode(
+        "deploy_name_taken",
+        "comfy-deploy refused a name another live deployment of the same Build holds, on `up --name` or `rename`. "
+        "`details.name` echoes it.",
+        "pick another name, or rename that deployment first with `comfy deploy rename`",
+    ),
+    ErrorCode(
+        "deploy_names_unavailable",
+        "`comfy deploy rename` reached a comfy-deploy that does not serve deployment names yet: it refused the "
+        "rename as a request it does not know, or answered without the name. Nothing was renamed.",
+        "wait until comfy-deploy serves names; until then a deployment is reached by its id",
     ),
     ErrorCode(
         "deploy_missing_input",
@@ -1559,22 +1594,34 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_update_failed",
         "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and the watch saw "
-        "the move fail: the new release's copy failed to come up, or the service dropped the update. The "
+        "the move fail: the new release's copy failed to come up, or the update ended before it landed, which "
+        "a `comfy deploy cancel`, a move back to the release it served, or the service dropping it does. The "
         "deployment keeps its id and URL and still serves the release it served before. "
         "`details.serving_release_id` names that release and `details.release_id` the one that failed.",
         "inspect `comfy deploy events --deployment <id>`, which covers the new release's copy; `logs` shows the "
         "release still serving",
     ),
     ErrorCode(
+        "deploy_update_replaced",
+        "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and before the "
+        "move landed a newer update replaced it: someone ran another `up`, `promote` or `rollback` on the same "
+        "deployment, and the service cancelled this one. The deployment keeps its id and URL. "
+        "`details.release_id` names the release this move asked for and `details.replacing_release_id` the one "
+        "the newer update moves to.",
+        "run `comfy deploy status --deployment <id>` to see the newer update, and, while it still waits, "
+        "`comfy deploy cancel --deployment <id>` to end it",
+    ),
+    ErrorCode(
         "deploy_updates_unavailable",
         "The command needs deployment updates, which are not on for this workspace yet: the deployment "
         "carries no `revision`. `comfy deploy promote` and `rollback` need it to move a deployment in place, "
         "`history` needs it to list the releases a deployment ran, and `comfy deploy events --release` needs it, "
-        "since only there does each event say which release made it. "
+        "since only there does each event say which release made it. `comfy deploy cancel` answers it too where "
+        "the deploy service is too old to cancel an update. "
         "`details.deployment_id` names the deployment that was read.",
         "for `events --release`, run it without `--release`; for `history`, read `comfy deploy events`; for "
         "`promote` or `rollback`, run the hint's `comfy deploy up --create --release <id>` to start a separate "
-        "deployment on that release",
+        "deployment on that release; for `cancel`, wait until the update lands or fails",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

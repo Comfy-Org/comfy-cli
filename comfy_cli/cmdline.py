@@ -2262,8 +2262,13 @@ _RootGroup.lazy_subcommands = {
         help="Enable/disable and configure ComfyUI-Manager (lifecycle, not updates).",
     ),
     "pr-cache": LazySubcommand("comfy_cli.command.pr_command", help="Manage PR cache."),
-    "code-search": LazySubcommand("comfy_cli.command.code_search", help="Search code across ComfyUI repositories."),
-    "cs": LazySubcommand("comfy_cli.command.code_search", hidden=True),
+    # code_search.app is a one-command Typer callback, not a command group.
+    # Mounting it as LazySubcommand makes Click expect another command after
+    # the query in an installed CLI even though direct module tests pass.
+    "code-search": LazyCommand(
+        "comfy_cli.command.code_search", attr="code_search", help="Search code across ComfyUI repositories."
+    ),
+    "cs": LazyCommand("comfy_cli.command.code_search", attr="code_search", hidden=True),
     "tracking": LazySubcommand("comfy_cli.tracking", help="Manage analytics tracking settings."),
     "cloud": LazySubcommand("comfy_cli.cloud.command", help="Comfy Cloud — sign in, route commands, inspect session."),
     "auth": LazySubcommand("comfy_cli.auth.command", help="Manage API tokens for model hosts (Civitai, Hugging Face)."),
