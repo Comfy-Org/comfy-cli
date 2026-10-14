@@ -60,7 +60,14 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import frontend_injected_widget_error, is_wildcard_type
+from comfy_cli.cql.engine import (
+    DynamicGroupBindingError,
+    _dynamic_group_widgets,
+    _validate_dynamic_group_layout,
+    _widgets_as_positional,
+    frontend_injected_widget_error,
+    is_wildcard_type,
+)
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -841,6 +848,20 @@ def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
     return int(bound) if bound.lstrip("-").isdigit() else bound
 
 
+def _widget_schema_port(graph, class_type: str, widget: str):
+    m = graph.node(class_type)
+    if m is None:
+        return None
+    port = next((p for p in m.inputs if p.name == widget), None)
+    if port is None:
+        group = next((p for p in m.inputs if p.is_dynamic_group and widget.startswith(f"{p.name}.")), None)
+        if group is not None:
+            row, separator, _field = widget[len(group.name) + 1 :].partition(".")
+            if separator and row.isascii() and row.isdecimal() and (len(row) == 1 or not row.startswith("0")):
+                port = next((p for p in _dynamic_group_widgets(group, f"{group.name}.{row}") if p.name == widget), None)
+    return port
+
+
 def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
     """Rewrite a mangled model/COMBO value to the real option it means so the
     model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
@@ -849,10 +870,7 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     UNAMBIGUOUS match is rewritten; anything else is left untouched so validate's
     ``unknown_enum_value`` (with ``did_you_mean``) still fires.
     """
-    m = graph.node(class_type)
-    if m is None:
-        return value, None
-    port = next((p for p in m.inputs if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
     if port is None:
         return value, None
     text = _string_widget_text(port, value)
@@ -2114,6 +2132,29 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     by_id = {n["id"]: n for n in all_nodes}
     nodes = [n for n in all_nodes if n.get("type") not in UI_ONLY_NODE_TYPES]
     ui_nodes = [n for n in all_nodes if n.get("type") in UI_ONLY_NODE_TYPES]
+    group_entries = {}
+
+    for node in nodes:
+        m = graph.node(node.get("type", ""))
+        if m is None:
+            continue
+        try:
+            entries = _validate_dynamic_group_layout(node, m)
+        except DynamicGroupBindingError as e:
+            raise RecipeError(f"node {node['id']}: {e}") from e
+        if entries is not None:
+            group_names = {p.name for p in m.inputs if p.is_dynamic_group}
+            group_entries[node["id"]] = [e for e in entries if e.owner in group_names]
+        values = node.get("widgets_values")
+        if entries is not None and isinstance(values, dict):
+            missing = [
+                e.name
+                for e in group_entries[node["id"]]
+                if e.port is not None and e.port.raw_spec is not None and e.name not in values
+            ]
+            if missing:
+                # add_node and resize materialize defaults; recipe ops cannot remove a saved field.
+                raise RecipeError(f"node {node['id']}: capture cannot preserve omitted DynamicGroup fields {missing}")
 
     # Validate lift targets up front — no silently-ignored typos.
     for (node_id, widget), _pname in lift.items():
@@ -2126,8 +2167,14 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             )
         # Editable names only: an injected slot (``upload``) owns a position
         # but no value, and apply would refuse it anyway — say so up front.
-        if widget not in graph.editable_widget_names(node.get("type", "")):
+        node_type = node.get("type", "")
+        values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
+        if widget not in graph.editable_widget_names(node_type, values):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
+        saved_values = node.get("widgets_values")
+        if isinstance(saved_values, dict) and widget not in saved_values:
+            if any(e.name == widget for e in group_entries.get(node_id, [])):
+                raise RecipeError(f"--param target {node_id}.{widget!r}: no saved DynamicGroup value to lift")
 
     warnings: list[dict] = []
     for n in ui_nodes:
@@ -2264,10 +2311,19 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         ops.append(add)
         from comfy_cli.cql import engine as _engine
 
-        widgets = _engine._widgets_as_positional(n.get("widgets_values"), graph, class_type)
+        saved_values = n.get("widgets_values")
+        widgets = _engine._widgets_as_positional(saved_values, graph, class_type)
         order = graph.widget_order_for_node(class_type, widgets)
+        group_widgets = {e.name for e in group_entries.get(n["id"], [])}
         defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
+            if (
+                wname in group_widgets
+                and isinstance(saved_values, dict)
+                and wname not in saved_values
+                and (str(n["id"]), wname) not in prim_feeds
+            ):
+                continue
             if i >= len(widgets) and (str(n["id"]), wname) not in prim_feeds:
                 continue
             pname = lift.get((n["id"], wname))
@@ -2303,8 +2359,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
 def _widget_param_type(graph, class_type: str, widget: str) -> str:
     """Recipe param type for a widget, from its schema port type."""
-    m = graph.node(class_type)
-    port = next((p for p in (m.inputs if m else []) if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
     t = (port.type if port else "").upper()
     if t == "INT":
         return "int"
@@ -3297,10 +3352,9 @@ class FatalFindingError(ValueError):
 def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
-    m = graph.node(class_type)
-    if m is None:
-        return []
-    port = next((p for p in m.inputs if p.name == widget), None)
+    from comfy_cli.cql.engine import SEVERITY_ERROR
+
+    port = _widget_schema_port(graph, class_type, widget)
     if port is None:
         return []
     err = port.validate_shape(value)
@@ -3311,8 +3365,6 @@ def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[di
     # already refused these (`Graph._validate_catalog_value` puts them in
     # `errors`); the edit path was the last surface still writing them and
     # returning ok:true.
-    from comfy_cli.cql.engine import SEVERITY_ERROR
-
     fatal = next((f for f in findings if f.get("severity") == SEVERITY_ERROR), None)
     if fatal is not None:
         raise FatalFindingError(fatal)
@@ -3459,6 +3511,10 @@ def _resolve_input_target(
       the API converter reads the link and skips the widget by name.
     """
     ins = node.get("inputs") or []
+    if graph is not None:
+        m = graph.node(node.get("type", ""))
+        if m is not None:
+            _validate_dynamic_group_layout(node, m)
     # Promoted subgraph input (``57.width``): the definition declares it, so it
     # is a link input on the instance even before the instance carries an
     # ``inputs[]`` entry for it — the frontend rebuilds those from the

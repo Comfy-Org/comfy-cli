@@ -825,6 +825,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-run once the server/session is reachable to get a fresh schema",
     ),
     ErrorCode(
+        "dynamic_group_unsupported",
+        "A node class has a DynamicGroup schema this CLI does not support, so `comfy nodes widget-catalog` "
+        "left it out of `types`. Consumers store that class's values opaquely and refuse widget writes to it. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) so every other class is still published.",
+        "update comfy-cli, or leave the class's widgets unedited",
+    ),
+    ErrorCode(
         "description_ignored",
         "`comfy workflow save --where local --description` was given a description, but the local "
         "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "

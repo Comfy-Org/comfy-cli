@@ -34,6 +34,7 @@ elsewhere in the package.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
 # store. Testing-only path; the canonical sign-in is OAuth.
 # (Re-exported by ``comfy_cli.target`` for back-compat.)
 CLOUD_API_KEY_PROVIDER = "comfy-cloud-api-key"
+
+_log = logging.getLogger(__name__)
 
 # Env var carrying a pre-obtained Comfy Cloud Bearer token (a Firebase/Cloud
 # JWT). Unlike ``COMFY_CLOUD_API_KEY`` (sent as ``X-API-Key``), this is sent as
@@ -101,7 +104,7 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     return auth_store.get_cloud_session()
 
 
-def refreshed_access_token(rejected: str | None) -> str | None:
+def refreshed_access_token(rejected: str | None, *, allow_clear: bool = True) -> str | None:
     """Force the shared refresh after a server 401, and return the new access token.
 
     Returns ``None`` when the refresh produced no token or the same one the
@@ -109,10 +112,84 @@ def refreshed_access_token(rejected: str | None) -> str | None:
     token already known to fail. A fatal refresh clears the stored session, and
     the 401 then carries the usual sign-in guidance.
     """
-    session = get_session(refresh=True, force=True)
+    session = get_session(refresh=True, force=True, allow_clear=allow_clear)
     if session is None or not session.access_token or session.access_token == rejected:
         return None
     return session.access_token
+
+
+class DataPlaneToken:
+    """The bearer one long command sends to a deployment endpoint, kept fresh.
+
+    The sign-in's access token lasts fifteen minutes. A command that read it once
+    and sent it for a whole job (`comfy deploy run --wait`) was refused by the
+    deployment as soon as the token it started with expired, though the job
+    itself ran on: whichever run was in flight at each expiry lost its result.
+
+    ``current`` re-reads the stored sign-in before each request, refreshing it
+    when it is within a minute of expiring; ``after_rejection`` forces the shared
+    refresh after a 401. A workspace API key, or a token handed to the client
+    directly, does not expire here and is sent unchanged (``refreshes=False``).
+    """
+
+    def __init__(self, value: str, *, refreshes: bool, base_url: str | None = None, allow_clear: bool = True) -> None:
+        self._value = value
+        self._refreshes = refreshes
+        # A sign-in to another environment, made while this command runs, is
+        # never picked up in its place.
+        self._base_url = base_url
+        self._allow_clear = allow_clear
+
+    @classmethod
+    def for_target_token(cls, value: str, *, base_url: str, allow_clear: bool) -> DataPlaneToken:
+        """Refresh ``value`` only if it is the stored sign-in's token.
+
+        A Target does not say where its token came from, and a token injected
+        through :data:`CLOUD_BEARER_ENV_VAR` must be sent unchanged even with a
+        sign-in stored beside it.
+        """
+        stored = get_session(refresh=False)
+        is_sign_in = stored is not None and stored.access_token == value and stored.base_url == base_url
+        return cls(value, refreshes=is_sign_in, base_url=base_url, allow_clear=allow_clear)
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return f"DataPlaneToken(value=***, refreshes={self._refreshes!r})"
+
+    def _same_environment(self, session: CloudSession | None) -> bool:
+        return session is not None and (self._base_url is None or session.base_url == self._base_url)
+
+    def current(self) -> str:
+        """The token to send now; the one already held when the store cannot be read or written."""
+        if not self._refreshes:
+            return self._value
+        try:
+            # The environment is checked before refreshing, so a sign-in another
+            # shell stored elsewhere is never spent (or cleared) on this command's behalf.
+            if self._same_environment(get_session(refresh=False)):
+                session = get_session(refresh=True, allow_clear=self._allow_clear)
+                if session is not None and session.access_token and self._same_environment(session):
+                    self._value = session.access_token
+        except OSError as error:
+            # A job already running must not be abandoned over the sign-in store:
+            # the token held may still be accepted, and a 401 reports itself.
+            _log.warning("could not re-read the stored sign-in; keeping the current token: %s", error)
+        return self._value
+
+    def after_rejection(self) -> bool:
+        """Swap in a refreshed token after a 401; ``False`` when there is none to retry with."""
+        if not self._refreshes:
+            return False
+        try:
+            if not self._same_environment(get_session(refresh=False)):
+                return False
+            token = refreshed_access_token(self._value, allow_clear=self._allow_clear)
+        except OSError as error:
+            _log.warning("could not refresh the stored sign-in after a 401: %s", error)
+            return False
+        if token is None:
+            return False
+        self._value = token
+        return True
 
 
 def find_api_key(*, purpose: Purpose) -> Credential | None:
