@@ -36,7 +36,7 @@ import typer
 from rich.progress import BarColumn, Progress, TimeElapsedColumn
 from rich.table import Column, Table
 
-from comfy_cli import execution_errors
+from comfy_cli import execution_errors, jobs_state
 from comfy_cli.caller import usage_source
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
 from comfy_cli.http import no_redirect_urlopen
@@ -128,12 +128,22 @@ class WorkflowExecution:
         *,
         extra_data: dict | None = None,
         api_key: str | None = None,
+        client_id: str | None = None,
     ):
         self.workflow = workflow
         self.host = host
         self.port = port
         self.verbose = verbose
-        self.client_id = str(uuid.uuid4())
+        # ComfyUI's /ws handler pops any socket already registered under an
+        # incoming clientId, so opening one with a BORROWED id would evict the
+        # client we are submitting on behalf of. Callers gate on this flag.
+        # cmdline.run already rejects a blank --client-id, but this class is a
+        # reusable surface a programmatic caller can construct directly without
+        # going through that validation, so strip here too rather than trust
+        # the caller — a whitespace-only id must not look like a real one.
+        client_id = client_id.strip() if isinstance(client_id, str) else client_id
+        self.borrowed_client_id = bool(client_id)
+        self.client_id = client_id or str(uuid.uuid4())
         self.outputs: list = []
         # Node-keyed companion to the flat `outputs` URLs — one
         # {"node_id", "url", "filename", "type"} entry per recorded URL, in
@@ -177,6 +187,11 @@ class WorkflowExecution:
         self.last_error: dict | None = None
 
     def connect(self):
+        if self.borrowed_client_id:
+            raise RuntimeError(
+                f"refusing to open a websocket as borrowed clientId {self.client_id!r}: "
+                "it would evict the client this run submits on behalf of"
+            )
         # Resolve via the package namespace so tests can patch
         # ``comfy_cli.command.run.WebSocket`` and have it take effect here.
         from comfy_cli.command import run as _run_pkg
@@ -208,6 +223,16 @@ class WorkflowExecution:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:
             data["extra_data"]["api_key_comfy_org"] = self.api_key
+        # This is a safety property, not caller metadata: keep it authoritative
+        # in both directions, not just when setting it. A caller-supplied
+        # extra_data that happens to carry this key (forwarded from another
+        # prompt, or any other source) must not survive into a genuinely
+        # non-borrowed submission -- that would mark every future watcher of
+        # this prompt poll-only for a run that was never borrowed.
+        if self.borrowed_client_id:
+            data["extra_data"][jobs_state.BORROWED_CLIENT_ID_KEY] = True
+        else:
+            data["extra_data"].pop(jobs_state.BORROWED_CLIENT_ID_KEY, None)
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:
