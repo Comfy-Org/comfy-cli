@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1288,7 +1289,7 @@ def test_group_row_replacement_refuses_an_earlier_write_to_the_group_in_its_batc
         {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
     ]
 
-    with pytest.raises(ValueError, match="this batch already writes loras"):
+    with pytest.raises(ValueError, match=r"loras(\.0\.strength)? is already written at base_version 0 by cli"):
         workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
 
 
@@ -1298,3 +1299,31 @@ def test_group_row_replacement_counts_pinned_rows_against_the_maximum():
 
     with pytest.raises(ValueError, match=r"3 row\(s\) plus 1 connected or promoted row\(s\) exceed the maximum of 3"):
         _replace_rows(workflow, [{"lora_name": "A.safetensors"}] * 3)
+
+
+@pytest.mark.parametrize(("widget", "value"), [("loras", 1), ("loras.0.strength", 0.2)])
+def test_group_row_replacement_refuses_a_later_write_to_the_group_in_its_batch(widget, value):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+        {"op": "set_widget", "node": 1, "widget": "before", "value": "kept"},
+        {"op": "set_widget", "node": 1, "widget": widget, "value": value},
+    ]
+
+    with pytest.raises(ValueError, match=rf"spec #2: {re.escape(widget)} was replaced earlier in this batch"):
+        workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
+
+
+def test_group_row_replacement_writes_a_recreated_row_on_the_interior_despite_a_stale_promotion():
+    workflow = _group_in_subgraph({"proxyWidgets": [["1", "loras.2.strength"]]})
+    rows = [
+        {"lora_name": "A.safetensors"},
+        {"lora_name": "B.safetensors"},
+        {"lora_name": "C.safetensors", "strength": 0.4},
+    ]
+
+    edited, ops, _ = _replace_rows(workflow, rows, node="9/1")
+
+    assert all(op.get("path") == ["9", "1"] and "promoted" not in op for op in ops)
+    assert edited["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][8:10] == ["C.safetensors", 0.4]
+    assert edited["nodes"][0]["inputs"] == []
