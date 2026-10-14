@@ -11,6 +11,16 @@ from comfy_cli.cql.widget_catalog import build_catalog
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "dynamic_group.json").read_text())
 
 
+def _catalog_refusal(graph):
+    """Build the catalog, check the refused class was left out and the rest kept, and raise its warning."""
+    catalog = build_catalog(graph)
+    warnings = catalog.get("warnings", [])
+    left_out = {w["message"].split(" left out: ")[0] for w in warnings}
+    assert left_out and not left_out & set(catalog["types"])
+    assert set(catalog["types"]) == {m.id for m in graph.all_nodes()} - left_out
+    raise ValueError("; ".join(w["message"] for w in warnings))
+
+
 def test_named_group_reads_keep_an_omitted_combo_selector_default():
     info = copy.deepcopy(FIXTURE["object_info"])
     info["CompositeDynamicGroup"]["input"]["required"]["mode"][1]["default"] = "advanced"
@@ -156,7 +166,7 @@ def test_group_default_input_refuses_before_binding(target, operation):
 
     with pytest.raises(error_type, match="DynamicGroup"):
         if operation == "catalog":
-            build_catalog(graph)
+            _catalog_refusal(graph)
         elif operation == "conversion":
             workflow_to_api.convert_ui_to_api(workflow, info)
         elif operation == "edit":
@@ -173,7 +183,7 @@ def test_group_refuses_non_boolean_seed_control_flag(flag):
     fields["strength"][1]["control_after_generate"] = flag
 
     with pytest.raises(ValueError, match="control_after_generate"):
-        build_catalog(Graph.from_object_info(info))
+        _catalog_refusal(Graph.from_object_info(info))
 
 
 @pytest.mark.parametrize("shape", ["missing", "null"])
@@ -466,7 +476,7 @@ def test_dynamic_group_generated_name_collision_is_refused(operation):
         elif operation == "edit":
             workflow_ops.set_widget(workflow, graph, 1, "loras.0.strength", 0.9)
         else:
-            build_catalog(graph)
+            _catalog_refusal(graph)
     assert workflow_ops.canonical(workflow) == workflow_ops.canonical(original)
 
 
@@ -602,7 +612,7 @@ def test_unknown_dynamic_group_schema_version_is_refused(operation):
         elif operation == "edit":
             workflow_ops.set_widget(workflow, graph, 1, "before", "changed")
         else:
-            build_catalog(graph)
+            _catalog_refusal(graph)
 
 
 def test_matching_explicit_form_remains_valid_after_standalone_resize():
@@ -944,7 +954,7 @@ def test_group_rejects_unsupported_template_fields(field_spec, operation):
 
     with pytest.raises(error_type, match="template"):
         if operation == "catalog":
-            build_catalog(Graph.from_object_info(info))
+            _catalog_refusal(Graph.from_object_info(info))
         else:
             workflow_to_api.convert_ui_to_api(FIXTURE["cases"]["empty"]["workflow"], info)
 
@@ -979,7 +989,7 @@ def test_group_inside_dynamic_combo_is_explicitly_unsupported_by_cli(operation, 
     error_type = ValueError if operation == "catalog" else workflow_to_api.WorkflowConversionError
     with pytest.raises(error_type, match="CLI.*DynamicCombo"):
         if operation == "catalog":
-            build_catalog(Graph.from_object_info(info))
+            _catalog_refusal(Graph.from_object_info(info))
         else:
             workflow_to_api.convert_ui_to_api(workflow, info)
 
@@ -1026,7 +1036,7 @@ def test_group_refuses_unsupported_controller_and_generated_companion_collision(
             "required": {"seed": ["INT", {"control_after_generate": True}], "seed.0": ["STRING", {}]}
         }
     with pytest.raises(ValueError, match="DynamicGroup"):
-        build_catalog(Graph.from_object_info(info))
+        _catalog_refusal(Graph.from_object_info(info))
 
 
 @pytest.mark.parametrize(

@@ -80,7 +80,7 @@
     "warnings": {
       "type": "array",
       "items": { "type": "object" },
-      "description": "Non-fatal advisories; carries the 'object_info_stale' entry when stale is true."
+      "description": "Non-fatal advisories; carries the 'object_info_stale' entry when stale is true, and one 'dynamic_group_unsupported' entry per class left out of types because its DynamicGroup schema is not supported."
     }
   },
   "required": ["catalog_version", "class_count", "types"]
