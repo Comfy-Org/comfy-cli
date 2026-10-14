@@ -10,6 +10,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli.builder_api import BuilderAuthError
+from comfy_cli.command import deploy_cancel as _deploy_cancel
 from comfy_cli.command import deploy_lifecycle as _deploy_lifecycle
 from comfy_cli.command import deploy_ls as _deploy_ls
 from comfy_cli.command import deploy_read as _deploy_read
@@ -32,7 +33,7 @@ from comfy_cli.command.deploy_runtime import render_spec_error as _render_spec_e
 from comfy_cli.command.deploy_runtime import resolved_up_request as _resolved_up_request
 from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_status import run_status as _run_status
-from comfy_cli.command.deploy_types import ComputeRequiredError, MoveResult, move_settled
+from comfy_cli.command.deploy_types import ComputeRequiredError, MoveResult, move_settled, watched_move
 from comfy_cli.command.deploy_types import UpRequest as UpRequest
 from comfy_cli.command.deploy_types import (
     required_string as _required_string,
@@ -42,6 +43,8 @@ from comfy_cli.command.deploy_up import (
 )
 from comfy_cli.command.deploy_up import (
     MoveFailedError,
+    MoveOutcomes,
+    MoveReplacedError,
     _render_result,
     ends_terminal,
     estimate_line,
@@ -50,6 +53,8 @@ from comfy_cli.command.deploy_up import (
     move_line,
     move_text,
     reconcile_up,
+    release_or_id,
+    replaced_message,
     warn_status,
 )
 from comfy_cli.command.deploy_up import (
@@ -243,10 +248,11 @@ def status_cmd(
     _run_status(path, deployment_id=deployment_id, watch=watch)
 
 
-def _watch(renderer, client, deployment_id: str, *, moving: str | None, on_abandon) -> JsonObject:
-    """Follow the deployment until it settles, or until the move onto release ``moving`` does."""
+def _watch(renderer, client, deployment_id: str, *, outcomes: MoveOutcomes | None, on_abandon) -> JsonObject:
+    """Follow the deployment until it settles, or until the move ``outcomes`` reads does."""
+    moving = outcomes.move.release_id if outcomes is not None else None
     reporter = DeployWatchReporter(renderer, deployment_id)
-    settled = move_settled(moving) if moving is not None else None
+    settled = move_settled(outcomes) if outcomes is not None else None
     limit = MOVE_WATCH_SECONDS if moving is not None else None
     try:
         return _poll_deployment(
@@ -280,6 +286,22 @@ def _render_move_failed(renderer, error: MoveFailedError) -> NoReturn:
             "release_id": error.release["id"],
             "serving_release_id": error.serving_release_id,
             "status": error.status,
+        },
+    )
+    raise typer.Exit(code=1) from error
+
+
+def _render_move_replaced(renderer, builder, error: MoveReplacedError) -> NoReturn:
+    replacing_id = error.replacing_release_id
+    replacing = release_or_id(builder, replacing_id) if isinstance(replacing_id, str) else {"id": replacing_id}
+    renderer.error(
+        code="deploy_update_replaced",
+        message=replaced_message(error.deployment_id, error.release, replacing),
+        hint=f"run `comfy deploy status --deployment {error.deployment_id}` to see the update that replaced it",
+        details={
+            "deployment_id": error.deployment_id,
+            "release_id": error.release["id"],
+            "replacing_release_id": replacing_id,
         },
     )
     raise typer.Exit(code=1) from error
@@ -398,14 +420,10 @@ def up_cmd(
                 if last is not None:
                     _render_result(renderer, replace(result, deployment=last, pending_bounds=None), watch=False)
 
-            watched = _watch(
-                renderer,
-                client,
-                watched_id,
-                moving=_required_string(result.release, "id") if moving else None,
-                on_abandon=abandoned,
-            )
-            result = finish_move(client, result, watched) if moving else replace(result, deployment=watched)
+            move = watched_move(result.release, result.previous_release, result.deployment) if moving else None
+            outcomes = MoveOutcomes(client, watched_id, move) if move is not None else None
+            watched = _watch(renderer, client, watched_id, outcomes=outcomes, on_abandon=abandoned)
+            result = finish_move(client, result, watched, outcomes) if outcomes else replace(result, deployment=watched)
         _render_result(renderer, result, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         _render_spec_error(renderer, error)
@@ -415,6 +433,8 @@ def up_cmd(
         raise typer.Exit(code=1) from error
     except MoveFailedError as error:
         _render_move_failed(renderer, error)
+    except MoveReplacedError as error:
+        _render_move_replaced(renderer, builder, error)
     except DeployAPIError as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
@@ -466,6 +486,12 @@ def rollback_cmd(
     _run_move(lambda builder, client: _deploy_rollback.rollback(builder, client, request), "rollback", watch)
 
 
+@app.command("cancel", help="End the update a deployment waits on; it keeps serving the release it serves.")
+@tracking.track_command("deploy")
+def cancel_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_cancel.run_cancel(_deploy_cancel.CancelRequest(path, deployment_id))
+
+
 @app.command("rename", help="Give a deployment a new name, keeping its id and URL.")
 @tracking.track_command("deploy")
 def rename_cmd(
@@ -506,9 +532,11 @@ def _run_move(start: Callable[..., MoveResult], command: str, watch: bool) -> No
                     _render_move(renderer, replace(result, deployment=last), command=command, watch=False)
 
             deployment_id = _required_string(result.deployment, "id")
-            moving = _required_string(result.release, "id")
-            watched = _watch(renderer, client, deployment_id, moving=moving, on_abandon=abandoned)
-            result = landed_result(result, watched)
+            outcomes = MoveOutcomes(
+                client, deployment_id, watched_move(result.release, result.previous_release, result.deployment)
+            )
+            watched = _watch(renderer, client, deployment_id, outcomes=outcomes, on_abandon=abandoned)
+            result = landed_result(result, watched, outcomes)
         _render_move(renderer, result, command=command, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         _render_spec_error(renderer, error)
@@ -518,6 +546,8 @@ def _run_move(start: Callable[..., MoveResult], command: str, watch: bool) -> No
         raise typer.Exit(code=1) from error
     except MoveFailedError as error:
         _render_move_failed(renderer, error)
+    except MoveReplacedError as error:
+        _render_move_replaced(renderer, builder, error)
     except DeployAPIError as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error

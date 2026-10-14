@@ -9,6 +9,7 @@ from typing import Final
 
 import typer
 
+from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import (
     BuilderReleaseClient,
@@ -29,9 +30,11 @@ from comfy_cli.command.deploy_types import (
     MoveResult,
     UpRequest,
     UpResult,
+    WatchedMove,
     deployment_label,
     deployment_name,
     release_label,
+    watched_move,
 )
 from comfy_cli.command.deploy_types import compute_config as _compute_config
 from comfy_cli.command.deploy_types import move_changed as _move_changed
@@ -40,6 +43,7 @@ from comfy_cli.command.deploy_types import optional_revision as _optional_revisi
 from comfy_cli.command.deploy_types import release_summary as _release_summary
 from comfy_cli.command.deploy_types import required_int as _required_int
 from comfy_cli.command.deploy_types import required_string as _required_string
+from comfy_cli.command.deploy_types import revision_release as _revision_release
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 
@@ -307,9 +311,11 @@ def _dropped_bounds(request: UpRequest, compute: JsonObject) -> tuple[str, ...]:
 class MoveFailedError(Exception):
     """A move `up` followed did not land; the deployment serves ``serving_release_id``."""
 
+    outcome = "failed"
+
     def __init__(self, deployment_id: str, release: JsonObject, serving: JsonObject, status: object) -> None:
         super().__init__(
-            f"the update of deployment {deployment_id} to {release_label(release)} failed; "
+            f"the update of deployment {deployment_id} to {release_label(release)} {self.outcome}; "
             f"it still serves {release_label(serving)}"
         )
         self.deployment_id = deployment_id
@@ -318,18 +324,81 @@ class MoveFailedError(Exception):
         self.status = status
 
 
-def raise_unless_landed(watched: JsonObject, release: JsonObject, previous: JsonObject) -> None:
-    """Raise MoveFailedError unless the watched move onto ``release`` landed."""
-    if _move_outcome(watched, _required_string(release, "id")) == "landed":
+class MoveEndedError(MoveFailedError):
+    """A move `up` followed ended with nothing failed: cancelled, dropped, or a move back ended it."""
+
+    outcome = "ended before it landed"
+
+
+class MoveReplacedError(Exception):
+    """A newer update replaced the move `up` followed; ``replacing_release_id`` is the release it moves to."""
+
+    def __init__(self, deployment_id: str, release: JsonObject, replacing_release_id: object) -> None:
+        super().__init__(replaced_message(deployment_id, release, {"id": replacing_release_id}))
+        self.deployment_id = deployment_id
+        self.release = release
+        self.replacing_release_id = replacing_release_id
+
+
+def replaced_message(deployment_id: str, release: JsonObject, replacing: JsonObject) -> str:
+    """What a replaced move says: the release it moved to and the one replacing it."""
+    return (
+        f"the update of deployment {deployment_id} to {release_label(release)} "
+        f"was replaced by an update to {release_label(replacing)}"
+    )
+
+
+class MoveOutcomes:
+    """Each read's outcome for one watched move.
+
+    Where a read shows the deployment gone past the revision the move would
+    make, it reads the deployment's history for the release at that
+    revision, which stays put once there, and keeps it.
+    """
+
+    def __init__(self, client: DeployUpClient, deployment_id: str, move: WatchedMove) -> None:
+        self.client = client
+        self.deployment_id = deployment_id
+        self.move = move
+        self.after_base: str | None = None
+
+    def __call__(self, snapshot: JsonObject) -> str | None:
+        outcome = _move_outcome(snapshot, self.move, self.after_base)
+        if outcome != "past" or self.move.base is None:
+            return outcome
+        try:
+            revisions = self.client.get_deployment_revisions(self.deployment_id).get("items")
+        except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException):
+            # A dropped connection included, as the estimate's read takes it.
+            # The next read asks again; a watch that never gets an answer
+            # ends as a lost watch, never as a landed move.
+            return outcome
+        self.after_base = _revision_release(revisions, self.move.base + 1)
+        return _move_outcome(snapshot, self.move, self.after_base)
+
+
+def raise_unless_landed(watched: JsonObject, release: JsonObject, previous: JsonObject, outcomes: MoveOutcomes) -> None:
+    """Raise MoveFailedError, or MoveReplacedError, unless the watched move onto ``release`` landed."""
+    deployment_id = _required_string(watched, "id")
+    outcome = outcomes(watched)
+    if outcome == "landed":
         return
+    pending = watched.get("pendingUpdate")
     serving_id = watched.get("releaseId")
+    if outcome == "replaced":
+        if outcomes.after_base is not None:
+            replacing = outcomes.after_base
+        else:
+            replacing = pending.get("releaseId") if isinstance(pending, dict) else serving_id
+        raise MoveReplacedError(deployment_id, release, replacing)
     serving = previous if serving_id == previous.get("id") else {"id": serving_id}
-    raise MoveFailedError(_required_string(watched, "id"), release, serving, watched.get("status"))
+    failed = MoveEndedError if outcome == "dropped" else MoveFailedError
+    raise failed(deployment_id, release, serving, watched.get("status"))
 
 
-def landed_result(result: MoveResult, watched: JsonObject) -> MoveResult:
+def landed_result(result: MoveResult, watched: JsonObject, outcomes: MoveOutcomes) -> MoveResult:
     """The watched promote or rollback, once the move it followed landed."""
-    raise_unless_landed(watched, result.release, result.previous_release)
+    raise_unless_landed(watched, result.release, result.previous_release, outcomes)
     return replace(result, deployment=watched)
 
 
@@ -340,7 +409,7 @@ def release_or_id(builder: BuilderReleaseClient, release_id: str) -> JsonObject:
     """
     try:
         return _release_summary(builder.get_release(release_id))
-    except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+    except (BuilderAuthError, DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
         return {"id": release_id}
 
 
@@ -473,17 +542,20 @@ def _move(
     )
     # The service answers at the same revision when the deployment already
     # serves the release, so there is nothing to wait for before the bounds.
-    return result if changed else finish_move(client, result, moved)
+    if changed:
+        return result
+    move = watched_move(result.release, result.previous_release, moved)
+    return finish_move(client, result, moved, MoveOutcomes(client, deployment_id, move))
 
 
-def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject) -> UpResult:
+def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, outcomes: MoveOutcomes) -> UpResult:
     """Confirm the move landed, then apply the bounds it could not carry.
 
     The move has landed by the time the bounds go, so a refused bounds edit is
     reported as bounds that had no effect rather than as a failed `up`.
     """
     deployment_id = _required_string(watched, "id")
-    raise_unless_landed(watched, result.release, result.previous_release or {})
+    raise_unless_landed(watched, result.release, result.previous_release or {}, outcomes)
     bounds = result.pending_bounds
     result = replace(result, deployment=watched, pending_bounds=None)
     if bounds is None:

@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
+  deployment waits on and keeps it serving the release it served; `--json`
+  names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
+  with `changed: false`. A watching `up`, `promote` or `rollback` whose update
+  a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
+  release, rather than reading as failed.
 - `comfy deploy up --create --name staging` names the deployment it creates,
   and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
   A name outside comfy-deploy's rule is refused before any call
@@ -79,6 +85,11 @@ history.
   (also on `nodes search --expand-top`) list a long option list in full.
 
 ### Changed
+
+- **Breaking:** a watching `comfy deploy up`, `promote` or `rollback` that
+  another change overtook, onto a third release, now exits 1 with `deploy_update_replaced`
+  and `details.replacing_release_id`, where it exited `deploy_update_failed`
+  with `details.serving_release_id`.
 
 - Inside the rollout of deployment updates, `comfy deploy up` refuses a Build
   with two or more running deployments until `--deployment` names one, and

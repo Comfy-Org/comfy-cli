@@ -1,6 +1,6 @@
 ---
 name: comfy-deploy
-description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / rollback / history / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
+description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / rollback / history / cancel / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
 ---
 
 # comfy-deploy
@@ -42,6 +42,7 @@ promote Move TARGET onto the release SOURCE serves, keeping its URL.      SPENDS
 rollback Move a deployment back to an earlier release, keeping its URL.  SPENDS
 rename  Give a deployment a new name, keeping its id and URL.
 history The releases a deployment ran, newest first, and what moved it.
+cancel  End the update a deployment waits on; it keeps its release.
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
 scale   Edit worker bounds, or GPU/region on a stopped deployment.
@@ -82,6 +83,10 @@ one depends on the workspace.** The output says which: a deployment that carries
   and status, until `--deployment <name>` names one;
   `--create` adds a separate deployment instead. If the new release fails to come
   up, `up` exits 1 with `deploy_update_failed` and the old release still serves.
+  On a deploy service that lets a newer update replace a waiting one, a newer
+  `up`, `promote` or `rollback` while one waits replaces it: the watch of the
+  first exits 1 with `deploy_update_replaced`, naming the newer release. An
+  older service refuses the newer move while one waits.
 - **Updates off:** a deployment is matched by release id, so cutting a new
   release and running `up` again does **not** move the existing deployment
   forward. It creates a **second** deployment, and the first keeps running and
@@ -248,7 +253,8 @@ comfy deploy promote SOURCE TARGET [--no-watch]
 - **It needs deployment updates on.** Without them it refuses with
   `deploy_updates_unavailable`; use `comfy deploy up --create` instead.
 - **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
-  when the new release does not come up, and TARGET still serves its old one.
+  when the new release does not come up, and TARGET still serves its old one,
+  or with `deploy_update_replaced` when a newer update replaced it.
 
 ## `comfy deploy rollback` and `comfy deploy history`
 
@@ -268,11 +274,33 @@ comfy deploy history [PATH] [--deployment <name|id>]
   the Build's only running one, refusing two with
   `deploy_ambiguous_deployment`.
 - **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
-  when the earlier release does not come back up.
+  when the earlier release does not come back up, or with
+  `deploy_update_replaced` when a newer update replaced it.
 - **`history` lists each revision newest first**, the current one marked `*`:
   its release version, what made it (`create`, `update`, `rollback`), who and
   when. Run it before `rollback --to` to see what is there to return to.
 - **Both need deployment updates on** (`deploy_updates_unavailable` otherwise).
+
+## `comfy deploy cancel`
+
+```shell
+comfy deploy cancel [PATH] [--deployment <name|id>]
+```
+
+- **It ends the update a deployment waits on**, an `up`, `promote` or
+  `rollback` whose release is still coming up, and stops that copy. The
+  deployment keeps serving the release it served, at the same revision.
+- **It names what it ended:** `--json` carries `cancelledUpdate`, the release
+  that update moved to, its `baseRevision` and `kind`. That is whichever update
+  waited when the service took the cancel, which can be a newer one than you
+  saw, so read it rather than assuming.
+- **Nothing waiting is not an error:** it exits 0 with `changed: false` and
+  `cancelledUpdate: null`, as a second cancel does.
+- **It picks the deployment as `rollback` does.** A deploy service too old for
+  cancel refuses with `deploy_updates_unavailable`; wait for the update to land
+  or fail instead.
+- **A cancelled move back to a kept release leaves that release as it was:**
+  one you stopped stays stopped and yours, and one on its way out still goes.
 
 ## `comfy deploy run`
 

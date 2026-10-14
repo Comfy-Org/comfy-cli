@@ -91,6 +91,13 @@ WIRES = [
         args=("dep-1", "canary"),
         body={"name": "canary"},
     ),
+    Wire(
+        "cancel",
+        "cancel_pending_update",
+        "DELETE",
+        f"{BASE}/v1/deployments/dep-1/pending-update",
+        args=("dep-1",),
+    ),
     Wire("revisions", "get_deployment_revisions", "GET", f"{BASE}/v1/deployments/dep-1/revisions", args=("dep-1",)),
     Wire("delete", "delete_deployment", "DELETE", f"{BASE}/v1/deployments/dep-1", args=("dep-1",)),
     Wire("start", "start_deployment", "POST", f"{BASE}/v1/deployments/dep-1/start", args=("dep-1",)),

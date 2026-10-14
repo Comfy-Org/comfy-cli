@@ -272,6 +272,17 @@ class DeployClient:
             body["toRevision"] = to_revision
         return self._post("move", ("deployments", deployment_id, "rollback"), body)
 
+    def cancel_pending_update(self, deployment_id: str) -> dict:
+        """End the update the deployment waits on; it keeps serving its release, at the same revision.
+
+        The reply is the deployment, with ``cancelledUpdate`` naming the update
+        it ended. Where nothing waits, the service answers 409
+        NO_PENDING_UPDATE and nothing changes.
+        """
+        return self._request(
+            _Request(operation="cancel", parts=("deployments", deployment_id, "pending-update"), method="DELETE")
+        )
+
     def get_deployment_revisions(self, deployment_id: str) -> dict:
         """GET /v1/deployments/{id}/revisions: every revision, oldest first."""
         return self._get("revisions", ("deployments", deployment_id, "revisions"))
