@@ -553,13 +553,26 @@ def _append_unique(index: dict[str, list[str]], key: str, model_id: str) -> None
 
 def _heading_section(content: str, heading: str) -> str | None:
     """Return one Markdown section named by producer slice metadata."""
-    match = re.search(rf"(?m)^(?P<marks>#+)\s+{re.escape(heading)}\s*$", content)
-    if match is None:
-        return None
-    level = len(match.group("marks"))
-    end_match = re.search(rf"(?m)^#{{1,{level}}}\s+", content[match.end() :])
-    end = len(content) if end_match is None else match.end() + end_match.start()
-    return content[match.start() : end].rstrip() + "\n"
+    lines = content.splitlines(keepends=True)
+    heading_pattern = re.compile(r"^(?P<marks>#+)\s+(?P<title>.*?)\s*$")
+    fence_pattern = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<tail>.*)$")
+    start = level = None
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        fence_match = fence_pattern.match(line)
+        if fence_match:
+            marker = fence_match.group("marker")
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1] and not fence_match.group("tail").strip():
+                fence = None
+            continue
+        match = heading_pattern.match(line) if fence is None else None
+        if match and start is None and match.group("title") == heading:
+            start, level = index, len(match.group("marks"))
+        elif match and start is not None and len(match.group("marks")) <= level:
+            return "".join(lines[start:index]).rstrip() + "\n"
+    return None if start is None else "".join(lines[start:]).rstrip() + "\n"
 
 
 def _utf8_size(value: str) -> int | None:

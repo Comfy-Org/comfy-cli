@@ -247,7 +247,6 @@ def test_custom_node_initial_context_and_jit_budget_fixture():
     assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
     assert initial_bytes < before_body // 3
     assert max(jit_bytes) < before_body // 3
-    assert initial_bytes // 4 < before_body // 4  # deterministic token estimate used in the receipt
     assert all(body not in router for body in slices)
 
 

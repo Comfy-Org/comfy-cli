@@ -846,6 +846,39 @@ class TestCli:
         assert payload["applies_to"] == {"api_generations": ["v3"]}
         _validate(payload)
 
+    def test_authoring_ignores_heading_lines_inside_fenced_code(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": (
+                    "```markdown\n## API only\nDECOY REQUESTED HEADING\n```\n\n"
+                    "## API only\n\nCANONICAL START\n\n"
+                    "~~~python\n# Not a boundary\n## Validation\n~~~\n\n"
+                    "AFTER FENCED HEADING\n\n# Next section\n\nMUST NOT LEAK\n"
+                ),
+                "slices": [
+                    {
+                        "id": "api-only",
+                        "heading": "API only",
+                        "retrieval_classes": ["api-schema"],
+                        "api_generations": ["v3"],
+                    }
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+
+        rc, env = _run(["authoring", "api-schema", "--api-generation", "v3"], capsys)
+
+        assert rc == 0
+        content = env["data"]["content"]
+        assert "CANONICAL START" in content
+        assert "AFTER FENCED HEADING" in content
+        assert "DECOY REQUESTED HEADING" not in content
+        assert "MUST NOT LEAK" not in content
+
     def test_authoring_unavailable_uses_visible_bounded_fallback(self, capsys):
         rc, env = _run(["authoring", "validation"], capsys)
         assert rc == 0
