@@ -1527,6 +1527,13 @@ def _dest_held_by_another(dest: pathlib.Path, download_id: str) -> bool:
     transfer is running — and its payload must name someone other than
     ``download_id``. Anything that cannot be checked reads as not held, which is
     the sweep's behavior from before the claim existed.
+
+    A held lock whose payload is unreadable (``read_claim`` returns ``None``,
+    e.g. Windows' byte-range lock blocking the read, or a rewrite in flight)
+    counts as held by *another*, even if the holder might be ``download_id``
+    itself. That is deliberate: it fails toward leaving the partial in place
+    rather than sweeping a live transfer's file, so do not treat ``None`` as
+    ours.
     """
     claim_file = _dest_claim_path(dest)
     if claim_file is None:
