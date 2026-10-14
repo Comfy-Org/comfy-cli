@@ -2378,9 +2378,37 @@ class TestWorkerReleasesTheClaim:
         assert download_state.read(workspace, first).status == "completed"
         assert _is_lockable(_claim_files(workspace)[0])
 
+        # The user removed the finished file (a present one is refused, as
+        # `download` itself does); what is under test is that the lock came back.
+        dest.unlink()
         _reset_envelope()
         submit()
         assert _claim_owner(workspace) != first
+
+    @pytest.mark.parametrize("hold", [False, True], ids=["background", "foreground"])
+    def test_a_file_that_landed_while_we_waited_is_not_downloaded_again(self, workspace, monkeypatch, tmp_path, hold):
+        """`download` checks `exists()` before the record write, the auth probe
+        and the lock rounds. A competitor that finishes its whole transfer in
+        that window leaves a free lock and a terminal record — a stale payload —
+        so winning the lock is re-checked against the file before we stamp it."""
+        dest = tmp_path / "m.safetensors"
+        rival = _state(dest=str(dest), status="completed")
+        download_state.write(workspace, rival)
+        claim = models._dest_claim_path(dest)
+        lock = download_state.lock_claim(claim)
+        lock.write_payload(rival.id, str(dest))
+        lock.release()
+        dest.write_bytes(b"finished")
+
+        ours = _state(dest=str(dest), status="downloading")
+        download_state.write(workspace, ours)
+        with pytest.raises(typer.Exit):
+            models._acquire_dest_claim(ours, dest, claim, hold=hold)
+
+        assert download_state.read(workspace, ours.id) is None
+        assert download_state.read_claim(claim) == rival.id
+        assert _is_lockable(claim)
+        assert dest.read_bytes() == b"finished"
 
     def test_a_failed_first_state_write_releases_it(self, workspace, monkeypatch, tmp_path):
         """An OSError out of the very first `write_path` — before the transfer
@@ -3177,7 +3205,9 @@ class TestForegroundClaimsItsDestination:
         assert _is_lockable(claim)
         (record,) = download_state.list_all(workspace)
         assert download_state.read_claim(claim) == record.id
-        assert status_at_release[-1] == ("completed" if outcome is None else "failed")
+        # [0], not [-1]: the `_is_lockable` probe above takes and releases the
+        # lock too, after `_download()` returned.
+        assert status_at_release[0] == ("completed" if outcome is None else "failed")
 
     def test_a_running_background_worker_refuses_a_foreground_run(self, workspace, monkeypatch, json_renderer):
         """bg -> fg: a worker holds the claim for its transfer, and that alone
@@ -3262,6 +3292,46 @@ class TestForegroundClaimsItsDestination:
         assert not models._in_spawn_gap(record)
         record.kind = "background"
         assert models._in_spawn_gap(record)
+
+    def test_a_pidless_foreground_record_keeps_its_spawn_gap(self):
+        """A genuine foreground record carries its pid from its first write. A
+        pidless one reading `foreground` is a background submit whose `kind`
+        failed validation and fell back — it keeps the protection, so an
+        unrecognized `kind` still fails toward refusing."""
+        record = _state(status="starting", kind="foreground", pid=None)
+        assert models._in_spawn_gap(record)
+
+    def test_ctrl_c_while_taking_the_lock_withdraws_the_record(self, workspace, monkeypatch):
+        """No transfer ran, so the just-written `downloading` record must not
+        stay behind to show up as a phantom download."""
+        monkeypatch.setattr(models, "_hold_foreground_claim", MagicMock(side_effect=KeyboardInterrupt()))
+        self._transfer(monkeypatch, MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with pytest.raises(KeyboardInterrupt):
+            self._download()
+
+        assert download_state.list_all(workspace) == []
+
+    def test_a_held_claim_whose_payload_would_not_go_down_is_blanked(self, workspace, monkeypatch):
+        """The held lock is still ours, but a payload left naming the stale
+        holder we just judged would make a competitor's refusal point at it."""
+        dest = self._dest(workspace)
+        stale = _state(dest=str(dest), status="failed")
+        download_state.write(workspace, stale)
+        claim = self._claim(workspace)
+        lock = download_state.lock_claim(claim)
+        lock.write_payload(stale.id, str(dest))
+        lock.release()
+        monkeypatch.setattr(download_state.ClaimLock, "write_payload", MagicMock(side_effect=OSError("disk full")))
+
+        ours = _state(dest=str(dest), status="downloading")
+        download_state.write(workspace, ours)
+        held = models._acquire_dest_claim(ours, dest, claim, hold=True)
+        try:
+            assert held is not None and held.held
+            assert held.read_payload() is None
+        finally:
+            held.release()
 
     def test_an_unusable_claims_directory_still_downloads(self, workspace, monkeypatch, json_renderer):
         """Claims are bookkeeping: with no claims directory the foreground run
@@ -3858,6 +3928,41 @@ class TestPollVerbs:
         assert env["ok"] is True
         assert env["data"]["status"] == "cancelled"
         assert not dest.exists()
+
+    @pytest.mark.parametrize("status", ["downloading", "failed"])
+    def test_cancel_of_a_dead_record_leaves_a_successors_transfer_alone(
+        self, workspace, json_renderer, tmp_path, status
+    ):
+        """The claim lock drops with a dead foreground run, so a successor can
+        already be streaming into the same destination. Its partials are not the
+        dead record's to sweep."""
+        dest = tmp_path / "m.safetensors"
+        dest.write_bytes(b"x" * 10)
+        part = tmp_path / "m.safetensors.a1b2c3d4.part"
+        part.write_bytes(b"y" * 10)
+        state = _state(
+            dest=str(dest),
+            status=status,
+            kind="foreground",
+            downloader="aria2",
+            pid=5150,
+            pid_create_time=1.0,
+            total_bytes=100,
+        )
+        download_state.write(workspace, state)
+        successor = download_state.lock_claim(models._dest_claim_path(dest))
+        successor.write_payload("0123456789ab", str(dest))
+
+        try:
+            with patch.object(download_state, "is_worker_process", return_value=False):
+                with patch("comfy_cli.utils.is_running", return_value=False):
+                    models.download_cancel(None, download_id=state.id)
+        finally:
+            successor.release()
+
+        assert json_renderer()["ok"] is True
+        assert dest.exists()
+        assert part.exists()
 
     def test_cancel_still_signals_a_live_background_worker(self, workspace, json_renderer, tmp_path):
         """The guard must key on `kind`, not merely on liveness — an unconditional

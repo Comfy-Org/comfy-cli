@@ -352,8 +352,9 @@ def _parse_claim_payload(raw: bytes | str) -> dict[str, Any] | None:
 def read_claim(path: Path) -> str | None:
     """The ``download_id`` recorded in the claim at ``path``, read *unlocked*.
 
-    Advisory only, and there is exactly one legitimate caller: a submitter that
-    could not take the lock and wants to name the holder in its refusal. It
+    Advisory only, and only for a caller that could not take the lock and wants
+    to know who holds it — a submitter naming the holder in its refusal, or
+    `download-cancel` checking the holder is not the record it is sweeping. It
     cannot be used to decide ownership — the payload it reads may be a rewrite
     in progress (the holder rewrites in place, so there is no atomic publish any
     more), and on Windows a locked byte range makes the read fail outright. Both
