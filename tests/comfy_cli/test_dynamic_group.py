@@ -1370,3 +1370,43 @@ def test_group_row_replacement_names_a_subgraph_input_promotion():
 
     with pytest.raises(ValueError, match=r"loras\.1 is promoted to the parent subgraph; unpromote it first"):
         _replace_rows(workflow, [], node="9/1")
+
+
+def test_group_row_replacement_does_not_retry_a_refused_write_on_an_inserted_copy(monkeypatch):
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    copy_node = copy.deepcopy(workflow["nodes"][0])
+    copy_node["id"] = "insert:op1:root:node:1"
+    workflow["nodes"].append(copy_node)
+    monkeypatch.setattr(workflow_ops, "_inserted_node_id", lambda *_: pytest.fail("retried on the inserted copy"))
+
+    with pytest.raises(ValueError, match="strength"):
+        _replace_rows(workflow, [{"lora_name": "B.safetensors", "strength": 5}])
+
+
+def test_group_row_replacement_refuses_a_recreated_row_that_still_has_a_link():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][3].update(name="LoRA #2 lora_name", link=10)
+    workflow, _ = workflow_ops.set_widget(workflow, graph, 1, "loras", 1)
+    assert workflow["nodes"][0]["inputs"][-1]["link"] == 10
+
+    with pytest.raises(ValueError, match=r"loras\.1 still has a link from an earlier row"):
+        workflow_ops.set_dynamic_group_rows(
+            workflow,
+            graph,
+            1,
+            "loras",
+            [{"lora_name": "A.safetensors"}, {"lora_name": "B.safetensors"}],
+            base_version=1,
+        )
+
+
+def test_group_row_replacement_refuses_an_earlier_write_to_a_dropped_row():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        {"op": "set_widget", "node": 1, "widget": "loras.1.strength", "value": 0.3},
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+    ]
+
+    with pytest.raises(ValueError, match=r"loras\.1\.strength is already written"):
+        workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
