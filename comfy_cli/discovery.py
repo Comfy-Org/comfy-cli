@@ -46,6 +46,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build release manifest": "build_release_manifest",
     "comfy build release delete": "build_release_delete",
     "comfy build validate": "build_validate",
+    "comfy build inventory": "build_inventory",
     "comfy build delete": "build_delete",
     "comfy build update": "build_update",
     "comfy build refs resolve": "build_refs_resolve",

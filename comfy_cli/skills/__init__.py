@@ -49,6 +49,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build", "comfy-build"),
     ("comfy-deploy", "comfy-deploy"),
     ("comfy-custom-nodes", "comfy-custom-nodes"),
+    ("comfy-run-on-cloud", "comfy-run-on-cloud"),
 )
 
 
@@ -72,6 +73,7 @@ REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build-failures", "comfy-build-failures"),
     ("comfy-deploy-failures", "comfy-deploy-failures"),
     ("comfy-agent-permissions", "comfy-agent-permissions"),
+    ("comfy-run-on-cloud-local-install", "comfy-run-on-cloud-local-install"),
 )
 
 

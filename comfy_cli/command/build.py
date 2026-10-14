@@ -3420,6 +3420,168 @@ def validate_cmd(
     renderer.emit(result, command="build validate")
 
 
+_INVENTORY_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _inventory_fetch_json(url: str) -> Any:
+    from comfy_cli.http import plain_urlopen, read_capped
+
+    with plain_urlopen(url, timeout=10) as resp:
+        return json.loads(read_capped(resp, url, max_bytes=_INVENTORY_MAX_BYTES))
+
+
+def _inventory_local_server(report: dict[str, Any], server: str) -> dict[str, Any]:
+    from comfy_cli.local_address import parse_local_url
+    from comfy_cli.workflow_inventory import join_server
+
+    host, port = parse_local_url(server)
+    netloc = f"[{host}]" if ":" in host else host
+    base = f"http://{netloc}:{port or 8188}"
+    section: dict[str, Any] = {"server": base}
+    try:
+        stats = _inventory_fetch_json(f"{base}/system_stats")
+        object_info = _inventory_fetch_json(f"{base}/object_info")
+    except (OSError, ValueError) as error:
+        # The server only adds detail; the workflow's own report stands without it.
+        section["error"] = f"{type(error).__name__}: {error}"
+        return section
+    section.update(join_server(report, object_info, stats))
+    return section
+
+
+def _check_server_option(value: str | None) -> str | None:
+    """Reject a malformed ``--server`` at parse time, so nothing runs on a typo."""
+    from comfy_cli.local_address import parse_local_url
+
+    if value is not None:
+        try:
+            parse_local_url(value)
+        except ValueError as error:
+            raise typer.BadParameter(f"{error}; pass e.g. http://127.0.0.1:8000") from error
+    return value
+
+
+def _desktop_model_roots() -> tuple[list[str], str | None]:
+    from comfy_cli.workflow_inventory import DESKTOP_SETTINGS_MACOS
+
+    settings = Path(DESKTOP_SETTINGS_MACOS).expanduser()
+    if not settings.is_file():
+        return [], f"--desktop: no Comfy Desktop settings at {settings}; pass each models folder with --models-root"
+    try:
+        dirs = json.loads(settings.read_text(encoding="utf-8")).get("modelsDirs") or []
+    except (OSError, ValueError, AttributeError) as error:
+        return [], f"--desktop: could not read {settings}: {error}"
+    return [d for d in dirs if isinstance(d, str)], None
+
+
+@app.command(
+    "inventory",
+    hidden=True,
+    help=(
+        "Report what one workflow loads (classes, models with subfolders, embeddings, input files, recorded "
+        "pack versions), which of those files are on this machine, and whether stock Comfy Cloud already runs "
+        "it. Read-only; reads the Cloud node catalog only with --cloud."
+    ),
+)
+@tracking.track_command("build")
+def inventory_cmd(
+    workflow: Annotated[str, typer.Argument(help="Workflow JSON, UI or API format.")],
+    cloud: Annotated[
+        bool,
+        typer.Option("--cloud", help="Check the workflow against stock Comfy Cloud's node catalog. Needs sign-in."),
+    ] = False,
+    server: Annotated[
+        str | None,
+        typer.Option(
+            "--server",
+            show_default=False,
+            callback=_check_server_option,
+            help="A running local ComfyUI, e.g. http://127.0.0.1:8000 (Comfy Desktop) or 127.0.0.1:8188.",
+        ),
+    ] = None,
+    models_root: Annotated[
+        list[str] | None,
+        typer.Option("--models-root", show_default=False, help="A models folder to search. Repeatable."),
+    ] = None,
+    desktop: Annotated[
+        bool,
+        typer.Option("--desktop", help="Also search Comfy Desktop's model folders (settings.json modelsDirs, macOS)."),
+    ] = False,
+    hash_files: Annotated[
+        bool,
+        typer.Option("--hash", help="sha256 every local match, to compare against public sources. Slow on big files."),
+    ] = False,
+):
+    from comfy_cli.workflow_inventory import inventory, join_cloud, join_local
+
+    renderer = get_renderer()
+    path = Path(workflow).expanduser()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        renderer.error(
+            code="workflow_not_found",
+            message=f"Could not read {path}: {error.strerror or error}",
+            hint="check the path",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from error
+    except ValueError as error:
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"{path} is not valid JSON: {error}",
+            hint="save the workflow again from ComfyUI (Workflow > Save, or Export)",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from error
+    if not isinstance(data, dict):
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"{path} holds a JSON {type(data).__name__}, not a workflow object.",
+            hint="pass a workflow saved from ComfyUI (UI format) or an API export",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1)
+
+    report = inventory(data)
+    report["workflow"] = str(path)
+    roots = list(models_root or [])
+    if desktop:
+        desktop_roots, warning = _desktop_model_roots()
+        roots += [r for r in desktop_roots if r not in roots]
+        if warning:
+            report["warnings"].append(warning)
+    if cloud:
+        from comfy_cli.command.nodes import _get_graph
+
+        graph = _get_graph(None, None, None, where="cloud")
+
+        def lookup(class_type: str) -> Mapping[str, Any] | None:
+            node = graph.node(class_type)
+            return graph.morphism_to_dict(node) if node is not None else None
+
+        report["cloud"] = join_cloud(report, lookup)
+    if server:
+        report["local_server"] = _inventory_local_server(report, server)
+    if roots:
+        report["models_roots"] = roots
+        join_local(report, roots, hash_files=hash_files)
+
+    if renderer.is_pretty():
+        renderer.print(
+            f"{len(report['classes'])} classes, {len(report['models'])} models, {len(report['inputs'])} inputs"
+        )
+        if "cloud" in report:
+            blocking = ", ".join(report["cloud"]["blocking"]) or "nothing"
+            renderer.print(f"Stock Comfy Cloud: {report['cloud']['verdict']} (blocking: {blocking})")
+        for model in report["models"]:
+            found = "" if "local" not in model else f"  [{len(model['local'])} local]"
+            renderer.print(f"  {model['path']}  ({model['node']}){found}")
+        for warning in report["warnings"]:
+            renderer.warn(warning)
+    renderer.emit(report, command="build inventory")
+
+
 @app.command("delete", help="Delete a build (soft-delete).")
 @tracking.track_command("build")
 def delete_cmd(
