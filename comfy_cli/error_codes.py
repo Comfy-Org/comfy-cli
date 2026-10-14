@@ -907,7 +907,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "model_download_claim_contested",
-        "`comfy model download --background` found the destination's claim lock held by another "
+        "`comfy model download` (foreground or `--background`) found the destination's claim lock held by another "
         "process, and that holder does not resolve to a readable download record. Holding the lock "
         "is what proves the destination is taken, so the refusal stands regardless — but there is "
         "no record to quote, which is why this is a distinct code rather than a "

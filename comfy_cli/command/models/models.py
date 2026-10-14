@@ -508,11 +508,12 @@ def download(
     #
     # Scope, precisely: this refuses a submission — foreground or `--background` —
     # into a destination that any live download has claimed, of either kind. It is
-    # kept as a *pre-flight* check even though both submit paths now re-scan after
-    # writing their own claim, because it is what lets the common sequential case
-    # ("I already have this downloading") refuse early, before filename resolution
-    # and an HF round trip, and without leaving a record behind. The post-write
-    # re-scan is the authoritative gate; this one is the cheap one.
+    # kept as a *pre-flight* check even though both submit paths now arbitrate on
+    # the destination's claim lock after writing their own record, because it is
+    # what lets the common sequential case ("I already have this downloading")
+    # refuse early, before filename resolution and an HF round trip, and without
+    # leaving a record behind. The claim lock is the authoritative gate; this one
+    # is the cheap one.
     #
     # Residual, unchanged and unclosable here: the scan only reads *this*
     # workspace's state directory, so two invocations from different workspaces
@@ -565,13 +566,28 @@ def download(
     # `--background` one does: until it did, it wrote no record and so was
     # invisible to every other invocation — a second foreground run, or a
     # `--background` submit started during one, passed both the scan above and
-    # `exists()` and the two transfers landed on the same file. Claim first, then
-    # re-scan (`_enforce_claim`), then move bytes; the record is what makes this
-    # run visible to whoever comes next, and it shows up in `comfy model
-    # downloads` like any other.
+    # `exists()` and the two transfers landed on the same file. Write the record,
+    # then take the destination's claim lock and *hold* it until the terminal
+    # status is on disk (the `finally` below). This process is the transferrer,
+    # so unlike a background submit there is no worker to hand the lock to and
+    # no spawn gap: the kernel decides between us and any other run, of either
+    # kind, and drops the lock for us if we are SIGKILLed. (With aria2 the bytes
+    # are written by the external daemon, which a SIGKILL of this process does
+    # not stop — the lock is released while that job may still be running.)
     claim = _claim_foreground(url=url, dest=local_filepath, downloader=resolved_downloader)
+    claim_lock = None
     if claim is not None:
-        _enforce_claim(claim, local_filepath)
+        try:
+            claim_lock = _hold_foreground_claim(claim, local_filepath)
+        except typer.Exit:
+            # A refusal, which has already withdrawn our record.
+            raise
+        except BaseException:
+            # Anything else (Ctrl-C during the lock wait, an unexpected error in
+            # the stale judgment): no transfer ran, so take the record back off
+            # disk rather than leave a `downloading` claim to read as a phantom.
+            _withdraw_record(claim, local_filepath, None)
+            raise
 
     try:
         if needs_hf_auth:
@@ -725,8 +741,14 @@ def download(
         # Reached on both paths, but never on SIGKILL — which is exactly the case
         # `download_state.reconcile` already handles: a record whose pid and
         # pid_create_time no longer match a live process demotes to `failed`, so a
-        # hard-killed foreground run self-clears just like a dead worker.
+        # hard-killed foreground run self-clears just like a dead worker. (The
+        # claim lock needs no such help: the kernel drops it with the process.)
         _persist_record(claim)
+        # Released only *after* the terminal write. A competitor that takes the
+        # lock the instant we drop it judges the payload — our id — by our
+        # record, and must find it finished rather than still `downloading`.
+        if claim_lock is not None:
+            claim_lock.release()
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -889,31 +911,34 @@ def _submit_background_download(
     # it pointing at a record of ours that does not exist yet — it would read as
     # stale and be stolen out from under us.
     #
-    # Unchanged non-goals. A *foreground* transfer still writes no claim file —
-    # it claims with its state record only — and the claim lives under
-    # `get_workspace()`, so two invocations run from different workspaces at one
-    # destination still consult different claim directories (the documented
-    # cross-workspace residual).
+    # A *foreground* transfer takes the same lock and holds it in-process for its
+    # whole transfer (see `download`), so a live foreground competitor is a held
+    # lock here like any worker — refused by the kernel, not found by a record
+    # re-scan. That is why there is no advisory re-scan on this path any more:
+    # every pairing in which both sides take the lock (background or foreground,
+    # either side) is decided by the lock plus the spawn-gap payload check, and
+    # `_enforce_claim` runs only when the lock cannot be taken at all.
     #
-    # Which is why the advisory re-scan survives, and runs *first*, before the
-    # claim. It is the only thing that sees a competitor writing no claim file —
-    # live foreground transfer, or a background record written by a version that
-    # predates this code — and running it before the claim is what keeps it from
-    # undoing the claim: after the claim, the records of the submitters we just
-    # beat are still on disk for the moment it takes them to withdraw, and a
-    # winner that re-scanned then would withdraw against its own losers (every
-    # submitter backing off, nothing downloading). It cannot deadlock the other
-    # way either: withdrawal here is only ever against a strictly earlier
-    # `_claim_order`, so the earliest record never withdraws.
-    _enforce_claim(state, dest)
-
+    # What that gives up: a competitor that writes a record but holds no lock —
+    # one whose own lock attempt degraded to `_enforce_claim`, or a foreground
+    # run from a CLI that predates the lock — is seen only by the pre-flight
+    # scan, so one whose record lands after it can transfer alongside us. A
+    # re-scan after winning cannot tell such a run from a submitter we just
+    # beat whose record has not been withdrawn yet, and withdrawing against
+    # those would back every submitter off.
+    #
+    # Unchanged non-goal: the claim lives under `get_workspace()`, so two
+    # invocations run from different workspaces at one destination still consult
+    # different claim directories (the documented cross-workspace residual).
     claim_file = _dest_claim_path(dest)
     if claim_file is not None:
         _acquire_dest_claim(state, dest, claim_file)
-    # else: the claims directory is unusable (a read-only state dir, or
-    # something sitting where `claims/` should be). Bookkeeping must not turn a
-    # download that used to work into an error, so that degrades to the advisory
-    # guard above — which is exactly the behavior that shipped before this.
+    else:
+        # The claims directory is unusable (a read-only state dir, or something
+        # sitting where `claims/` should be). Bookkeeping must not turn a
+        # download that used to work into an error, so degrade to the advisory
+        # re-scan — exactly the behavior that shipped before the claim existed.
+        _enforce_claim(state, dest)
 
     try:
         pid = _spawn_download_worker(state_file, log_file)
@@ -1233,18 +1258,17 @@ def _claim_order(state: download_state.DownloadState) -> tuple[str, str]:
     chars) breaks them, and because both racers compute the same order over the
     same two records they always agree on who won.
 
-    It no longer decides a background submit. Ordering records can only rank the
-    ones a racer happens to *see*, and a racer that scans before the other's
+    It no longer decides a submit of either kind. Ordering records can only rank
+    the ones a racer happens to *see*, and a racer that scans before the other's
     record lands sees no competitor at all — so two submits could rank each other
-    into a pair of winners. What decides a background submit now is the held
-    claim lock (:func:`_acquire_dest_claim`), where the kernel's arbitration is
-    the order and nobody has to see anybody.
+    into a pair of winners. What decides now is the held claim lock
+    (:func:`_acquire_dest_claim`), where the kernel's arbitration is the order
+    and nobody has to see anybody.
 
     This order survives for the readers that are still advisory and still want a
     deterministic pick: :func:`_active_download_for`'s winner-pick (one live
-    claim reported out of several), and :func:`_enforce_claim`, which is the
-    whole guard on the *foreground* path — a foreground transfer writes a record
-    but no claim file, so its two racers still have nothing else to agree on.
+    claim reported out of several), and :func:`_enforce_claim`, the record
+    re-scan a submit degrades to when the lock cannot be taken at all.
     """
     return (state.started_at or "", state.id)
 
@@ -1281,8 +1305,8 @@ def _active_download_for(
     both a within-grace ``starting`` record and a live worker blocking, while
     demoting a dead worker's record so it self-clears.
 
-    ``exclude_id`` skips one record: :func:`_submit_background_download` re-runs
-    this scan *after* writing its own claim and must not find itself.
+    ``exclude_id`` skips one record: :func:`_enforce_claim` re-runs this scan
+    *after* the caller wrote its own record and must not find itself.
 
     The scan is scoped to ``get_workspace()``'s state directory, and that is the
     residual neither this nor the claim lock closes — the claim lives in
@@ -1432,9 +1456,20 @@ def _claim_owner_live(state_file: pathlib.Path, owner_id: str) -> bool:
 
 
 def _in_spawn_gap(fresh: download_state.DownloadState) -> bool:
-    """True for an already-reconciled record whose worker may still be booting."""
+    """True for an already-reconciled record whose worker may still be booting.
+
+    Never a foreground record: that run is its own transferrer and holds the
+    lock from before it stamps the payload until after its terminal write, so a
+    claim we could lock that names one is stale whatever the record still says
+    (a terminal write that failed, a process still exiting). A genuine one
+    carries its own pid from its first write; a *pidless* record reading
+    `foreground` can only be a submit whose `kind` failed validation and fell
+    back (see `download_state._TOLERANT_FALLBACKS`), and it keeps its spawn-gap
+    protection so the check still fails toward refusing.
+    """
     return (
-        fresh.status in download_state.ACTIVE_STATUSES
+        not (fresh.is_foreground and fresh.pid is not None)
+        and fresh.status in download_state.ACTIVE_STATUSES
         and download_state.elapsed_seconds(fresh) < download_state.STARTUP_GRACE_S
     )
 
@@ -1482,6 +1517,35 @@ def _refuse_held_claim(
         hint="check `comfy model downloads`, then retry",
         details={"path": str(dest), "claim_file": str(claim_file), "download_id": holder_id},
     )
+
+
+def _dest_held_by_another(dest: pathlib.Path, download_id: str) -> bool:
+    """Whether another download currently holds ``dest``'s claim lock. Never raises.
+
+    For `download-cancel`'s partial sweep, which must not delete a live
+    successor's in-progress file. Only a *held* lock counts — that is the proof a
+    transfer is running — and its payload must name someone other than
+    ``download_id``. Anything that cannot be checked reads as not held, which is
+    the sweep's behavior from before the claim existed.
+
+    A held lock whose payload is unreadable (``read_claim`` returns ``None``,
+    e.g. Windows' byte-range lock blocking the read, or a rewrite in flight)
+    counts as held by *another*, even if the holder might be ``download_id``
+    itself. That is deliberate: it fails toward leaving the partial in place
+    rather than sweeping a live transfer's file, so do not treat ``None`` as
+    ours.
+    """
+    claim_file = _dest_claim_path(dest)
+    if claim_file is None:
+        return False
+    try:
+        lock = download_state.lock_claim(claim_file)
+    except OSError:
+        return False
+    if lock is not None:
+        lock.release()
+        return False
+    return download_state.read_claim(claim_file) != download_id
 
 
 def _clear_dest_claim(claim_file: pathlib.Path, owner_id: str) -> None:
@@ -1601,12 +1665,20 @@ def _acquire_dest_claim(
     state: download_state.DownloadState,
     dest: pathlib.Path,
     claim_file: pathlib.Path,
-) -> None:
+    *,
+    hold: bool = False,
+) -> download_state.ClaimLock | None:
     """Take the claim lock on ``dest`` and stamp it, or withdraw and refuse.
 
-    Returns None when the destination is ours. Otherwise it belongs to someone
-    else: our own record comes back off disk (so we leave no phantom claim) and
-    the caller gets the usual `model_download_in_flight` refusal.
+    Returns normally when the destination is ours. Otherwise it belongs to
+    someone else: our own record comes back off disk (so we leave no phantom
+    claim) and the caller gets the usual `model_download_in_flight` refusal.
+
+    ``hold`` is the foreground path's mode: the caller *is* the transferrer, so
+    instead of releasing for a worker to re-take, the won lock is returned and
+    the caller holds it until its transfer has written a terminal status. With
+    ``hold`` False (a background submit) the return is always None. Either mode
+    returns None when it degraded to :func:`_enforce_claim`.
 
     Three outcomes, and only the first two are collisions:
 
@@ -1625,7 +1697,8 @@ def _acquire_dest_claim(
     We release before spawning rather than handing the descriptor to the worker:
     the worker re-takes the lock itself (with a short blocking window) and holds
     it for the transfer, which keeps ownership with the process actually writing
-    the bytes even if this one exits first.
+    the bytes even if this one exits first. A held (foreground) claim has no such
+    handoff, and so no spawn gap of its own.
     """
     judged_stale: str | None = None
     write_error: OSError | None = None
@@ -1642,7 +1715,7 @@ def _acquire_dest_claim(
             # raced again.
             _report_claim_degraded(e, dest)
             _enforce_claim(state, dest)
-            return
+            return None
 
         if lock is None:
             raise _refuse_held_claim(state, dest, claim_file)
@@ -1651,13 +1724,38 @@ def _acquire_dest_claim(
             payload = lock.read_payload()
             holder_id = payload.get("download_id") if payload is not None else None
             if holder_id is None or holder_id == state.id or holder_id == judged_stale:
+                if dest.exists():
+                    # A competitor finished its whole transfer while we waited
+                    # (the record write, the auth probe and the lock rounds all
+                    # follow the caller's `exists()` check). Its lock is free and
+                    # its record terminal, so the payload reads stale — but the
+                    # file is there, and transferring now would replace it.
+                    _withdraw_record(state, dest, holder_id)
+                    raise _download_failure(
+                        code="model_file_exists",
+                        message=f"File already exists: {dest}",
+                        hint="pass `--filename` to save under a different name, or remove the existing file",
+                        details={"path": str(dest)},
+                    )
                 try:
                     lock.write_payload(state.id, str(dest))
                 except OSError as e:
                     write_error = e
+                if hold:
+                    # Ours for the whole transfer. An unwritten payload does not
+                    # change that — the held lock is the ownership proof — but
+                    # the old one may still name the holder we just judged stale,
+                    # and a competitor's refusal would then point at it. Blank it
+                    # so the refusal reads `model_download_claim_contested`.
+                    if write_error is not None:
+                        with contextlib.suppress(OSError):
+                            lock.clear_payload()
+                    held, lock = lock, None
+                    return held
                 break
         finally:
-            lock.release()
+            if lock is not None:
+                lock.release()
 
         # A foreign id, judged with the lock released: the record read, reconcile
         # and psutil query behind `_spawn_gap_holder` are slow next to a payload
@@ -1681,23 +1779,27 @@ def _acquire_dest_claim(
         # reconciles the whole state directory.
         _report_claim_degraded(write_error, dest)
         _enforce_claim(state, dest)
+    return None
 
 
 def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> None:
     """Re-scan for a competing claim on ``dest`` and withdraw ours if we lost.
 
-    The second half of claim-then-check, shared by both submit paths. The caller
-    has already *written* ``state`` — that record is the claim — so this scan sees
-    any competitor that also claimed ``dest``, which the pre-flight scan in
-    :func:`download` structurally cannot: it runs before the claim exists, with
-    the ``--background`` split and (for a Hugging Face url) a whole
-    ``check_unauthorized`` round trip between it and the write.
+    **Degradation path only.** Both submit paths now arbitrate with the held
+    claim lock (:func:`_acquire_dest_claim`) — a background worker and a
+    foreground transfer each hold it for their whole transfer, and the payload
+    check covers a background submit's spawn gap — so every pairing of
+    foreground and background is decided by the kernel. This runs only when the
+    lock cannot be used at all: the claims directory is unavailable, the
+    filesystem cannot lock, or the payload would not go down. Bookkeeping must
+    not turn a download that used to work into an error, so those fall back to
+    the record re-scan that shipped before the lock.
 
-    It is check-then-act and cannot be otherwise — hence the held claim lock
-    that now decides the background path (:func:`_acquire_dest_claim`). This
-    stays because it is the only guard the *foreground* path has (a foreground
-    transfer writes no claim file), and because it is what lets a background
-    submit that already holds its claim still notice a live foreground competitor.
+    The caller has already *written* ``state`` — that record is the claim — so
+    this scan sees any competitor whose record has landed, which the pre-flight
+    scan in :func:`download` structurally cannot. It is check-then-act and cannot
+    be otherwise: a competitor whose record lands after our scan is invisible to
+    it, which is exactly the window the lock closes.
 
     Both racers run this over the same two records and rank them with the same
     :func:`_claim_order`, so they agree on the winner instead of both backing off
@@ -1788,6 +1890,29 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
     except (OSError, ValueError):
         return None
     return state
+
+
+def _hold_foreground_claim(state: download_state.DownloadState, dest: pathlib.Path) -> download_state.ClaimLock | None:
+    """Take ``dest``'s claim lock for a foreground transfer and keep it.
+
+    Called right after :func:`_claim_foreground` has written ``state``, and the
+    same arbitration a background submit runs (:func:`_acquire_dest_claim`):
+    a held lock is a live owner and we withdraw our record and refuse; a free
+    lock whose payload names a background submit still inside its spawn gap is
+    that submit's destination and we refuse too; anything else is ours. The
+    difference is that the won lock comes back to the caller, which holds it
+    until its ``finally`` has written the terminal status.
+
+    Returns None when claims are unavailable here — no claims directory, or a
+    filesystem that cannot lock. Those degrade to :func:`_enforce_claim`, the
+    record re-scan the foreground path used before it held a lock, because an
+    unwritable workspace must not break a download that used to work.
+    """
+    claim_file = _dest_claim_path(dest)
+    if claim_file is None:
+        _enforce_claim(state, dest)
+        return None
+    return _acquire_dest_claim(state, dest, claim_file, hold=True)
 
 
 def _persist_record(state: download_state.DownloadState | None) -> None:
@@ -1942,7 +2067,11 @@ def download_cancel(
         # says), and that worker would re-create whatever we removed — or worse,
         # find the temp it is streaming into deleted underneath it.
         reclaimed = 0
-        if state.status != "completed" and not download_state.worker_alive(state):
+        if (
+            state.status != "completed"
+            and not download_state.worker_alive(state)
+            and not _dest_held_by_another(pathlib.Path(state.dest), state.id)
+        ):
             reclaimed = cleanup_partials(pathlib.Path(state.dest))
             if reclaimed:
                 state.completed_bytes = 0
@@ -1970,7 +2099,10 @@ def download_cancel(
     # A *dead* foreground record still goes down the normal path below: the
     # partial file it left behind is exactly what the user is trying to reclaim,
     # and `stop_worker`/`kill_worker` are inert for a pid that no longer matches
-    # its recorded start time.
+    # its recorded start time. The destination itself does not wait on that
+    # demotion: a foreground run holds its claim lock for the transfer, and the
+    # kernel drops it when the process dies, so the next submit can take the
+    # destination at once — the record demotion here is belt-and-braces.
     if state.is_foreground and download_state.worker_alive(state):
         renderer.error(
             code="model_download_foreground_cancel",
@@ -2011,6 +2143,10 @@ def download_cancel(
     finished = state.status == "completed" or (
         size is not None and state.total_bytes is not None and size >= state.total_bytes
     )
+    # A dead record's destination can already belong to a successor: the claim
+    # lock drops with the process, so the next submit may be streaming into the
+    # same `.part` (or, with aria2, the destination itself) by now.
+    successor = not finished and stopped and _dest_held_by_another(partial, state.id)
     if finished:
         # The bytes are all there. Keep the file and record what actually
         # happened rather than deleting a complete model out from under the user.
@@ -2019,7 +2155,7 @@ def download_cancel(
         if size is not None:
             state.completed_bytes = size
     else:
-        if stopped:
+        if stopped and not successor:
             # Only aria2 writes straight to the destination (it resumes from its
             # own control file), so only an unfinished *aria2* transfer leaves its
             # bytes here. The httpx path never writes through the destination, so
@@ -2042,7 +2178,12 @@ def download_cancel(
             if cleanup_partials(partial):
                 removed = True
         state.status = "cancelled"
-        state.error = None if stopped else "worker may still be running; partial file left in place"
+        if not stopped:
+            state.error = "worker may still be running; partial file left in place"
+        elif successor:
+            state.error = "another download now holds this destination; partial file left in place"
+        else:
+            state.error = None
         if removed:
             state.completed_bytes = 0
 

@@ -121,6 +121,13 @@ history.
 
 ### Fixed
 
+- Two `comfy model download` runs aimed at the same file — both in the
+  foreground, or one foreground and one `--background` — no longer both
+  download it. A foreground run now holds the destination's claim lock for its
+  whole transfer, as a background worker does, so exactly one proceeds and the
+  other is refused with `model_download_in_flight`. A foreground run killed
+  with SIGKILL frees the destination at once (with `--downloader aria2` the
+  aria2 daemon may still be writing it; cancel that job in aria2 first).
 - `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
   when the sign-in token it started with expires mid-run. The token lasts
   fifteen minutes, and the run sent the one it started with for every request
