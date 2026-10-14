@@ -106,8 +106,10 @@ def _preflight_validate(
     if not object_info:
         return
 
+    from comfy_cli.cql import model_assets
     from comfy_cli.cql.engine import Graph
 
+    model_assets.use_where(where)
     graph = Graph.from_object_info(object_info)
     validation = graph.validate_workflow(workflow)
     if not validation.get("valid", True):

@@ -96,8 +96,10 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     ``on_stale``, if provided, is fired when a stale-cache fallback occurs:
     ``on_stale(host_key, error_str)``.
     """
+    from comfy_cli.cql import model_assets
     from comfy_cli.cql.engine import Graph, LoadError
 
+    model_assets.use_where(where)
     renderer = get_renderer()
     try:
         if input_path is not None:
@@ -1669,6 +1671,10 @@ def validate_api_workflow(
         # A bad env/project/config value with no explicit flag never breaks the
         # command — drop to the local default, as before.
     mode = target.value
+    # The catalog check's Cloud asset lookup follows the same resolved route.
+    from comfy_cli.cql import model_assets
+
+    model_assets.use_where(mode)
     # Routing resolved — stamp it so the envelopes below (the object_info load
     # failure and the UI-conversion errors) name the target this validate ran
     # against. The file-read errors above stay `where: null`: they precede the

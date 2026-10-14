@@ -84,6 +84,9 @@ def _get_graph(
     ``on_stale``, if provided, is forwarded to ``resilient_load_object_info``
     and fired when a stale-cache fallback occurs (see loader for signature).
     """
+    from comfy_cli.cql import model_assets
+
+    model_assets.use_where(where)
     mode = _resolved_where(where)
     # Every `comfy nodes` verb routes through here, so this is the one place
     # the target is decided — stamp it on the renderer so the envelopes emitted
