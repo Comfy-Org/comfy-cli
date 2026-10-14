@@ -117,6 +117,8 @@ _SENSITIVE_EXACT = frozenset(
         # evicts its socket by connecting as it. Redacted rather than dropped,
         # so "was --client-id used" stays measurable.
         "client_id",
+        "query",
+        "repo",
     }
 )
 
