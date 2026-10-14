@@ -163,6 +163,122 @@ def test_interior_connect_replaces_the_incumbent_link(tmp_path, capsys):
     assert first_id not in _node(wf, 2005)["outputs"][0]["links"]
 
 
+def test_disconnect_interior_link_removes_both_endpoint_references(tmp_path, capsys):
+    import json
+
+    path = _write(tmp_path, _workflow())
+    connected = _run(["connect", str(path), "70/2005.STRING", "70/2011.text"], capsys)
+    link_id = connected["data"]["op"]["link_id"]
+
+    disconnected = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert disconnected["ok"] is True, disconnected
+    op = disconnected["data"]["op"]
+    assert op["path"] == ["70"]
+    assert (str(op["to_node"]), op["to_slot"], op["link_id"]) == ("2011", 1, link_id)
+    wf = json.loads(path.read_text())
+    assert link_id not in [link["id"] for link in _sg(wf)["links"]]
+    assert _node(wf, 2011)["inputs"][1]["link"] is None
+    assert link_id not in _node(wf, 2005)["outputs"][0]["links"]
+
+
+def test_interior_disconnect_op_replays_to_the_same_document():
+    base = _workflow()
+    graph = _graph()
+    wired, _ = workflow_ops.connect(copy.deepcopy(base), graph, "70/2005", "STRING", "70/2011", "text")
+    out, op = workflow_ops.disconnect(copy.deepcopy(wired), graph, "70/2011", "text")
+
+    replayed = workflow_ops.apply_op(copy.deepcopy(wired), op, graph)
+
+    assert replayed["definitions"] == out["definitions"]
+    assert workflow_ops._write_target(op) == ("input", ("70",), "2011", 1)
+
+
+def test_interior_grown_reconnect_and_disconnect_share_path_register():
+    base = _workflow()
+    _node(base, 2011)["inputs"][1]["grow_id"] = 7001
+    wired, reconnect = workflow_ops.connect(
+        copy.deepcopy(base),
+        _graph(),
+        "70/2005",
+        "STRING",
+        "70/2011",
+        "text",
+        actor="agent",
+        base_version=5,
+    )
+    _, disconnect = workflow_ops.disconnect(
+        copy.deepcopy(wired),
+        _graph(),
+        "70/2011",
+        "text",
+        actor="human",
+        base_version=9,
+    )
+
+    assert reconnect["grow_id"] == disconnect["grow_id"] == 7001
+    target = ("input", ("70",), "2011", "grow_id", 7001)
+    assert workflow_ops._write_target(reconnect) == target
+    assert workflow_ops._write_target(disconnect) == target
+    results = []
+    for order in ((reconnect, disconnect), (disconnect, reconnect)):
+        result = copy.deepcopy(base)
+        for op in order:
+            workflow_ops.apply_op(result, copy.deepcopy(op), _graph())
+        results.append(result)
+    assert workflow_ops.canonical(results[0]) == workflow_ops.canonical(results[1])
+    assert _node(results[0], 2011)["inputs"][1]["link"] is None
+
+
+def test_interior_grown_disconnect_follows_identity_after_slot_shift():
+    base = _workflow()
+    _node(base, 2011)["inputs"][1]["grow_id"] = 7001
+    wired, _ = workflow_ops.connect(
+        copy.deepcopy(base), _graph(), "70/2005", "STRING", "70/2011", "text", base_version=5
+    )
+    _, disconnect = workflow_ops.disconnect(copy.deepcopy(wired), _graph(), "70/2011", "text", base_version=9)
+    link_id = disconnect["link_id"]
+    shifted = copy.deepcopy(wired)
+    _node(shifted, 2011)["inputs"].insert(0, {"name": "new", "type": "STRING", "link": None})
+    for link in _sg(shifted)["links"]:
+        if link["id"] == link_id:
+            link["target_slot"] = 2
+
+    workflow_ops.apply_op(shifted, disconnect, _graph())
+
+    assert _node(shifted, 2011)["inputs"][0]["link"] is None
+    grown = next(inp for inp in _node(shifted, 2011)["inputs"] if inp.get("grow_id") == 7001)
+    assert grown["link"] is None
+    assert link_id not in [link["id"] for link in _sg(shifted)["links"]]
+
+
+def test_disconnect_interior_link_from_boundary_is_refused(tmp_path, capsys):
+    wf = _workflow()
+    sg = _sg(wf)
+    sg["inputs"] = [{"id": "in-1", "name": "prompt", "type": "STRING", "linkIds": [8001]}]
+    sg["links"].append(
+        {"id": 8001, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(wf, 2011)["inputs"][1]["link"] = 8001
+    path = _write(tmp_path, wf)
+
+    env = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert env["ok"] is False
+    assert "crosses the subgraph boundary" in env["error"]["message"]
+
+
+def test_disconnect_shared_interior_definition_is_refused(tmp_path, capsys):
+    wf = _workflow(instances=2)
+    _node(wf, 2011)["inputs"][1]["link"] = 9001
+    path = _write(tmp_path, wf)
+
+    env = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert env["ok"] is False
+    assert "2 instances" in env["error"]["message"]
+
+
 def test_interior_connect_type_mismatch_is_refused(tmp_path, capsys):
     path = _write(tmp_path, _workflow())
     env = _run(["connect", str(path), "70/2012.MODEL", "70/2011.clip"], capsys)

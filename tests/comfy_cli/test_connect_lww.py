@@ -129,6 +129,33 @@ def _connect(
     }
 
 
+def _disconnect(tag: str, actor: str, base_version: int, link_id: int = 9000) -> dict[str, Any]:
+    return {
+        "op": "disconnect",
+        "op_id": _op_id(tag),
+        "actor": actor,
+        "base_version": base_version,
+        "stamp": [base_version, actor],
+        "link_id": link_id,
+        "to_node": SAMPLER,
+        "to_slot": POSITIVE,
+    }
+
+
+def test_disconnect_and_connect_share_one_lww_register():
+    connect = _connect("dc1", AGENT, 5, 9101, ENCODER)
+    disconnect = _disconnect("dc2", HUMAN, 9)
+    results = []
+    for order in ((connect, disconnect), (disconnect, connect)):
+        wf = copy.deepcopy(_wired_base())
+        for op in order:
+            ops.apply_op(wf, copy.deepcopy(op), None)
+        results.append(wf)
+    assert ops.canonical(results[0]) == ops.canonical(results[1])
+    assert results[0]["links"] == []
+    assert results[0]["nodes"][-1]["inputs"][POSITIVE]["link"] is None
+
+
 def _add_encoder(tag: str, actor: str, base_version: int, node_id: int, text: str) -> dict[str, Any]:
     return {
         "op": "add_node",
@@ -414,6 +441,116 @@ def test_concurrent_autogrows_are_not_a_shared_register():
     assert _link_ids(forward) == [9701, 9702]
     assert _link_ids(reverse) == [9701, 9702]
     assert _comparable(forward) == _comparable(reverse)
+
+
+@pytest.mark.parametrize(
+    "grow",
+    [
+        {"name": "images.image0", "type": "IMAGE"},
+        {"name": "cfg", "type": "FLOAT", "widget": "cfg"},
+    ],
+    ids=["ordinary-autogrow", "widget-converted"],
+)
+def test_dynamic_disconnect_tombstone_survives_reversed_replay(grow: dict[str, Any]):
+    """A disconnect can arrive before the connect that materializes its slot."""
+    connect = _grow_connect("id1", AGENT, 5, 9751, 500)
+    connect["grow"] = grow
+    connect["link_type"] = grow["type"]
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("id2"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": 9751,
+        "to_node": 700,
+        "to_slot": 1,
+        "grow_id": 9751,
+    }
+
+    forward = _run(_autogrow_base(), [connect, disconnect])
+    reverse = _run(_autogrow_base(), [disconnect, connect])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == []
+    grown = next(i for i in forward["nodes"][-1]["inputs"] if i.get("grow_id") == 9751)
+    assert grown["link"] is None
+    if "widget" in grow:
+        assert grown["widget"] == {"name": grow["widget"]}
+
+
+def test_grown_input_reconnect_and_disconnect_share_one_register():
+    base = _autogrow_base()
+    grown = base["nodes"][-1]["inputs"][0]
+    grown["grow_id"] = 9751
+    _, reconnect = ops.connect(
+        copy.deepcopy(base),
+        None,
+        500,
+        0,
+        700,
+        "images.image0",
+        actor=AGENT,
+        base_version=5,
+    )
+    assert reconnect["grow_id"] == 9751
+    assert "grow" not in reconnect
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("grd2"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": reconnect["link_id"],
+        "to_node": 700,
+        "to_slot": 0,
+        "grow_id": 9751,
+    }
+
+    forward = _run(base, [reconnect, disconnect])
+    reverse = _run(base, [disconnect, reconnect])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == []
+    assert forward["nodes"][-1]["inputs"][0]["link"] is None
+
+
+@pytest.mark.parametrize(
+    "grow",
+    [
+        {"name": "images.image0", "type": "IMAGE"},
+        {"name": "cfg", "type": "FLOAT", "widget": "cfg"},
+    ],
+    ids=["ordinary-autogrow", "widget-converted"],
+)
+def test_grown_input_reconnect_waits_for_its_creating_connect(grow: dict[str, Any]):
+    create = _grow_connect("grc1", AGENT, 1, 9751, 500)
+    create["grow"] = grow
+    create["link_type"] = grow["type"]
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("grc2"),
+        "actor": HUMAN,
+        "base_version": 5,
+        "stamp": [5, HUMAN],
+        "link_id": 9751,
+        "to_node": 700,
+        "to_slot": 1,
+        "grow_id": 9751,
+    }
+    reconnect = _connect("grc3", AGENT, 9, 9752, 510, to_node=700, to_slot=1)
+    reconnect["grow_id"] = 9751
+    reconnect["link_type"] = grow["type"]
+
+    forward = _run(_autogrow_base(), [create, disconnect, reconnect])
+    reverse = _run(_autogrow_base(), [reconnect, disconnect, create])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == [9752]
+    grown = next(i for i in forward["nodes"][-1]["inputs"] if i.get("grow_id") == 9751)
+    assert grown["link"] == 9752
+    assert "_pending_dynamic_connects" not in forward
+    assert "_pending_dynamic_connects" not in reverse
 
 
 # ---------------------------------------------------------------------------

@@ -112,6 +112,18 @@ class TestTemplateIds:
         )
         assert ops[0]["to_node"].endswith(":root:node:9")
 
+    def test_disconnect_resolves_bare_template_id(self, graph):
+        wf, connected = workflow_ops.connect(_canvas(), graph, 16, "IMAGE", 9, "images")
+
+        # A later local write advances the Lamport counter; equal counters are
+        # concurrent and intentionally use op_id as the deterministic tie-break.
+        wf, disconnected = workflow_ops.disconnect(wf, graph, 9, "images", base_version=1)
+
+        assert disconnected["to_node"].endswith(":root:node:9")
+        assert disconnected["link_id"] == connected["link_id"]
+        assert wf["links"] == []
+        assert wf["nodes"][1]["inputs"][0]["link"] is None
+
     def test_set_node_field_and_delete_node(self, graph):
         wf, op = workflow_ops.set_node_field(_canvas(), 16, "title", "Reference")
         assert op["node_id"].endswith(":root:node:16")
