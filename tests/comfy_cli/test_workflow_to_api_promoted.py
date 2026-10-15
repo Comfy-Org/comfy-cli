@@ -1061,6 +1061,27 @@ def test_promoted_overlay_ignores_unhashable_link_ids(monkeypatch):
     workflow_to_api._overlay_promoted_host_values({}, workflow, {definition_id: definition})
 
 
+def test_promoted_overlay_ignores_incomplete_interior_link_rows(monkeypatch):
+    from comfy_cli.cql import promoted
+
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {"id": definition_id, "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    workflow = {
+        "nodes": [
+            {"id": 1, "type": definition_id, "inputs": [{"name": "value", "link": 9}], "widgets_values": ["host"]}
+        ],
+        "links": [{"id": 9}],
+    }
+    prompt = {"1:leaf": {"inputs": {"value": "interior"}}}
+    item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
+    monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
+    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+
+    workflow_to_api._overlay_promoted_host_values(prompt, workflow, {definition_id: definition})
+
+    assert prompt["1:leaf"]["inputs"]["value"] == "host"
+
+
 def test_duplicate_normalized_definition_input_names_use_the_first_slot():
     definition = {"inputs": [{"name": 7}, {"name": "7"}]}
     outer = {"inputs": [{"name": "7"}]}

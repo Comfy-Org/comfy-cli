@@ -1717,6 +1717,7 @@ def test_string_and_integer_link_ids_use_the_last_row(sd15_graph):
     wf["links"].append(["7", "1", 0, "2", 0, "DIFFERENT-UNUSED-TYPE"])
     result = render_py(wf, sd15_graph)
     assert result.source
+    assert "duplicate link id 7; using the last row" in result.warnings
 
 
 def test_typed_duplicate_link_rows_use_the_last_row():

@@ -249,6 +249,8 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 candidate = link.get("id")
                 if not _is_link_id(candidate):
                     continue
+                if not all(field in link for field in ("origin_id", "origin_slot", "target_id", "target_slot")):
+                    continue
                 if _promoted._is_input_proxy_link(link) and len(memberships.get(candidate, ())) != 1:
                     continue
             elif isinstance(link, (list, tuple)) and len(link) >= 6:

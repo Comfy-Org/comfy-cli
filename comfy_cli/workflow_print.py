@@ -200,9 +200,10 @@ _NONLIST_DEF_OUTPUTS = object()
 _NONLIST_GROUPS = object()
 
 
-def _dedupe_identical_links(links: list[Any]) -> list[Any]:
-    """Drop byte-for-byte-equivalent rows while retaining conflicting duplicates."""
+def _dedupe_identical_links(links: list[Any], warnings: list[str] | None = None) -> list[Any]:
+    """Drop equivalent rows and warn once for each conflicting duplicate id."""
     seen: dict[str, tuple[Any, ...]] = {}
+    reported_conflicts: set[str] = set()
     out: list[Any] = []
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
@@ -212,6 +213,9 @@ def _dedupe_identical_links(links: list[Any]) -> list[Any]:
         normalised_row = _normalised_link_row(link)
         if seen.get(link_id) == normalised_row:
             continue
+        if link_id in seen and link_id not in reported_conflicts and warnings is not None:
+            reported_conflicts.add(link_id)
+            warnings.append(f"duplicate link id {link_id}; using the last row")
         seen.setdefault(link_id, normalised_row)
         out.append(link)
     return out
@@ -1918,7 +1922,7 @@ def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         warnings.append("workflow: ignoring non-list links block")
         raw_links = []
     links = []
-    for link in _dedupe_identical_links(raw_links):
+    for link in _dedupe_identical_links(raw_links, warnings):
         if isinstance(link, list) and link and link[0] is None:
             warnings.append(f"link has null id and was ignored: {link!r}")
             continue

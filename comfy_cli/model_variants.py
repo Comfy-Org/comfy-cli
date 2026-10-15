@@ -270,6 +270,9 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
     for _ in range(_MAX_NESTED_PROMOTION_DEPTH + 1):
         grown = False
         for node, sg_loc in _workflow_nodes(workflow):
+            if remaining_visits < 1:
+                raise ModelVariantResolutionError("promoted model propagation exceeded its work safe limit")
+            remaining_visits -= 1
             sg_id = str(node.get("type", ""))
             swaps, wv = renamed.get(sg_id), node.get("widgets_values")
             if not swaps or not isinstance(wv, list) or sg_id not in defs:
