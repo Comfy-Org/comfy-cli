@@ -4,49 +4,55 @@ from __future__ import annotations
 
 import pytest
 
-from comfy_cli import cmdline
+from comfy_cli import cancellation, cmdline
 from comfy_cli.caller import Caller
 
 
+class _Tty:
+    def isatty(self) -> bool:
+        return True
+
+
 @pytest.mark.parametrize(
-    ("caller", "expand"),
+    ("caller", "stdin_tty", "expand"),
     [
-        (Caller(kind="user", agentic=False, source_env=None), True),
-        (Caller(kind="pipe", agentic=True, source_env=None), False),
-        (Caller(kind="inapp-agent", agentic=True, source_env="COMFY_USER_AGENT"), False),
+        (Caller(kind="user", agentic=False, source_env=None), True, True),
+        (Caller(kind="pipe", agentic=True, source_env=None), False, False),
+        (Caller(kind="pipe", agentic=True, source_env=None), True, True),
+        (Caller(kind="inapp-agent", agentic=True, source_env="COMFY_USER_AGENT"), True, False),
+        (Caller(kind="user", agentic=True, source_env="COMFY_USER_AGENT"), True, False),
     ],
+    ids=["person", "piped-agent", "person-redirecting-output", "marked-agent", "agent-calling-itself-user"],
 )
-def test_only_a_person_gets_windows_argument_expansion(monkeypatch, caller, expand):
-    seen = {}
-
-    def fake_app(**kwargs):
-        seen.update(kwargs)
-
-    monkeypatch.setattr(cmdline, "app", fake_app)
+def test_only_a_person_gets_windows_argument_expansion(monkeypatch, caller, stdin_tty, expand):
     monkeypatch.setattr(cmdline, "detect_caller", lambda: caller)
-    cmdline.main()
-    assert seen == {"windows_expand_args": expand}
+    monkeypatch.setattr("sys.stdin", _Tty() if stdin_tty else None)
+    assert cmdline._windows_expand_args() is expand
 
 
-def test_typer_skips_expansion_when_told(monkeypatch):
-    """The flag reaches Typer's parser: off, a glob stays a glob even on Windows."""
-    import typer
+@pytest.mark.parametrize(("agentic", "expanded"), [(True, False), (False, True)])
+def test_the_real_app_takes_the_decision(monkeypatch, agentic, expanded):
+    """Through cmdline.main and comfy's own app, on Windows."""
     from typer import _click
 
-    seen = []
-    app = typer.Typer()
+    calls = []
+    monkeypatch.setattr(cancellation, "install_sigint_handler", lambda: None)
+    monkeypatch.setattr(
+        cmdline, "detect_caller", lambda: Caller(kind="agent" if agentic else "user", agentic=agentic, source_env=None)
+    )
+    import os
 
-    @app.command()
-    def cmd(words: list[str]):
-        seen.extend(words)
+    import typer.core
 
-    monkeypatch.setattr("os.name", "nt")
-    monkeypatch.setattr(_click.utils, "_expand_args", lambda args: ["EXPANDED"])
-    monkeypatch.setattr("sys.argv", ["comfy", "ag?nt"])
+    class _WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, attr):
+            return getattr(os, attr)
+
+    monkeypatch.setattr(typer.core, "os", _WindowsOS())
+    monkeypatch.setattr(_click.utils, "_expand_args", lambda args: calls.append(list(args)) or list(args))
+    monkeypatch.setattr("sys.argv", ["comfy", "--help"])
     with pytest.raises(SystemExit):
-        app(windows_expand_args=False)
-    assert seen == ["ag?nt"]
-    seen.clear()
-    with pytest.raises(SystemExit):
-        app(windows_expand_args=True)
-    assert seen == ["EXPANDED"]
+        cmdline.main()
+    assert bool(calls) is expanded

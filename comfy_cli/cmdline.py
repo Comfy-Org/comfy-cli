@@ -279,6 +279,26 @@ workspace_manager = WorkspaceManager()
 console = Console()
 
 
+def _windows_expand_args() -> bool:
+    """Whether Click may rewrite this run's arguments on Windows.
+
+    On Windows, Click rewrites every argument before the CLI reads it: a
+    leading ~, set %VAR%/$VAR, and glob patterns (cmd.exe expands %VAR% but
+    never globs, so for a person this is the only globbing). An agent's
+    arguments are exact, and a supervising agent checks them as written:
+    expanded, a checked word can become another command, option or path. So
+    a caller ``detect_caller`` sees as an agent gets its arguments as
+    written. A ``pipe`` caller with a terminal on stdin is a person who
+    redirected output (``comfy upload *.png > log``) and keeps expansion; an
+    agent that marks itself none of the ways ``detect_caller`` reads, and
+    runs in a real terminal, is not covered.
+    """
+    caller = detect_caller()
+    if not caller.agentic:
+        return True
+    return caller.kind == "pipe" and stream_is_tty(sys.stdin)
+
+
 def main():
     # Install the SIGINT handler BEFORE Typer parses argv and runs the
     # subcommand. Otherwise a Ctrl-C during the first ~100ms (argv parsing,
@@ -291,13 +311,7 @@ def main():
     # non-zero exit code at the OS level — otherwise the envelope says
     # ok:false but the shell sees 0 and downstream tools think we succeeded.
     try:
-        # On Windows, Click rewrites every argument before the CLI reads it: a
-        # leading ~, %VAR%/$VAR and glob patterns (cmd.exe does none of this, so
-        # for a person it is the only globbing). An agent's arguments are
-        # exact, and a supervising agent checks them as written: expanded, a
-        # checked word can become another command, option or path. So an
-        # agentic caller's arguments are taken as written.
-        app(windows_expand_args=not detect_caller().agentic)
+        app(windows_expand_args=_windows_expand_args())
     except KeyboardInterrupt:
         # SIGINT path: emit a cancelled envelope if one hasn't been written yet.
         try:
