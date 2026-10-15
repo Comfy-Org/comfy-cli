@@ -249,5 +249,5 @@ def test_clear_rejected_in_batch_with_registered_hint():
     assert "no changes were applied" in str(err).lower()
 
 
-def test_load_image_output_is_treated_as_a_ui_only_node():
+def test_load_image_output_is_not_treated_as_a_ui_only_node():
     assert "LoadImageOutput" not in workflow_ops.UI_ONLY_NODE_TYPES

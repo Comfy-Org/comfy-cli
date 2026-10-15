@@ -588,17 +588,17 @@ def _looks_like_hostname(authority: str) -> bool:
 
 def _authority_labels_before(context: str) -> str | None:
     """Return the dotted authority prefix immediately before a matched label."""
+    last_space = max(context.rfind(" "), context.rfind("\t"), context.rfind("\r"), context.rfind("\n"))
+    token = context[last_space + 1 :]
     embedded_url = re.search(
         r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*(?:://|:\\/\\/)(?P<labels>[A-Za-z0-9.-]*)$",
-        context,
+        token,
     )
     if embedded_url is not None:
         labels = embedded_url.group("labels")
         if (labels and not labels.endswith(".")) or ".." in labels:
             return None
         return labels
-    last_space = max(context.rfind(" "), context.rfind("\t"), context.rfind("\r"), context.rfind("\n"))
-    token = context[last_space + 1 :]
     separator = ":\\/\\/" if ":\\/\\/" in token else "://"
     if separator in token:
         scheme, labels = token.rsplit(separator, 1)
@@ -810,10 +810,10 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
         # ``=`` assignment with a numeric value is still a credential. Preserve
         # only the authority/path token, then rescan its query, fragment, and
         # following diagnostics for credentials.
-        boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#;&,"]
+        boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "/?#;&,"]
         safe_end = min(boundaries) if boundaries else len(value)
         return f"{prefix}{value[:safe_end]}{_scrub_secret_tail(value[safe_end:])}"
-    already_masked = re.match(r"""[ \t]*(?:\*{3}(?=$|[\s}\])])|(["'])\*{3}\1(?=$|[\s}\])]))""", value) is not None
+    already_masked = re.match(r"""[ \t]*(?:\*{3}|(["'])\*{3}\1)[}\])]*(?=$|\s)""", value) is not None
     rendered_siblings = _render_assignment_siblings(prefix, value, mask_leading=not already_masked)
     if rendered_siblings is not None:
         return rendered_siblings
@@ -843,10 +843,9 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
 
 _SECRET_PATTERNS = (
     (
-        re.compile(r'([A-Za-z][A-Za-z0-9+._-]*://(?:\[[^\]\s"]+\]|[^\s/?#":]+):[0-9]{1,5})\?[^\s"]*'),
+        re.compile(r'([A-Za-z][A-Za-z0-9+._-]*(?:://|:\\/\\/)[^\s?#"]+)\?[^\s"]*', re.IGNORECASE),
         r"\1?***",
     ),
-    (re.compile(r'(https?://[^\s?#"]+)\?[^\s"]*', re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
     # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
     # (Basic, Bearer, Token, Digest with its quoted comma-separated params,

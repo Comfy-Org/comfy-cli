@@ -160,6 +160,25 @@ def test_dynamic_selector_uses_backend_equality_for_boolean_and_integer_keys():
     ]
 
 
+def test_dynamic_sub_widget_option_hints_preserve_key_types_without_merging():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    options["options"] = [
+        {"key": 1, "inputs": {"required": {"integer_only": ["STRING", {"default": "int"}]}}},
+        {"key": "1", "inputs": {"required": {"string_only": ["STRING", {"default": "str"}]}}},
+    ]
+    options["default"] = 1
+    graph = Graph.from_object_info(object_info)
+    wf, _ = _fresh(graph)
+
+    assert graph.dynamic_sub_widget_options(
+        "MinimaxHailuo03TextToVideoNode", "model.integer_only", wf["nodes"][0]["widgets_values"]
+    ) == ("model", [1])
+    assert graph.dynamic_sub_widget_options(
+        "MinimaxHailuo03TextToVideoNode", "model.string_only", wf["nodes"][0]["widgets_values"]
+    ) == ("model", ["1"])
+
+
 def test_dynamic_sub_widget_rejects_catalog_invalid_values_before_writing(graph):
     wf, nid = _fresh(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, nid, "model", "MiniMax H3 Max")
@@ -326,12 +345,36 @@ def test_replayed_hidden_write_applies_after_a_selector_reveals_it(graph):
     )
     workflow_ops.apply_op(wf, hidden_write, graph)
     assert hidden_write["op_id"] not in wf.get("_applied_ops", [])
+    assert hidden_write["op_id"] in wf["_deferred_widget_ops"]
 
     wf, _ = workflow_ops.set_widget(wf, graph, node_id, "model", "MiniMax H3 Max", actor="agent-b")
-    workflow_ops.apply_op(wf, hidden_write, graph)
 
     assert hidden_write["op_id"] in wf["_applied_ops"]
+    assert "_deferred_widget_ops" not in wf
     assert "quality" in wf["nodes"][0]["widgets_values"]
+
+
+def test_hidden_write_and_revealing_selector_converge_in_either_replay_order(graph):
+    first, node_id = _fresh(graph)
+    second = copy.deepcopy(first)
+    selector = workflow_ops._new_op("set_widget", "agent-a", 1, node_id=node_id, widget="model", value="MiniMax H3 Max")
+    hidden_write = workflow_ops._new_op(
+        "set_widget",
+        "agent-b",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+
+    workflow_ops.apply_op(first, selector, graph)
+    workflow_ops.apply_op(first, hidden_write, graph)
+    workflow_ops.apply_op(second, hidden_write, graph)
+    workflow_ops.apply_op(second, selector, graph)
+
+    assert workflow_ops.canonical(first) == workflow_ops.canonical(second)
+    assert "quality" in first["nodes"][0]["widgets_values"]
+    assert "_deferred_widget_ops" not in second
 
 
 def test_dynamic_sub_widget_combo_uses_the_same_normalization_as_top_level():

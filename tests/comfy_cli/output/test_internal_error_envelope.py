@@ -324,9 +324,11 @@ def test_internal_error_scrubber_handles_unprintable_exception():
     assert _internal_error_message(UnprintableError()) == "UnprintableError: unprintable exception"
 
 
-def test_internal_error_scrubber_does_not_treat_query_at_as_userinfo():
+def test_internal_error_scrubber_masks_an_unported_non_http_query_without_treating_at_as_userinfo():
     message = "amqp://host?opt=user@example.com"
-    assert message in _internal_error_message(RuntimeError(message))
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "user@example.com" not in scrubbed
+    assert "amqp://host?***" in scrubbed
 
 
 def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
@@ -957,6 +959,30 @@ def test_internal_error_scrubber_rescans_after_an_exempt_host_port(message):
 def test_internal_error_scrubber_preserves_a_port_before_a_query():
     scrubbed = _internal_error_message(RuntimeError("https://auth.com:443?code=x"))
     assert "auth.com:443?***" in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "postgres://db.example/app?password=LIVE",
+        r"custom:\/\/service.example/path?token=LIVE",
+    ],
+)
+def test_internal_error_scrubber_masks_queries_for_any_url_scheme(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "LIVE" not in scrubbed
+    assert "?***" in scrubbed
+
+
+def test_internal_error_scrubber_does_not_trust_a_mask_with_trailing_text():
+    scrubbed = _internal_error_message(RuntimeError("password=***)TAIL"))
+    assert "TAIL" not in scrubbed
+
+
+def test_internal_error_scrubber_keeps_host_port_path_but_masks_path_assignment():
+    scrubbed = _internal_error_message(RuntimeError("https://auth.example.com:443/password=LIVE"))
+    assert scrubbed.startswith("RuntimeError: https://") and ":443/" in scrubbed
+    assert "LIVE" not in scrubbed
 
 
 def test_internal_error_scrubber_masks_cr_only_folded_headers():

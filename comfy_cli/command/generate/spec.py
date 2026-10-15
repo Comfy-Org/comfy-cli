@@ -505,11 +505,14 @@ def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None
 
 
 def _preferred_media_type(content: dict[str, Any]) -> str:
-    if "application/json" in content:
-        return "application/json"
-    if "multipart/form-data" in content:
-        return "multipart/form-data"
-    return next(iter(content), "application/json")
+    normalized = [(media_type.partition(";")[0].strip().lower(), media_type) for media_type in content]
+    for base, _original in normalized:
+        if base == "application/json" or base.endswith("+json"):
+            return base
+    for preferred in ("multipart/form-data", "application/x-www-form-urlencoded"):
+        if any(base == preferred for base, _original in normalized):
+            return preferred
+    return normalized[0][0] if normalized else "application/json"
 
 
 _SUPPORTED_OPERATION_METHODS = {"get", "put", "patch", "delete", "options", "head", "trace"}
@@ -675,14 +678,33 @@ def _schema_accepts_string_value(
 
     try:
         schema_type = schema.get("type")
-        if isinstance(schema_type, str) and schema_type != "string":
+        finite_constraint = "const" in schema or isinstance(schema.get("enum"), list)
+        array_typed = schema_type == "array" or (isinstance(schema_type, list) and "array" in schema_type)
+        if isinstance(schema_type, str) and schema_type != "string" and not finite_constraint and not array_typed:
             return finish(False)
-        if isinstance(schema_type, list) and "string" not in schema_type:
+        if isinstance(schema_type, list) and "string" not in schema_type and not finite_constraint and not array_typed:
             return finish(False)
-        if "const" in schema and not (isinstance(schema["const"], str) and schema["const"] == value):
+
+        def normalized_scalar(item: Any) -> str | None:
+            if isinstance(item, str):
+                return item
+            if isinstance(item, int | float) and not isinstance(item, bool):
+                return str(item)
+            return None
+
+        if "const" in schema and normalized_scalar(schema["const"]) != value:
             return finish(False)
         enum = schema.get("enum")
-        if isinstance(enum, list) and value not in [item for item in enum if isinstance(item, str)]:
+        if isinstance(enum, list):
+            normalized_enum = [candidate for item in enum if (candidate := normalized_scalar(item)) is not None]
+            if value not in normalized_enum:
+                return finish(False)
+        items = schema.get("items")
+        if (
+            isinstance(items, dict)
+            and (array_typed or not finite_constraint)
+            and not _schema_accepts_string_value(items, value, active, memo)
+        ):
             return finish(False)
         all_of = schema.get("allOf")
         if isinstance(all_of, list) and not all(

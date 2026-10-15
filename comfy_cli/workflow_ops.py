@@ -2566,11 +2566,14 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # attempt's own stamp and is silently dropped forever.
     had_widget_stamps = "_widget_stamps" in workflow
     stamps_before = dict(workflow.get("_widget_stamps") or {})
+    had_deferred_ops = "_deferred_widget_ops" in workflow
+    deferred_before = copy.deepcopy(workflow.get("_deferred_widget_ops") or {})
     try:
         if kind == "add_node":
             _apply_add_node(workflow, op)
         elif kind == "set_widget":
             if _apply_set_widget(workflow, op, graph) is False:
+                workflow.setdefault("_deferred_widget_ops", {})[op["op_id"]] = copy.deepcopy(op)
                 if not had_applied_ops and not workflow.get("_applied_ops"):
                     workflow.pop("_applied_ops", None)
                 return workflow
@@ -2591,6 +2594,10 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             workflow["_widget_stamps"] = stamps_before
         else:
             workflow.pop("_widget_stamps", None)
+        if had_deferred_ops:
+            workflow["_deferred_widget_ops"] = deferred_before
+        else:
+            workflow.pop("_deferred_widget_ops", None)
         if not had_applied_ops and not workflow.get("_applied_ops"):
             workflow.pop("_applied_ops", None)
         raise
@@ -2600,7 +2607,39 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # written into a discarded list. Re-read, so a re-delivered reset_doc is a
     # no-op rather than a second wipe.
     workflow.setdefault("_applied_ops", []).append(op["op_id"])
+    deferred = workflow.get("_deferred_widget_ops")
+    if isinstance(deferred, dict):
+        deferred.pop(op["op_id"], None)
+        if not deferred:
+            workflow.pop("_deferred_widget_ops", None)
+    if kind == "set_widget":
+        _retry_deferred_widget_ops(workflow, graph)
     return workflow
+
+
+def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
+    """Apply queued hidden-widget writes after a selector reveals their targets."""
+    while isinstance(pending := workflow.get("_deferred_widget_ops"), dict) and pending:
+        progressed = False
+        for op_id in sorted(list(pending), key=str):
+            op = pending.get(op_id)
+            if not isinstance(op, dict):
+                pending.pop(op_id, None)
+                progressed = True
+                continue
+            if op_id in (workflow.get("_applied_ops") or []):
+                pending.pop(op_id, None)
+                progressed = True
+                continue
+            if _apply_set_widget(workflow, op, graph) is False:
+                continue
+            workflow.setdefault("_applied_ops", []).append(op_id)
+            pending.pop(op_id, None)
+            progressed = True
+        if not progressed:
+            break
+    if not workflow.get("_deferred_widget_ops"):
+        workflow.pop("_deferred_widget_ops", None)
 
 
 def _apply_add_node(workflow: dict, op: dict) -> None:
@@ -3017,7 +3056,8 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     """Replace the whole document with the empty baseline, bookkeeping included.
 
     Unlike ``_apply_clear`` this drops ``last_node_id``/``last_link_id``,
-    ``_applied_ops`` and ``_widget_stamps`` — the history barrier of §1.6. Ids
+    ``_applied_ops``, ``_widget_stamps`` and deferred writes — the history
+    barrier of §1.6. Ids
     are minted at random in ``[2**40, 2**53)`` (``mint_id``), never allocated
     from the high-water marks, so resetting them to 0 cannot cause id reuse.
     """
@@ -3132,6 +3172,7 @@ def canonical(workflow: dict) -> dict:
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
     w.pop("_widget_stamps", None)
+    w.pop("_deferred_widget_ops", None)
     nodes = w.get("nodes")
     # Capture each node's original index -> slot identity BEFORE reordering
     # inputs, so links (which reference the raw index) can be rewritten.
@@ -3237,6 +3278,7 @@ def strip_internal(workflow: dict) -> dict:
     """
     workflow.pop("_applied_ops", None)
     workflow.pop("_widget_stamps", None)
+    workflow.pop("_deferred_widget_ops", None)
     return complete_save_format(workflow)
 
 

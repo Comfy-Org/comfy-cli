@@ -1825,7 +1825,7 @@ class Graph:
                 port = entry.port
                 if port is None or not port.dynamic_options or not _is_dynamic_combo_type(port.type):
                     continue
-                options: dict[str, Any] = {}
+                options: list[tuple[Any, dict[str, Any]]] = []
                 for option in port.dynamic_options:
                     key = option.get("key")
                     if key is None:
@@ -1836,11 +1836,12 @@ class Graph:
                         _has_control_after_generate_slot(sub_port) for sub_port in sub_ports if not sub_port.is_link
                     ):
                         widgets.append("control_after_generate")
-                    options[str(key)] = {"widgets": widgets}
+                    options.append((key, {"widgets": widgets}))
                 combos[entry.name] = {"options": options}
         for selector, spec in combos.items():
             options = spec.get("options") or {}
-            keys = [key for key, opt in options.items() if widget in (opt.get("widgets") or [])]
+            option_items = options.items() if isinstance(options, dict) else options
+            keys = [key for key, opt in option_items if widget in (opt.get("widgets") or [])]
             if keys and len(keys) < len(options):
                 return selector, keys
         return None

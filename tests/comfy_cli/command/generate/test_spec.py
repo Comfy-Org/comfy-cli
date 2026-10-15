@@ -523,6 +523,22 @@ def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"enum": ["a"], "items": {"enum": ["z"]}}) == ["a"]
 
 
+def test_preferred_media_type_normalizes_parameters_and_structured_json():
+    assert spec._preferred_media_type({"application/problem+json; charset=utf-8": {}}) == "application/problem+json"
+    assert (
+        spec._preferred_media_type({"text/plain": {}, "application/x-www-form-urlencoded; charset=utf-8": {}})
+        == "application/x-www-form-urlencoded"
+    )
+
+
+def test_oneof_acceptance_preserves_numeric_and_array_item_enums():
+    assert spec._extract_enum({"oneOf": [{"type": "integer", "enum": [1]}, {"const": "two"}]}) == ["1", "two"]
+    assert spec._extract_enum({"oneOf": [{"type": "array", "items": {"enum": ["image"]}}, {"const": "video"}]}) == [
+        "image",
+        "video",
+    ]
+
+
 def test_extract_enum_unions_anyof_and_intersects_allof():
     # A spec that splits the model set across anyOf/oneOf branches surfaces
     # every branch, deduped, not just the first.

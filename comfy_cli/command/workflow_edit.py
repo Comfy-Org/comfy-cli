@@ -720,6 +720,7 @@ def ls_nodes_cmd(
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():
         from rich.table import Table
+        from rich.text import Text
 
         tbl = Table(show_header=True, header_style="bold")
         tbl.add_column("id", no_wrap=True)
@@ -736,7 +737,7 @@ def ls_nodes_cmd(
                 )
                 if value
             )
-            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""), state)
+            tbl.add_row(Text(str(r["id"])), Text(str(r["type"])), Text(str(r["title"] or "")), state)
         renderer.console().print(tbl)
     renderer.emit(payload, command="workflow ls-nodes")
 

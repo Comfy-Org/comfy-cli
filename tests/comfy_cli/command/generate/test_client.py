@@ -105,14 +105,81 @@ def test_form_urlencoded_arrays_repeat_keys_and_binary_is_refused(tmp_path):
         schema.FlagDef(name="tags", kind="array", item_kind="string", required=False),
         schema.FlagDef(name="image", kind="binary", required=False),
     ]
-    assert client._split_payload({"tags": ["a", "b"]}, flags, "application/x-www-form-urlencoded")[2] == [
-        ("tags", "a"),
-        ("tags", "b"),
-    ]
+    data = client._split_payload({"tags": ["a", "b"]}, flags, "application/x-www-form-urlencoded")[2]
+    assert data == {"tags": ["a", "b"]}
+    request = httpx.Request("POST", "https://example.test", data=data)
+    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert request.content == b"tags=a&tags=b"
     image = tmp_path / "image.png"
     image.write_bytes(b"x")
     with pytest.raises(client.ApiError, match="require multipart"):
         client._split_payload({"image": image}, flags, "application/x-www-form-urlencoded")
+
+
+def test_form_urlencoded_rejects_non_array_and_nested_values():
+    flags = [schema.FlagDef(name="tags", kind="array", item_kind="string", required=False)]
+    with pytest.raises(client.ApiError, match="expected an array"):
+        client._split_payload({"tags": "not-an-array"}, flags, "application/x-www-form-urlencoded")
+    with pytest.raises(client.ApiError, match="nested form values"):
+        client._split_payload({"tags": [{"secret": "value"}]}, flags, "application/x-www-form-urlencoded")
+
+
+def test_empty_multipart_payload_forces_multipart_encoding():
+    payload = client._split_payload({}, [], "multipart/form-data")
+    assert payload == (None, [], None)
+
+
+def test_send_empty_multipart_payload_builds_a_zero_part_wire_body(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/multipart",
+        path="/proxy/example/multipart",
+        method="post",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="multipart/form-data",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        client.httpx,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or httpx.Response(200),
+    )
+
+    client.send_request(ep, {}, [], api_key="comfyui-test")
+
+    assert captured["headers"]["Content-Type"] == "multipart/form-data; boundary=comfy-cli-empty"
+    assert captured["content"] == b"--comfy-cli-empty--\r\n"
+    assert "files" not in captured and "data" not in captured
+
+
+def test_parameterized_json_media_type_uses_json_body(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/json",
+        path="/proxy/example/json",
+        method="post",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="application/problem+json; charset=utf-8",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        client.httpx,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or httpx.Response(200),
+    )
+
+    client.send_request(ep, {"prompt": "hello"}, [], api_key="comfyui-test")
+
+    assert captured["json"] == {"prompt": "hello"}
+    assert "files" not in captured and "data" not in captured
 
 
 def _capture_post(monkeypatch):

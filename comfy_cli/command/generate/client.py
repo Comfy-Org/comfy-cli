@@ -70,16 +70,19 @@ def _split_payload(
     and data is the non-file form fields (stringified or JSON-encoded as needed).
     """
     flag_by_name = {f.name: f for f in flags}
-    if content_type == "application/json":
+    base_content_type = content_type.partition(";")[0].strip().lower()
+    json_content_type = base_content_type == "application/json" or base_content_type.endswith("+json")
+    if json_content_type:
         return values, None, None
-    if content_type not in {"multipart/form-data", "application/x-www-form-urlencoded"}:
+    if base_content_type not in {"multipart/form-data", "application/x-www-form-urlencoded"}:
         raise ApiError(0, "", f"Unsupported request content type: {content_type}")
 
     files: list[tuple[str, Any]] = []
-    data: dict[str, Any] | list[tuple[str, str]] = {} if content_type == "multipart/form-data" else []
-    needs_repeated_form_fields = False
+    data: dict[str, Any] = {}
 
-    def form_scalar(item: Any) -> str:
+    def form_scalar(name: str, item: Any) -> str:
+        if isinstance(item, (dict, list, tuple)):
+            raise ApiError(0, "", f"--{name}: nested form values are not supported")
         if isinstance(item, bool):
             return "true" if item else "false"
         return str(item)
@@ -87,27 +90,28 @@ def _split_payload(
     for name, value in values.items():
         flag = flag_by_name.get(name)
         if (
-            content_type == "application/x-www-form-urlencoded"
+            base_content_type == "application/x-www-form-urlencoded"
             and flag
             and (flag.kind == "binary" or (flag.kind == "array" and flag.item_kind == "binary"))
         ):
             raise ApiError(0, "", f"--{name}: binary values require multipart/form-data")
-        if content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "array":
-            assert isinstance(data, list)
-            needs_repeated_form_fields = True
-            data.extend((name, form_scalar(item)) for item in value)
-        elif content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "object":
+        if base_content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "array":
+            if not isinstance(value, (list, tuple)):
+                raise ApiError(0, "", f"--{name}: expected an array value")
+            data[name] = [form_scalar(name, item) for item in value]
+        elif base_content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "object":
             if not isinstance(value, dict):
                 raise ApiError(0, "", f"--{name}: expected an object value")
-            assert isinstance(data, list)
-            needs_repeated_form_fields = True
-            data.extend((str(key), form_scalar(item)) for key, item in value.items())
-        elif content_type == "multipart/form-data" and flag and flag.kind == "binary":
+            for key, item in value.items():
+                data[str(key)] = form_scalar(name, item)
+        elif base_content_type == "multipart/form-data" and flag and flag.kind == "binary":
             path = Path(value) if not isinstance(value, Path) else value
             if not path.is_file():
                 raise ApiError(0, "", f"--{name}: file not found: {path}")
             files.append((name, (path.name, path.open("rb"), "application/octet-stream")))
-        elif content_type == "multipart/form-data" and flag and flag.kind == "array" and flag.item_kind == "binary":
+        elif (
+            base_content_type == "multipart/form-data" and flag and flag.kind == "array" and flag.item_kind == "binary"
+        ):
             for p in value:
                 p = Path(p) if not isinstance(p, Path) else p
                 if not p.is_file():
@@ -117,22 +121,18 @@ def _split_payload(
             # Multipart form fields are scalar — JSON-encode complex values.
             import json as _json
 
-            assert isinstance(data, dict)
             data[name] = _json.dumps(value)
         else:
-            if isinstance(data, dict):
-                data[name] = form_scalar(value)
-            else:
-                data.append((name, form_scalar(value)))
-    if content_type == "multipart/form-data" and not files:
+            data[name] = form_scalar(name, value)
+    if base_content_type == "multipart/form-data" and not files:
         # httpx falls back to application/x-www-form-urlencoded when ``files``
         # is empty. Filename-less file tuples force the declared multipart
         # wire format for endpoints whose optional binary fields were omitted.
-        assert isinstance(data, dict)
-        return None, [(name, (None, value)) for name, value in data.items()], None
-    if content_type == "application/x-www-form-urlencoded" and not needs_repeated_form_fields:
-        assert isinstance(data, list)
-        return None, None, dict(data)
+        parts = [(name, (None, value)) for name, value in data.items()]
+        # An empty list is an internal sentinel: ``send_request`` emits a true
+        # zero-part multipart body rather than inventing a field the API did
+        # not declare.
+        return None, parts, None
     return None, files or None, data
 
 
@@ -173,11 +173,20 @@ def send_request(
         method = endpoint.method.lower()
         if method == "get":
             return httpx.get(url, params=values, headers=headers, timeout=timeout)
-        if method == "post" and endpoint.request_content_type == "application/json":
+        base_content_type = endpoint.request_content_type.partition(";")[0].strip().lower()
+        json_content_type = base_content_type == "application/json" or base_content_type.endswith("+json")
+        if base_content_type == "multipart/form-data" and files == []:
+            boundary = "comfy-cli-empty"
+            empty_headers = {**headers, "Content-Type": f"multipart/form-data; boundary={boundary}"}
+            kwargs = {"content": f"--{boundary}--\r\n".encode(), "headers": empty_headers, "timeout": timeout}
+            if method == "post":
+                return httpx.post(url, **kwargs)
+            return httpx.request(method.upper(), url, **kwargs)
+        if method == "post" and json_content_type:
             return httpx.post(url, json=json_body, headers=headers, timeout=timeout)
         if method == "post":
             return httpx.post(url, files=files, data=data, headers=headers, timeout=timeout)
-        if endpoint.request_content_type == "application/json":
+        if json_content_type:
             return httpx.request(method.upper(), url, json=json_body, headers=headers, timeout=timeout)
         return httpx.request(method.upper(), url, files=files, data=data, headers=headers, timeout=timeout)
     finally:
