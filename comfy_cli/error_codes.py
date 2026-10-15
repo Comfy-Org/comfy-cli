@@ -588,6 +588,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "egress-allow.json) could not be read, or is not the shape the agent writes.",
         "fix or remove the file named in the message and try again",
     ),
+    ErrorCode(
+        "agent_approval_moved",
+        "`comfy agent allow` and `comfy agent deny` were removed: a script the agent ran could approve "
+        "its own requests. They change nothing and exit 1.",
+        "approve or deny the request on its card in the agent panel",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
