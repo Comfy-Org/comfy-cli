@@ -1,9 +1,10 @@
 """Detect whether the CLI is being driven by a human or an agent.
 
-The detection flips three defaults:
+The detection flips four defaults:
     - Output mode (agents → JSON, humans → pretty)
     - Confirmation prompts (skipped for agents)
     - Pretty banner (suppressed for agents)
+    - Windows argument expansion (off for agents; see cmdline._windows_expand_args)
 
 Signals (in priority order — most specific first):
     1. ``COMFY_USER_AGENT=<label>`` → explicit override, agentic, label preserved.

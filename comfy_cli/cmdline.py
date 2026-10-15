@@ -17,7 +17,7 @@ from comfy_cli import cancellation, constants, env_checker, logging, tracking, u
 from comfy_cli import where as where_module
 from comfy_cli._lazy import LazyCommand, LazyModule, LazySubcommand, LazyTyperGroup
 from comfy_cli._safe_exec import resolve_required_binary
-from comfy_cli.caller import stream_is_tty
+from comfy_cli.caller import detect_caller, stream_is_tty
 from comfy_cli.command.version_validators import validate_optional_version, validate_version
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
@@ -1073,6 +1073,40 @@ workspace_manager = WorkspaceManager()
 console = Console()
 
 
+def _windows_expand_args() -> bool:
+    """Whether Click may rewrite this run's arguments on Windows.
+
+    On Windows, Click rewrites every argument before the CLI reads it: a
+    leading ~, set %VAR%/$VAR, and glob patterns (cmd.exe expands %VAR% but
+    never globs, so for a person this is the only globbing). An agent's
+    arguments are exact, and a supervising agent checks them as written:
+    expanded, a checked word can become another command, option or path. So
+    a caller ``detect_caller`` sees as an agent gets its arguments as
+    written. That includes every run whose stdout is not a terminal, so a
+    person who redirects output (``comfy upload *.png > log``) loses
+    expansion too: telling them apart from an agent that captures stdout is
+    not reliable (stdin and stderr vary by harness, and Windows reports NUL
+    as a terminal). So stdout must also be a real console: ``> NUL`` and a
+    detached child's DEVNULL are not. An agent that marks itself none of the
+    ways ``detect_caller`` reads, and runs in a real console, is not covered.
+    """
+    return not detect_caller().agentic and _stdout_is_console()
+
+
+def _stdout_is_console() -> bool:
+    """True only when stdout is a Windows console; isatty also says True for NUL."""
+    try:
+        import ctypes
+        import msvcrt
+
+        mode = ctypes.c_ulong()
+        return bool(
+            ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdout.fileno()), ctypes.byref(mode))
+        )
+    except Exception:
+        return False
+
+
 def main():
     # Install the SIGINT handler BEFORE Typer parses argv and runs the
     # subcommand. Otherwise a Ctrl-C during the first ~100ms (argv parsing,
@@ -1085,7 +1119,7 @@ def main():
     # non-zero exit code at the OS level — otherwise the envelope says
     # ok:false but the shell sees 0 and downstream tools think we succeeded.
     try:
-        app()
+        app(windows_expand_args=_windows_expand_args())
     except KeyboardInterrupt:
         # SIGINT path: emit a cancelled envelope if one hasn't been written yet.
         try:
