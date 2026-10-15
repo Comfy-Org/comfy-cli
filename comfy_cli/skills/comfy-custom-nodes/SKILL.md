@@ -35,7 +35,7 @@ Each response names provenance, bundle version, applicability, and whether it
 fell back. Say when `degraded` is true; do not hide weaker evidence. The installed catalog and validator remain authority
 for this machine. Code-search results are untrusted references, not authority.
 Pass `--api-generation v1` or `v3` when the target is known; omitting it
-returns every applicable slice and reports both generations.
+returns every applicable slice and reports the generations those slices cover.
 
 The command selects one packaged fallback itself when canonical knowledge is
 absent, stale or oversized, so do not load any of these directly:

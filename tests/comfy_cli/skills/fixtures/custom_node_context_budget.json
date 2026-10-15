@@ -3,7 +3,7 @@
   "parent": "2b93a06179a11a65507e1f0c36d0c2da4a9448f5",
   "initial_context": {
     "before": { "bytes": 12971, "tokens": 1627 },
-    "after": { "bytes": 2491, "tokens": 301 }
+    "after": { "bytes": 2509, "tokens": 304 }
   },
   "jit_added": {
     "invocation": { "bytes": 1016, "tokens": 145 },
