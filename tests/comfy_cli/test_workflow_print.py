@@ -1530,7 +1530,7 @@ def test_malformed_graph_containers_are_reported_not_crashed(malformed):
     assert "workflow: ignoring non-list nodes block" in res.warnings
     assert "workflow: ignoring non-list links block" in res.warnings
     assert "workflow: ignoring non-list groups block" in res.warnings
-    assert "workflow: ignoring non-list subgraphs block" in res.warnings
+    assert "workflow: ignoring non-list definitions.subgraphs block" in res.warnings
 
 
 def test_typed_distinct_holder_does_not_retarget_a_link_row():

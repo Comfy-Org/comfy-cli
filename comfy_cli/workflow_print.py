@@ -1950,7 +1950,7 @@ def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         promoted_workflow = {**workflow, "definitions": None}
     subgraphs = definitions.get("subgraphs") if definitions else None
     if subgraphs is not None and not isinstance(subgraphs, list):
-        warnings.append("workflow: ignoring non-list subgraphs block")
+        warnings.append("workflow: ignoring non-list definitions.subgraphs block")
         subgraphs = []
         definitions = {**definitions, "subgraphs": subgraphs}
         promoted_workflow = {**workflow, "definitions": definitions}
