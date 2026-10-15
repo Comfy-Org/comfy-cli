@@ -766,6 +766,37 @@ def test_valid_six_level_four_way_boundary_fanout_uses_the_output_budget():
     assert len(targets) == 4**6
 
 
+def test_valid_ten_level_three_way_boundary_fanout_stays_below_output_cap():
+    definitions: dict[str, dict] = {
+        "leaf": {
+            "id": "leaf",
+            "inputs": [{"name": "value", "linkIds": [1]}],
+            "nodes": [
+                {"id": 9, "type": "Plain", "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}]}
+            ],
+            "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+        }
+    }
+    for level in reversed(range(10)):
+        child = "leaf" if level == 9 else f"level-{level + 1}"
+        definitions[f"level-{level}"] = {
+            "id": f"level-{level}",
+            "inputs": [{"name": "value", "linkIds": [1, 2, 3]}],
+            "nodes": [
+                {"id": index, "type": child, "inputs": [{"name": "value", "link": index + 1}]} for index in range(3)
+            ],
+            "links": [{"id": index + 1, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(3)],
+        }
+
+    targets = promoted.boundary_widget_targets(
+        definitions["level-0"],
+        promoted.PromotedInput("value", "STRING", 0, 0),
+        definitions,
+    )
+
+    assert len(targets) == 3**10
+
+
 def test_stable_boundary_cache_revalidates_ancestor_dependencies():
     ancestor = {
         "id": "ancestor",
@@ -1008,6 +1039,78 @@ def test_resolve_write_uses_last_link_row_and_declared_input_membership():
 
     assert target.kind == "host"
     assert target.widget == "cfg"
+    assert target.redirected_from == "host/inner.value"
+
+
+def _plain_widget_graph() -> Graph:
+    return Graph.from_object_info(
+        {
+            "Plain": {
+                "input": {"required": {"value": ["FLOAT", {"default": 1.0}]}},
+                "input_order": {"required": ["value"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+            }
+        }
+    )
+
+
+def test_resolve_write_keeps_non_unique_boundary_membership_interior():
+    sg_id = "11111111-2222-3333-4444-555555555555"
+    definition = {
+        "id": sg_id,
+        "inputs": [
+            {"name": "first", "type": "FLOAT", "linkIds": [5]},
+            {"name": "second", "type": "FLOAT", "linkIds": [5]},
+        ],
+        "nodes": [
+            {
+                "id": "inner",
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": 5, "widget": {"name": "value"}}],
+                "widgets_values": [1.0],
+            }
+        ],
+        "links": [{"id": 5, "origin_id": -10, "target_id": "inner", "target_slot": 0}],
+    }
+    workflow = {
+        "nodes": [{"id": "host", "type": sg_id, "inputs": [], "widgets_values": [7.5, 8.5]}],
+        "links": [],
+        "definitions": {"subgraphs": [definition]},
+    }
+
+    target = promoted.resolve_write(workflow, _plain_widget_graph(), ["host", "inner"], "value")
+
+    assert target.kind == "interior"
+    assert target.segments == ["host", "inner"]
+
+
+def test_resolve_write_redirects_a_normalized_empty_boundary_name():
+    sg_id = "11111111-2222-3333-4444-555555555555"
+    definition = {
+        "id": sg_id,
+        "inputs": [{"name": None, "type": "FLOAT", "linkIds": [5]}],
+        "nodes": [
+            {
+                "id": "inner",
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": 5, "widget": {"name": "value"}}],
+                "widgets_values": [1.0],
+            }
+        ],
+        "links": [{"id": 5, "origin_id": -10, "target_id": "inner", "target_slot": 0}],
+    }
+    workflow = {
+        "nodes": [{"id": "host", "type": sg_id, "inputs": [], "widgets_values": [7.5]}],
+        "links": [],
+        "definitions": {"subgraphs": [definition]},
+    }
+
+    target = promoted.resolve_write(workflow, _plain_widget_graph(), ["host", "inner"], "value")
+
+    assert target.kind == "host"
+    assert target.widget == ""
     assert target.redirected_from == "host/inner.value"
 
 

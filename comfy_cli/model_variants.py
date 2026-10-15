@@ -164,9 +164,10 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     ``model_unavailable`` warning (with the closest options) per model file
     that has no unique sibling and is left as it was. A subgraph instance that
     carries the same filename as a promoted value, and the ``properties.models``
-    download list, follow the rewrite. Top-level-only replacements are applied
-    directly; a replacement that must propagate through promoted subgraph
-    values is staged on a copy so a traversal failure leaves the input intact.
+    download list, follow the rewrite. Every replacement is staged on a deep
+    copy so a traversal failure leaves the input intact; on success the
+    workflow's top-level mapping is replaced with that transactional result,
+    so references into its former nested objects are no longer current.
     """
     from comfy_cli.cql.promoted import PromotionTraversalLimitError
 

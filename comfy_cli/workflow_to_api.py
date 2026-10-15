@@ -244,13 +244,15 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         keys: set[tuple[type, int | str]] = set()
         raw_links = scope.get("links")
         for link in raw_links if isinstance(raw_links, list) else []:
-            candidate = (
-                link.get("id")
-                if isinstance(link, dict)
-                else link[0]
-                if isinstance(link, (list, tuple)) and link
-                else None
-            )
+            if isinstance(link, dict):
+                candidate = link.get("id")
+                memberships = _promoted._input_link_memberships(scope, subgraph_defs)
+                if not _promoted._is_input_proxy_link(link) or len(memberships.get(candidate, ())) != 1:
+                    continue
+            elif isinstance(link, (list, tuple)) and len(link) >= 6:
+                candidate = link[0]
+            else:
+                continue
             if _is_link_id(candidate):
                 keys.add((type(candidate), candidate))
         scope_links[id(scope)] = (scope, keys)
@@ -265,9 +267,12 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         if depth > _MAX_SUBGRAPH_ITERATIONS or instance.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
             return
         inner_nodes = nodes_for(sg)
-        if len(inner_nodes) + 1 > visit_budget[0]:
+        raw_definition_inputs = sg.get("inputs")
+        definition_input_count = len(raw_definition_inputs) if isinstance(raw_definition_inputs, list) else 0
+        visit_cost = len(inner_nodes) + definition_input_count + 1
+        if visit_cost > visit_budget[0]:
             raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
-        visit_budget[0] -= len(inner_nodes) + 1
+        visit_budget[0] -= visit_cost
         for inner in inner_nodes:
             inner_type = inner.get("type")
             inner_def = subgraph_defs.get(str(inner_type)) if is_subgraph_uuid(inner_type) else None
@@ -510,11 +515,19 @@ def _definition_expansion_metrics(definition: dict) -> tuple[int, int, int]:
     """Cached-worthy copied work plus real node/link counts for one definition."""
     raw_nodes = definition.get("nodes")
     raw_links = definition.get("links")
+    raw_inputs = definition.get("inputs")
     nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
     links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
     raw_scan_cost = (len(raw_nodes) if isinstance(raw_nodes, list) else 0) + (
         len(raw_links) if isinstance(raw_links, list) else 0
     )
+    if isinstance(raw_inputs, list):
+        raw_scan_cost += len(raw_inputs)
+        raw_scan_cost += sum(
+            len(entry) + (len(entry.get("linkIds")) if isinstance(entry.get("linkIds"), list) else 0)
+            for entry in raw_inputs
+            if isinstance(entry, dict)
+        )
     copied_cost = sum(_node_expansion_cost(node) for node in nodes) + sum(
         1 + len(link) + len(str(link.get("origin_id", ""))) + len(str(link.get("target_id", ""))) for link in links
     )
@@ -571,7 +584,7 @@ def _outer_slot_to_input_idx(
         definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
         for idx, inp in enumerate(definition_inputs):
             if isinstance(inp, dict):
-                sg_input_names[_input_name(inp.get("name"))] = idx
+                sg_input_names.setdefault(_input_name(inp.get("name")), idx)
     mapping: dict[int, int] = {}
     raw_outer_inputs = outer_node.get("inputs")
     outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
@@ -771,11 +784,10 @@ def _expand_one_subgraph(
                 output_sources.setdefault(output_slot, (origin_id, origin_slot))
             resolved_output_link_ids.add(lid)
 
-        definition_input_names = {
-            _input_name(entry.get("name")): idx
-            for idx, entry in enumerate(definition_inputs)
-            if isinstance(entry, dict)
-        }
+        definition_input_names: dict[str, int] = {}
+        for idx, entry in enumerate(definition_inputs):
+            if isinstance(entry, dict):
+                definition_input_names.setdefault(_input_name(entry.get("name")), idx)
         cached = (*cached, input_targets, output_sources, definition_input_names, internal_link_map, interior_links)
         if _definition_cache is not None:
             _definition_cache[id(sg_def)] = cached

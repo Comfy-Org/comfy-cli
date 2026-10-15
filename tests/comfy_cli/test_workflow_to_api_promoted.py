@@ -130,6 +130,56 @@ def test_dangling_link_on_a_promoted_input_does_not_drop_the_host_value(object_i
     assert _api_node(api, "MiniMaxMusic3TextEncode", "37:13")["inputs"]["caption"].startswith("Global Metadata")
 
 
+def test_malformed_link_row_on_a_promoted_input_does_not_drop_the_host_value(object_info):
+    wf = _load("audio_minimax_music_3.json")
+    inst = next(n for n in wf["nodes"] if n["id"] == 37)
+    inst["inputs"].append({"name": "caption", "type": "STRING", "widget": {"name": "caption"}, "link": 999999})
+    wf["links"].append([999999])
+
+    api = convert_ui_to_api(wf, object_info)
+
+    assert _api_node(api, "MiniMaxMusic3TextEncode", "37:13")["inputs"]["caption"].startswith("Global Metadata")
+
+
+def test_non_unique_nested_boundary_link_does_not_hide_the_inner_host_value():
+    child_id = "11111111-2222-4333-8444-555555555555"
+    parent_id = "66666666-7777-4888-8999-000000000000"
+    child = {
+        "id": child_id,
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": "leaf",
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "target_id": "leaf", "target_slot": 0}],
+    }
+    parent = {
+        "id": parent_id,
+        "inputs": [
+            {"name": "first", "linkIds": [99]},
+            {"name": "second", "linkIds": [99]},
+        ],
+        "nodes": [
+            {
+                "id": "nested",
+                "type": child_id,
+                "inputs": [{"name": "value", "link": 99}],
+                "widgets_values": ["host value"],
+            }
+        ],
+        "links": [{"id": 99, "origin_id": -10, "target_id": "nested", "target_slot": 0}],
+    }
+    workflow = {"nodes": [{"id": "root", "type": parent_id}], "links": []}
+    api_prompt = {"root:nested:leaf": {"class_type": "Plain", "inputs": {"value": "interior default"}}}
+
+    workflow_to_api._overlay_promoted_host_values(api_prompt, workflow, {parent_id: parent, child_id: child})
+
+    assert api_prompt["root:nested:leaf"]["inputs"]["value"] == "host value"
+
+
 def test_stale_boundary_target_reattaches_external_value_to_the_actual_holder(object_info, graph):
     wf = _load("image_z_image_turbo.json")
     wf, primitive = workflow_ops.add_node(wf, graph, "PrimitiveInt")
@@ -906,6 +956,38 @@ def test_definition_expansion_cost_charges_link_endpoint_id_bytes():
     }
 
     assert workflow_to_api._definition_expansion_cost(definition) >= 3001
+
+
+def test_definition_expansion_cost_charges_declared_inputs_and_memberships():
+    definition = {
+        "inputs": [{"name": f"value-{index}", "linkIds": list(range(10))} for index in range(20)],
+        "nodes": [],
+        "links": [],
+    }
+
+    assert workflow_to_api._definition_expansion_cost(definition) >= 20 * 12
+
+
+def test_promoted_overlay_budget_charges_declared_inputs(monkeypatch):
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {
+        "id": definition_id,
+        "inputs": [{"name": f"value-{index}"} for index in range(4)],
+        "nodes": [],
+        "links": [],
+    }
+    workflow = {"nodes": [{"id": 1, "type": definition_id}], "links": []}
+    monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 4)
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="promoted-value overlay exceeded"):
+        workflow_to_api._overlay_promoted_host_values({}, workflow, {definition_id: definition})
+
+
+def test_duplicate_normalized_definition_input_names_use_the_first_slot():
+    definition = {"inputs": [{"name": 7}, {"name": "7"}]}
+    outer = {"inputs": [{"name": "7"}]}
+
+    assert workflow_to_api._outer_slot_to_input_idx(outer, definition) == {0: 0}
 
 
 def test_expansion_budget_is_clamped_to_an_absolute_cap(monkeypatch):

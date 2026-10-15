@@ -1009,12 +1009,19 @@ def resolve_write(
                 raw_sg_inputs = parent_def.get("inputs")
                 sg_inputs = raw_sg_inputs if isinstance(raw_sg_inputs, list) else []
                 memberships = _input_link_memberships(parent_def, defs).get(link_id, set())
-                input_index = next(iter(memberships)) if len(memberships) == 1 else None
-                sg_input = sg_inputs[input_index] if input_index is not None and input_index < len(sg_inputs) else None
-                if isinstance(sg_input, dict) and sg_input.get("name"):
-                    return resolve_write(
-                        workflow, graph, segments[:-1], str(sg_input["name"]), redirected_from=redirected_from or given
-                    )
+                if len(memberships) != 1:
+                    return WriteTarget("interior", widget=widget, segments=segments, redirected_from=redirected_from)
+                input_index = next(iter(memberships))
+                sg_input = sg_inputs[input_index] if input_index < len(sg_inputs) else None
+                if not isinstance(sg_input, dict):
+                    return WriteTarget("interior", widget=widget, segments=segments, redirected_from=redirected_from)
+                return resolve_write(
+                    workflow,
+                    graph,
+                    segments[:-1],
+                    _input_name(sg_input.get("name")),
+                    redirected_from=redirected_from or given,
+                )
             if link is not None:
                 origin = link.get("origin_id")
                 origin_node = next((n for n in parent_def.get("nodes") or [] if str(n.get("id")) == str(origin)), None)
@@ -2142,11 +2149,6 @@ def _boundary_targets(
                 1,
                 "promoted widget boundary traversal exceeded its safe limit",
             )
-            _spend_traversal_budget(
-                _output_budget,
-                len(stable_result),
-                "promoted widget boundary traversal exceeded its safe limit",
-            )
             return stable_result
     if memo_key in _memo:
         result = _memo[memo_key]
@@ -2156,11 +2158,6 @@ def _boundary_targets(
         _spend_traversal_budget(
             _budget,
             1,
-            "promoted widget boundary traversal exceeded its safe limit",
-        )
-        _spend_traversal_budget(
-            _output_budget,
-            len(result),
             "promoted widget boundary traversal exceeded its safe limit",
         )
         return result
