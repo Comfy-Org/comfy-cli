@@ -6,7 +6,7 @@
   "properties": {
     "loaded": { "type": "boolean", "description": "Whether a bundle is loaded (status)." },
     "reason": { "type": "string", "description": "Why no bundle loaded (status, loaded=false)." },
-    "source": { "type": "string", "description": "env | cache | fetch | stale-cache (status)." },
+    "source": { "type": "string", "description": "Bundle source (status) or comfy-knowledge | packaged-fallback (authoring)." },
     "stale": { "type": "boolean", "description": "True when served from an expired cache after a failed fetch." },
     "version": { "type": "string", "description": "Bundle version from manifest.json, or 'unknown' (status)." },
     "schema_version": { "type": "integer", "description": "Bundle schema version the loader accepts (status)." },
@@ -64,6 +64,12 @@
         }
       }
     },
-    "local_check": { "type": "string", "description": "Present only under pick --check-local. `ok` when the check ran, though a pick may still carry its own local_check. Otherwise the error code that stopped the check (server_not_running, model_listing_too_large, gallery_load_failed), and no pick is marked." }
+    "local_check": { "type": "string", "description": "Present only under pick --check-local. `ok` when the check ran, though a pick may still carry its own local_check. Otherwise the error code that stopped the check (server_not_running, model_listing_too_large, gallery_load_failed), and no pick is marked." },
+    "class": { "type": "string", "description": "Bounded authoring knowledge class." },
+    "content": { "type": "string", "description": "The selected JIT authoring slice only." },
+    "applies_to": { "type": ["string", "object", "array", "null"], "description": "Version applicability supplied by the canonical slice or packaged fallback." },
+    "provenance": { "type": ["string", "object", "array", "null"], "description": "Source provenance supplied by the canonical slice or packaged fallback." },
+    "degraded": { "type": "boolean", "description": "True when packaged fallback was used." },
+    "degraded_reason": { "type": "string", "description": "Visible reason canonical knowledge was not used." }
   }
 }

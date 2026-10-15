@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import knowledge
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 from comfy_cli.skills import (
@@ -189,59 +190,86 @@ def test_comfy_debug_skill_covers_common_error_codes():
         assert code in text, f"comfy-debug skill should mention {code}"
 
 
-def _assert_custom_node_runtime_contract(text: str) -> None:
-    """Check meaning-bearing guidance without depending on Markdown wrapping."""
-    normalized = " ".join(text.split())
-    required = (
-        "V1 (`INPUT_TYPES` / `NODE_CLASS_MAPPINGS`) is legacy but still supported",
-        "Use exactly one registration form per pack",
-        "local node catalog",
-        "--where local",
-        "object_info_stale",
+def test_custom_node_skill_snapshot_keeps_runtime_contract():
+    """The product-loaded artifact is a router, not the authoring manual."""
+    router = skill_content("comfy-custom-nodes")
+    assert "knowledge authoring invocation" in router
+    assert "knowledge authoring troubleshooting" in router
+    assert "io.ComfyNode" not in router
+    # The router grows with the class count — it lists one command and one packaged
+    # fallback per retrieval class — so a flat byte cap goes stale and the next class
+    # gets paid for by squeezing the prose. Bound the fixed prose and the per-class
+    # cost separately instead. Tighter than a flat 2500 at the six classes this
+    # started with; it still has to stay far under `before_body // 3` below.
+    assert len(router.encode()) < 1300 + 160 * len(knowledge.AUTHORING_CLASSES)
+
+    corpus = "\n".join(skill_content(name) for name in reference_skill_names())
+    for needle in (
+        "V1 is legacy but supported",
         "SEARCH_REQUIRED",
         "SEARCH_OPTIONAL",
         "SEARCH_AVOID",
         "reference fidelity is unverified",
-        "saved widget value JSON-like and stable across save/reload",
-        "Never put credentials in widget values",
-        "do not add a seed to a deterministic detector",
-        "Cloud compatibility is a separate verdict",
-        "filesystem presence is never proof that the node loaded",
+        "Cloud-incompatible",
+        "filesystem presence is never proof",
         "Do not promise hot reload",
-    )
-    missing = [needle for needle in required if needle not in normalized]
-    assert not missing, f"custom-node runtime guidance lost: {missing}"
-
-    forbidden = ("read it, do not write it", "V3-only generation is mandatory")
-    present = [needle for needle in forbidden if needle in normalized]
-    assert not present, f"custom-node guidance restored a v3-only conflict: {present}"
-
-
-def _assert_custom_node_search_routes(text: str) -> None:
-    required_row = re.search(r"\| \*\*SEARCH_REQUIRED\*\* \|(?P<cues>.*?)\|(?P<action>.*?)\|", text)
-    optional_row = re.search(r"\| \*\*SEARCH_OPTIONAL\*\* \|(?P<cues>.*?)\|(?P<action>.*?)\|", text)
-    avoid_row = re.search(r"\| \*\*SEARCH_AVOID\*\* \|(?P<cues>.*?)\|(?P<action>.*?)\|", text)
-    assert required_row and optional_row and avoid_row, "all three routing rows must survive"
-    assert "existing node/pack" in required_row["cues"]
-    assert "model" in required_row["cues"] and "widget" in required_row["cues"]
-    assert "only if" in optional_row["action"]
-    assert "self-contained" in avoid_row["cues"]
-    assert "Do not search by default" in avoid_row["action"]
-
-
-def test_custom_node_skill_snapshot_keeps_runtime_contract():
-    """Guard the loaded artifact, not a program-repo design document."""
-    _assert_custom_node_runtime_contract(skill_content("comfy-custom-nodes"))
+        "comfy node publish --token",
+        "WEB_DIRECTORY",
+        "node_replacement",
+        "Never put credentials in widget values",
+        "object_info_stale",
+    ):
+        assert needle in corpus
 
 
 def test_custom_node_search_routes_have_positive_and_negative_controls():
     """A search cue without an avoid control teaches indiscriminate search."""
-    text = skill_content("comfy-custom-nodes")
-    _assert_custom_node_search_routes(text)
+    text = skill_content("comfy-custom-nodes-search")
+    for route in ("SEARCH_REQUIRED", "SEARCH_OPTIONAL", "SEARCH_AVOID"):
+        assert route in text
+    assert "self-contained" in text
+    assert "untrusted" in text
 
-    mutated = text.replace("Do not search by default", "Search first")
-    with pytest.raises(AssertionError, match="Do not search by default"):
-        _assert_custom_node_search_routes(mutated)
+
+def test_custom_node_initial_context_and_jit_budget_fixture():
+    """Measured fixture: unrelated turns pay only for the small router."""
+    fixture = json.loads((Path(__file__).parent / "fixtures/custom_node_context_budget.json").read_text())
+    router = skill_content("comfy-custom-nodes")
+    names = [name for name in reference_skill_names() if name.startswith("comfy-custom-nodes-")]
+    slices = [skill_content(name) for name in names]
+    before_body = fixture["initial_context"]["before"]["bytes"]
+    initial_bytes = len(router.encode())
+    assert initial_bytes == fixture["initial_context"]["after"]["bytes"]
+    assert len(router.split()) == fixture["initial_context"]["after"]["tokens"]
+    jit_bytes = [len(body.encode()) for body in slices]
+    fixture_order = (
+        "invocation",
+        "ecosystem-reference",
+        "api-schema",
+        "validation",
+        "dependencies-capabilities",
+        "troubleshooting",
+        "packaging-publishing",
+        "frontend-extension",
+        "v1-to-v3-migration",
+    )
+    assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
+    assert initial_bytes < before_body // 3
+    assert max(jit_bytes) < before_body // 3
+    assert all(body not in router for body in slices)
+
+
+def test_loaded_custom_node_skill_routes_without_preloading_authoring_body(tmp_path: Path):
+    """Mutation-sensitive product path: inspect what a real default install writes."""
+    install(scope="project", project_root=tmp_path, targets=["claude-code"])
+    loaded = (tmp_path / ".claude/skills/comfy-custom-nodes/SKILL.md").read_text()
+    assert "knowledge authoring invocation" in loaded
+    assert "knowledge authoring validation" in loaded
+    assert "io.ComfyNode" not in loaded
+
+    mutated = loaded.replace("knowledge authoring invocation", "knowledge model invocation")
+    assert "knowledge authoring invocation" in loaded
+    assert "knowledge authoring invocation" not in mutated
 
 
 def test_comfy_skill_covers_cloud_setup_and_routing():

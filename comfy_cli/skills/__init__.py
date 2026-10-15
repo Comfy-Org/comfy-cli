@@ -72,6 +72,15 @@ REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build-failures", "comfy-build-failures"),
     ("comfy-deploy-failures", "comfy-deploy-failures"),
     ("comfy-agent-permissions", "comfy-agent-permissions"),
+    ("comfy-custom-nodes-invocation", "comfy-custom-nodes-invocation"),
+    ("comfy-custom-nodes-search", "comfy-custom-nodes-search"),
+    ("comfy-custom-nodes-api-schema", "comfy-custom-nodes-api-schema"),
+    ("comfy-custom-nodes-validation", "comfy-custom-nodes-validation"),
+    ("comfy-custom-nodes-dependencies", "comfy-custom-nodes-dependencies"),
+    ("comfy-custom-nodes-troubleshooting", "comfy-custom-nodes-troubleshooting"),
+    ("comfy-custom-nodes-packaging", "comfy-custom-nodes-packaging"),
+    ("comfy-custom-nodes-frontend", "comfy-custom-nodes-frontend"),
+    ("comfy-custom-nodes-migration", "comfy-custom-nodes-migration"),
 )
 
 

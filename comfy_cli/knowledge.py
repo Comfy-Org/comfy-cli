@@ -58,6 +58,25 @@ MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
+MAX_AUTHORING_SLICE_BYTES = 8192
+MAX_AUTHORING_METADATA_BYTES = 2048
+# The producer's vocabulary, not ours: every value here is a `retrieval_classes`
+# entry declared by a slice in comfy-knowledge's `custom-node-authoring`
+# playbook. A class absent from this tuple makes `_index_custom_node_authoring`
+# skip the slice that declares it, so the producer's content stays unreachable
+# until the class is added here. Last reconciled against comfy-knowledge
+# `3055e9dcc86d5dae416251374f97bce466999cb8`, where the last three were added.
+AUTHORING_CLASSES = (
+    "invocation",
+    "ecosystem-reference",
+    "api-schema",
+    "validation",
+    "dependencies-capabilities",
+    "troubleshooting",
+    "packaging-publishing",
+    "frontend-extension",
+    "v1-to-v3-migration",
+)
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 # `knowledge pick --check-local` reasons, kept short: each flagged pick repeats one.
@@ -114,6 +133,7 @@ class Bundle:
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
     model_capabilities: dict[str, list[str]]  # model id -> capability ids that rank it
+    custom_node_authoring: tuple[dict[str, Any], ...]
     # _normalize(alias) -> id. A key two ids would share is left out, so only the
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
@@ -540,6 +560,89 @@ def _append_unique(index: dict[str, list[str]], key: str, model_id: str) -> None
         ids.append(model_id)
 
 
+def _heading_section(content: str, heading: str) -> str | None:
+    """Return one Markdown section named by producer slice metadata."""
+    lines = content.splitlines(keepends=True)
+    heading_pattern = re.compile(r"^(?P<marks>#+)\s+(?P<title>.*?)\s*$")
+    fence_pattern = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<tail>.*)$")
+    start = level = None
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        fence_match = fence_pattern.match(line)
+        if fence_match:
+            marker = fence_match.group("marker")
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1] and not fence_match.group("tail").strip():
+                fence = None
+            continue
+        match = heading_pattern.match(line) if fence is None else None
+        if match and start is None and match.group("title") == heading:
+            start, level = index, len(match.group("marks"))
+        elif match and start is not None and len(match.group("marks")) <= level:
+            return "".join(lines[start:index]).rstrip() + "\n"
+    return None if start is None else "".join(lines[start:]).rstrip() + "\n"
+
+
+def _utf8_size(value: str) -> int | None:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
+def _index_custom_node_authoring(data: dict) -> tuple[dict[str, Any], ...]:
+    """Validate and index the canonical producer's bounded playbook slices."""
+    playbooks = data.get("playbooks")
+    playbook = playbooks.get("custom-node-authoring") if isinstance(playbooks, dict) else None
+    if not isinstance(playbook, dict) or not isinstance(playbook.get("content"), str):
+        return ()
+    slices = playbook.get("slices")
+    if not isinstance(slices, list):
+        return ()
+
+    indexed: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in slices:
+        if not isinstance(item, dict) or set(item) != {"id", "heading", "retrieval_classes", "api_generations"}:
+            continue
+        slice_id, heading = item["id"], item["heading"]
+        classes, generations = item["retrieval_classes"], item["api_generations"]
+        if (
+            not isinstance(slice_id, str)
+            or not isinstance(heading, str)
+            or not slice_id
+            or slice_id in seen_ids
+            or not isinstance(classes, list)
+            or not classes
+            or not all(isinstance(value, str) and value in AUTHORING_CLASSES for value in classes)
+            or len(set(classes)) != len(classes)
+            or not isinstance(generations, list)
+            or not generations
+            or not all(value in ("v1", "v3") for value in generations)
+            or len(set(generations)) != len(generations)
+        ):
+            continue
+        metadata_size = _utf8_size(json.dumps(item))
+        if metadata_size is None or metadata_size > MAX_AUTHORING_METADATA_BYTES:
+            continue
+        content = _heading_section(playbook["content"], heading)
+        content_size = _utf8_size(content) if content is not None else None
+        if content is None or not content.strip() or content_size is None or content_size > MAX_AUTHORING_SLICE_BYTES:
+            continue
+        seen_ids.add(slice_id)
+        indexed.append(
+            {
+                "id": slice_id,
+                "heading": heading,
+                "retrieval_classes": tuple(classes),
+                "api_generations": tuple(generations),
+                "content": content,
+            }
+        )
+    return tuple(indexed)
+
+
 def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path: str, mtime: float) -> Bundle:
     models = {mid: row for mid, row in data["models"].items() if isinstance(mid, str) and isinstance(row, dict)}
 
@@ -563,6 +666,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         if isinstance(caps_raw, dict)
         else {}
     )
+    custom_node_authoring = _index_custom_node_authoring(data)
     deps_raw = data.get("deprecations")
     deprecations = (
         {d["id"]: d for d in deps_raw if isinstance(d, dict) and isinstance(d.get("id"), str)}
@@ -637,6 +741,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         templates=templates,
         nodes=nodes,
         model_capabilities=model_capabilities,
+        custom_node_authoring=custom_node_authoring,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
         capability_tokens=capability_tokens,
