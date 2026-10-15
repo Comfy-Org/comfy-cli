@@ -8,25 +8,19 @@ from comfy_cli import cancellation, cmdline
 from comfy_cli.caller import Caller
 
 
-class _Tty:
-    def isatty(self) -> bool:
-        return True
-
-
 @pytest.mark.parametrize(
-    ("caller", "stdin_tty", "expand"),
+    ("caller", "expand"),
     [
-        (Caller(kind="user", agentic=False, source_env=None), True, True),
-        (Caller(kind="pipe", agentic=True, source_env=None), False, False),
-        (Caller(kind="pipe", agentic=True, source_env=None), True, True),
-        (Caller(kind="inapp-agent", agentic=True, source_env="COMFY_USER_AGENT"), True, False),
-        (Caller(kind="user", agentic=True, source_env="COMFY_USER_AGENT"), True, False),
+        (Caller(kind="user", agentic=False, source_env=None), True),
+        (Caller(kind="pipe", agentic=True, source_env=None), False),
+        (Caller(kind="pipe", agentic=True, source_env="COMFY_USER_AGENT"), False),
+        (Caller(kind="inapp-agent", agentic=True, source_env="COMFY_USER_AGENT"), False),
+        (Caller(kind="user", agentic=True, source_env="COMFY_USER_AGENT"), False),
     ],
-    ids=["person", "piped-agent", "person-redirecting-output", "marked-agent", "agent-calling-itself-user"],
+    ids=["person", "piped-run", "agent-calling-itself-pipe", "marked-agent", "agent-calling-itself-user"],
 )
-def test_only_a_person_gets_windows_argument_expansion(monkeypatch, caller, stdin_tty, expand):
+def test_only_a_person_at_a_terminal_gets_windows_argument_expansion(monkeypatch, caller, expand):
     monkeypatch.setattr(cmdline, "detect_caller", lambda: caller)
-    monkeypatch.setattr("sys.stdin", _Tty() if stdin_tty else None)
     assert cmdline._windows_expand_args() is expand
 
 

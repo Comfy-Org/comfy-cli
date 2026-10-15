@@ -288,15 +288,14 @@ def _windows_expand_args() -> bool:
     arguments are exact, and a supervising agent checks them as written:
     expanded, a checked word can become another command, option or path. So
     a caller ``detect_caller`` sees as an agent gets its arguments as
-    written. A ``pipe`` caller with a terminal on stdin is a person who
-    redirected output (``comfy upload *.png > log``) and keeps expansion; an
-    agent that marks itself none of the ways ``detect_caller`` reads, and
-    runs in a real terminal, is not covered.
+    written. That includes every run whose stdout is not a terminal, so a
+    person who redirects output (``comfy upload *.png > log``) loses
+    expansion too: telling them apart from an agent that captures stdout is
+    not reliable (stdin and stderr vary by harness, and Windows reports NUL
+    as a terminal). An agent that marks itself none of the ways
+    ``detect_caller`` reads, and runs in a real terminal, is not covered.
     """
-    caller = detect_caller()
-    if not caller.agentic:
-        return True
-    return caller.kind == "pipe" and stream_is_tty(sys.stdin)
+    return not detect_caller().agentic
 
 
 def main():
