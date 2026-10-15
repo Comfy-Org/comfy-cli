@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import knowledge
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 from comfy_cli.skills import (
@@ -195,7 +196,12 @@ def test_custom_node_skill_snapshot_keeps_runtime_contract():
     assert "knowledge authoring invocation" in router
     assert "knowledge authoring troubleshooting" in router
     assert "io.ComfyNode" not in router
-    assert len(router.encode()) < 2500
+    # The router grows with the class count — it lists one command and one packaged
+    # fallback per retrieval class — so a flat byte cap goes stale and the next class
+    # gets paid for by squeezing the prose. Bound the fixed prose and the per-class
+    # cost separately instead. Tighter than a flat 2500 at the six classes this
+    # started with; it still has to stay far under `before_body // 3` below.
+    assert len(router.encode()) < 1300 + 160 * len(knowledge.AUTHORING_CLASSES)
 
     corpus = "\n".join(skill_content(name) for name in reference_skill_names())
     for needle in (
@@ -243,6 +249,9 @@ def test_custom_node_initial_context_and_jit_budget_fixture():
         "validation",
         "dependencies-capabilities",
         "troubleshooting",
+        "packaging-publishing",
+        "frontend-extension",
+        "v1-to-v3-migration",
     )
     assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
     assert initial_bytes < before_body // 3

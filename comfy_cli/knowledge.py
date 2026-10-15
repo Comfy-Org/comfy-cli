@@ -60,6 +60,12 @@ MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key a
 MAX_VERSION_CHARS = 64
 MAX_AUTHORING_SLICE_BYTES = 8192
 MAX_AUTHORING_METADATA_BYTES = 2048
+# The producer's vocabulary, not ours: every value here is a `retrieval_classes`
+# entry declared by a slice in comfy-knowledge's `custom-node-authoring`
+# playbook. A class absent from this tuple makes `_index_custom_node_authoring`
+# skip the slice that declares it, so the producer's content stays unreachable
+# until the class is added here. Last reconciled against comfy-knowledge
+# `3055e9dcc86d5dae416251374f97bce466999cb8`, where the last three were added.
 AUTHORING_CLASSES = (
     "invocation",
     "ecosystem-reference",
@@ -67,6 +73,9 @@ AUTHORING_CLASSES = (
     "validation",
     "dependencies-capabilities",
     "troubleshooting",
+    "packaging-publishing",
+    "frontend-extension",
+    "v1-to-v3-migration",
 )
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
