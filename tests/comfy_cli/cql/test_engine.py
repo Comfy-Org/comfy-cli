@@ -20,7 +20,6 @@ from comfy_cli.cql.engine import (
     Port,
     _apply_one_slot,
     _count_instances,
-    _def_contains_type,
     _extract_frontend_slots,
     _subgraph_defs_by_id,
     _write_widget,

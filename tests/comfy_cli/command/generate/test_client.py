@@ -74,6 +74,47 @@ def test_send_request_encodes_form_urlencoded_values(monkeypatch):
     assert captured.get("json") is None
 
 
+def test_multipart_without_a_file_stays_multipart(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/multipart",
+        path="/proxy/example/multipart",
+        method="post",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="multipart/form-data",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        client.httpx,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or httpx.Response(200),
+    )
+
+    client.send_request(ep, {"prompt": "hello"}, [], api_key="comfyui-test")
+
+    assert captured["files"] == [("prompt", (None, "hello"))]
+    assert captured["data"] is None
+
+
+def test_form_urlencoded_arrays_repeat_keys_and_binary_is_refused(tmp_path):
+    flags = [
+        schema.FlagDef(name="tags", kind="array", item_kind="string", required=False),
+        schema.FlagDef(name="image", kind="binary", required=False),
+    ]
+    assert client._split_payload({"tags": ["a", "b"]}, flags, "application/x-www-form-urlencoded")[2] == [
+        ("tags", "a"),
+        ("tags", "b"),
+    ]
+    image = tmp_path / "image.png"
+    image.write_bytes(b"x")
+    with pytest.raises(client.ApiError, match="require multipart"):
+        client._split_payload({"image": image}, flags, "application/x-www-form-urlencoded")
+
+
 def _capture_post(monkeypatch):
     captured = {}
 

@@ -373,6 +373,47 @@ def _scrub_secret_quoted_values(text: str) -> str:
     return "".join(chunks)
 
 
+_ESCAPED_SECRET_QUOTED_START = re.compile(
+    rf"(?P<prefix>\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
+    r"\\+[\"']\s*[:=]\s*)(?P<slashes>\\+)(?P<quote>[\"'])",
+    re.IGNORECASE,
+)
+
+
+def _scrub_escaped_secret_quoted_values(text: str) -> str:
+    """Mask nested JSON-string secrets with a deterministic linear scan."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _ESCAPED_SECRET_QUOTED_START.search(text, search_from):
+        slashes = match.group("slashes")
+        closer = slashes + match.group("quote")
+        index = match.end()
+        end = -1
+        while index < len(text):
+            if text[index] != "\\":
+                index += 1
+                continue
+            run_start = index
+            while index < len(text) and text[index] == "\\":
+                index += 1
+            if index < len(text) and text[index] == match.group("quote"):
+                if index - run_start == len(slashes):
+                    end = run_start
+                    break
+                index += 1
+        chunks.extend((text[cursor : match.start()], match.group("prefix"), closer, "***"))
+        if end < 0:
+            return "".join(chunks)
+        chunks.append(closer)
+        cursor = end + len(closer)
+        search_from = cursor
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
 _YAML_SECRET_LINE = re.compile(
     rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*:)"
     r"(?P<space>[^\S\r\n]*)(?P<value>[^\r\n]*)$",
@@ -500,7 +541,7 @@ def _scrub_armored_blocks(text: str) -> str:
     return "".join(chunks)
 
 
-_URL_SCHEME_START = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*://")
+_URL_SCHEME_START = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*(?:://|:\\/\\/)")
 
 
 def _looks_like_numbered_network_authority(authority: str) -> bool:
@@ -548,7 +589,7 @@ def _looks_like_hostname(authority: str) -> bool:
 def _authority_labels_before(context: str) -> str | None:
     """Return the dotted authority prefix immediately before a matched label."""
     embedded_url = re.search(
-        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*://(?P<labels>[A-Za-z0-9.-]*)$",
+        r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+._-]*(?:://|:\\/\\/)(?P<labels>[A-Za-z0-9.-]*)$",
         context,
     )
     if embedded_url is not None:
@@ -558,8 +599,9 @@ def _authority_labels_before(context: str) -> str | None:
         return labels
     last_space = max(context.rfind(" "), context.rfind("\t"), context.rfind("\r"), context.rfind("\n"))
     token = context[last_space + 1 :]
-    if "://" in token:
-        scheme, labels = token.rsplit("://", 1)
+    separator = ":\\/\\/" if ":\\/\\/" in token else "://"
+    if separator in token:
+        scheme, labels = token.rsplit(separator, 1)
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+._-]*", scheme):
             return None
     else:
@@ -884,16 +926,6 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"(?P<prefix>\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
-            r"\\+[\"']\s*[:=]\s*)(?P<slashes>\\+)(?P<quote>[\"'])"
-            r"(?:(?:\\\\.)|\\(?![\"'])|(?!(?P=slashes)(?P=quote))[^\\])*?"
-            r"(?P<closer>(?P=slashes)(?P=quote)|$)",
-            re.IGNORECASE,
-        ),
-        r"\g<prefix>\g<slashes>\g<quote>***\g<closer>",
-    ),
-    (
-        re.compile(
             rf"(\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
             r"\\+[\"']\s*[:=]\s*)(?!\\+[\"'])(?:\\(?![\"'])|[^\s,}])+",
             re.IGNORECASE,
@@ -920,6 +952,8 @@ _SECRET_PATTERNS = (
 
 def _internal_error_message(error: BaseException) -> str:
     prefix = f"{type(error).__name__}: "
+    if len(prefix) >= _INTERNAL_ERROR_MESSAGE_CAP:
+        return prefix[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
     try:
         detail = str(error)
     except Exception:
@@ -966,15 +1000,16 @@ def _internal_error_message(error: BaseException) -> str:
     text = _scrub_secret_constructors(text)
     text = _scrub_secret_containers(text)
     text = _scrub_secret_quoted_values(text)
+    text = _scrub_escaped_secret_quoted_values(text)
     text = _scrub_armored_blocks(text)
     text = _scrub_url_userinfo(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     visible_detail_cap = max(0, _INTERNAL_ERROR_MESSAGE_CAP - len(prefix))
     if len(text) > visible_detail_cap:
-        text = text[: visible_detail_cap - 1] + "…"
+        text = text[: max(0, visible_detail_cap - 1)] + "…"
     elif scrub_input_truncated:
-        text = text[: visible_detail_cap - 1] + "…"
+        text = text[: max(0, visible_detail_cap - 1)] + "…"
     return prefix + text
 
 

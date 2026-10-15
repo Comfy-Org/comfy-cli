@@ -382,6 +382,10 @@ def _resolve_schema(
     """Return ``(resolved, contains_cycle_placeholder)`` for :func:`_resolve`."""
     if not isinstance(node, (dict, list)):
         return node, False
+    # Identity-based keys are safe only while their containers stay alive;
+    # otherwise CPython may reuse an address for a later temporary schema.
+    keepalive = memo.setdefault(("identity-keepalive",), ([], False))[0]
+    keepalive.append(node)
     if isinstance(node, dict):
         if "$ref" in node:
             ref = node["$ref"]
@@ -642,7 +646,12 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     raise SpecError(_unknown_endpoint_message(endpoint_id))
 
 
-def _schema_accepts_string_value(schema: Any, value: str, active: set[int] | None = None) -> bool:
+def _schema_accepts_string_value(
+    schema: Any,
+    value: str,
+    active: set[int] | None = None,
+    memo: dict[tuple[int, str], bool] | None = None,
+) -> bool:
     """Evaluate the finite string constraints needed for enum extraction."""
     if schema is True:
         return True
@@ -650,31 +659,48 @@ def _schema_accepts_string_value(schema: Any, value: str, active: set[int] | Non
         return False
     if active is None:
         active = set()
+    if memo is None:
+        memo = {}
     schema_id = id(schema)
     if schema_id in active:
         return True
+    memo_key = (schema_id, value)
+    if memo_key in memo:
+        return memo[memo_key]
     active.add(schema_id)
+
+    def finish(result: bool) -> bool:
+        memo[memo_key] = result
+        return result
+
     try:
         schema_type = schema.get("type")
         if isinstance(schema_type, str) and schema_type != "string":
-            return False
+            return finish(False)
         if isinstance(schema_type, list) and "string" not in schema_type:
-            return False
+            return finish(False)
         if "const" in schema and not (isinstance(schema["const"], str) and schema["const"] == value):
-            return False
+            return finish(False)
         enum = schema.get("enum")
         if isinstance(enum, list) and value not in [item for item in enum if isinstance(item, str)]:
-            return False
+            return finish(False)
         all_of = schema.get("allOf")
-        if isinstance(all_of, list) and not all(_schema_accepts_string_value(item, value, active) for item in all_of):
-            return False
+        if isinstance(all_of, list) and not all(
+            _schema_accepts_string_value(item, value, active, memo) for item in all_of
+        ):
+            return finish(False)
         any_of = schema.get("anyOf")
-        if isinstance(any_of, list) and not any(_schema_accepts_string_value(item, value, active) for item in any_of):
-            return False
+        if isinstance(any_of, list) and not any(
+            _schema_accepts_string_value(item, value, active, memo) for item in any_of
+        ):
+            return finish(False)
         one_of = schema.get("oneOf")
-        if isinstance(one_of, list) and sum(_schema_accepts_string_value(item, value, active) for item in one_of) != 1:
-            return False
-        return True
+        if (
+            isinstance(one_of, list)
+            and sum(_schema_accepts_string_value(item, value, active, memo) for item in one_of) != 1
+        ):
+            return finish(False)
+        return finish(True)
     finally:
         active.remove(schema_id)
 
@@ -709,6 +735,7 @@ def _extract_enum(
         return value
 
     constraints: list[list[str]] = []
+    one_of_variants: list[list[Any]] = []
     const = prop.get("const")
     if isinstance(const, str):
         constraints.append([const])
@@ -731,6 +758,8 @@ def _extract_enum(
         variants = prop.get(key)
         if not isinstance(variants, list):
             continue
+        if key == "oneOf":
+            one_of_variants.append(variants)
         merged: list[str] = []
         merged_values: set[str] = set()
         merged_results: set[int] = set()
@@ -763,16 +792,7 @@ def _extract_enum(
                     if value not in merged_values:
                         merged_values.add(value)
                         merged.append(value)
-        if key == "oneOf" and unconstrained and constraints:
-            finite_sibling_values = list(dict.fromkeys(value for constraint in constraints for value in constraint))
-            constraints.append(
-                [
-                    value
-                    for value in finite_sibling_values
-                    if sum(_schema_accepts_string_value(variant, value) for variant in variants) == 1
-                ]
-            )
-        elif not unconstrained and merged:
+        if not unconstrained and merged:
             constraints.append(
                 [value for value in merged if branch_counts.get(value) == 1] if key == "oneOf" else merged
             )
@@ -790,6 +810,13 @@ def _extract_enum(
     for constraint in constraints[1:]:
         allowed.intersection_update(constraint)
     intersected = [value for value in constraints[0] if value in allowed]
+    for variants in one_of_variants:
+        acceptance_memo: dict[tuple[int, str], bool] = {}
+        intersected = [
+            value
+            for value in intersected
+            if sum(_schema_accepts_string_value(variant, value, memo=acceptance_memo) for variant in variants) == 1
+        ]
     return finish(intersected or None)
 
 
@@ -1096,6 +1123,7 @@ def _model_name_hint(name: str) -> str | None:
     resolution_budget_limit = _schema_resolution_budget(raw)
     aggregate_resolution_budget = [resolution_budget_limit * 4]
     resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
+    resolved_keepalive: list[Any] = []
     property_memo: dict[tuple[int, str], dict[str, Any] | None] = {}
     object_memo: dict[int, bool] = {}
     accepts_property_memo: dict[tuple[int, str], bool] = {}
@@ -1135,6 +1163,7 @@ def _model_name_hint(name: str) -> str | None:
             resolved = _resolve(raw, schema, memo=resolution_memo, budget=resolution_budget)
             if not isinstance(resolved, dict):
                 continue
+            resolved_keepalive.append(resolved)
             for field in ("model", "model_name", "model_id"):
                 prop = _find_property(
                     resolved,

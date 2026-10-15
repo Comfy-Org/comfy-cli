@@ -1193,6 +1193,34 @@ def test_internal_error_scrubber_keeps_a_long_compact_diagnostic():
     assert scrubbed.endswith("…")
 
 
+def test_internal_error_caps_an_adversarially_long_exception_type():
+    huge_error = type("X" * 600, (Exception,), {})
+
+    scrubbed = _internal_error_message(huge_error("LIVE-DETAIL"))
+
+    assert len(scrubbed) == 500
+    assert "LIVE-DETAIL" not in scrubbed
+    assert scrubbed.endswith("…")
+
+
+def test_internal_error_scrubs_userinfo_in_json_escaped_urls():
+    scrubbed = _internal_error_message(RuntimeError(r'{"url":"https:\/\/alice:LIVE@host/path"}'))
+
+    assert "LIVE" not in scrubbed
+    assert r"https:\/\/***@host/path" in scrubbed
+
+
+def test_escaped_json_scrubber_is_linear_on_long_backslash_runs():
+    import time
+
+    message = r"body={\"password\": \"" + "\\" * 4_000 + r"x\'}"
+    started = time.perf_counter()
+    scrubbed = _internal_error_message(RuntimeError(message))
+
+    assert time.perf_counter() - started < 0.2
+    assert len(scrubbed) <= 500
+
+
 def test_internal_error_scrubber_preserves_text_after_an_unquoted_value():
     scrubbed = _internal_error_message(RuntimeError("bad option 'token=abc' given; retry later"))
     assert "abc" not in scrubbed

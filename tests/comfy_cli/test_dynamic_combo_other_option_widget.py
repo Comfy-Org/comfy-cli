@@ -272,7 +272,7 @@ def test_interior_write_to_a_hidden_sub_widget_is_refused(graph):
     assert "57/7.model" in msg, f"must name the interior selector address: {msg}"
 
 
-def test_replayed_hidden_sub_widget_commits_a_no_op_without_forking(graph):
+def test_replayed_hidden_sub_widget_stays_retryable_without_forking(graph):
     wf = _in_subgraph(graph)
     wf["nodes"].append(copy.deepcopy(wf["nodes"][0]) | {"id": 58})
     before = copy.deepcopy(wf)
@@ -291,10 +291,11 @@ def test_replayed_hidden_sub_widget_commits_a_no_op_without_forking(graph):
 
     assert wf["nodes"] == before["nodes"]
     assert wf["definitions"] == before["definitions"]
-    assert wf["_widget_stamps"]
+    assert op["op_id"] not in wf.get("_applied_ops", [])
+    assert "_widget_stamps" not in wf
 
 
-def test_replayed_top_level_hidden_sub_widget_commits_a_no_op(graph):
+def test_replayed_top_level_hidden_sub_widget_stays_retryable(graph):
     wf, node_id = _fresh(graph)
     before = copy.deepcopy(wf)
     op = workflow_ops._new_op(
@@ -309,7 +310,28 @@ def test_replayed_top_level_hidden_sub_widget_commits_a_no_op(graph):
     workflow_ops.apply_op(wf, op, graph)
 
     assert wf["nodes"] == before["nodes"]
-    assert wf["_widget_stamps"]
+    assert op["op_id"] not in wf.get("_applied_ops", [])
+    assert "_widget_stamps" not in wf
+
+
+def test_replayed_hidden_write_applies_after_a_selector_reveals_it(graph):
+    wf, node_id = _fresh(graph)
+    hidden_write = workflow_ops._new_op(
+        "set_widget",
+        "agent-a",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+    workflow_ops.apply_op(wf, hidden_write, graph)
+    assert hidden_write["op_id"] not in wf.get("_applied_ops", [])
+
+    wf, _ = workflow_ops.set_widget(wf, graph, node_id, "model", "MiniMax H3 Max", actor="agent-b")
+    workflow_ops.apply_op(wf, hidden_write, graph)
+
+    assert hidden_write["op_id"] in wf["_applied_ops"]
+    assert "quality" in wf["nodes"][0]["widgets_values"]
 
 
 def test_dynamic_sub_widget_combo_uses_the_same_normalization_as_top_level():

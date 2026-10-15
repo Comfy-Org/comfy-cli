@@ -2570,7 +2570,10 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
         if kind == "add_node":
             _apply_add_node(workflow, op)
         elif kind == "set_widget":
-            _apply_set_widget(workflow, op, graph)
+            if _apply_set_widget(workflow, op, graph) is False:
+                if not had_applied_ops and not workflow.get("_applied_ops"):
+                    workflow.pop("_applied_ops", None)
+                return workflow
         elif kind == "set_node_field":
             _apply_set_node_field(workflow, op)
         elif kind == "connect":
@@ -2614,7 +2617,7 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
         workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])
 
 
-def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
+def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
     # Last-writer-wins: a lower-stamped concurrent write to this target is
     # dropped, so the surviving value is the same in any apply order.
     if not _lww_gate(workflow, op):
@@ -2681,11 +2684,9 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         )
         refusal = next((item for item in preflight_warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
         if refusal is not None:
-            # Recording APIs refuse this before creating an op. During replay,
-            # however, another selector op may have hidden the target. Preserve
-            # convergence by treating that reordered write as a committed no-op.
-            _lww_commit(workflow, op)
-            return
+            # Do not mark the write applied: a concurrent selector can reveal
+            # the target later, after which redelivery must still take effect.
+            return False
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
@@ -2702,8 +2703,7 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     warnings = _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
     refusal = next((item for item in warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
     if refusal is not None:
-        _lww_commit(workflow, op)
-        return
+        return False
     _lww_commit(workflow, op)
 
 

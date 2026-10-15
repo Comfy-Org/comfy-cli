@@ -58,7 +58,11 @@ def resolve_api_key(explicit: str | None = None) -> str:
 
 def _split_payload(
     values: dict[str, Any], flags: list[FlagDef], content_type: str
-) -> tuple[dict[str, Any] | None, list[tuple[str, Any]] | None, dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any] | None,
+    list[tuple[str, Any]] | None,
+    dict[str, Any] | list[tuple[str, str]] | None,
+]:
     """Return (json_body, multipart_files, multipart_data).
 
     For JSON endpoints: json_body is the dict, others are None.
@@ -72,10 +76,33 @@ def _split_payload(
         raise ApiError(0, "", f"Unsupported request content type: {content_type}")
 
     files: list[tuple[str, Any]] = []
-    data: dict[str, Any] = {}
+    data: dict[str, Any] | list[tuple[str, str]] = {} if content_type == "multipart/form-data" else []
+    needs_repeated_form_fields = False
+
+    def form_scalar(item: Any) -> str:
+        if isinstance(item, bool):
+            return "true" if item else "false"
+        return str(item)
+
     for name, value in values.items():
         flag = flag_by_name.get(name)
-        if content_type == "multipart/form-data" and flag and flag.kind == "binary":
+        if (
+            content_type == "application/x-www-form-urlencoded"
+            and flag
+            and (flag.kind == "binary" or (flag.kind == "array" and flag.item_kind == "binary"))
+        ):
+            raise ApiError(0, "", f"--{name}: binary values require multipart/form-data")
+        if content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "array":
+            assert isinstance(data, list)
+            needs_repeated_form_fields = True
+            data.extend((name, form_scalar(item)) for item in value)
+        elif content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "object":
+            if not isinstance(value, dict):
+                raise ApiError(0, "", f"--{name}: expected an object value")
+            assert isinstance(data, list)
+            needs_repeated_form_fields = True
+            data.extend((str(key), form_scalar(item)) for key, item in value.items())
+        elif content_type == "multipart/form-data" and flag and flag.kind == "binary":
             path = Path(value) if not isinstance(value, Path) else value
             if not path.is_file():
                 raise ApiError(0, "", f"--{name}: file not found: {path}")
@@ -90,11 +117,22 @@ def _split_payload(
             # Multipart form fields are scalar — JSON-encode complex values.
             import json as _json
 
+            assert isinstance(data, dict)
             data[name] = _json.dumps(value)
-        elif flag and flag.kind == "boolean":
-            data[name] = "true" if value else "false"
         else:
-            data[name] = str(value)
+            if isinstance(data, dict):
+                data[name] = form_scalar(value)
+            else:
+                data.append((name, form_scalar(value)))
+    if content_type == "multipart/form-data" and not files:
+        # httpx falls back to application/x-www-form-urlencoded when ``files``
+        # is empty. Filename-less file tuples force the declared multipart
+        # wire format for endpoints whose optional binary fields were omitted.
+        assert isinstance(data, dict)
+        return None, [(name, (None, value)) for name, value in data.items()], None
+    if content_type == "application/x-www-form-urlencoded" and not needs_repeated_form_fields:
+        assert isinstance(data, list)
+        return None, None, dict(data)
     return None, files or None, data
 
 

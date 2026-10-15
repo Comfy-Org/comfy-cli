@@ -543,10 +543,38 @@ def test_extract_enum_unions_anyof_and_intersects_allof():
     assert spec._extract_enum(
         {"anyOf": [{"type": "string"}, {"enum": ["ignored"]}], "allOf": [{"enum": ["kept"]}]}
     ) == ["kept"]
+    assert spec._extract_enum({"oneOf": [{"type": "string"}, {"const": "a"}], "allOf": [{"enum": ["a", "b"]}]}) == ["b"]
     assert spec._schema_admits_unconstrained_string({"type": "string", "allOf": [{"enum": ["v2"]}]}) is False
     assert (
         spec._schema_admits_unconstrained_string({"anyOf": [{"type": "string"}], "allOf": [{"const": "v2"}]}) is False
     )
+
+
+def test_string_acceptance_memoizes_shared_diamonds():
+    leaf = {"type": "string"}
+    schema = leaf
+    for _ in range(30):
+        schema = {"allOf": [schema, schema]}
+    memo = {}
+
+    assert spec._schema_accepts_string_value(schema, "value", memo=memo)
+    assert len(memo) == 31
+
+    rejecting_leaf = {"enum": ["other"]}
+    rejecting_schema = rejecting_leaf
+    for _ in range(30):
+        rejecting_schema = {"allOf": [rejecting_schema, rejecting_schema]}
+    rejecting_memo = {}
+    assert not spec._schema_accepts_string_value(rejecting_schema, "value", memo=rejecting_memo)
+    assert len(rejecting_memo) == 31
+
+
+def test_resolution_memo_keeps_identity_keys_alive():
+    node = {"type": "string"}
+    memo = {}
+
+    assert spec._resolve({}, node, memo=memo) == node
+    assert memo[("identity-keepalive",)][0][0] is node
 
 
 def test_find_property_descends_top_level_composition():
