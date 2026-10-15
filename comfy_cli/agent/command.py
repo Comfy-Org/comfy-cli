@@ -103,6 +103,18 @@ def _sandbox_status(port: int | None) -> dict | None:
     return out
 
 
+@app.command("allow", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("deny", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def _moved_to_the_panel(ctx: typer.Context):
+    """Kept hidden so an older agent's instructions get an answer: approving here was removed, and changes nothing."""
+    get_renderer().error(
+        code="agent_approval_moved",
+        message=f"comfy agent {ctx.info_name} was removed: a script the agent ran could approve its own requests",
+        hint="approve or deny the request on its card in the agent panel",
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command(
     "permissions",
     help="Show the agent's requests waiting for approval, the approved folders and hosts, and a running agent's sandbox.",

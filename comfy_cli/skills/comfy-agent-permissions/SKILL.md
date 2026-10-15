@@ -46,7 +46,8 @@ the user one; tell them the request is waiting in the panel. If the card
 closes unanswered (it times out, or the turn ends), the request stays pending.
 An unanswered card is not a yes: ask again only if the user asks for that
 folder or host again, and then a new card answers it. To see what is
-waiting and what is already approved, run:
+waiting and what is already approved, the user runs this in their own
+terminal (the agent's own comfy surfaces refuse every `comfy agent` command):
 
 ```
 comfy agent permissions                       # what is waiting (id, kind, target, reason, age), what is approved
@@ -56,9 +57,8 @@ The agent vets the target when the user approves it: a target that can never
 be granted (below) is not approved.
 
 An approval is remembered for every later start (`<data dir>/permissions.json`,
-`<data dir>/egress-allow.json`). A running agent applies it within about
-20 seconds; until then the folder or host is still refused, so wait for the
-approval to land (retry once after the pause, not in a loop) before continuing.
+`<data dir>/egress-allow.json`). A running agent applies an approval from the
+panel as soon as the user gives it.
 
 ## Start-time settings (the user sets them, then restarts the agent)
 

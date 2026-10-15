@@ -329,12 +329,18 @@ def test_cli_permissions_prints_no_panel_note_with_nothing_pending(tmp_path: Pat
         ["deny", "0123456789abcdef"],
     ],
 )
-def test_allow_and_deny_are_not_commands(tmp_path: Path, argv: list[str]):
+def test_allow_and_deny_approve_nothing_and_point_to_the_panel(tmp_path: Path, argv: list[str]):
     """A script the agent's model runs could otherwise approve its own request."""
     root = tmp_path / "data"
     _write_pending(root, _req("0123456789abcdef", "host", "models.example.com"))
     before = sorted((p.name, p.read_text()) for p in root.iterdir())
     res = CliRunner().invoke(app, [*argv, "--data-dir", str(root)])
-    assert res.exit_code != 0
-    assert "No such command" in res.output
+    assert res.exit_code == 1
+    assert "agent panel" in " ".join(res.output.split())
     assert sorted((p.name, p.read_text()) for p in root.iterdir()) == before
+
+
+def test_allow_and_deny_stay_out_of_help():
+    res = CliRunner().invoke(app, ["--help"])
+    assert res.exit_code == 0
+    assert " allow " not in res.output and " deny " not in res.output
