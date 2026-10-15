@@ -243,11 +243,13 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             return cached[1]
         keys: set[tuple[type, int | str]] = set()
         raw_links = scope.get("links")
+        memberships = _promoted._input_link_memberships(scope, subgraph_defs)
         for link in raw_links if isinstance(raw_links, list) else []:
             if isinstance(link, dict):
                 candidate = link.get("id")
-                memberships = _promoted._input_link_memberships(scope, subgraph_defs)
-                if not _promoted._is_input_proxy_link(link) or len(memberships.get(candidate, ())) != 1:
+                if not _is_link_id(candidate):
+                    continue
+                if _promoted._is_input_proxy_link(link) and len(memberships.get(candidate, ())) != 1:
                     continue
             elif isinstance(link, (list, tuple)) and len(link) >= 6:
                 candidate = link[0]
@@ -280,12 +282,18 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
         raw_instance_inputs = instance.get("inputs")
         instance_inputs = raw_instance_inputs if isinstance(raw_instance_inputs, list) else []
-        external_links = {
-            _input_name(entry.get("name")): entry.get("link") for entry in instance_inputs if isinstance(entry, dict)
-        }
+        # Expansion maps serialized outer slots onto definition inputs using
+        # first-name-wins plus positional fallback. Use that exact mapping for
+        # liveness too; a stale name must not make overlay disagree with the
+        # link that expansion already attached.
+        outer_map = _outer_slot_to_input_idx(instance, sg)
+        external_links: dict[int, Any] = {}
+        for slot, entry in enumerate(instance_inputs):
+            if isinstance(entry, dict):
+                external_links.setdefault(outer_map.get(slot, slot), entry.get("link"))
         live_links = live_link_keys(scope)
         for pi in _promoted.promoted_inputs(sg, subgraph_defs):
-            external_link = external_links.get(pi.name)
+            external_link = external_links.get(pi.index)
             if not pi.is_widget or (_is_link_id(external_link) and (type(external_link), external_link) in live_links):
                 continue
             value = _promoted.host_value(instance, pi)
@@ -293,7 +301,11 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 continue
             # Every interior widget the input feeds — a repaired primitive
             # fan-out links one host value into several targets.
-            for path, widget in _promoted.boundary_widget_targets(sg, pi, subgraph_defs):
+            targets = _promoted.boundary_widget_targets(sg, pi, subgraph_defs)
+            if len(targets) > visit_budget[0]:
+                raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
+            visit_budget[0] -= len(targets)
+            for path, widget in targets:
                 entry = api_prompt.get(":".join([prefix, *path]))
                 if not isinstance(entry, dict):
                     continue

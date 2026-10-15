@@ -879,6 +879,40 @@ def test_resolve_write_redirects_a_normalized_empty_boundary_name():
     assert target.redirected_from == "host/inner.value"
 
 
+def test_instance_input_normalizes_serialized_names():
+    assert promoted.instance_input({"inputs": [{"name": 7, "link": 1}]}, "7") == {"name": 7, "link": 1}
+
+
+def test_incomplete_array_link_is_not_live():
+    assert promoted.link_exists({"links": [[7]]}, 7) is False
+
+
+def test_resolve_write_keeps_ambiguous_normalized_boundary_name_interior():
+    sg_id = "11111111-2222-3333-4444-555555555555"
+    definition = {
+        "id": sg_id,
+        "inputs": [{"name": 7, "linkIds": []}, {"name": "7", "linkIds": [5]}],
+        "nodes": [
+            {
+                "id": "inner",
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": 5, "widget": {"name": "value"}}],
+                "widgets_values": [1.0],
+            }
+        ],
+        "links": [{"id": 5, "origin_id": -10, "target_id": "inner", "target_slot": 0}],
+    }
+    workflow = {
+        "nodes": [{"id": "host", "type": sg_id, "inputs": [], "widgets_values": [7.5, 8.5]}],
+        "links": [],
+        "definitions": {"subgraphs": [definition]},
+    }
+
+    target = promoted.resolve_write(workflow, _plain_widget_graph(), ["host", "inner"], "value")
+
+    assert target.kind == "interior"
+
+
 def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
     sg = {
         "id": "sg",

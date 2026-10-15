@@ -1712,35 +1712,37 @@ def test_null_link_id_is_warned_and_dropped(sd15_graph):
     assert any("link has null id and was ignored" in warning for warning in res.warnings)
 
 
-def test_string_and_integer_link_ids_are_conflicting_duplicates(sd15_graph):
+def test_string_and_integer_link_ids_use_the_last_row(sd15_graph):
     wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
     wf["links"].append(["7", "1", 0, "2", 0, "DIFFERENT-UNUSED-TYPE"])
-    with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
-        render_py(wf, sd15_graph)
+    result = render_py(wf, sd15_graph)
+    assert result.source
 
 
-def test_typed_duplicate_link_rows_are_rejected():
+def test_typed_duplicate_link_rows_use_the_last_row():
     wf = _mini([_node(1, "Source"), _node(2, "Target", inputs=[{"name": "x", "link": 7}])], [])
     wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
-    with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
-        render_py(wf, None)
+    result = render_py(wf, None)
+    assert "target = Target" in result.source
 
     definition_rows = [
         {"id": 7, "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
         {"id": "7", "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
     ]
     errors: list[str] = []
-    workflow_print._def_links({"links": definition_rows}, errors, [])
-    assert errors == ["duplicate link id 7"]
+    warnings: list[str] = []
+    workflow_print._def_links({"links": definition_rows}, errors, warnings)
+    assert errors == []
+    assert warnings == ["duplicate link id 7; using the last row"]
 
 
-def test_duplicate_link_validation_normalizes_each_row_once():
+def test_duplicate_link_validation_does_not_scan_rows_twice():
     rows = [[7, 1, index, 2, 0] for index in range(20)]
     with mock.patch.object(
         workflow_print, "_normalised_link_row", wraps=workflow_print._normalised_link_row
     ) as normalize:
-        assert workflow_print._validate([], rows) == ["duplicate link id 7"]
-    assert normalize.call_count == len(rows)
+        assert workflow_print._validate([], rows) == []
+    assert normalize.call_count == 0
 
     definition_rows = [
         {"id": 7, "origin_id": 1, "origin_slot": index, "target_id": 2, "target_slot": 0} for index in range(20)
@@ -1749,8 +1751,10 @@ def test_duplicate_link_validation_normalizes_each_row_once():
     with mock.patch.object(
         workflow_print, "_normalised_link_row", wraps=workflow_print._normalised_link_row
     ) as normalize:
-        workflow_print._def_links({"links": definition_rows}, errors, [])
-    assert errors == ["duplicate link id 7"]
+        warnings = []
+        workflow_print._def_links({"links": definition_rows}, errors, warnings)
+    assert errors == []
+    assert warnings == ["duplicate link id 7; using the last row"]
     assert normalize.call_count == len(definition_rows)
 
 

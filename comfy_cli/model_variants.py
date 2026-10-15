@@ -45,6 +45,12 @@ _WORD_TAIL = re.compile(r"(?:^|[_\-.])(?P<tok>[^_\-.]+)$")
 #: File extensions a model loader option carries.
 MODEL_FILE = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.IGNORECASE)
 
+# Bound the instance × promoted-input work performed while propagating a
+# model replacement through nested definitions. Real workflows are far below
+# this; malformed multi-megabyte saves fail closed instead of monopolizing a
+# fetch/validation process.
+_MAX_PROMOTED_VARIANT_VISITS = 100_000
+
 
 class ModelVariantResolutionError(RuntimeError):
     """A malformed promoted-widget graph prevented safe model substitution."""
@@ -259,6 +265,8 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
     from comfy_cli.cql.promoted import _MAX_NESTED_PROMOTION_DEPTH, defs_by_id, promoted_inputs
 
     defs = defs_by_id(workflow)
+    promoted_by_def: dict[str, list] = {}
+    remaining_visits = _MAX_PROMOTED_VARIANT_VISITS
     for _ in range(_MAX_NESTED_PROMOTION_DEPTH + 1):
         grown = False
         for node, sg_loc in _workflow_nodes(workflow):
@@ -266,7 +274,14 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
             swaps, wv = renamed.get(sg_id), node.get("widgets_values")
             if not swaps or not isinstance(wv, list) or sg_id not in defs:
                 continue
-            for pi in promoted_inputs(defs[sg_id], defs):
+            promoted = promoted_by_def.get(sg_id)
+            if promoted is None:
+                promoted = promoted_inputs(defs[sg_id], defs)
+                promoted_by_def[sg_id] = promoted
+            if len(promoted) > remaining_visits:
+                raise ModelVariantResolutionError("promoted model propagation exceeded its work safe limit")
+            remaining_visits -= len(promoted)
+            for pi in promoted:
                 if not pi.is_widget:
                     continue
                 key = (str(pi.source_node), f"promoted:{pi.source_input}" if pi.nested else str(pi.source_widget))

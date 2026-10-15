@@ -437,6 +437,16 @@ class TestResolveWorkflowModels:
         assert "sg-1" in visited
         assert "unrelated" not in visited
 
+    def test_promoted_propagation_has_a_per_call_work_budget(self, graph, monkeypatch):
+        workflow = _template()
+        before = copy.deepcopy(workflow)
+        monkeypatch.setattr("comfy_cli.model_variants._MAX_PROMOTED_VARIANT_VISITS", 0)
+
+        with pytest.raises(ModelVariantResolutionError, match="work safe limit"):
+            resolve_workflow_models(workflow, graph)
+
+        assert workflow == before
+
 
 # ---------------------------------------------------------------------------
 # templates fetch

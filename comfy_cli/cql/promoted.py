@@ -637,7 +637,7 @@ def instance_input(instance: dict, name: str) -> dict | None:
     """The instance's serialized ``inputs[]`` entry for subgraph input ``name``."""
     raw_inputs = instance.get("inputs")
     for entry in raw_inputs if isinstance(raw_inputs, list) else []:
-        if isinstance(entry, dict) and entry.get("name") == name:
+        if isinstance(entry, dict) and _input_name(entry.get("name")) == name:
             return entry
     return None
 
@@ -663,7 +663,7 @@ def link_exists(scope: dict, link_id: Any) -> bool:
             candidate = link.get("id")
             if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
                 return True
-        elif isinstance(link, (list, tuple)) and link:
+        elif isinstance(link, (list, tuple)) and len(link) >= 6:
             candidate = link[0]
             if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
                 return True
@@ -1015,11 +1015,20 @@ def resolve_write(
                 sg_input = sg_inputs[input_index] if input_index < len(sg_inputs) else None
                 if not isinstance(sg_input, dict):
                     return WriteTarget("interior", widget=widget, segments=segments, redirected_from=redirected_from)
+                promoted_name = _input_name(sg_input.get("name"))
+                if (
+                    sum(
+                        isinstance(candidate, dict) and _input_name(candidate.get("name")) == promoted_name
+                        for candidate in sg_inputs
+                    )
+                    != 1
+                ):
+                    return WriteTarget("interior", widget=widget, segments=segments, redirected_from=redirected_from)
                 return resolve_write(
                     workflow,
                     graph,
                     segments[:-1],
-                    _input_name(sg_input.get("name")),
+                    promoted_name,
                     redirected_from=redirected_from or given,
                 )
             if link is not None:
