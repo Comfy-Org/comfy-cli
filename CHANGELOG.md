@@ -93,9 +93,11 @@ history.
 - On Windows, an agent's arguments now reach comfy-cli as written: Click's
   argument expansion (a leading `~`, `%VAR%`/`$VAR`, glob patterns) is off for
   any caller detected as an agent, so a supervisor that checks an agent's
-  arguments sees what runs. This includes any run whose stdout is not a
-  terminal: a person who redirects output (`comfy upload *.png > log`) now
-  gets the literal argument, and should expand it in their shell instead.
+  globs and `%VAR%`/`$VAR` sees what runs (some commands still expand a `~`
+  in a path themselves). This includes any run whose stdout is not a console,
+  including `> NUL`: a person who redirects output (`comfy upload *.png > log`)
+  now gets the literal `*.png`, and neither cmd.exe nor PowerShell expands it
+  for them, so they list the files instead.
 
 - **Breaking:** a watching `comfy deploy up`, `promote` or `rollback` that
   another change overtook, onto a third release, now exits 1 with `deploy_update_replaced`

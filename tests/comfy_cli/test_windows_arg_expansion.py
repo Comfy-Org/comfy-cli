@@ -21,7 +21,20 @@ from comfy_cli.caller import Caller
 )
 def test_only_a_person_at_a_terminal_gets_windows_argument_expansion(monkeypatch, caller, expand):
     monkeypatch.setattr(cmdline, "detect_caller", lambda: caller)
+    monkeypatch.setattr(cmdline, "_stdout_is_console", lambda: True)
     assert cmdline._windows_expand_args() is expand
+
+
+def test_a_person_whose_output_is_not_a_console_gets_no_expansion(monkeypatch):
+    """`> NUL` reads as a TTY on Windows, but it is not a console."""
+    monkeypatch.setattr(cmdline, "detect_caller", lambda: Caller(kind="user", agentic=False, source_env=None))
+    monkeypatch.setattr(cmdline, "_stdout_is_console", lambda: False)
+    assert cmdline._windows_expand_args() is False
+
+
+def test_stdout_is_never_a_console_off_windows_or_when_unreadable(monkeypatch):
+    monkeypatch.setattr("sys.stdout", None)
+    assert cmdline._stdout_is_console() is False
 
 
 @pytest.mark.parametrize(("agentic", "expanded"), [(True, False), (False, True)])
@@ -45,6 +58,7 @@ def test_the_real_app_takes_the_decision(monkeypatch, agentic, expanded):
             return getattr(os, attr)
 
     monkeypatch.setattr(typer.core, "os", _WindowsOS())
+    monkeypatch.setattr(cmdline, "_stdout_is_console", lambda: True)
     monkeypatch.setattr(_click.utils, "_expand_args", lambda args: calls.append(list(args)) or list(args))
     monkeypatch.setattr("sys.argv", ["comfy", "--help"])
     with pytest.raises(SystemExit):

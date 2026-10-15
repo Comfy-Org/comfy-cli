@@ -292,10 +292,25 @@ def _windows_expand_args() -> bool:
     person who redirects output (``comfy upload *.png > log``) loses
     expansion too: telling them apart from an agent that captures stdout is
     not reliable (stdin and stderr vary by harness, and Windows reports NUL
-    as a terminal). An agent that marks itself none of the ways
-    ``detect_caller`` reads, and runs in a real terminal, is not covered.
+    as a terminal). So stdout must also be a real console: ``> NUL`` and a
+    detached child's DEVNULL are not. An agent that marks itself none of the
+    ways ``detect_caller`` reads, and runs in a real console, is not covered.
     """
-    return not detect_caller().agentic
+    return not detect_caller().agentic and _stdout_is_console()
+
+
+def _stdout_is_console() -> bool:
+    """True only when stdout is a Windows console; isatty also says True for NUL."""
+    try:
+        import ctypes
+        import msvcrt
+
+        mode = ctypes.c_ulong()
+        return bool(
+            ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdout.fileno()), ctypes.byref(mode))
+        )
+    except Exception:
+        return False
 
 
 def main():
