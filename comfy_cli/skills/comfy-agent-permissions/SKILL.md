@@ -43,8 +43,9 @@ The user approves or refuses the request in the agent panel: it shows up in
 the chat as a card with Allow and Deny buttons. There is no command to approve
 a request or grant a folder or host, so do not look for one and do not hand
 the user one; tell them the request is waiting in the panel. If the card
-closes unanswered (it times out, or the turn ends), the request stays pending:
-ask for the same target again in a later turn and a new card answers it. To see what is
+closes unanswered (it times out, or the turn ends), the request stays pending.
+An unanswered card is not a yes: ask again only if the user asks for that
+folder or host again, and then a new card answers it. To see what is
 waiting and what is already approved, run:
 
 ```

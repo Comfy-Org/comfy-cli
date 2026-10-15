@@ -121,7 +121,7 @@ history.
 
 ### Removed
 
-- `comfy agent allow` and `comfy agent deny`. The local agent's model can run
+- **Breaking:** `comfy agent allow` and `comfy agent deny`. The local agent's model can run
   comfy-cli, so a script it ran could approve the agent's own requests or grant
   it a folder or host. The user now approves or denies a request only in the
   agent panel. `comfy agent permissions` still lists what is waiting and what
