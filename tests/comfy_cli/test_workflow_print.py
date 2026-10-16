@@ -1712,6 +1712,16 @@ def test_null_link_id_is_warned_and_dropped(sd15_graph):
     assert any("link has null id and was ignored" in warning for warning in res.warnings)
 
 
+@pytest.mark.parametrize("link_id", [[], {}, True, 1.5])
+def test_invalid_link_id_is_warned_and_dropped(sd15_graph, link_id):
+    wf = _stale_slot_workflow([link_id, 1, 0, 2, 1, "LATENT"])
+
+    result = render_py(wf, sd15_graph)
+
+    assert result.source
+    assert any("link has invalid id and was ignored" in warning for warning in result.warnings)
+
+
 def test_string_and_integer_link_ids_remain_distinct():
     wf = _mini(
         [

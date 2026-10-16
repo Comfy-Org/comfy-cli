@@ -1934,9 +1934,12 @@ def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         raw_links = []
     links = []
     for link in _dedupe_identical_links(raw_links, warnings):
-        if isinstance(link, list) and link and link[0] is None:
-            warnings.append(f"link has null id and was ignored: {link!r}")
-            continue
+        if isinstance(link, list) and link:
+            link_id = link[0]
+            if not _is_link_id(link_id):
+                kind = "null" if link_id is None else "invalid"
+                warnings.append(f"link has {kind} id and was ignored: {link!r}")
+                continue
         links.append(link)
 
     definitions = workflow.get("definitions")
