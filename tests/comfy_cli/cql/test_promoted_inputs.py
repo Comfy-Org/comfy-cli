@@ -495,6 +495,16 @@ def test_live_external_link_rejects_incomplete_or_ambiguous_definition_rows(link
     assert promoted.live_external_link(scope, instance, "value") is None
 
 
+def test_live_external_link_accepts_a_uniquely_listed_input_proxy_holder():
+    scope = {
+        "inputs": [{"name": "value", "linkIds": [7]}],
+        "links": [{"id": 7, "origin_id": -10}],
+    }
+    instance = {"inputs": [{"name": "value", "link": 7}]}
+
+    assert promoted.live_external_link(scope, instance, "value") == 7
+
+
 def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
     sg = {
         "id": "sg",

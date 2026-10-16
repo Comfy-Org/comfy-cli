@@ -245,18 +245,12 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         raw_links = scope.get("links")
         memberships = _promoted._input_link_memberships(scope, subgraph_defs)
         for link in raw_links if isinstance(raw_links, list) else []:
+            if not _promoted._is_live_link_row(link, memberships):
+                continue
             if isinstance(link, dict):
                 candidate = link.get("id")
-                if not _is_link_id(candidate):
-                    continue
-                if not _promoted._is_complete_link_row(link):
-                    continue
-                if _promoted._is_input_proxy_link(link) and len(memberships.get(candidate, ())) != 1:
-                    continue
-            elif isinstance(link, (list, tuple)) and len(link) >= 6:
-                candidate = link[0]
             else:
-                continue
+                candidate = link[0]
             if _is_link_id(candidate):
                 keys.add((type(candidate), candidate))
         scope_links[id(scope)] = (scope, keys)

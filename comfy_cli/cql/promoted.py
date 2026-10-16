@@ -124,6 +124,17 @@ def _is_complete_link_row(link: Any) -> bool:
     return isinstance(link, (list, tuple)) and len(link) >= 6
 
 
+def _is_live_link_row(link: Any, memberships: dict[Any, set[int]]) -> bool:
+    """Whether a row is live under the frontend's boundary/holder rules."""
+    if isinstance(link, dict):
+        candidate = link.get("id")
+        if not _is_link_id(candidate):
+            return False
+        if _is_input_proxy_link(link):
+            return len(memberships.get(candidate, ())) == 1
+    return _is_complete_link_row(link)
+
+
 def _listed_link_ids(entry: dict) -> list[Any]:
     """A definition entry's serialized link-id list, or empty when malformed."""
     value = entry.get("linkIds")
@@ -665,20 +676,15 @@ def link_exists(scope: dict, link_id: Any) -> bool:
         return False
     raw_links = scope.get("links")
     links = raw_links if isinstance(raw_links, list) else []
-    memberships: dict[Any, set[int]] | None = None
+    memberships = _input_link_memberships(scope, {})
     for link in links:
+        if not _is_live_link_row(link, memberships):
+            continue
         if isinstance(link, dict):
-            if not _is_complete_link_row(link):
-                continue
             candidate = link.get("id")
             if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
-                if _is_input_proxy_link(link):
-                    if memberships is None:
-                        memberships = _input_link_memberships(scope, {})
-                    if len(memberships.get(candidate, ())) != 1:
-                        continue
                 return True
-        elif _is_complete_link_row(link):
+        else:
             candidate = link[0]
             if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
                 return True

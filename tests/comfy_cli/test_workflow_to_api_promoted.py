@@ -1071,6 +1071,38 @@ def test_promoted_overlay_prefers_a_live_duplicate_mapped_slot(monkeypatch):
     assert prompt["1:leaf"]["inputs"]["value"] == "live external value"
 
 
+def test_nested_overlay_keeps_a_uniquely_listed_input_proxy_value(monkeypatch):
+    from comfy_cli.cql import promoted
+
+    parent_id = "00000000-0000-4000-8000-000000000001"
+    child_id = "00000000-0000-4000-8000-000000000002"
+    child = {"id": child_id, "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    parent = {
+        "id": parent_id,
+        "inputs": [{"name": "value", "linkIds": [7]}],
+        "nodes": [
+            {
+                "id": "nested",
+                "type": child_id,
+                "inputs": [{"name": "value", "link": 7}],
+                "widgets_values": ["stale nested host"],
+            }
+        ],
+        # Holder routing makes this uniquely listed input-proxy row live even
+        # when redundant endpoint fields are absent.
+        "links": [{"id": 7, "origin_id": -10}],
+    }
+    workflow = {"nodes": [{"id": 1, "type": parent_id}], "links": []}
+    prompt = {"1:nested:leaf": {"inputs": {"value": "external value"}}}
+    item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
+    monkeypatch.setattr(promoted, "promoted_inputs", lambda sg, *_args: [item] if sg is child else [])
+    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+
+    workflow_to_api._overlay_promoted_host_values(prompt, workflow, {parent_id: parent, child_id: child})
+
+    assert prompt["1:nested:leaf"]["inputs"]["value"] == "external value"
+
+
 def test_promoted_overlay_ignores_unhashable_link_ids(monkeypatch):
     from comfy_cli.cql import promoted
 
