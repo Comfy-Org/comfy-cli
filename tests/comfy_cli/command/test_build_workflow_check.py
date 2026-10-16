@@ -234,6 +234,42 @@ def test_validate_tells_each_missing_pack_the_source_it_can_be_added_from(
     assert "`repository` + `gitRef`" in error["hint"]
 
 
+@pytest.mark.parametrize(
+    "pack",
+    [
+        {"packId": "ultimate-sd-upscale", "latestVersion": "\ud800", "classes": ["UltimateSDUpscale"]},
+        {
+            "packId": "ultimate-sd-upscale",
+            "repository": "https://github.com/example/\ud800",
+            "classes": ["UltimateSDUpscale"],
+        },
+    ],
+    ids=["latest-version", "repository"],
+)
+def test_validate_tells_a_person_the_missing_pack_when_its_route_cannot_be_encoded(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, pack: JsonObject
+) -> None:
+    """A lone surrogate is legal in a JSON string, so the builder's
+    ``latestVersion`` or ``repository`` can carry one past the answer's checks;
+    printing it raw raises ``UnicodeEncodeError`` and the person reads nothing,
+    not even which pack is missing."""
+    # Given
+    answer = {**MISSING, "missing": [pack]}
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", CoverageTransport(answer=answer))
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    result = _invoke("validate", workspace, "--workflow", str(_workflow_file(workspace)), output="pretty")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert not isinstance(result.exception, UnicodeEncodeError), result.exception
+    said = _said(result)
+    assert "lacks node packs" in said
+    assert "ultimate-sd-upscale: UltimateSDUpscale" in said
+    assert "Build spec is valid" not in said
+
+
 @pytest.mark.parametrize("workflow", [API_WORKFLOW, UI_WORKFLOW], ids=["api-export", "ui-export"])
 def test_validate_passes_a_covered_workflow_in_either_export(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, workflow: JsonObject
