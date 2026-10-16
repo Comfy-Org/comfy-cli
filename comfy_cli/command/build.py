@@ -1973,12 +1973,13 @@ def _check_workflow(renderer, client, path: Path, workflow: dict, definition: di
     if coverage["complete"]:
         return {"path": str(path), "format": coverage["format"], "complete": True, "covered": coverage["covered"]}
     missing, unverified = coverage["missing"], coverage["unverified"]
-    # The builder's strings (pack id, classes, version, repository) reach the
-    # terminal here, and a lone surrogate in any of them would print nothing.
+    # The builder's strings (pack id, classes, version, repository, class type,
+    # reason) reach the terminal here, and a lone surrogate in any of them would
+    # print nothing.
     lines = [
         _encodable(f"  {pack['packId']}: {', '.join(pack['classes'])}{_missing_pack_route(pack)}") for pack in missing
     ]
-    lines += [f"  not verified: {item['classType']} ({item['reason']})" for item in unverified]
+    lines += [_encodable(f"  not verified: {item['classType']} ({item['reason']})") for item in unverified]
     # The lists apart are only in JSON, as with a refused definition.
     if not renderer.is_pretty():
         details.update({"missing": missing, "unverified": unverified})

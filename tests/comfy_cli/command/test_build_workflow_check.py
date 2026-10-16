@@ -270,6 +270,36 @@ def test_validate_tells_a_person_the_missing_pack_when_its_route_cannot_be_encod
     assert "Build spec is valid" not in said
 
 
+@pytest.mark.parametrize(
+    ("item", "shown"),
+    [
+        ({"classType": "Silent\ud800Node", "reason": "lookupFailed"}, "(lookupFailed)"),
+        ({"classType": "SilentNode", "reason": "lookup\ud800Failed"}, "not verified: SilentNode"),
+    ],
+    ids=["class-type", "reason"],
+)
+def test_validate_tells_a_person_the_unverified_class_when_its_strings_cannot_be_encoded(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, item: JsonObject, shown: str
+) -> None:
+    """The same lone surrogate in an unverified ``classType`` or ``reason`` must
+    not cost the person the whole could-not-verify diagnostic."""
+    # Given
+    answer = {**UNVERIFIED, "unverified": [item]}
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", CoverageTransport(answer=answer))
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    result = _invoke("validate", workspace, "--workflow", str(_workflow_file(workspace)), output="pretty")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert not isinstance(result.exception, UnicodeEncodeError), result.exception
+    said = _said(result)
+    assert "could not verify" in said
+    assert shown in said
+    assert "Build spec is valid" not in said
+
+
 @pytest.mark.parametrize("workflow", [API_WORKFLOW, UI_WORKFLOW], ids=["api-export", "ui-export"])
 def test_validate_passes_a_covered_workflow_in_either_export(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, workflow: JsonObject
