@@ -499,8 +499,8 @@ def test_list_releases_falls_back_to_the_versions_key(monkeypatch):
 
 # --- the supplied-definition workflow check -----------------------------------
 #
-# POST /v1/workflows/validate (Comfy-Org/cloud#13736). The answers below are the
-# shapes that PR's own tests pin: `ultimate-sd-upscale` missing from an empty
+# POST /v1/workflows/validate. The answers below are the shapes the builder's own
+# tests pin: `ultimate-sd-upscale` missing from an empty
 # definition, a registry that did not answer for `SilentNode`.
 
 _MISSING_ANSWER = {

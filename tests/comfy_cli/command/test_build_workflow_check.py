@@ -1,6 +1,6 @@
 """`comfy build validate --workflow` and `comfy build push --workflow`.
 
-The builder's POST /v1/workflows/validate (Comfy-Org/cloud#13736) compares a
+The builder's POST /v1/workflows/validate compares a
 workflow with a definition the caller sends. These pin that the CLI sends the
 LOCAL spec's definition, stops a push before anything moves when a class is
 missing or cannot be verified, and treats an old builder or a strange answer as
