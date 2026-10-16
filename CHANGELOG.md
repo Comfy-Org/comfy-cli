@@ -121,6 +121,9 @@ history.
 
 ### Fixed
 
+- Preserve record-valued widgets such as `ImageCropV2.crop_region` during
+  UI-to-API workflow conversion instead of replacing them with schema defaults.
+
 - `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
   when the sign-in token it started with expires mid-run. The token lasts
   fifteen minutes, and the run sent the one it started with for every request
