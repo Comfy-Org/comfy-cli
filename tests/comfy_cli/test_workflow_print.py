@@ -1460,8 +1460,8 @@ def test_malformed_target_slot_does_not_exact_match_a_holder(malformed_slot):
         nodes, [[7, 1, 0, 2, malformed_slot, "*"]]
     )
 
-    assert retargeted == {"7": (2, 0)}
-    assert dependencies == {"7": [(2, 0), (2, 1)]}
+    assert retargeted == {workflow_print._link_key(7): (2, 0)}
+    assert dependencies == {workflow_print._link_key(7): [(2, 0), (2, 1)]}
     assert any("non-integer input slot" in warning for warning in warnings)
 
 
@@ -1712,12 +1712,22 @@ def test_null_link_id_is_warned_and_dropped(sd15_graph):
     assert any("link has null id and was ignored" in warning for warning in res.warnings)
 
 
-def test_string_and_integer_link_ids_use_the_last_row(sd15_graph):
-    wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
-    wf["links"].append(["7", "1", 0, "2", 0, "DIFFERENT-UNUSED-TYPE"])
-    result = render_py(wf, sd15_graph)
-    assert result.source
-    assert "duplicate link id 7; using the last row" in result.warnings
+def test_string_and_integer_link_ids_remain_distinct():
+    wf = _mini(
+        [
+            _node(1, "SourceA", outputs=[{"name": "out", "links": [7]}]),
+            _node(2, "TargetA", inputs=[{"name": "x", "link": 7}]),
+            _node(3, "SourceB", outputs=[{"name": "out", "links": ["7"]}]),
+            _node(4, "TargetB", inputs=[{"name": "x", "link": "7"}]),
+        ],
+        [[7, 1, 0, 2, 0, "*"], ["7", 3, 0, 4, 0, "*"]],
+    )
+
+    result = render_py(wf, None)
+
+    assert "target_a = TargetA(x=source_a)" in result.source
+    assert "target_b = TargetB(x=source_b)" in result.source
+    assert not any("duplicate link id" in warning for warning in result.warnings)
 
 
 def test_typed_duplicate_link_rows_use_the_last_row():
@@ -1728,13 +1738,29 @@ def test_typed_duplicate_link_rows_use_the_last_row():
 
     definition_rows = [
         {"id": 7, "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
-        {"id": "7", "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
+        {"id": 7, "origin_id": 3, "origin_slot": 0, "target_id": 2, "target_slot": 0},
     ]
     errors: list[str] = []
     warnings: list[str] = []
     workflow_print._def_links({"links": definition_rows}, errors, warnings)
     assert errors == []
     assert warnings == ["duplicate link id 7; using the last row"]
+
+
+def test_definition_string_and_integer_link_ids_remain_distinct():
+    rows = [
+        {"id": 7, "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
+        {"id": "7", "origin_id": 3, "origin_slot": 0, "target_id": 4, "target_slot": 0},
+    ]
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    links = workflow_print._def_links({"links": rows}, errors, warnings)
+
+    assert errors == []
+    assert warnings == []
+    assert links[workflow_print._link_key(7)] == (1, 0, 2, 0)
+    assert links[workflow_print._link_key("7")] == (3, 0, 4, 0)
 
 
 def test_duplicate_link_validation_does_not_scan_rows_twice():
