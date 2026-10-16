@@ -450,9 +450,9 @@ def test_generated_two_writer_streams_converge(seed: int):
 def test_same_batch_connects_resolve_by_op_id_not_batch_position():
     """``apply_specs`` stamps every op in a batch with the SAME base_version,
     so a same-target pair inside one batch is decided by the op_id tiebreak,
-    not by spec order. Convergence holds — "last spec wins" does not. This has
-    been true of ``set_widget`` since the freeze; amendment v1.2 extends the
-    same property to ``connect`` and says so."""
+    not by arrival order. Since amendment v1.8 ``_new_op`` mints increasing
+    op_ids, so a minted batch resolves in spec order; these hand-authored ids
+    pin the tiebreak itself."""
     first = _connect("k1", AGENT, 5, 9901, ENCODER)
     second = _connect("k0", AGENT, 5, 9902, OTHER_ENCODER)
     wf = _run(_base(), [first, second])

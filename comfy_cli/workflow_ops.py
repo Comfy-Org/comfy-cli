@@ -30,6 +30,8 @@ Convergence guarantees ``apply_op`` upholds, so any replay order reaches the sam
 * **Last-writer-wins on widgets** — two concurrent writes to the same widget
   converge on the value with the higher causal ``stamp`` ``[base_version, actor]``
   (``op_id`` breaks exact ties into a total order), independent of apply order.
+  Ops share one stamp within an ``apply_specs`` batch, and ``op_id`` is minted
+  in increasing order, so the later write in a batch wins.
   The winning stamp per target is tracked in ``_widget_stamps`` (apply-only
   bookkeeping, stripped before serialization).
 * **Deterministic structure** — forking a shared subgraph definition mints an id
@@ -56,7 +58,7 @@ import json
 import math
 import random
 import re
-import uuid
+import time
 from typing import Any
 
 from comfy_cli import layout
@@ -79,10 +81,23 @@ def mint_id() -> int:
     return _ID_FLOOR | random.getrandbits(52)
 
 
+_last_op_clock = 0
+
+
+def _new_op_id() -> str:
+    """32 lowercase hex chars (§8.2): a nanosecond clock that never repeats or
+    goes backwards in this process, then 64 random bits for uniqueness. Every op
+    in an ``apply_specs`` batch shares one stamp, so ``op_id`` is what breaks the
+    tie; minting it in increasing order makes the later spec win."""
+    global _last_op_clock
+    _last_op_clock = max(time.time_ns(), _last_op_clock + 1)
+    return f"{_last_op_clock:016x}{random.getrandbits(64):016x}"
+
+
 def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str, Any]:
     return {
         "op": kind,
-        "op_id": uuid.uuid4().hex,
+        "op_id": _new_op_id(),
         "actor": actor,
         "base_version": base_version,
         "stamp": [base_version, actor],
