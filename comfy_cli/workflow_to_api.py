@@ -249,7 +249,7 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 candidate = link.get("id")
                 if not _is_link_id(candidate):
                     continue
-                if not all(field in link for field in ("origin_id", "origin_slot", "target_id", "target_slot")):
+                if not _promoted._is_complete_link_row(link):
                     continue
                 if _promoted._is_input_proxy_link(link) and len(memberships.get(candidate, ())) != 1:
                     continue
@@ -289,14 +289,23 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         # liveness too; a stale name must not make overlay disagree with the
         # link that expansion already attached.
         outer_map = _outer_slot_to_input_idx(instance, sg)
+        live_links = live_link_keys(scope)
+
+        def is_live(link_id: Any) -> bool:
+            return _is_link_id(link_id) and (type(link_id), link_id) in live_links
+
         external_links: dict[int, Any] = {}
         for slot, entry in enumerate(instance_inputs):
             if isinstance(entry, dict):
-                external_links.setdefault(outer_map.get(slot, slot), entry.get("link"))
-        live_links = live_link_keys(scope)
+                input_index = outer_map.get(slot, slot)
+                candidate = entry.get("link")
+                if input_index not in external_links or (
+                    not is_live(external_links[input_index]) and is_live(candidate)
+                ):
+                    external_links[input_index] = candidate
         for pi in _promoted.promoted_inputs(sg, subgraph_defs):
             external_link = external_links.get(pi.index)
-            if not pi.is_widget or (_is_link_id(external_link) and (type(external_link), external_link) in live_links):
+            if not pi.is_widget or is_live(external_link):
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:

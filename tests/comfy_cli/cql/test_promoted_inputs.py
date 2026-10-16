@@ -478,6 +478,23 @@ def test_live_external_link_keeps_boolean_and_integer_ids_distinct():
     assert promoted.live_external_link(scope, instance, "value") is None
 
 
+@pytest.mark.parametrize(
+    "links,inputs",
+    [
+        ([{"id": 7}], [{"name": "value", "linkIds": [7]}]),
+        (
+            [{"id": 7, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+            [{"name": "first", "linkIds": [7]}, {"name": "second", "linkIds": [7]}],
+        ),
+    ],
+)
+def test_live_external_link_rejects_incomplete_or_ambiguous_definition_rows(links, inputs):
+    scope = {"inputs": inputs, "links": links}
+    instance = {"inputs": [{"name": "value", "link": 7}]}
+
+    assert promoted.live_external_link(scope, instance, "value") is None
+
+
 def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
     sg = {
         "id": "sg",

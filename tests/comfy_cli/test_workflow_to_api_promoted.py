@@ -1045,6 +1045,32 @@ def test_promoted_overlay_uses_expansion_slot_mapping_for_liveness(monkeypatch):
     assert prompt["1:leaf"]["inputs"]["value"] == "interior"
 
 
+def test_promoted_overlay_prefers_a_live_duplicate_mapped_slot(monkeypatch):
+    from comfy_cli.cql import promoted
+
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {"id": definition_id, "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    workflow = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": definition_id,
+                "inputs": [{"name": "value", "link": None}, {"name": "value", "link": 9}],
+                "widgets_values": ["host"],
+            }
+        ],
+        "links": [[9, 2, 0, 1, 1, "STRING"]],
+    }
+    prompt = {"1:leaf": {"inputs": {"value": "live external value"}}}
+    item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
+    monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
+    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+
+    workflow_to_api._overlay_promoted_host_values(prompt, workflow, {definition_id: definition})
+
+    assert prompt["1:leaf"]["inputs"]["value"] == "live external value"
+
+
 def test_promoted_overlay_ignores_unhashable_link_ids(monkeypatch):
     from comfy_cli.cql import promoted
 

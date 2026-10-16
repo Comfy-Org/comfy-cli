@@ -447,6 +447,17 @@ class TestResolveWorkflowModels:
 
         assert workflow == before
 
+    def test_promoted_propagation_budget_ignores_nodes_without_swaps(self, graph, monkeypatch):
+        workflow = _template()
+        workflow["nodes"] = [
+            {"id": f"irrelevant-{index}", "type": "Plain", "widgets_values": []} for index in range(100)
+        ] + workflow["nodes"]
+        monkeypatch.setattr("comfy_cli.model_variants._MAX_PROMOTED_VARIANT_VISITS", 10)
+
+        substitutions, _unavailable = resolve_workflow_models(workflow, graph)
+
+        assert substitutions
+
 
 # ---------------------------------------------------------------------------
 # templates fetch

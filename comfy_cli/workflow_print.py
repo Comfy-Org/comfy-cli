@@ -201,28 +201,34 @@ _NONLIST_GROUPS = object()
 
 
 def _dedupe_identical_links(links: list[Any], warnings: list[str] | None = None) -> list[Any]:
-    """Drop equivalent rows and warn once for each conflicting duplicate id."""
+    """Keep the authoritative last row and warn once for each conflicting id."""
     seen: dict[tuple[type, int | str], tuple[Any, ...]] = {}
+    last_index: dict[tuple[type, int | str], int] = {}
     reported_conflicts: set[tuple[type, int | str]] = set()
-    out: list[Any] = []
-    for link in links:
+    for index, link in enumerate(links):
         if not isinstance(link, list) or len(link) < 5:
-            out.append(link)
             continue
         raw_link_id = link[0]
         if not _is_link_id(raw_link_id):
-            out.append(link)
             continue
         link_id = _link_key(raw_link_id)
         normalised_row = _normalised_link_row(link)
-        if seen.get(link_id) == normalised_row:
-            continue
-        if link_id in seen and link_id not in reported_conflicts and warnings is not None:
+        if (
+            link_id in seen
+            and seen[link_id] != normalised_row
+            and link_id not in reported_conflicts
+            and warnings is not None
+        ):
             reported_conflicts.add(link_id)
             warnings.append(f"duplicate link id {raw_link_id}; using the last row")
         seen[link_id] = normalised_row
-        out.append(link)
-    return out
+        last_index[link_id] = index
+    return [
+        link
+        for index, link in enumerate(links)
+        if not (isinstance(link, list) and len(link) >= 5 and _is_link_id(link[0]))
+        or last_index[_link_key(link[0])] == index
+    ]
 
 
 def _validate(nodes: list[dict], links: list[list]) -> list[str]:
@@ -443,6 +449,28 @@ def _stale_input_slot_links(
                 )
         fed_sources_by_node[str(node.get("id"))] = fed_sources
 
+    def report_unheld(where: str, link_id: Any, src_id: Any, src_slot: Any, tgt_id: Any) -> None:
+        same_source = fed_sources_by_node[str(tgt_id)].get((str(src_id), _typed_value_key(src_slot)), [])
+        current_key = _link_key(link_id) if _is_link_id(link_id) else None
+        rewired = next((name for key, name in same_source if key != current_key), None)
+        if rewired is not None:
+            warnings.append(
+                f"{where}; a leftover row — input {rewired!r} already gets that value from node "
+                f"{qualify(src_id)} output {src_slot} through another link, so nothing needs re-wiring"
+            )
+            return
+        source = "the subgraph input" if str(src_id) == _PROXY_IN else f"node {qualify(src_id)} output {src_slot}"
+        fixed = f"{qualify(src_id)}.{src_slot}" if str(src_id) != _PROXY_IN else None
+        warnings.append(
+            f"{where}; no input holds it, so it feeds nothing and was ignored. It was wired from {source} — "
+            + (
+                f"if that value was meant for node {qualify(tgt_id)}, re-wire it with "
+                f"`connect {fixed} {qualify(tgt_id)}.<input>` rather than retyping the value"
+                if fixed
+                else "re-wire it to the input it was meant for"
+            )
+        )
+
     for link in links:
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         locations = holders_by_link.get(_link_key(link_id), []) if _is_link_id(link_id) else []
@@ -494,7 +522,7 @@ def _stale_input_slot_links(
                 )
             else:
                 ignored.add(_link_key(link_id))
-                warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
+                report_unheld(where, link_id, src_id, src_slot, tgt_id)
             continue
 
         inputs = tgt_node.get("inputs")
@@ -523,7 +551,7 @@ def _stale_input_slot_links(
                 )
             else:
                 ignored.add(_link_key(link_id))
-                warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
+                report_unheld(where, link_id, src_id, src_slot, tgt_id)
             continue
 
         where = (
@@ -539,36 +567,9 @@ def _stale_input_slot_links(
                 f"{where}; rendered through input {str(holder.get('name') or '')!r} on node "
                 f"{qualify(holder_id)}, which holds it"
             )
-        elif proxy_input_id is not None and str(src_id) == proxy_input_id:
-            ignored.add(_link_key(link_id))
-            warnings.append(
-                f"{where}; no input holds it, so it feeds nothing and was ignored. It was wired from "
-                "the subgraph input — re-wire it to the input it was meant for"
-            )
         else:
             ignored.add(_link_key(link_id))
-            same_source = fed_sources_by_node[str(tgt_id)].get((str(src_id), _typed_value_key(src_slot)), [])
-            current_key = _link_key(link_id) if _is_link_id(link_id) else None
-            rewired = next((name for key, name in same_source if key != current_key), None)
-            if rewired is not None:
-                warnings.append(
-                    f"{where}; a leftover row — input {rewired!r} already gets that value from node "
-                    f"{qualify(src_id)} output {src_slot} through another link, so nothing needs re-wiring"
-                )
-            else:
-                source = (
-                    "the subgraph input" if str(src_id) == _PROXY_IN else f"node {qualify(src_id)} output {src_slot}"
-                )
-                fixed = f"{qualify(src_id)}.{src_slot}" if str(src_id) != _PROXY_IN else None
-                warnings.append(
-                    f"{where}; no input holds it, so it feeds nothing and was ignored. It was wired from {source} — "
-                    + (
-                        f"if that value was meant for node {qualify(tgt_id)}, re-wire it with "
-                        f"`connect {fixed} {qualify(tgt_id)}.<input>` rather than retyping the value"
-                        if fixed
-                        else "re-wire it to the input it was meant for"
-                    )
-                )
+            report_unheld(where, link_id, src_id, src_slot, tgt_id)
     return warnings, ignored, retargeted, dependency_targets
 
 
@@ -1469,6 +1470,9 @@ def _def_links(sg_def: dict, link_errors: list[str], link_warnings: list[str]) -
         ):
             reported_duplicate_ids.add(normalized_id)
             link_warnings.append(f"duplicate link id {lid}; using the last row")
+        if normalized_id in out:
+            del out[normalized_id]
+            del normalized_by_id[normalized_id]
         out[normalized_id] = row
         normalized_by_id[normalized_id] = normalized_row
     return out

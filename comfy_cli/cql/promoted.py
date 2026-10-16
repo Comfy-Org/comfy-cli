@@ -117,6 +117,13 @@ def _is_input_proxy_link(link: Any) -> bool:
     return isinstance(link, dict) and str(link.get("origin_id")) == str(SUBGRAPH_INPUT_NODE_ID)
 
 
+def _is_complete_link_row(link: Any) -> bool:
+    """Whether a serialized link row has every endpoint field consumers use."""
+    if isinstance(link, dict):
+        return all(field in link for field in ("id", "origin_id", "origin_slot", "target_id", "target_slot"))
+    return isinstance(link, (list, tuple)) and len(link) >= 6
+
+
 def _listed_link_ids(entry: dict) -> list[Any]:
     """A definition entry's serialized link-id list, or empty when malformed."""
     value = entry.get("linkIds")
@@ -658,12 +665,20 @@ def link_exists(scope: dict, link_id: Any) -> bool:
         return False
     raw_links = scope.get("links")
     links = raw_links if isinstance(raw_links, list) else []
+    memberships: dict[Any, set[int]] | None = None
     for link in links:
         if isinstance(link, dict):
+            if not _is_complete_link_row(link):
+                continue
             candidate = link.get("id")
             if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
+                if _is_input_proxy_link(link):
+                    if memberships is None:
+                        memberships = _input_link_memberships(scope, {})
+                    if len(memberships.get(candidate, ())) != 1:
+                        continue
                 return True
-        elif isinstance(link, (list, tuple)) and len(link) >= 6:
+        elif _is_complete_link_row(link):
             candidate = link[0]
             if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
                 return True

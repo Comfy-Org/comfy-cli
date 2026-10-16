@@ -1256,7 +1256,7 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     n_inputs = len(tgt.get("inputs") or [])
     assert any(
         f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs" in warning
-        and "was ignored" in warning
+        and "a leftover row" in warning
         for warning in res.warnings
     )
 
@@ -1343,7 +1343,7 @@ def test_output_proxy_target_slot_out_of_range_is_dropped(sd15_graph):
     assert any("declares boundary slot 4 but is listed under output slot" in w for w in res.warnings)
 
 
-def test_in_range_unheld_definition_input_proxy_link_is_ignored():
+def test_in_range_unheld_definition_input_proxy_link_is_reported_as_leftover():
     wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
     graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
     sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
@@ -1363,8 +1363,7 @@ def test_in_range_unheld_definition_input_proxy_link_is_ignored():
     res = render_py(wf, graph)
 
     assert any(
-        warning.startswith(f"link 9999 targets input slot 0 on node 10/{target['id']}")
-        and warning.endswith("no input holds it, so it feeds nothing and was ignored")
+        warning.startswith(f"link 9999 targets input slot 0 on node 10/{target['id']}") and "a leftover row" in warning
         for warning in res.warnings
     )
 
@@ -1521,6 +1520,15 @@ def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
     res = render_py(wf, sd15_graph)
     assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
     assert "but that input does not hold it" in res.warnings[0]
+
+
+def test_in_range_unheld_duplicate_is_reported_as_leftover(sd15_graph):
+    result = render_py(_stale_slot_workflow([7, 1, 0, 2, 1, "LATENT"]), sd15_graph)
+
+    assert result.warnings == [
+        "link 7 targets input slot 1 on node 2, but that input does not hold it; a leftover row — input 'samples' "
+        "already gets that value from node 1 output 0 through another link, so nothing needs re-wiring"
+    ]
 
 
 @pytest.mark.parametrize("malformed", [5, {}, "", False])
@@ -1740,6 +1748,22 @@ def test_string_and_integer_link_ids_remain_distinct():
     assert not any("duplicate link id" in warning for warning in result.warnings)
 
 
+def test_broken_last_duplicate_row_evicts_an_earlier_live_row():
+    wf = _mini(
+        [
+            _node(1, "Source", outputs=[{"name": "out", "links": [7]}]),
+            _node(2, "Target", inputs=[{"name": "x", "link": 7}]),
+        ],
+        [[7, 1, 0, 2, 0, "*"], [7, 99, 0, 2, 0, "*"]],
+    )
+
+    result = render_py(wf, None)
+
+    assert "target = Target(x=None)" in result.source
+    assert "duplicate link id 7; using the last row" in result.warnings
+    assert any(warning.startswith("BROKEN link 7") for warning in result.warnings)
+
+
 def test_typed_duplicate_link_rows_use_the_last_row():
     wf = _mini([_node(1, "Source"), _node(2, "Target", inputs=[{"name": "x", "link": 7}])], [])
     wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
@@ -1771,6 +1795,19 @@ def test_definition_string_and_integer_link_ids_remain_distinct():
     assert warnings == []
     assert links[workflow_print._link_key(7)] == (1, 0, 2, 0)
     assert links[workflow_print._link_key("7")] == (3, 0, 4, 0)
+
+
+def test_definition_duplicate_winner_keeps_its_last_serialized_position():
+    rows = [
+        {"id": 1, "origin_id": "first", "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        {"id": 2, "origin_id": "middle", "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        {"id": 1, "origin_id": "last", "origin_slot": 0, "target_id": -20, "target_slot": 0},
+    ]
+
+    links = workflow_print._def_links({"links": rows}, [], [])
+
+    assert list(links) == [workflow_print._link_key(2), workflow_print._link_key(1)]
+    assert links[workflow_print._link_key(1)][0] == "last"
 
 
 def test_duplicate_link_validation_does_not_scan_rows_twice():
