@@ -56,7 +56,7 @@ pull      Replace the local spec with a fetched Build, keeping local asset ident
 status    Report how far the spec is from the remote Build and from the install.
 ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
-validate  Validate the local spec without contacting the builder.
+validate  Validate the local spec (only --remote and --workflow reach the builder).
 delete    Delete a Build (soft-delete).
 release   create · ls · show · logs · manifest · delete
 refs      resolve · base-images · build-targets · model-dirs

@@ -3486,7 +3486,7 @@ def release_logs(
     renderer.emit({**content, "releaseId": release_id}, command="build release logs")
 
 
-@app.command("validate", help="Validate the local comfy-build spec without contacting the builder.")
+@app.command("validate", help="Validate the local comfy-build spec; only --remote and --workflow contact the builder.")
 @tracking.track_command("build")
 def validate_cmd(
     path: Annotated[
