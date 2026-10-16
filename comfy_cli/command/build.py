@@ -1926,6 +1926,24 @@ def _coverage_definition(definition: dict) -> dict:
     return project_wire_definition(staged)
 
 
+_NODES_MISSING_HINT = (
+    "add each named pack to the spec's definition.customNodes as its line says: a published pack as `id` + "
+    "`registryVersion`, an unpublished one as `repository` + `gitRef` (a commit); then run the command again"
+)
+
+
+def _missing_pack_route(pack: dict) -> str:
+    """How the spec adds *pack*: from the registry when the builder names a published
+    version, else from its repository (the builder's ``packId`` is then the clone
+    URL). Nothing when the answer names neither."""
+    if pack.get("latestVersion"):
+        return f" (add from the registry: id {pack['packId']}, registryVersion {pack['latestVersion']})"
+    repository = pack.get("repository") or (pack["packId"] if pack["packId"].startswith("https://") else "")
+    if repository:
+        return f" (unpublished; add from its repository: repository {repository}, gitRef a commit)"
+    return ""
+
+
 def _check_workflow(renderer, client, path: Path, workflow: dict, definition: dict) -> dict:
     """Ask the builder whether the local *definition* installs every node class
     *workflow* uses, and return the payload entry only when it provably does.
@@ -1955,7 +1973,7 @@ def _check_workflow(renderer, client, path: Path, workflow: dict, definition: di
     if coverage["complete"]:
         return {"path": str(path), "format": coverage["format"], "complete": True, "covered": coverage["covered"]}
     missing, unverified = coverage["missing"], coverage["unverified"]
-    lines = [f"  {pack['packId']}: {', '.join(pack['classes'])}" for pack in missing]
+    lines = [f"  {pack['packId']}: {', '.join(pack['classes'])}{_missing_pack_route(pack)}" for pack in missing]
     lines += [f"  not verified: {item['classType']} ({item['reason']})" for item in unverified]
     # The lists apart are only in JSON, as with a refused definition.
     if not renderer.is_pretty():
@@ -1967,8 +1985,7 @@ def _check_workflow(renderer, client, path: Path, workflow: dict, definition: di
             message=_capped_lines(
                 f"the local build definition lacks node packs the workflow {path} uses:", lines, where
             ),
-            hint="add each named pack to the spec's definition.customNodes (its registry id at the latest version), "
-            "then run the command again",
+            hint=_NODES_MISSING_HINT,
             details=details,
         )
     else:

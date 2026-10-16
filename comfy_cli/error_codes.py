@@ -1272,12 +1272,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "build_workflow_nodes_missing",
         "`comfy build validate --workflow` or `comfy build push --workflow` asked the builder to compare the "
         "workflow with the LOCAL spec's definition, and the definition lacks node packs the workflow's classes "
-        "need. The message lists each pack as `<packId>: <classes>`, then any class the builder could not "
-        "decide; `details.missing` carries each pack as `{packId, classes, name?, repository?, latestVersion?}` "
+        "need. The message lists each pack as `<packId>: <classes>` and the source to add it from, then any "
+        "class the builder could not decide; `details.missing` carries each pack as `{packId, classes, name?, repository?, latestVersion?}` "
         "and `details.unverified` each undecided class as `{classType, reason, packId?}`. `push` stops before "
         "it uploads, saves or releases anything.",
-        "add each named pack to the spec's definition.customNodes (its registry id at the latest version), "
-        "then run the command again",
+        "add each named pack to the spec's definition.customNodes as its line says: a published pack as `id` + "
+        "`registryVersion`, an unpublished one as `repository` + `gitRef` (a commit); then run the command again",
     ),
     ErrorCode(
         "build_workflow_unverified",

@@ -204,6 +204,36 @@ def test_validate_names_each_missing_class_once_to_a_person(workspace: Path, mon
     assert "Build spec is valid" not in said
 
 
+def test_validate_tells_each_missing_pack_the_source_it_can_be_added_from(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pack the registry does not publish comes back with its clone URL as
+    ``packId``, its ``repository``, and no ``latestVersion``: it can only be added
+    from that repository, so its line must not send the user to the registry."""
+    # Given
+    clone = "https://github.com/example/comfyui-unpublished"
+    answer = copy.deepcopy(MISSING)
+    answer["missing"].insert(0, {"packId": clone, "repository": clone, "classes": ["UnpublishedNode"]})
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", CoverageTransport(answer=answer))
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    result = _invoke("validate", workspace, "--workflow", str(_workflow_file(workspace)))
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_workflow_nodes_missing"
+    assert error["details"]["missing"][0] == {"packId": clone, "classes": ["UnpublishedNode"], "repository": clone}
+    [unpublished] = [line for line in error["message"].splitlines() if line.startswith(f"  {clone}:")]
+    [published] = [line for line in error["message"].splitlines() if line.startswith("  ultimate-sd-upscale:")]
+    assert f"from its repository: repository {clone}, gitRef" in unpublished
+    assert "registry" not in unpublished
+    assert "from the registry: id ultimate-sd-upscale, registryVersion 1.2.0" in published
+    assert "registry id at the latest version" not in error["hint"]
+    assert "`repository` + `gitRef`" in error["hint"]
+
+
 @pytest.mark.parametrize("workflow", [API_WORKFLOW, UI_WORKFLOW], ids=["api-export", "ui-export"])
 def test_validate_passes_a_covered_workflow_in_either_export(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, workflow: JsonObject
