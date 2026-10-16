@@ -106,6 +106,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow insert-workflow": "workflow",
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",
+    "comfy workflow disconnect": "workflow",
     "comfy workflow set-widget": "workflow",
     "comfy workflow set-node-field": "workflow",
     "comfy workflow delete-node": "workflow",
