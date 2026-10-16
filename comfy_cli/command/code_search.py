@@ -47,7 +47,8 @@ _TYPE_FILTER_RE = re.compile(r"(^|\s)type:")
 # `timeout: 30` (a YAML-ish literal) are not rejected — a real Sourcegraph
 # filter value is never separated from its colon by whitespace.
 _INJECTED_FILTER_RE = re.compile(
-    r"(^|[\s(])-?(count|repo|r|timeout|context|rev|revision|fork|archived|select):(?=[^\s)])", re.IGNORECASE
+    r"(^|[\s(])-?(count|repo|r|timeout|context|rev|revision|fork|archived|select|patterntype):(?=[^\s)])",
+    re.IGNORECASE,
 )
 
 # C0 (0x00-0x1F) and C1 (0x7F-0x9F) control characters, including ESC (0x1B)
@@ -106,8 +107,8 @@ def _validate_query(query: str, repo: str | None) -> None:
         raise ValueError(f"query must be at most {MAX_QUERY_BYTES} bytes")
     if _INJECTED_FILTER_RE.search(query):
         raise ValueError(
-            "query must not contain count:, repo:, timeout:, context:, rev:, revision:, fork:, archived:, or "
-            "select: filters"
+            "query must not contain count:, repo:, timeout:, context:, rev:, revision:, fork:, archived:, "
+            "select:, or patterntype: filters"
         )
     if repo and re.search(r"\s", repo):
         raise ValueError("repo must not contain whitespace")
@@ -475,10 +476,12 @@ def code_search(
         typer.Argument(
             help=(
                 "Search query (supports Sourcegraph syntax). Defaults to file matches; "
-                "pass your own `type:` filter (e.g. `type:commit`) to override. Join multiple "
-                "concepts with explicit `AND`, or use a single literal token: plain whitespace "
-                "is one literal pattern, not an implicit intersection (use "
-                "`seedWidget AND serializeValue`, not `seedWidget serializeValue`)."
+                "pass your own `type:` filter (e.g. `type:commit`) to override. Whitespace is "
+                "not a reliable AND: whether `seedWidget serializeValue` matches both terms or "
+                "one literal phrase depends on the service's pattern-type default, which this "
+                "command does not pin. Join multiple concepts with explicit `AND` instead "
+                "(`seedWidget AND serializeValue`) to get the same result regardless of that "
+                "default."
             ),
         ),
     ],
