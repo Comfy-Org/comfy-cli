@@ -1,11 +1,10 @@
 """`workflow connect` between two nodes INSIDE one subgraph definition.
 
-Prod trace f8d27ae4 (SAM3, 357 nodes): three interior links of subgraph 70
-pointed at an input slot their SAM3 nodes no longer had, so the RegexExtract
-prompts fed nothing and the text prompts sat empty. The repair is a re-wire
-inside the definition (`70/2005.0` -> `70/2011.text_prompt`), but connect
-refused every interior address ("a link cannot cross a subgraph boundary"),
-so the agent hardcoded the prompt text instead.
+When interior links of a subgraph point at an input slot their target nodes
+no longer have, the inputs they should feed sit empty. The repair is a
+re-wire inside the definition (`70/2005.0` -> `70/2011.text_prompt`), but
+connect used to refuse every interior address ("a link cannot cross a
+subgraph boundary").
 
 A link between two interior nodes of the same definition crosses no
 boundary. connect now wires it and emits a `connect` op carrying the

@@ -184,6 +184,7 @@ class TestBuildQuery:
             "fork:yes x",
             "archived:yes x",
             "select:repo x",
+            "patterntype:regexp x",
         ):
             with pytest.raises(ValueError):
                 _validate_query(query, None)
@@ -208,11 +209,13 @@ class TestBuildQuery:
             "foo OR (fork:yes)",
             "foo OR (archived:yes)",
             "foo OR (select:repo)",
+            "foo OR (patterntype:regexp)",
             "foo -context:evil",
             "foo -rev:evil",
             "foo -fork:yes",
             "foo -archived:yes",
             "foo -select:repo",
+            "foo -patterntype:regexp",
         ):
             with pytest.raises(ValueError):
                 _validate_query(query, None)

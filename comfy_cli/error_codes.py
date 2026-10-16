@@ -174,8 +174,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "ws_timeout",
-        "WebSocket idle past `--timeout` while waiting for the server.",
-        "re-run with a larger `--timeout` (e.g. `--timeout 300`)",
+        "WebSocket idle past `--timeout` (wall-clock) while waiting for the server.",
+        "re-run with a larger `--timeout` (e.g. `--timeout 300`); if the machine slept mid-run, "
+        "the job may still be running — check `comfy jobs status <id>`, and use `caffeinate` (macOS) for long local batches",
     ),
     ErrorCode(
         "prompt_rejected",
@@ -329,7 +330,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "cloud_http_error",
-        "Cloud returned a non-2xx HTTP error. `details.status` carries the code.",
+        "Cloud returned a non-2xx HTTP error, or a 2xx whose body could not confirm the operation (unparseable, "
+        "not an object, or missing a required field). `details.status` carries the code.",
         "check `details.body` for the server's message",
     ),
     ErrorCode(
@@ -825,6 +827,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-run once the server/session is reachable to get a fresh schema",
     ),
     ErrorCode(
+        "dynamic_group_unsupported",
+        "A node class has a DynamicGroup schema this CLI does not support, so `comfy nodes widget-catalog` "
+        "left it out of `types`. Consumers store that class's values opaquely and refuse widget writes to it. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) so every other class is still published.",
+        "update comfy-cli, or leave the class's widgets unedited",
+    ),
+    ErrorCode(
         "description_ignored",
         "`comfy workflow save --where local --description` was given a description, but the local "
         "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
@@ -900,24 +909,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "model_download_claim_contested",
-        "`comfy model download --background` lost the race for a destination it had just judged "
-        "free: the stale claim it cleared was re-taken by another submitter before its own retry, "
-        "and that new claim does not (yet) resolve to a live download record. `details.path` is the "
-        "destination; `details.download_id` names the new claim's holder when its claim file was "
-        "readable, and is null otherwise. Unlike `model_download_in_flight` there is no `status`/"
-        "`kind` to report — the competitor's record was not visible at refusal time.",
+        "`comfy model download` (foreground or `--background`) found the destination's claim lock "
+        "held by another process, and that holder does not resolve to a readable download record. Holding the lock "
+        "is what proves the destination is taken, so the refusal stands regardless — but there is "
+        "no record to quote, which is why this is a distinct code rather than a "
+        "`model_download_in_flight` missing its `status`/`kind` fields. `details.path` is the "
+        "destination, `details.claim_file` the claim the lock is held on, and "
+        "`details.download_id` the holder's recorded id when the claim payload was readable "
+        "(null otherwise — it may be a rewrite in progress, or locked against reading on Windows).",
         "check `comfy model downloads`, then retry",
-    ),
-    ErrorCode(
-        "model_download_claim_unclearable",
-        "`comfy model download --background` found a stale destination claim it could not remove "
-        "(`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
-        "directory) sits at the claim path. Every submission to `details.path` will be refused "
-        "until the claim file is cleared, so the command reports the real obstacle rather than a "
-        "phantom in-flight download. `details.download_id` is the stale claim's recorded holder, "
-        "null when the claim was unreadable.",
-        "remove the claim file by hand (check its ownership and the permissions on the `claims/` "
-        "directory), then retry",
     ),
     ErrorCode(
         "model_download_foreground_cancel",

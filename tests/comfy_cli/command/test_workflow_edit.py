@@ -1493,6 +1493,31 @@ class TestLsNodes:
         types = {n["type"] for n in env["data"]["nodes"]}
         assert types == {"KSampler", "EmptyLatentImage"}
 
+    def test_pretty_table_surfaces_node_state(self, patched_graph, tmp_path, capsys):
+        workflow = _base_workflow()
+        workflow["nodes"][0]["mode"] = 4
+        workflow["nodes"].append({"id": 20, "type": "Reroute", "inputs": [], "outputs": []})
+        path = _write(tmp_path, workflow)
+
+        out, _err, result = _invoke_raw(["ls-nodes", str(path)], capsys, _force_pretty_renderer)
+
+        assert result.exit_code == 0
+        assert "state" in out
+        assert "bypass" in out
+        assert "ui-only" in out
+
+    def test_pretty_table_treats_workflow_cells_as_literal_text(self, patched_graph, tmp_path, capsys):
+        workflow = _base_workflow()
+        workflow["nodes"][0].update({"id": "[link=https://example.test]3[/link]", "type": "[fp16]", "title": "[/]"})
+        path = _write(tmp_path, workflow)
+
+        out, _err, result = _invoke_raw(["ls-nodes", str(path)], capsys, _force_pretty_renderer)
+
+        assert result.exit_code == 0
+        assert "[link=https://example.test]3[/link]" in out
+        assert "[fp16]" in out
+        assert "[/]" in out
+
 
 # ---------------------------------------------------------------------------
 # apply — batch with aliases
@@ -1849,6 +1874,25 @@ class TestCapture:
         env = _run(["capture", str(path)], capsys)
         assert env["ok"] is False
         assert "subgraph" in env["error"]["message"].lower()
+
+    def test_capture_tolerates_a_non_dict_definitions_block(self, patched_graph, tmp_path, capsys):
+        """A truthy non-dict ``definitions`` used to raise AttributeError past the
+        ``RecipeError`` handler; it now reads as "no subgraphs"."""
+        wf = _base_workflow()
+        wf["definitions"] = [1]
+        path = _write(tmp_path, wf)
+        env = _run(["capture", str(path)], capsys)
+        assert env["ok"] is True, env
+
+    @pytest.mark.parametrize("subgraphs", [{"sg": {}}, "corrupt", 1])
+    def test_capture_tolerates_a_non_list_subgraphs_block(self, patched_graph, tmp_path, capsys, subgraphs):
+        """A truthy non-list ``definitions.subgraphs`` reads as "no subgraphs"
+        (as every other reader treats it) rather than refusing the capture."""
+        wf = _base_workflow()
+        wf["definitions"] = {"subgraphs": subgraphs}
+        path = _write(tmp_path, wf)
+        env = _run(["capture", str(path)], capsys)
+        assert env["ok"] is True, env
 
 
 # ---------------------------------------------------------------------------

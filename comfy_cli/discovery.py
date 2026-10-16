@@ -174,6 +174,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy knowledge status": "knowledge",
     "comfy knowledge resolve": "knowledge",
     "comfy knowledge pick": "knowledge",
+    "comfy knowledge authoring": "knowledge",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",

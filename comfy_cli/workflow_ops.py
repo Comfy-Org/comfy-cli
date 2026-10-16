@@ -60,7 +60,14 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import frontend_injected_widget_error, is_wildcard_type
+from comfy_cli.cql.engine import (
+    DynamicGroupBindingError,
+    _dynamic_group_widgets,
+    _validate_dynamic_group_layout,
+    _widgets_as_positional,
+    frontend_injected_widget_error,
+    is_wildcard_type,
+)
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -186,9 +193,8 @@ class NotBatchableError(ValueError):
 
 
 # Node types that live only in the UI graph and never reach the API — the
-# frontend's isVirtualNode set. Mirrors workflow_to_api._UI_ONLY_NODE_TYPES;
-# duplicated rather than imported to keep workflow_ops import-free of the
-# converter. Keep the two in sync.
+# frontend's isVirtualNode set. Duplicated rather than imported to keep
+# workflow_ops import-free of the converter; keep both sources in sync.
 UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
 
 # The annotation subset of UI_ONLY_NODE_TYPES. The catalog has no schema for
@@ -849,7 +855,23 @@ def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
     return int(bound) if bound.lstrip("-").isdigit() else bound
 
 
-def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
+def _widget_schema_port(graph, class_type: str, widget: str):
+    m = graph.node(class_type)
+    if m is None:
+        return None
+    port = next((p for p in m.inputs if p.name == widget), None)
+    if port is None:
+        group = next((p for p in m.inputs if p.is_dynamic_group and widget.startswith(f"{p.name}.")), None)
+        if group is not None:
+            row, separator, _field = widget[len(group.name) + 1 :].partition(".")
+            if separator and row.isascii() and row.isdecimal() and (len(row) == 1 or not row.startswith("0")):
+                port = next((p for p in _dynamic_group_widgets(group, f"{group.name}.{row}") if p.name == widget), None)
+    return port
+
+
+def _normalize_combo(
+    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+) -> tuple[Any, dict | None]:
     """Rewrite a mangled model/COMBO value to the real option it means so the
     model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
     ``wai-illustrious-sdxl.safetensors``). Returns ``(value, note)`` — ``note`` is
@@ -857,10 +879,17 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     UNAMBIGUOUS match is rewritten; anything else is left untouched so validate's
     ``unknown_enum_value`` (with ``did_you_mean``) still fires.
     """
-    m = graph.node(class_type)
-    if m is None:
-        return value, None
-    port = next((p for p in m.inputs if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
+    if port is None and widgets_values is not None:
+        from comfy_cli.cql import engine as _engine
+
+        m = graph.node(class_type)
+        if m is None:
+            return value, None
+        port = next(
+            (entry.port for entry in _engine._expand_widget_entries(m, widgets_values) if entry.name == widget),
+            None,
+        )
     if port is None:
         return value, None
     text = _string_widget_text(port, value)
@@ -1049,8 +1078,8 @@ def _set_widget_impl(
         segments, inner_widget = target.segments, target.widget
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
-        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
         cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
+        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value, cur)
         old = None
         if graph.node(inner_type) is not None:
             # Same resolution as a top-level node, so a sub-widget the current
@@ -1058,7 +1087,7 @@ def _set_widget_impl(
             # recording an op that writes nothing.
             i = _widget_index(graph, inner_type, inner_widget, cur, node_id="/".join(str(s) for s in segments))
             old = cur[i] if i < len(cur) else None
-        warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
+        warnings = _validate_widget(graph, inner_type, inner_widget, value, cur)  # raises on shape/catalog mismatch
         if norm_note:
             warnings = [norm_note, *warnings]
         op = _new_op(
@@ -1081,9 +1110,9 @@ def _set_widget_impl(
     class_type = node.get("type", "")
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
     idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"))  # raises on unknown name
-    value, norm_note = _normalize_combo(graph, class_type, widget, value)
+    value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets)
     old = widgets[idx] if idx < len(widgets) else None
-    warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
+    warnings = _validate_widget(graph, class_type, widget, value, widgets)  # raises on shape/catalog mismatch
     morphism = graph.node(class_type)
     port = next((p for p in morphism.inputs if p.name == widget), None) if morphism is not None else None
     if port is not None and port.dynamic_options:
@@ -2296,13 +2325,38 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     `${param_name}` holes (with a `params` header entry defaulting to the current
     value) even if the value equals the node default — so the fields you want to
     vary are actually parameterizable. No auto-parameterization otherwise."""
-    if (workflow.get("definitions") or {}).get("subgraphs"):
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list) and subgraphs:
         raise RecipeError("capture does not support subgraphs yet — edit/flatten top-level nodes first")
     lift = lift or {}
     all_nodes = [n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and "id" in n]
     by_id = {n["id"]: n for n in all_nodes}
     nodes = [n for n in all_nodes if n.get("type") not in UI_ONLY_NODE_TYPES]
     ui_nodes = [n for n in all_nodes if n.get("type") in UI_ONLY_NODE_TYPES]
+    group_entries = {}
+
+    for node in nodes:
+        m = graph.node(node.get("type", ""))
+        if m is None:
+            continue
+        try:
+            entries = _validate_dynamic_group_layout(node, m)
+        except DynamicGroupBindingError as e:
+            raise RecipeError(f"node {node['id']}: {e}") from e
+        if entries is not None:
+            group_names = {p.name for p in m.inputs if p.is_dynamic_group}
+            group_entries[node["id"]] = [e for e in entries if e.owner in group_names]
+        values = node.get("widgets_values")
+        if entries is not None and isinstance(values, dict):
+            missing = [
+                e.name
+                for e in group_entries[node["id"]]
+                if e.port is not None and e.port.raw_spec is not None and e.name not in values
+            ]
+            if missing:
+                # add_node and resize materialize defaults; recipe ops cannot remove a saved field.
+                raise RecipeError(f"node {node['id']}: capture cannot preserve omitted DynamicGroup fields {missing}")
 
     # Validate lift targets up front — no silently-ignored typos.
     for (node_id, widget), _pname in lift.items():
@@ -2315,8 +2369,14 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             )
         # Editable names only: an injected slot (``upload``) owns a position
         # but no value, and apply would refuse it anyway — say so up front.
-        if widget not in graph.editable_widget_names(node.get("type", "")):
+        node_type = node.get("type", "")
+        values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
+        if widget not in graph.editable_widget_names(node_type, values):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
+        saved_values = node.get("widgets_values")
+        if isinstance(saved_values, dict) and widget not in saved_values:
+            if any(e.name == widget for e in group_entries.get(node_id, [])):
+                raise RecipeError(f"--param target {node_id}.{widget!r}: no saved DynamicGroup value to lift")
 
     warnings: list[dict] = []
     for n in ui_nodes:
@@ -2453,10 +2513,19 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         ops.append(add)
         from comfy_cli.cql import engine as _engine
 
-        widgets = _engine._widgets_as_positional(n.get("widgets_values"), graph, class_type)
+        saved_values = n.get("widgets_values")
+        widgets = _engine._widgets_as_positional(saved_values, graph, class_type)
         order = graph.widget_order_for_node(class_type, widgets)
+        group_widgets = {e.name for e in group_entries.get(n["id"], [])}
         defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
+            if (
+                wname in group_widgets
+                and isinstance(saved_values, dict)
+                and wname not in saved_values
+                and (str(n["id"]), wname) not in prim_feeds
+            ):
+                continue
             if i >= len(widgets) and (str(n["id"]), wname) not in prim_feeds:
                 continue
             pname = lift.get((n["id"], wname))
@@ -2492,8 +2561,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
 def _widget_param_type(graph, class_type: str, widget: str) -> str:
     """Recipe param type for a widget, from its schema port type."""
-    m = graph.node(class_type)
-    port = next((p for p in (m.inputs if m else []) if p.name == widget), None)
+    port = _widget_schema_port(graph, class_type, widget)
     t = (port.type if port else "").upper()
     if t == "INT":
         return "int"
@@ -2696,6 +2764,7 @@ def apply_specs(
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
     op whose ``op_id`` was already applied is a no-op."""
+    had_applied_ops = "_applied_ops" in workflow
     applied = workflow.setdefault("_applied_ops", [])
     if op["op_id"] in applied:
         return workflow
@@ -2706,14 +2775,21 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed
     # attempt's own stamp and is silently dropped forever.
+    had_widget_stamps = "_widget_stamps" in workflow
     stamps_before = dict(workflow.get("_widget_stamps") or {})
     pending_was_present = "_pending_dynamic_connects" in workflow
     pending_before = copy.deepcopy(workflow.get("_pending_dynamic_connects"))
+    had_deferred_ops = "_deferred_widget_ops" in workflow
+    deferred_before = copy.deepcopy(workflow.get("_deferred_widget_ops") or {})
     try:
         if kind == "add_node":
             _apply_add_node(workflow, op)
         elif kind == "set_widget":
-            _apply_set_widget(workflow, op, graph)
+            if _apply_set_widget(workflow, op, graph) is False:
+                workflow.setdefault("_deferred_widget_ops", {})[op["op_id"]] = copy.deepcopy(op)
+                if not had_applied_ops and not workflow.get("_applied_ops"):
+                    workflow.pop("_applied_ops", None)
+                return workflow
         elif kind == "set_node_field":
             _apply_set_node_field(workflow, op)
         elif kind == "connect":
@@ -2729,12 +2805,20 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
         else:
             raise ValueError(f"unknown op {kind!r}")
     except BaseException:
-        if stamps_before or "_widget_stamps" in workflow:
+        if had_widget_stamps:
             workflow["_widget_stamps"] = stamps_before
+        else:
+            workflow.pop("_widget_stamps", None)
         if pending_was_present:
             workflow["_pending_dynamic_connects"] = pending_before
         else:
             workflow.pop("_pending_dynamic_connects", None)
+        if had_deferred_ops:
+            workflow["_deferred_widget_ops"] = deferred_before
+        else:
+            workflow.pop("_deferred_widget_ops", None)
+        if not had_applied_ops and not workflow.get("_applied_ops"):
+            workflow.pop("_applied_ops", None)
         raise
     # NOT ``applied.append`` — ``_apply_reset_doc`` REPLACES ``_applied_ops``
     # with a fresh list (that is what makes it a history barrier), so the local
@@ -2742,7 +2826,39 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # written into a discarded list. Re-read, so a re-delivered reset_doc is a
     # no-op rather than a second wipe.
     workflow.setdefault("_applied_ops", []).append(op["op_id"])
+    deferred = workflow.get("_deferred_widget_ops")
+    if isinstance(deferred, dict):
+        deferred.pop(op["op_id"], None)
+        if not deferred:
+            workflow.pop("_deferred_widget_ops", None)
+    if kind == "set_widget":
+        _retry_deferred_widget_ops(workflow, graph)
     return workflow
+
+
+def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
+    """Apply queued hidden-widget writes after a selector reveals their targets."""
+    while isinstance(pending := workflow.get("_deferred_widget_ops"), dict) and pending:
+        progressed = False
+        for op_id in sorted(list(pending), key=str):
+            op = pending.get(op_id)
+            if not isinstance(op, dict):
+                pending.pop(op_id, None)
+                progressed = True
+                continue
+            if op_id in (workflow.get("_applied_ops") or []):
+                pending.pop(op_id, None)
+                progressed = True
+                continue
+            if _apply_set_widget(workflow, op, graph) is False:
+                continue
+            workflow.setdefault("_applied_ops", []).append(op_id)
+            pending.pop(op_id, None)
+            progressed = True
+        if not progressed:
+            break
+    if not workflow.get("_deferred_widget_ops"):
+        workflow.pop("_deferred_widget_ops", None)
 
 
 def _apply_add_node(workflow: dict, op: dict) -> None:
@@ -2759,7 +2875,7 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
         workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])
 
 
-def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
+def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
     # Last-writer-wins: a lower-stamped concurrent write to this target is
     # dropped, so the surviving value is the same in any apply order.
     if not _lww_gate(workflow, op):
@@ -2817,6 +2933,18 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
             return
         from comfy_cli.cql import engine as _engine
 
+        # Validate against the current definition before the mutating resolver
+        # forks shared ancestors. Imported/replayed malformed ops must be
+        # atomic: a rejected widget cannot leave an unreachable fork behind.
+        preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        preflight_warnings = _engine._write_widget(
+            copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False
+        )
+        refusal = next((item for item in preflight_warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
+        if refusal is not None:
+            # Do not mark the write applied: a concurrent selector can reveal
+            # the target later, after which redelivery must still take effect.
+            return False
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         target = _engine._resolve_node_path(workflow, [str(s) for s in path], defs_by_id)
         _engine._write_widget(target, op["inner_widget"], op["value"], graph, extend=False)
@@ -2830,7 +2958,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # The CQL writer is the schema-aware positional owner. In particular, a
     # dynamic-combo selector change must replace the old option's variable-width
     # sub-widget span before preserving trailing values such as seed/watermark.
-    _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
+    warnings = _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
+    refusal = next((item for item in warnings if item.get("code") == "unknown_dynamic_sub_input"), None)
+    if refusal is not None:
+        return False
     _lww_commit(workflow, op)
 
 
@@ -3350,7 +3481,8 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     """Replace the whole document with the empty baseline, bookkeeping included.
 
     Unlike ``_apply_clear`` this drops ``last_node_id``/``last_link_id``,
-    ``_applied_ops`` and ``_widget_stamps`` — the history barrier of §1.6. Ids
+    ``_applied_ops``, ``_widget_stamps`` and deferred writes — the history
+    barrier of §1.6. Ids
     are minted at random in ``[2**40, 2**53)`` (``mint_id``), never allocated
     from the high-water marks, so resetting them to 0 cannot cause id reuse.
     """
@@ -3478,6 +3610,7 @@ def canonical(workflow: dict) -> dict:
     w.pop("_applied_ops", None)
     w.pop("_widget_stamps", None)
     w.pop("_pending_dynamic_connects", None)
+    w.pop("_deferred_widget_ops", None)
     nodes = w.get("nodes")
     # Capture each node's original index -> slot identity BEFORE reordering
     # inputs, so links (which reference the raw index) can be rewritten.
@@ -3517,7 +3650,8 @@ def canonical(workflow: dict) -> dict:
                     ln[4] = ident
             canon.append(ln)
         w["links"] = sorted(canon, key=lambda ln: str(ln[0]))
-    defs = (w.get("definitions") or {}).get("subgraphs")
+    definitions = w.get("definitions")
+    defs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
     if isinstance(defs, list):
         w["definitions"]["subgraphs"] = sorted(defs, key=lambda sg: str(sg.get("id", "")))
     return w
@@ -3583,6 +3717,7 @@ def strip_internal(workflow: dict) -> dict:
     workflow.pop("_applied_ops", None)
     workflow.pop("_widget_stamps", None)
     workflow.pop("_pending_dynamic_connects", None)
+    workflow.pop("_deferred_widget_ops", None)
     return complete_save_format(workflow)
 
 
@@ -3639,7 +3774,7 @@ def _other_option_widget_error(
     "not found" on purpose: the name is real, so the sibling-address
     enrichment must not fire.
     """
-    found = graph.dynamic_sub_widget_options(class_type, widget)
+    found = graph.dynamic_sub_widget_options(class_type, widget, widgets_values)
     if found is None:
         return None
     selector, keys = found
@@ -3648,11 +3783,14 @@ def _other_option_widget_error(
         # under a `model` option without it). "Set model.mode first" would
         # send the caller on a write that fails too, so keep the plain refusal.
         return None
-    current = None
+    absent = object()
+    current: Any = absent
     if widgets_values is not None:
         idx = order.index(selector)
         if idx < len(widgets_values):
             current = widgets_values[idx]
+    if current is absent:
+        current = graph.widget_default_for_node(class_type, selector, widgets_values)
     options = " or ".join(repr(k) for k in keys)
     addr = f"{node_id}.{selector}" if node_id is not None else selector
     return ValueError(
@@ -3730,13 +3868,25 @@ class FatalFindingError(ValueError):
         super().__init__(finding.get("message", finding.get("code", "invalid value")))
 
 
-def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[dict]:
+def _validate_widget(
+    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
-    m = graph.node(class_type)
-    if m is None:
-        return []
-    port = next((p for p in m.inputs if p.name == widget), None)
+    from comfy_cli.cql.engine import SEVERITY_ERROR
+
+    port = _widget_schema_port(graph, class_type, widget)
+    if port is None and widgets_values is not None:
+        from comfy_cli.cql import engine as _engine
+
+        # Dynamic-combo sub-widgets live only in the active flattened layout,
+        # not in ``m.inputs``. Validate the concrete selected port before the
+        # writer materializes it.
+        m = graph.node(class_type)
+        if m is None:
+            return []
+        entries = _engine._expand_widget_entries(m, widgets_values)
+        port = next((entry.port for entry in entries if entry.name == widget), None)
     if port is None:
         return []
     err = port.validate_shape(value)
@@ -3747,8 +3897,6 @@ def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[di
     # already refused these (`Graph._validate_catalog_value` puts them in
     # `errors`); the edit path was the last surface still writing them and
     # returning ok:true.
-    from comfy_cli.cql.engine import SEVERITY_ERROR
-
     fatal = next((f for f in findings if f.get("severity") == SEVERITY_ERROR), None)
     if fatal is not None:
         raise FatalFindingError(fatal)
@@ -3895,6 +4043,10 @@ def _resolve_input_target(
       the API converter reads the link and skips the widget by name.
     """
     ins = node.get("inputs") or []
+    if graph is not None:
+        m = graph.node(node.get("type", ""))
+        if m is not None:
+            _validate_dynamic_group_layout(node, m)
     # Promoted subgraph input (``57.width``): the definition declares it, so it
     # is a link input on the instance even before the instance carries an
     # ``inputs[]`` entry for it — the frontend rebuilds those from the

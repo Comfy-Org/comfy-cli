@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- DynamicGroup workflow conversion, row editing and validation, including row
+  templates in node discovery and the widget catalog. Refuse incompatible saved
+  widget layouts and ambiguous names instead of editing a different widget.
+
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
@@ -91,6 +95,15 @@ history.
 
 ### Changed
 
+- Once every model byte is in, the progress line of `comfy deploy up`,
+  `comfy deploy status` (with or without `--watch`) and a watching
+  `comfy deploy promote` or `rollback` adds "finishing: putting the models in
+  place" while the deploy service sends `placingModels: true`, on every
+  provider, so a line at "7.0 GB of 7.0 GB" no longer reads as
+  stuck until the endpoint step starts. `placingModels` is documented in the
+  `progress` object of the `deploy status`, `deploy up` and `deploy_progress`
+  schemas. An older service's line is unchanged.
+
 - **Breaking:** a watching `comfy deploy up`, `promote` or `rollback` that
   another change overtook, onto a third release, now exits 1 with `deploy_update_replaced`
   and `details.replacing_release_id`, where it exited `deploy_update_failed`
@@ -109,8 +122,8 @@ history.
 - An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
   closest options in `suggestions` (at most 5) with `option_count`, and carries
   `valid_options` only when the list has 12 options or fewer. It used to carry
-  the whole folder listing twice; one validate in production came to ~340K
-  tokens.
+  the whole folder listing twice, which made findings on large model folders
+  very large.
 - `comfy nodes show` and `nodes search --expand-top` cut a combo input's
   `choices` longer than 20 to the first 20, with `choices_total`,
   `choices_truncated` and a `choices_note` naming the `--select` that filters
@@ -122,6 +135,15 @@ history.
 
 ### Fixed
 
+- `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
+  when the sign-in token it started with expires mid-run. The token lasts
+  fifteen minutes, and the run sent the one it started with for every request
+  to the deployment, so whichever run was in flight at each expiry failed
+  (more often with several runs in parallel). Each request now reads the
+  sign-in afresh, refreshing it near expiry, and a refused job read refreshes
+  once and reads again. A workspace API key, or a token injected through
+  `COMFY_CLOUD_AUTH_TOKEN`, is sent unchanged. `comfy download` running on the
+  stored sign-in likewise re-reads it before each output of a many-file download.
 - `comfy build release show .` (and `release logs .`, `release manifest .`)
   reads `.` as the build path, the way `release create .` does, and shows that
   Build's newest release. It used to send `.` to the builder as a release id
@@ -134,6 +156,14 @@ history.
   before a PATH as `build_missing_input`, both before any request. A release id
   the file system cannot look up (longer than a file name, naming a folder you
   cannot read, or `~name` for no such user) still reaches the builder as the id.
+- The knowledge capability matcher preserves repeated words in keys, so
+  `video-edit`'s alias "Video to Video" no longer collapses to the single word
+  "video" and full-matches every query that mentions a video. Repeated query
+  nouns do not satisfy that alias unless its wording is literally present. The
+  capability a phrase names still resolves ("video edit", "video to video",
+  "extend this video"); a phrase that names nothing now resolves to nothing and
+  gets the `no curated knowledge for …` nudge, as `_resolve_tokens` already
+  documented for "4K video generation".
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another
