@@ -11,6 +11,7 @@ Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/builds {name, definition}              -> {id, ...}
   POST /v1/snapshots/resolve {snapshot}           -> {definition, report}
   POST /v1/workflows/resolve {workflow}           -> {definition, report, format}
+  POST /v1/workflows/validate {workflow, definition} -> {format, complete, covered, missing, unverified}
   POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
   GET  /v1/releases/{id}                          -> {status, ...}
 """
@@ -96,6 +97,74 @@ class _CountingReader:
 
 class BuilderAuthError(Exception):
     """No workspace API key and no usable Cloud JWT to authenticate with."""
+
+
+class WorkflowCheckUnavailable(Exception):
+    """The builder did not check a workflow: it has no such route, or its answer
+    was not the coverage shape. Never a verified result.
+
+    Deliberately not an ``HTTPError``, ``KeyError`` or ``ValueError``: the
+    command's ``_builder_call`` maps those to envelopes of their own, and this
+    failure has its own code."""
+
+
+#: What a builder that predates POST /v1/workflows/validate answers for it.
+_ROUTE_ABSENT = frozenset({404, 405, 501})
+
+
+def _workflow_coverage(parsed: object) -> dict:
+    """The coverage answer checked field by field, or ``WorkflowCheckUnavailable``.
+
+    ``complete`` is trusted only beside the lists it summarizes: a ``true`` next
+    to a missing or unverified entry is a contradiction, not an all-clear.
+    Repeated classes are listed once, in the order the builder sent them."""
+
+    def bad(why: str) -> WorkflowCheckUnavailable:
+        return WorkflowCheckUnavailable(f"the builder's workflow check answered an unreadable result: {why}")
+
+    if not isinstance(parsed, dict):
+        raise bad("not a JSON object")
+    complete, covered, fmt = parsed.get("complete"), parsed.get("covered"), parsed.get("format")
+    if not isinstance(complete, bool):
+        raise bad("`complete` is not a boolean")
+    if not isinstance(covered, int) or isinstance(covered, bool) or covered < 0:
+        raise bad("`covered` is not a count")
+    if not isinstance(fmt, str):
+        raise bad("`format` is not a string")
+    raw_missing, raw_unverified = parsed.get("missing"), parsed.get("unverified")
+    if not isinstance(raw_missing, list) or not isinstance(raw_unverified, list):
+        raise bad("`missing` and `unverified` must both be lists")
+    missing: list[dict] = []
+    for entry in raw_missing:
+        classes = entry.get("classes") if isinstance(entry, dict) else None
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("packId"), str)
+            or not isinstance(classes, list)
+            or not classes
+            or not all(isinstance(name, str) for name in classes)
+        ):
+            raise bad("a `missing` entry has no `packId` or no `classes`")
+        pack = {"packId": entry["packId"], "classes": list(dict.fromkeys(classes))}
+        pack.update({k: entry[k] for k in ("name", "repository", "latestVersion") if isinstance(entry.get(k), str)})
+        missing.append(pack)
+    unverified: dict[str, dict] = {}
+    for entry in raw_unverified:
+        if not isinstance(entry, dict) or not all(isinstance(entry.get(k), str) for k in ("classType", "reason")):
+            raise bad("an `unverified` entry has no `classType` or no `reason`")
+        item = {"classType": entry["classType"], "reason": entry["reason"]}
+        if isinstance(entry.get("packId"), str):
+            item["packId"] = entry["packId"]
+        unverified.setdefault(item["classType"], item)
+    if complete == bool(missing or unverified):
+        raise bad("`complete` disagrees with the `missing` and `unverified` lists")
+    return {
+        "format": fmt,
+        "complete": complete,
+        "covered": covered,
+        "missing": missing,
+        "unverified": [*unverified.values()],
+    }
 
 
 class BuilderCredentialRefused(urllib.error.HTTPError):
@@ -297,6 +366,32 @@ class BuilderClient:
         against the registry and every model comes back in the report instead of
         the definition. That registry sweep is what earns the raised timeout."""
         return self._post(("workflows", "resolve"), {"workflow": workflow}, timeout=_WORKFLOW_IMPORT_TIMEOUT)
+
+    def validate_workflow(self, workflow: dict, definition: dict) -> dict:
+        """POST /v1/workflows/validate — which of a workflow's node classes the
+        supplied *definition* installs, lacks (``missing``, by pack) or leaves
+        undecided (``unverified``, with a reason). No saved Build is read, so an
+        unsaved local definition is what gets checked; :meth:`validate_build` is
+        the saved-Build check and is not this.
+
+        Returns the answer as ``_workflow_coverage`` checked it. A route this
+        builder lacks, or an answer in another shape, raises
+        ``WorkflowCheckUnavailable``; every other HTTP error propagates."""
+        try:
+            _, parsed = self._send(
+                self.target.url("workflows", "validate"),
+                method="POST",
+                body={"workflow": workflow, "definition": definition},
+                max_bytes=_MAX_JSON,
+                timeout=_WORKFLOW_IMPORT_TIMEOUT,
+            )
+        except urllib.error.HTTPError as error:
+            if error.code not in _ROUTE_ABSENT:
+                raise
+            raise WorkflowCheckUnavailable(
+                f"this builder cannot check a workflow (HTTP {error.code} for POST /v1/workflows/validate)"
+            ) from error
+        return _workflow_coverage(parsed)
 
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)
