@@ -587,6 +587,41 @@ def test_subgraph_instance_and_definition(sd15_graph):
     assert "batch_prompt_iterator = " in src
 
 
+def test_subgraph_instance_print_uses_positional_fallback_for_a_stale_input_name(sd15_graph):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Mapped input",
+        "inputs": [{"name": "cfg", "type": "STRING", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [
+            _node(
+                2,
+                "CLIPTextEncode",
+                inputs=[
+                    {"name": "clip", "type": "CLIP", "link": None},
+                    {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                ],
+                widgets=["interior"],
+            )
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 2, "target_slot": 1}],
+    }
+    source = _node(
+        1,
+        "EmptyLatentImage",
+        outputs=[{"name": "LATENT", "type": "LATENT", "links": [5]}],
+        widgets=[64, 64, 1],
+    )
+    instance = _node(10, subgraph_id, inputs=[{"name": "stale", "link": 5}], widgets=["host"])
+    wf = _mini([source, instance], [[5, 1, 0, 10, 0, "STRING"]])
+    wf["definitions"] = {"subgraphs": [definition]}
+
+    line = next(line for line in render_py(wf, sd15_graph).source.splitlines() if "# 10 subgraph" in line)
+
+    assert "cfg=empty_latent_image" in line
+
+
 def test_missing_subgraph_definition_prints_opaquely(sd15_graph):
     wf = _mini([_node(10, "d33c1791-dfd2-4102-8540-aa63e4434cd2")], [])
     res = render_py(wf, sd15_graph)

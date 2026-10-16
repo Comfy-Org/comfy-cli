@@ -4667,11 +4667,11 @@ def _declared_subgraph_slots(
     any_declared = False
     all_resolved = True
     defs = _subgraph_defs_by_id(workflow) if workflow is not None else {}
-    promoted_by_name = {p.name: p for p in _promoted.promoted_inputs(sg, defs)}
+    promoted_by_name = _promoted._promoted_name_index(_promoted.promoted_inputs(sg, defs))
     for inp in sg.get("inputs") or []:
         if not isinstance(inp, dict):
             continue
-        inp_name = inp.get("name", "")
+        inp_name = _promoted._input_name(inp.get("name"))
         if not inp_name:
             continue
         pi = promoted_by_name.get(inp_name)

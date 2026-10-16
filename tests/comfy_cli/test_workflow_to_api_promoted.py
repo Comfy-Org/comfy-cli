@@ -1279,6 +1279,74 @@ def test_promoted_overlay_skips_non_uuid_definition_instances():
     resolve.assert_not_called()
 
 
+def test_promoted_overlay_caches_live_links_for_sibling_instances(monkeypatch):
+    from comfy_cli.cql import promoted
+
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {"id": definition_id, "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    workflow = {
+        "nodes": [
+            {"id": index, "type": definition_id, "inputs": [{"name": "value", "link": None}]} for index in range(20)
+        ],
+        "links": [[index, "source", 0, index, 0, "STRING"] for index in range(100)],
+    }
+    item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
+    monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
+    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [])
+
+    with mock.patch.object(promoted, "_live_link_keys", wraps=promoted._live_link_keys) as live_keys:
+        workflow_to_api._overlay_promoted_host_values({}, workflow, {definition_id: definition})
+
+    assert live_keys.call_count == 1
+
+
+def test_expansion_uses_one_mapped_winner_for_colliding_live_inputs():
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {"id": definition_id, "inputs": [{"name": "cfg"}], "nodes": [], "links": []}
+    instance = {
+        "id": 10,
+        "type": definition_id,
+        "inputs": [{"name": "cfg", "link": 5}, {"name": "cfg", "link": 6}],
+    }
+    links = [[5, 1, 0, 10, 0, "FLOAT"], [6, 2, 0, 10, 1, "FLOAT"]]
+
+    _nodes, _links, ctx = workflow_to_api._expand_subgraphs([instance], links, {definition_id: definition})
+
+    assert ctx.held_input_idx["10"] == {5: (0,)}
+
+
+def test_output_boundary_row_held_by_an_input_becomes_an_interior_edge():
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {
+        "id": definition_id,
+        "inputs": [],
+        "outputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [
+            {"id": 1, "type": "Source", "inputs": [], "outputs": [{"name": "out", "links": [1]}]},
+            {"id": 2, "type": "Target", "inputs": [{"name": "value", "link": 1}], "outputs": []},
+        ],
+        "links": [{"id": 1, "origin_id": 1, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+
+    nodes, links, _ctx = workflow_to_api._expand_subgraphs(
+        [{"id": 10, "type": definition_id, "inputs": []}], [], {definition_id: definition}
+    )
+
+    target = next(node for node in nodes if node["id"] == "10:2")
+    holder_id = target["inputs"][0]["link"]
+    assert next(link for link in links if link[0] == holder_id)[1:5] == ["10:1", 0, "10:2", 0]
+
+
+def test_passthrough_output_resolution_depth_fails_closed(monkeypatch):
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.output_sources["10"] = {0: (-10, 0)}
+    ctx.input_sources["10"] = {0: ("10", 0)}
+    monkeypatch.setattr(workflow_to_api, "_MAX_RESOLUTION_DEPTH", 2)
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="output resolution exceeded"):
+        workflow_to_api._resolve_subgraph_output("10", 0, ctx)
+
+
 def test_input_source_budget_charges_plain_fanout_targets():
     ctx = workflow_to_api._SubgraphCtx()
     ctx.input_targets["10"] = {0: [(7, 0), (8, 0)]}

@@ -520,6 +520,25 @@ def test_live_external_link_uses_expansion_slot_mapping_and_live_preference(inpu
     assert promoted.live_external_link(scope, instance, "cfg", definition) == 5
 
 
+def test_declared_slots_normalize_numeric_names_and_keep_first_duplicate(monkeypatch):
+    from comfy_cli.cql import engine
+
+    definition = {"inputs": [{"name": 7}, {"name": "7"}], "links": [], "nodes": []}
+    instance = {"id": 10, "inputs": [], "widgets_values": ["first", "second"]}
+    promoted_inputs = [
+        promoted.PromotedInput("7", "STRING", index=0, value_index=0, source_node="a", source_widget="value"),
+        promoted.PromotedInput("7", "STRING", index=1, value_index=1, source_node="b", source_widget="value"),
+    ]
+    monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: promoted_inputs)
+
+    slots, _curated = engine._declared_subgraph_slots(
+        instance, definition, "10", None, workflow={"nodes": [instance], "links": []}
+    )
+
+    assert slots[0]["address"] == "10.7"
+    assert slots[0]["current_value"] == "first"
+
+
 def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
     sg = {
         "id": "sg",

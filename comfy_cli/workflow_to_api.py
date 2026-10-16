@@ -226,6 +226,7 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
 
     visit_budget = [_MAX_SUBGRAPH_EXPANSION_BUDGET]
     definition_nodes: dict[int, tuple[dict, list[dict]]] = {}
+    scope_links: dict[int, tuple[dict, set[tuple[type, int | str]]]] = {}
 
     def nodes_for(definition: dict) -> list[dict]:
         cached = definition_nodes.get(id(definition))
@@ -235,6 +236,14 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
         definition_nodes[id(definition)] = (definition, nodes)
         return nodes
+
+    def live_link_keys(scope: dict) -> set[tuple[type, int | str]]:
+        cached = scope_links.get(id(scope))
+        if cached is not None and cached[0] is scope:
+            return cached[1]
+        keys = _promoted._live_link_keys(scope)
+        scope_links[id(scope)] = (scope, keys)
+        return keys
 
     def visit(instance: dict, sg: dict, scope: dict, prefix: str, depth: int) -> None:
         # ``scope`` holds the links that can feed THIS instance's inputs: the
@@ -256,16 +265,20 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             inner_def = subgraph_defs.get(str(inner_type)) if is_subgraph_uuid(inner_type) else None
             if inner_def is not None:
                 visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
+        promoted_widgets = [pi for pi in _promoted.promoted_inputs(sg, subgraph_defs) if pi.is_widget]
+        if not promoted_widgets:
+            return
         # Expansion, slots and write resolution share this exact name-first,
         # positional-fallback mapping and live-entry collision preference.
-        mapped_inputs = _promoted._mapped_instance_inputs(scope, instance, sg)
-        live_links = _promoted._live_link_keys(scope)
+        # Cache the scope scan: many sibling instances share the same links.
+        live_links = live_link_keys(scope)
+        mapped_inputs = _promoted._mapped_instance_inputs(scope, instance, sg, live_links)
 
         def is_live(link_id: Any) -> bool:
             return _is_link_id(link_id) and (type(link_id), link_id) in live_links
 
         external_links = {input_index: entry.get("link") for input_index, entry in mapped_inputs.items()}
-        for pi in _promoted.promoted_inputs(sg, subgraph_defs):
+        for pi in promoted_widgets:
             external_link = external_links.get(pi.index)
             if not pi.is_widget or is_live(external_link):
                 continue
@@ -381,6 +394,8 @@ def _expand_subgraphs(
     if not subgraph_defs:
         return nodes, links, ctx
 
+    from comfy_cli.cql import promoted as _promoted
+
     definition_cache: dict[int, tuple[Any, ...]] = {}
     expansion_metrics: dict[int, tuple[dict, int, int, int]] = {}
     # Interior rows minted during expansion must not collide with either a
@@ -415,6 +430,8 @@ def _expand_subgraphs(
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
+        iteration_scope = {"links": links}
+        iteration_live_keys = _promoted._live_link_keys(iteration_scope)
         for node in nodes:
             node_type = node.get("type")
             if is_subgraph_uuid(node_type) and node_type in subgraph_defs:
@@ -456,12 +473,13 @@ def _expand_subgraphs(
                 )
                 ctx.outer_to_input_idx[node_id] = outer_map
                 held_slots: dict[Any, set[int]] = {}
-                raw_outer_inputs = node.get("inputs")
-                outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
-                for outer_slot, entry in enumerate(outer_inputs):
-                    if not isinstance(entry, dict) or not _is_link_id(entry.get("link")):
+                mapped_inputs = _promoted._mapped_instance_inputs(
+                    iteration_scope, node, subgraph_defs[node_type], iteration_live_keys
+                )
+                for input_index, entry in mapped_inputs.items():
+                    if not _is_link_id(entry.get("link")):
                         continue
-                    held_slots.setdefault(entry["link"], set()).add(outer_map.get(outer_slot, outer_slot))
+                    held_slots.setdefault(entry["link"], set()).add(input_index)
                 ctx.held_input_idx[node_id] = {link_id: tuple(sorted(slots)) for link_id, slots in held_slots.items()}
                 for link_id, slots in ctx.held_input_idx[node_id].items():
                     ctx.input_holders.setdefault(link_id, []).extend((node_id, slot) for slot in slots)
@@ -551,6 +569,67 @@ def _last_wins_interior_links(internal_links: list[dict], link_map: dict[Any, di
         and str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
         and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
     ]
+
+
+def _output_boundary_holder_edges(
+    sg_def: dict,
+    internal_links: list[dict],
+    link_map: dict[Any, dict],
+    holders: dict[Any, list[tuple[dict, int, dict]]],
+    outer_id: Any,
+    link_id_counter: list[int],
+) -> tuple[dict[tuple[int, int], int], list[list[Any]]]:
+    """Mint interior edges for real inputs holding an output-boundary row."""
+    from comfy_cli.cql.promoted import held_link_targets
+
+    holder_ids: dict[tuple[int, int], int] = {}
+    edges: list[list[Any]] = []
+    for link in internal_links:
+        old_id = link.get("id")
+        if (
+            not _is_link_id(old_id)
+            or link_map.get(old_id) is not link
+            or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID)
+            or str(link.get("origin_id")) in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+        ):
+            continue
+        for target, target_slot, _entry in held_link_targets(sg_def, old_id, link, holders):
+            new_id = link_id_counter[0]
+            link_id_counter[0] += 1
+            holder_ids[(id(target), target_slot)] = new_id
+            edges.append(
+                [
+                    new_id,
+                    f"{outer_id}:{link.get('origin_id')}",
+                    link.get("origin_slot"),
+                    f"{outer_id}:{target.get('id')}",
+                    target_slot,
+                    link.get("type"),
+                ]
+            )
+    return holder_ids, edges
+
+
+def _expanded_node_inputs(
+    inner: dict,
+    internal_link_map: dict[Any, dict],
+    link_id_remap: dict[Any, int],
+    boundary_holder_ids: dict[tuple[int, int], int],
+) -> list[Any]:
+    """Rewrite one expanded node's inputs, including boundary-holder edges."""
+    raw_inputs = inner.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    expanded: list[Any] = []
+    for slot, entry in enumerate(inputs):
+        if not isinstance(entry, dict):
+            expanded.append(entry)
+            continue
+        rewritten = _rewrite_internal_input(entry, internal_link_map, link_id_remap)
+        holder_id = boundary_holder_ids.get((id(inner), slot))
+        if holder_id is not None:
+            rewritten["link"] = holder_id
+        expanded.append(rewritten)
+    return expanded
 
 
 def _outer_slot_to_input_idx(
@@ -689,6 +768,15 @@ def _expand_one_subgraph(
         link_id_remap[old_id] = _link_id_counter[0]
         _link_id_counter[0] += 1
 
+    # A row routed to the output proxy can also be held by a real interior
+    # input in malformed-but-recoverable saves. The renderer treats every
+    # real holder as fed by the row's source; preserve those dependencies in
+    # the API graph with one fresh edge per holder while still publishing the
+    # same row as the definition output.
+    boundary_holder_ids, boundary_holder_edges = _output_boundary_holder_edges(
+        sg_def, internal_links, internal_link_map, holders, outer_id, _link_id_counter
+    )
+
     if len(cached) >= 11:
         input_targets, output_sources, _definition_input_names = cached[8:11]
     else:
@@ -781,12 +869,7 @@ def _expand_one_subgraph(
     for inner in internal_nodes:
         expanded = inner.copy()
         expanded["id"] = f"{outer_id}:{inner.get('id')}"
-        raw_inner_inputs = inner.get("inputs")
-        inner_inputs = raw_inner_inputs if isinstance(raw_inner_inputs, list) else []
-        expanded["inputs"] = [
-            _rewrite_internal_input(inp, internal_link_map, link_id_remap) if isinstance(inp, dict) else inp
-            for inp in inner_inputs
-        ]
+        expanded["inputs"] = _expanded_node_inputs(inner, internal_link_map, link_id_remap, boundary_holder_ids)
         expanded_nodes.append(expanded)
 
     expanded_links: list = []
@@ -811,6 +894,7 @@ def _expand_one_subgraph(
                 link.get("type"),
             ]
         )
+    expanded_links.extend(boundary_holder_edges)
 
     return expanded_nodes, expanded_links, input_targets, output_sources
 
@@ -1067,7 +1151,7 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
 
 def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0) -> tuple[Any, Any] | None:
     if depth > _MAX_RESOLUTION_DEPTH:
-        return node_id_str, slot
+        raise WorkflowConversionError("subgraph output resolution exceeded its safe limit")
     mapping = ctx.output_sources.get(node_id_str)
     if not mapping:
         return node_id_str, slot

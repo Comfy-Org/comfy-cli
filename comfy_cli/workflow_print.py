@@ -861,6 +861,8 @@ class _RenderCtx:
     e.g. ``"10"`` or ``"10/3"`` for a definition nested inside another)."""
 
     graph: Any
+    scope: dict
+    live_link_keys: set[tuple[type, int | str]]
     link_map: dict[Any, tuple]
     nodes_by_id: dict[str, dict]
     printable_ids: set[str]
@@ -1288,11 +1290,8 @@ def _render_subgraph_instance_line(
     extra: dict[str, str] = {}
     warnings = state.warnings
     inputs = [inp for inp in node.get("inputs") or [] if isinstance(inp, dict)]
-    by_name: dict[str, dict] = {}
-    for inp in inputs:
-        iname = inp.get("name")
-        if isinstance(iname, str) and iname not in by_name:
-            by_name[iname] = inp
+    mapped_inputs = _promoted._mapped_instance_inputs(ctx.scope, node, sg_def, ctx.live_link_keys)
+    mapped_entry_ids = {id(entry) for entry in mapped_inputs.values()}
     rendered: set[str] = set()
 
     def socket_text(iname: str, link_id: Any) -> str:
@@ -1309,7 +1308,7 @@ def _render_subgraph_instance_line(
 
     for pi in _promoted.promoted_inputs(sg_def, state.promoted_defs):
         rendered.add(pi.name)
-        entry = by_name.get(pi.name)
+        entry = mapped_inputs.get(pi.index)
         link_id = entry.get("link") if entry is not None else None
         text = None
         if pi.is_widget:
@@ -1332,6 +1331,8 @@ def _render_subgraph_instance_line(
         _place_arg(pi.name, text, args, extra)
 
     for inp in inputs:
+        if id(inp) in mapped_entry_ids:
+            continue
         iname = inp.get("name") or ""
         if iname in rendered:
             continue
@@ -1846,6 +1847,8 @@ def _render_definition_block(
 
     ctx = _RenderCtx(
         graph=graph,
+        scope=sg_def,
+        live_link_keys=_promoted._live_link_keys(sg_def),
         link_map=all_links,
         nodes_by_id=nodes_by_id,
         printable_ids=printable_ids,
@@ -2054,6 +2057,8 @@ def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
 
     ctx = _RenderCtx(
         graph=graph,
+        scope=promoted_workflow,
+        live_link_keys=_promoted._live_link_keys(promoted_workflow),
         link_map=link_map,
         nodes_by_id=nodes_by_id,
         printable_ids=printable_ids,

@@ -695,7 +695,12 @@ def _live_link_keys(scope: dict) -> set[tuple[type, int | str]]:
     return keys
 
 
-def _mapped_instance_inputs(scope: dict, instance: dict, definition: dict) -> dict[int, dict]:
+def _mapped_instance_inputs(
+    scope: dict,
+    instance: dict,
+    definition: dict,
+    live_keys: set[tuple[type, int | str]] | None = None,
+) -> dict[int, dict]:
     """Map serialized instance slots to definition inputs as expansion does.
 
     A matching name wins over position; unknown or stale names fall back to
@@ -710,7 +715,8 @@ def _mapped_instance_inputs(scope: dict, instance: dict, definition: dict) -> di
         if isinstance(entry, dict):
             definition_names.setdefault(_input_name(entry.get("name")), index)
 
-    live_keys = _live_link_keys(scope)
+    if live_keys is None:
+        live_keys = _live_link_keys(scope)
 
     def is_live(entry: dict) -> bool:
         candidate = entry.get("link")
