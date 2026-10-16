@@ -188,29 +188,238 @@ def _iter_python_files(root: Path):
         yield p
 
 
-def _collect_emitted_commands() -> dict[str, list[Path]]:
-    """AST-scan comfy_cli for ``.emit(..., command="X")`` literal call sites."""
-    found: dict[str, list[Path]] = {}
-    for path in _iter_python_files(SRC_ROOT):
+def _parse_sources(root: Path) -> list[tuple[Path, ast.Module]]:
+    trees: list[tuple[Path, ast.Module]] = []
+    for path in _iter_python_files(root):
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            trees.append((path, ast.parse(path.read_text(encoding="utf-8"))))
         except (OSError, SyntaxError):
             continue
+    return trees
+
+
+def _string_literal(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+class _Forwarder:
+    """A helper that emits on its caller's behalf: it takes a ``command``
+    parameter and passes that same name through to ``.emit(command=...)``.
+
+    The literal therefore lives at the *call site*, which is why a scan that
+    only looks at ``.emit`` arguments sees an ``ast.Name`` and records nothing.
+    """
+
+    __slots__ = ("pos_index", "default", "ambiguous")
+
+    def __init__(self, pos_index: int | None, default: str | None) -> None:
+        self.pos_index = pos_index
+        self.default = default
+        self.ambiguous = False
+
+
+def _collect_command_forwarders(trees) -> dict[str, _Forwarder]:
+    """Pass 1: find functions that forward a ``command`` parameter into ``.emit``.
+
+    Keyed by function name only — deliberately coarse. Two same-named helpers
+    with different signatures are marked ambiguous and dropped rather than
+    guessed at.
+    """
+    forwarders: dict[str, _Forwarder] = {}
+    for _path, tree in trees:
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            args = fn.args
+            positional = [a.arg for a in (*args.posonlyargs, *args.args)]
+            keyword_only = [a.arg for a in args.kwonlyargs]
+            if "command" not in positional and "command" not in keyword_only:
+                continue
+            forwards = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "emit"
+                and any(
+                    kw.arg == "command" and isinstance(kw.value, ast.Name) and kw.value.id == "command"
+                    for kw in node.keywords
+                )
+                for node in ast.walk(fn)
+            )
+            if not forwards:
+                continue
+            pos_index = positional.index("command") if "command" in positional else None
+            default: str | None = None
+            if pos_index is not None:
+                # Defaults right-align onto the positional parameters.
+                offset = pos_index - (len(positional) - len(args.defaults))
+                if offset >= 0:
+                    default = _string_literal(args.defaults[offset])
+            else:
+                kw_default = args.kw_defaults[keyword_only.index("command")]
+                default = _string_literal(kw_default)
+            existing = forwarders.get(fn.name)
+            if existing is None:
+                forwarders[fn.name] = _Forwarder(pos_index, default)
+            elif existing.pos_index != pos_index or existing.default != default:
+                existing.ambiguous = True
+    return {name: f for name, f in forwarders.items() if not f.ambiguous}
+
+
+def _scan_command_literals(trees) -> dict[str, list[Path]]:
+    """Record every ``command="X"`` string literal that reaches an envelope.
+
+    Two sources, recorded identically: a literal passed straight to ``.emit``,
+    and a literal passed to a forwarding helper found by pass 1. Purely static —
+    nothing here imports or executes ``comfy_cli``.
+    """
+    forwarders = _collect_command_forwarders(trees)
+    found: dict[str, list[Path]] = {}
+    for path, tree in trees:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if not (isinstance(func, ast.Attribute) and func.attr == "emit"):
+            if isinstance(func, ast.Attribute) and func.attr == "emit":
+                for kw in node.keywords:
+                    if kw.arg == "command" and (literal := _string_literal(kw.value)) is not None:
+                        found.setdefault(literal, []).append(path)
                 continue
-            for kw in node.keywords:
-                if kw.arg == "command" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    found.setdefault(kw.value.value, []).append(path)
+            # Forwarders are followed only through a bare-name call, so an
+            # unrelated `obj.emit_selected(...)` is never assumed to be the
+            # same function.
+            if not isinstance(func, ast.Name):
+                continue
+            forwarder = forwarders.get(func.id)
+            if forwarder is None:
+                continue
+            explicit = [kw for kw in node.keywords if kw.arg == "command"]
+            if explicit:
+                if (literal := _string_literal(explicit[0].value)) is not None:
+                    found.setdefault(literal, []).append(path)
+                continue
+            starred = any(isinstance(a, ast.Starred) for a in node.args)
+            if forwarder.pos_index is not None and not starred and len(node.args) > forwarder.pos_index:
+                if (literal := _string_literal(node.args[forwarder.pos_index])) is not None:
+                    found.setdefault(literal, []).append(path)
+                continue
+            # No `command` argument at all: the signature default is what gets
+            # emitted — unless the call splats kwargs, where we cannot tell.
+            splatted = any(kw.arg is None for kw in node.keywords)
+            if forwarder.default is not None and not starred and not splatted:
+                found.setdefault(forwarder.default, []).append(path)
     return found
+
+
+def _collect_emitted_commands() -> dict[str, list[Path]]:
+    """AST-scan comfy_cli for every ``command="X"`` literal that reaches ``.emit``,
+    directly or through a forwarding helper."""
+    return _scan_command_literals(_parse_sources(SRC_ROOT))
 
 
 @pytest.fixture(scope="module")
 def emitted_commands() -> dict[str, list[Path]]:
     return _collect_emitted_commands()
+
+
+def _scan_snippet(source: str) -> dict[str, list[Path]]:
+    return _scan_command_literals([(Path("snippet.py"), ast.parse(source))])
+
+
+# --- positive controls for the collector itself -----------------------------
+# The ratchet above was blind for as long as it existed: every structured
+# workflow edit passes its command name to a local `_finish` helper, so the
+# `.emit(command=...)` argument is an `ast.Name` and the literal sits one frame
+# up at the call site. Nine call sites went unscanned and two of them were
+# unregistered. These tests watch the collector find a forwarded literal, so
+# the guard is not trusted on the strength of never having fired.
+
+
+def test_collector_finds_a_literal_forwarded_through_a_helper():
+    found = _scan_snippet(
+        """
+def _finish(renderer, payload, command: str) -> None:
+    renderer.emit(payload, command=command)
+
+def cmd():
+    _finish(renderer, {}, "widget poke")
+"""
+    )
+    assert "widget poke" in found
+
+
+def test_collector_finds_a_forwarded_literal_passed_by_keyword():
+    found = _scan_snippet(
+        """
+def _emit_terminal(renderer, payload, *, command: str) -> None:
+    renderer.emit(payload, command=command)
+
+def cmd():
+    _emit_terminal(renderer, {}, command="widget poke")
+"""
+    )
+    assert "widget poke" in found
+
+
+def test_collector_uses_a_forwarders_literal_default_when_the_call_omits_it():
+    found = _scan_snippet(
+        """
+def shared(workflow, *, command: str = "widget poke") -> None:
+    renderer.emit(workflow, command=command)
+
+def cmd():
+    shared(workflow)
+"""
+    )
+    assert "widget poke" in found
+
+
+def test_collector_ignores_a_non_literal_forwarded_argument():
+    """Conservative by design: an unresolvable argument is skipped, not guessed."""
+    found = _scan_snippet(
+        """
+def _finish(renderer, payload, command: str) -> None:
+    renderer.emit(payload, command=command)
+
+def cmd(name):
+    _finish(renderer, {}, name)
+"""
+    )
+    assert found == {}
+
+
+def test_collector_ignores_a_helper_that_does_not_forward_into_emit():
+    found = _scan_snippet(
+        """
+def log_it(renderer, command: str) -> None:
+    renderer.debug(command)
+
+def cmd():
+    log_it(renderer, "widget poke")
+"""
+    )
+    assert found == {}
+
+
+def test_workflow_edit_commands_are_reachable_only_through_the_forwarder(emitted_commands):
+    """Ratchet keeping the forwarder pass wired to the real source tree.
+
+    Every one of these is emitted exclusively via ``workflow_edit._finish`` /
+    ``_emit_op``, so a regression that stops following forwarders drops them
+    all and this fails before the registration check can go quiet again.
+    """
+    forwarded_only = [
+        "workflow add-node",
+        "workflow clear",
+        "workflow connect",
+        "workflow insert-workflow",
+        "workflow reset-doc",
+        "workflow set-node-field",
+        "workflow set-widget",
+    ]
+    missing = sorted(cmd for cmd in forwarded_only if cmd not in emitted_commands)
+    assert not missing, f"collector stopped following command literals through forwarding helpers: {missing}"
 
 
 def test_every_emitted_command_registers_a_schema(emitted_commands):

@@ -111,6 +111,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow delete-node": "workflow",
     "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
+    # Whole-document edits: same `_finish` op envelope as the primitives above.
+    "comfy workflow clear": "workflow",
+    "comfy workflow reset-doc": "workflow",
     "comfy workflow apply": "workflow",
     "comfy workflow capture": "workflow",
     "comfy workflow foreach": "workflow",
