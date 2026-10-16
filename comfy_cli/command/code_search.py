@@ -475,7 +475,10 @@ def code_search(
         typer.Argument(
             help=(
                 "Search query (supports Sourcegraph syntax). Defaults to file matches; "
-                "pass your own `type:` filter (e.g. `type:commit`) to override."
+                "pass your own `type:` filter (e.g. `type:commit`) to override. Join multiple "
+                "concepts with explicit `AND`, or use a single literal token: plain whitespace "
+                "is one literal pattern, not an implicit intersection (use "
+                "`seedWidget AND serializeValue`, not `seedWidget serializeValue`)."
             ),
         ),
     ],
