@@ -20,6 +20,7 @@ from comfy_cli.command.code_search import (
     QueryRejectedError,
     ResponseTooLargeError,
     SearchUnavailableError,
+    _attach_context,
     _build_query,
     _decode_search,
     _fetch_results,
@@ -27,12 +28,52 @@ from comfy_cli.command.code_search import (
     _get_stats,
     _print_results,
     _safe_markup_text,
+    _source_slice,
     _strip_control_chars,
     _validate_query,
     app,
 )
 
 runner = CliRunner()
+
+
+def test_source_slice_preserves_pinned_range_and_class_body():
+    source = (
+        "header\nclass Example:\n    INPUT = 'NORMALIZED_AMPLITUDE'\n    def run(self):\n        return self.INPUT\n"
+    )
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 2, 5)
+    assert snippet["repository"] == "owner/repo"
+    assert snippet["commit"] == "a" * 40
+    assert snippet["start_line"] == 2
+    assert snippet["end_line"] == 5
+    assert "NORMALIZED_AMPLITUDE" in snippet["text"]
+    assert snippet["url"].endswith("#L2-L5")
+
+
+def test_attach_context_makes_declaration_only_match_implementation_usable():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": 2, "preview": "class Example:", "url": "match"}],
+        }
+    ]
+    source = "header\nclass Example:\n    TYPE = 'NORMALIZED_AMPLITUDE'\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        _attach_context(results)
+    match = results[0]["matches"][0]
+    assert match["preview"] == "class Example:"
+    assert match["snippet"]["text"] != match["preview"]
+    assert "NORMALIZED_AMPLITUDE" in match["snippet"]["text"]
+
+
+def test_source_slice_rejects_unpinned_or_oversized_expansion():
+    with pytest.raises(ValueError, match="40-character"):
+        _source_slice("owner/repo", "main", "nodes.py", 1, 2)
+    with pytest.raises(ValueError, match="at most 200"):
+        _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 201)
 
 
 # ---------------------------------------------------------------------------
