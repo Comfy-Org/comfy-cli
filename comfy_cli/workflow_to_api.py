@@ -226,7 +226,6 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
 
     visit_budget = [_MAX_SUBGRAPH_EXPANSION_BUDGET]
     definition_nodes: dict[int, tuple[dict, list[dict]]] = {}
-    scope_links: dict[int, tuple[dict, set[tuple[type, int | str]]]] = {}
 
     def nodes_for(definition: dict) -> list[dict]:
         cached = definition_nodes.get(id(definition))
@@ -236,25 +235,6 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
         definition_nodes[id(definition)] = (definition, nodes)
         return nodes
-
-    def live_link_keys(scope: dict) -> set[tuple[type, int | str]]:
-        cached = scope_links.get(id(scope))
-        if cached is not None and cached[0] is scope:
-            return cached[1]
-        keys: set[tuple[type, int | str]] = set()
-        raw_links = scope.get("links")
-        memberships = _promoted._input_link_memberships(scope, subgraph_defs)
-        for link in raw_links if isinstance(raw_links, list) else []:
-            if not _promoted._is_live_link_row(link, memberships):
-                continue
-            if isinstance(link, dict):
-                candidate = link.get("id")
-            else:
-                candidate = link[0]
-            if _is_link_id(candidate):
-                keys.add((type(candidate), candidate))
-        scope_links[id(scope)] = (scope, keys)
-        return keys
 
     def visit(instance: dict, sg: dict, scope: dict, prefix: str, depth: int) -> None:
         # ``scope`` holds the links that can feed THIS instance's inputs: the
@@ -276,27 +256,15 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             inner_def = subgraph_defs.get(str(inner_type)) if is_subgraph_uuid(inner_type) else None
             if inner_def is not None:
                 visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
-        raw_instance_inputs = instance.get("inputs")
-        instance_inputs = raw_instance_inputs if isinstance(raw_instance_inputs, list) else []
-        # Expansion maps serialized outer slots onto definition inputs using
-        # first-name-wins plus positional fallback. Use that exact mapping for
-        # liveness too; a stale name must not make overlay disagree with the
-        # link that expansion already attached.
-        outer_map = _outer_slot_to_input_idx(instance, sg)
-        live_links = live_link_keys(scope)
+        # Expansion, slots and write resolution share this exact name-first,
+        # positional-fallback mapping and live-entry collision preference.
+        mapped_inputs = _promoted._mapped_instance_inputs(scope, instance, sg)
+        live_links = _promoted._live_link_keys(scope)
 
         def is_live(link_id: Any) -> bool:
             return _is_link_id(link_id) and (type(link_id), link_id) in live_links
 
-        external_links: dict[int, Any] = {}
-        for slot, entry in enumerate(instance_inputs):
-            if isinstance(entry, dict):
-                input_index = outer_map.get(slot, slot)
-                candidate = entry.get("link")
-                if input_index not in external_links or (
-                    not is_live(external_links[input_index]) and is_live(candidate)
-                ):
-                    external_links[input_index] = candidate
+        external_links = {input_index: entry.get("link") for input_index, entry in mapped_inputs.items()}
         for pi in _promoted.promoted_inputs(sg, subgraph_defs):
             external_link = external_links.get(pi.index)
             if not pi.is_widget or is_live(external_link):

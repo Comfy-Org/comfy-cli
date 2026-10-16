@@ -505,6 +505,21 @@ def test_live_external_link_accepts_a_uniquely_listed_input_proxy_holder():
     assert promoted.live_external_link(scope, instance, "value") == 7
 
 
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        [{"name": "cfg", "link": None}, {"name": "cfg", "link": 5}],
+        [{"name": "stale", "link": 5}],
+    ],
+)
+def test_live_external_link_uses_expansion_slot_mapping_and_live_preference(inputs):
+    scope = {"links": [[5, "source", 0, "instance", 0, "FLOAT"]]}
+    definition = {"inputs": [{"name": "cfg", "type": "FLOAT"}]}
+    instance = {"inputs": inputs}
+
+    assert promoted.live_external_link(scope, instance, "cfg", definition) == 5
+
+
 def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
     sg = {
         "id": "sg",

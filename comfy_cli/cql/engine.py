@@ -4685,7 +4685,7 @@ def _declared_subgraph_slots(
             # Only a LIVE link counts (the workflow's for a top-level instance,
             # the containing definition's for a nested one); a dangling id is
             # what the frontend drops on load, so the host value runs.
-            linked_from = _promoted.live_external_link(scope if scope is not None else workflow, instance, inp_name)
+            linked_from = _promoted.live_external_link(scope if scope is not None else workflow, instance, inp_name, sg)
         elif pi is not None and pi.is_widget:
             current = _UNRESOLVED
         else:

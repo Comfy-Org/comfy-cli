@@ -674,30 +674,84 @@ def link_exists(scope: dict, link_id: Any) -> bool:
     definition (interior links are ``{"id": …}`` dicts)."""
     if not _is_link_id(link_id):
         return False
+    return (type(link_id), link_id) in _live_link_keys(scope)
+
+
+def _live_link_keys(scope: dict) -> set[tuple[type, int | str]]:
+    """Typed IDs of link rows the frontend can route in ``scope``."""
     raw_links = scope.get("links")
     links = raw_links if isinstance(raw_links, list) else []
     memberships = _input_link_memberships(scope, {})
+    keys: set[tuple[type, int | str]] = set()
     for link in links:
         if not _is_live_link_row(link, memberships):
             continue
         if isinstance(link, dict):
             candidate = link.get("id")
-            if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
-                return True
         else:
             candidate = link[0]
-            if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
-                return True
-    return False
+        if _is_link_id(candidate):
+            keys.add((type(candidate), candidate))
+    return keys
 
 
-def live_external_link(scope: dict, instance: dict, name: str) -> Any:
+def _mapped_instance_inputs(scope: dict, instance: dict, definition: dict) -> dict[int, dict]:
+    """Map serialized instance slots to definition inputs as expansion does.
+
+    A matching name wins over position; unknown or stale names fall back to
+    their serialized position. When several outer slots map to one definition
+    input, prefer the first live entry over an earlier unlinked or dangling
+    one, matching the link expansion and promoted-value overlay.
+    """
+    definition_names: dict[str, int] = {}
+    raw_definition_inputs = definition.get("inputs")
+    definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
+    for index, entry in enumerate(definition_inputs):
+        if isinstance(entry, dict):
+            definition_names.setdefault(_input_name(entry.get("name")), index)
+
+    live_keys = _live_link_keys(scope)
+
+    def is_live(entry: dict) -> bool:
+        candidate = entry.get("link")
+        return _is_link_id(candidate) and (type(candidate), candidate) in live_keys
+
+    mapped: dict[int, dict] = {}
+    raw_instance_inputs = instance.get("inputs")
+    instance_inputs = raw_instance_inputs if isinstance(raw_instance_inputs, list) else []
+    for outer_index, entry in enumerate(instance_inputs):
+        if not isinstance(entry, dict):
+            continue
+        input_index = definition_names.get(_input_name(entry.get("name")), outer_index)
+        current = mapped.get(input_index)
+        if current is None or (not is_live(current) and is_live(entry)):
+            mapped[input_index] = entry
+    return mapped
+
+
+def live_external_link(scope: dict, instance: dict, name: str, definition: dict | None = None) -> Any:
     """The link id feeding the instance's input ``name`` from outside, if that
     link exists in ``scope`` (the workflow for a top-level instance, the
     containing definition for a nested one); else None. A dangling id is
     treated as unlinked everywhere — ``set-widget``, ``slots`` and the
     converter must agree on what runs."""
-    link_id = external_link(instance, name)
+    if definition is None:
+        link_id = external_link(instance, name)
+    else:
+        raw_definition_inputs = definition.get("inputs")
+        definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
+        input_index = next(
+            (
+                index
+                for index, entry in enumerate(definition_inputs)
+                if isinstance(entry, dict) and _input_name(entry.get("name")) == name
+            ),
+            None,
+        )
+        entry = (
+            _mapped_instance_inputs(scope, instance, definition).get(input_index) if input_index is not None else None
+        )
+        link_id = entry.get("link") if entry is not None else None
     if link_id is None or not link_exists(scope, link_id):
         return None
     return link_id
@@ -1108,7 +1162,7 @@ def resolve_write(
                 f"promoted input {widget!r} on subgraph node {node_str} is a link input ({pi.type}), not a widget — "
                 f"wire it with `comfy workflow connect <file> <node>.<output> {node_str}.{widget}`"
             )
-        link_id = live_external_link(workflow, node, widget)
+        link_id = live_external_link(workflow, node, widget, sg)
         if link_id is not None:
             return trace_upstream_write(workflow, graph, link_id, given, redirected_from=redirected_from or given)
         # No link, or a dangling link id the frontend drops on load: the host
