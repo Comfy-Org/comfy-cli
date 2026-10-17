@@ -206,29 +206,111 @@ def _string_literal(node: ast.AST | None) -> str | None:
 
 class _Forwarder:
     """A helper that emits on its caller's behalf: it takes a ``command``
-    parameter and passes that same name through to ``.emit(command=...)``.
+    parameter and passes that same name straight through to
+    ``.emit(command=command)``.
 
     The literal therefore lives at the *call site*, which is why a scan that
     only looks at ``.emit`` arguments sees an ``ast.Name`` and records nothing.
     """
 
-    __slots__ = ("pos_index", "default", "ambiguous")
+    __slots__ = ("pos_index", "default")
 
     def __init__(self, pos_index: int | None, default: str | None) -> None:
         self.pos_index = pos_index
         self.default = default
-        self.ambiguous = False
 
 
-def _collect_command_forwarders(trees) -> dict[str, _Forwarder]:
+def _own_body(fn: ast.AST):
+    """Walk ``fn``'s own statements, not those of anything nested inside it.
+
+    ``ast.walk`` would descend into nested functions, lambdas and classes, so an
+    outer function whose inner closure happens to have its own ``command``
+    parameter would be misread as a forwarder.
+    """
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _rebinds_command(fn: ast.AST) -> bool:
+    """True if ``fn`` assigns to the name ``command`` anywhere in its own body.
+
+    A rebound parameter (``command = f"x {command}"``) means the value that
+    reaches ``.emit`` is no longer the caller's literal, so the call site must
+    not be trusted.
+    """
+    for node in _own_body(fn):
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)):
+            targets = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, ast.withitem):
+            targets = [node.optional_vars] if node.optional_vars else []
+        for target in targets:
+            for sub in ast.walk(target):
+                if isinstance(sub, ast.Name) and sub.id == "command":
+                    return True
+    return False
+
+
+def _module_key(path: Path) -> str:
+    return str(path.resolve())
+
+
+def _resolve_import(node: ast.ImportFrom, current: Path) -> Path | None:
+    """Map a ``from X import ...`` onto a file inside the scanned tree."""
+    if node.level:
+        base = current.resolve().parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        parts = node.module.split(".") if node.module else []
+    else:
+        if not node.module:
+            return None
+        parts = node.module.split(".")
+        if not parts or parts[0] != SRC_ROOT.name:
+            return None
+        base = SRC_ROOT.parent
+    target = base
+    for part in parts:
+        target = target / part
+    for candidate in (target.with_suffix(".py"), target / "__init__.py"):
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def _imported_names(tree: ast.Module, path: Path) -> dict[str, str]:
+    """``local name -> defining module key`` for ``from ... import name`` forms."""
+    names: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        source = _resolve_import(node, path)
+        if source is None:
+            continue
+        for alias in node.names:
+            if alias.name != "*":
+                names[alias.asname or alias.name] = _module_key(source)
+    return names
+
+
+def _collect_command_forwarders(trees) -> dict[tuple[str, str], _Forwarder]:
     """Pass 1: find functions that forward a ``command`` parameter into ``.emit``.
 
-    Keyed by function name only — deliberately coarse. Two same-named helpers
-    with different signatures are marked ambiguous and dropped rather than
-    guessed at.
+    Keyed by ``(defining module, function name)``. Qualifying the key is what
+    lets pass 2 refuse a same-named function from an unrelated module instead of
+    attributing its call sites to this forwarder.
     """
-    forwarders: dict[str, _Forwarder] = {}
-    for _path, tree in trees:
+    forwarders: dict[tuple[str, str], _Forwarder] = {}
+    for path, tree in trees:
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -245,9 +327,9 @@ def _collect_command_forwarders(trees) -> dict[str, _Forwarder]:
                     kw.arg == "command" and isinstance(kw.value, ast.Name) and kw.value.id == "command"
                     for kw in node.keywords
                 )
-                for node in ast.walk(fn)
+                for node in _own_body(fn)
             )
-            if not forwards:
+            if not forwards or _rebinds_command(fn):
                 continue
             pos_index = positional.index("command") if "command" in positional else None
             default: str | None = None
@@ -257,26 +339,34 @@ def _collect_command_forwarders(trees) -> dict[str, _Forwarder]:
                 if offset >= 0:
                     default = _string_literal(args.defaults[offset])
             else:
-                kw_default = args.kw_defaults[keyword_only.index("command")]
-                default = _string_literal(kw_default)
-            existing = forwarders.get(fn.name)
-            if existing is None:
-                forwarders[fn.name] = _Forwarder(pos_index, default)
-            elif existing.pos_index != pos_index or existing.default != default:
-                existing.ambiguous = True
-    return {name: f for name, f in forwarders.items() if not f.ambiguous}
+                default = _string_literal(args.kw_defaults[keyword_only.index("command")])
+            forwarders[(_module_key(path), fn.name)] = _Forwarder(pos_index, default)
+    return forwarders
 
 
 def _scan_command_literals(trees) -> dict[str, list[Path]]:
-    """Record every ``command="X"`` string literal that reaches an envelope.
+    """Record the ``command="X"`` string literals this scan can prove reach ``.emit``.
 
-    Two sources, recorded identically: a literal passed straight to ``.emit``,
-    and a literal passed to a forwarding helper found by pass 1. Purely static —
-    nothing here imports or executes ``comfy_cli``.
+    Exactly two shapes are recognised, and recorded identically:
+
+    1. a literal passed directly to ``.emit(command="X")``;
+    2. a literal passed to a *one-hop* forwarder — a function that takes a
+       ``command`` parameter and passes that name through unchanged.
+
+    Deliberately NOT covered, so no caller mistakes this for a total scan:
+    multi-hop chains, and any hop that transforms the value. For example
+    ``deploy._run_move(..., "promote")`` → ``_render_move(command=command)`` →
+    ``.emit(command=f"deploy {command}")`` builds its name with an f-string, so
+    ``deploy promote``/``deploy rollback`` remain unchecked by the ratchet.
+    Non-literal arguments are skipped rather than guessed at.
+
+    Purely static — nothing here imports or executes ``comfy_cli``.
     """
     forwarders = _collect_command_forwarders(trees)
     found: dict[str, list[Path]] = {}
     for path, tree in trees:
+        module = _module_key(path)
+        imported = _imported_names(tree, path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -286,12 +376,15 @@ def _scan_command_literals(trees) -> dict[str, list[Path]]:
                     if kw.arg == "command" and (literal := _string_literal(kw.value)) is not None:
                         found.setdefault(literal, []).append(path)
                 continue
-            # Forwarders are followed only through a bare-name call, so an
-            # unrelated `obj.emit_selected(...)` is never assumed to be the
-            # same function.
+            # Followed only through a bare-name call that resolves to a forwarder
+            # defined in this module or explicitly imported into it. An unrelated
+            # `obj.emit_selected(...)`, or a same-named `_finish` from another
+            # module, is therefore never attributed to a forwarder.
             if not isinstance(func, ast.Name):
                 continue
-            forwarder = forwarders.get(func.id)
+            forwarder = forwarders.get((module, func.id))
+            if forwarder is None and func.id in imported:
+                forwarder = forwarders.get((imported[func.id], func.id))
             if forwarder is None:
                 continue
             explicit = [kw for kw in node.keywords if kw.arg == "command"]
@@ -299,22 +392,28 @@ def _scan_command_literals(trees) -> dict[str, list[Path]]:
                 if (literal := _string_literal(explicit[0].value)) is not None:
                     found.setdefault(literal, []).append(path)
                 continue
-            starred = any(isinstance(a, ast.Starred) for a in node.args)
-            if forwarder.pos_index is not None and not starred and len(node.args) > forwarder.pos_index:
-                if (literal := _string_literal(node.args[forwarder.pos_index])) is not None:
-                    found.setdefault(literal, []).append(path)
-                continue
+            # A positional `*args` splat only obscures the binding if it sits at
+            # or before `command`'s index; it can never bind a keyword-only one.
+            first_starred = next((i for i, a in enumerate(node.args) if isinstance(a, ast.Starred)), None)
+            if forwarder.pos_index is not None:
+                shadowed = first_starred is not None and first_starred <= forwarder.pos_index
+                if not shadowed and len(node.args) > forwarder.pos_index:
+                    if (literal := _string_literal(node.args[forwarder.pos_index])) is not None:
+                        found.setdefault(literal, []).append(path)
+                    continue
+                if shadowed:
+                    continue
             # No `command` argument at all: the signature default is what gets
-            # emitted — unless the call splats kwargs, where we cannot tell.
+            # emitted — unless a `**kwargs` splat could be supplying one.
             splatted = any(kw.arg is None for kw in node.keywords)
-            if forwarder.default is not None and not starred and not splatted:
+            if forwarder.default is not None and not splatted:
                 found.setdefault(forwarder.default, []).append(path)
     return found
 
 
 def _collect_emitted_commands() -> dict[str, list[Path]]:
-    """AST-scan comfy_cli for every ``command="X"`` literal that reaches ``.emit``,
-    directly or through a forwarding helper."""
+    """AST-scan comfy_cli for the ``command="X"`` literals reaching ``.emit``
+    directly or through a one-hop forwarder (see ``_scan_command_literals``)."""
     return _scan_command_literals(_parse_sources(SRC_ROOT))
 
 
@@ -331,9 +430,11 @@ def _scan_snippet(source: str) -> dict[str, list[Path]]:
 # The ratchet above was blind for as long as it existed: every structured
 # workflow edit passes its command name to a local `_finish` helper, so the
 # `.emit(command=...)` argument is an `ast.Name` and the literal sits one frame
-# up at the call site. Nine call sites went unscanned and two of them were
-# unregistered. These tests watch the collector find a forwarded literal, so
-# the guard is not trusted on the strength of never having fired.
+# up at the call site. Five such forwarders across four files hid 11 command
+# literals; two were unregistered (`workflow clear`, `workflow reset-doc`) and
+# one was registered under the WRONG name (`delete-node` emitting
+# `"workflow delete"`). These tests watch the collector find a forwarded
+# literal, so the guard is not trusted on the strength of never having fired.
 
 
 def test_collector_finds_a_literal_forwarded_through_a_helper():
@@ -402,17 +503,142 @@ def cmd():
     assert found == {}
 
 
+def test_collector_ignores_a_command_rebound_before_the_emit():
+    """A transformed value is not the caller's literal, so don't record it."""
+    found = _scan_snippet(
+        """
+def helper(renderer, payload, command: str) -> None:
+    command = f"deploy {command}"
+    renderer.emit(payload, command=command)
+
+def cmd():
+    helper(renderer, {}, "promote")
+"""
+    )
+    assert found == {}
+
+
+def test_collector_ignores_an_outer_function_whose_nested_closure_forwards():
+    """`ast.walk` would descend into the closure and misread the outer signature."""
+    found = _scan_snippet(
+        """
+def outer(renderer, command: str) -> None:
+    def inner(payload, command: str) -> None:
+        renderer.emit(payload, command=command)
+
+    register(inner)
+
+def cmd():
+    outer(renderer, "widget poke")
+"""
+    )
+    assert found == {}
+
+
+def test_collector_keeps_a_keyword_only_default_through_a_positional_splat():
+    """A positional splat cannot bind a keyword-only parameter, so the default holds."""
+    found = _scan_snippet(
+        """
+def helper(*args, command: str = "widget poke") -> None:
+    renderer.emit(args, command=command)
+
+def cmd(values):
+    helper(*values)
+"""
+    )
+    assert found == {"widget poke": [Path("snippet.py")]}
+
+
+def test_collector_keeps_a_literal_when_a_splat_follows_the_command_argument():
+    found = _scan_snippet(
+        """
+def helper(renderer, command: str, *rest) -> None:
+    renderer.emit(rest, command=command)
+
+def cmd(extra):
+    helper(renderer, "widget poke", *extra)
+"""
+    )
+    assert "widget poke" in found
+
+
+def test_collector_skips_a_splat_that_could_shadow_the_command_position():
+    found = _scan_snippet(
+        """
+def helper(renderer, command: str = "widget poke") -> None:
+    renderer.emit({}, command=command)
+
+def cmd(values):
+    helper(*values)
+"""
+    )
+    assert found == {}
+
+
+def test_collector_does_not_attribute_a_same_named_function_from_another_module():
+    """Forwarders are keyed by defining module, so `tracking._finish`-style
+    name collisions in an unrelated module are not followed."""
+    forwarder = """
+def _finish(renderer, payload, command: str) -> None:
+    renderer.emit(payload, command=command)
+"""
+    unrelated = """
+def _finish(run):
+    return run.close()
+
+def cmd():
+    _finish("not a command")
+"""
+    found = _scan_command_literals(
+        [
+            (Path("emitter.py"), ast.parse(forwarder)),
+            (Path("unrelated.py"), ast.parse(unrelated)),
+        ]
+    )
+    assert found == {}
+
+
+# Every forwarder the scan must keep resolving, as ``(module, function)``.
+# Only `_finish`/`_emit_op` have forwarder-only commands to ratchet on, so
+# without this the other three could stop resolving with nothing failing.
+EXPECTED_FORWARDERS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("comfy_cli/command/workflow_edit.py", "_finish"),
+        ("comfy_cli/command/workflow_edit.py", "_emit_op"),
+        ("comfy_cli/command/jobs.py", "_emit_terminal"),
+        ("comfy_cli/selector.py", "emit_selected"),
+        ("comfy_cli/command/workflow.py", "validate_api_workflow"),
+    }
+)
+
+
+def test_every_known_command_forwarder_still_resolves():
+    """Ratchet against silent coverage loss across all five forwarders."""
+    detected = {
+        (Path(module).relative_to(SRC_ROOT.parent).as_posix(), name)
+        for module, name in _collect_command_forwarders(_parse_sources(SRC_ROOT))
+    }
+    missing = sorted(EXPECTED_FORWARDERS - detected)
+    assert not missing, (
+        f"command forwarders no longer detected: {missing}\n"
+        "Their call-site literals are now invisible to the registration ratchet."
+    )
+
+
 def test_workflow_edit_commands_are_reachable_only_through_the_forwarder(emitted_commands):
     """Ratchet keeping the forwarder pass wired to the real source tree.
 
     Every one of these is emitted exclusively via ``workflow_edit._finish`` /
-    ``_emit_op``, so a regression that stops following forwarders drops them
-    all and this fails before the registration check can go quiet again.
+    ``_emit_op`` or ``jobs._emit_terminal``, so a regression that stops
+    following forwarders drops them all and this fails before the registration
+    check can go quiet again.
     """
     forwarded_only = [
+        "jobs watch",
         "workflow add-node",
         "workflow clear",
         "workflow connect",
+        "workflow delete-node",
         "workflow insert-workflow",
         "workflow reset-doc",
         "workflow set-node-field",
