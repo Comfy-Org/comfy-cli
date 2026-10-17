@@ -494,7 +494,9 @@ def delete_cmd(
             "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
-    _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete")
+    # `workflow delete-node`, matching renderer.command above and the error path.
+    # `workflow delete` is the unrelated cloud/local CRUD verb (workflow.py).
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete-node")
 
 
 # ---------------------------------------------------------------------------
