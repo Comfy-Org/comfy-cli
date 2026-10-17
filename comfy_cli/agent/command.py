@@ -193,6 +193,14 @@ def _open_health(url: str):
     return build_http_only_opener(urllib.request.ProxyHandler({})).open(url, timeout=2)
 
 
+# The keys only the agent's own /health carries. Its handler answers the plain
+# string "ok" until at least one of these is reported and a JSON object once
+# any is, so an object without one of them is some other service on a reused
+# port (cloud services/agent/server/server.go, healthPayload). `status` is
+# deliberately not in the list: every other health endpoint has it too.
+_AGENT_HEALTH_KEYS = ("sandbox", "skills", "crdt", "doc_host", "prompt", "version")
+
+
 def _sandbox_status(port: int | None) -> dict | None:
     if not port:
         return None
@@ -205,6 +213,12 @@ def _sandbox_status(port: int | None) -> dict | None:
         return None
     if not isinstance(body, dict):
         return None  # a stale port answered by something that is not the agent
+    if not any(key in body for key in _AGENT_HEALTH_KEYS):
+        # A reused port can be held by an unrelated local service whose
+        # /health answers `{"status": "ok"}`. That is not this agent, and
+        # treating it as one would refuse `allow`/`deny` (_refuse_while_live)
+        # and leave the user no way to edit the files at all.
+        return None
     # The envelope schema says sandbox is an object or null and comfy_path a
     # string or null; a stale or foreign server's shapes are not passed on.
     sandbox = body.get("sandbox")

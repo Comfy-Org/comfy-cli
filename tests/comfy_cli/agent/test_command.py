@@ -407,6 +407,40 @@ def test_sandbox_status_treats_non_object_health_as_unavailable(monkeypatch):
     assert command._sandbox_status(8190) == {"sandbox": {"mode": "seatbelt"}}
 
 
+def test_sandbox_status_rejects_another_service_on_a_reused_port(monkeypatch):
+    """`{"status": "ok"}` from an unrelated service is not this agent.
+
+    It is the dangerous direction of the stale-port problem: reading it as a
+    live agent makes `allow`/`deny` refuse, which leaves the user no way to
+    edit the permission files at all.
+    """
+    from comfy_cli.agent import command
+
+    for body in (b'{"status": "ok"}', b'{"status": "healthy", "uptime": 12}', b"{}"):
+        monkeypatch.setattr(command, "_open_health", lambda url, b=body: _Resp(b))
+        assert command._sandbox_status(8190) is None, body
+
+    # One agent-only key is enough, even with no sandbox reported yet.
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"status": "ok", "version": "1.2.3"}'))
+    assert command._sandbox_status(8190) == {"sandbox": None}
+
+
+def test_allow_writes_when_another_service_holds_the_agents_old_port(tmp_path: Path, monkeypatch):
+    """The reused-port case end to end: the write must not be refused."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"status": "ok"}'))
+
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    assert read_state(root).paths[0]["path"] == str(folder)
+
+
 def test_sandbox_status_normalizes_malformed_nested_health(monkeypatch):
     from comfy_cli.agent import command
 
