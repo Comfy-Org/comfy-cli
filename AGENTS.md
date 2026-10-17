@@ -71,11 +71,22 @@ with accepted ADRs. Proposed ADRs express design direction and should be
 treated as guidance during review. See `.agents/checks/adr-compliance.md` for
 the automated review rules.
 
+Comfy repositories standardize the ADR behavior: canonical records, identifier
+and status semantics, review expectations, and supersession history should mean
+the same thing everywhere. Each repository implements validation and CI with
+its native toolchain. In this Python repository that means
+`scripts/check_adrs.py`, pytest, pre-commit, and GitHub Actions; do not copy a
+TypeScript validator merely to make the implementation identical to another
+repository.
+
 Write an ADR when a decision establishes a durable boundary, invariant, data
 ownership rule, compatibility contract, or dependency choice. Keep transient
 implementation details in the PR instead. Capture the context, alternatives,
 tradeoffs, and consequences that a future maintainer cannot infer from code.
-Start from `docs/adr/TEMPLATE.md`.
+Start from `docs/adr/TEMPLATE.md`. Its Context, Decision, Alternatives
+considered, and Consequences sections are recommended review guidance, not a
+schema enforced by the validator; concise records may adapt them when that
+makes the decision clearer.
 
 ADR files are named
 `<DOMAIN>[-<SUBDOMAIN>]-<NNNN>-descriptive-title.md`: use at most two

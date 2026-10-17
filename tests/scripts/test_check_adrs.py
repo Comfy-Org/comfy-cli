@@ -20,7 +20,7 @@ def write_adr(directory: Path, filename: str = ADR_FILENAME) -> None:
     )
 
 
-def test_validate_adr_directory_accepts_identifier_based_adrs(tmp_path: Path) -> None:
+def test_validate_adr_directory_accepts_minimal_adr_without_recommended_sections(tmp_path: Path) -> None:
     write_adr(tmp_path)
     (tmp_path / "TEMPLATE.md").write_text("template", encoding="utf-8")
 

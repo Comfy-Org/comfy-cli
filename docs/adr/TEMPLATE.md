@@ -2,6 +2,12 @@
 
 Date: YYYY-MM-DD
 
+<!--
+Context, Decision, Alternatives considered, and Consequences are recommended
+review guidance. The validator intentionally enforces identity and lifecycle
+metadata, not these section names or their prose.
+-->
+
 ## Status
 
 Proposed

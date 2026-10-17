@@ -1,5 +1,8 @@
 # Op vocabulary — v1 (frozen)
 
+The accepted architectural role of this frozen, versioned contract is recorded
+in [ADR-OPERATIONS-0002](adr/OPERATIONS-0002-version-structured-workflow-operations.md).
+
 Status: **FROZEN**. This document is the normative contract for the structured-edit
 op vocabulary in `comfy_cli/workflow_ops.py`: the op kinds, their argument shapes,
 their idempotency and conflict rules, and the batch protocol. Downstream
@@ -11,9 +14,8 @@ Machine-readable projection: `workflow_ops.FROZEN_OPS`, `workflow_ops.DEFERRED_O
 enforces that this document, those constants, and the `apply_op` / `apply_specs`
 dispatch tables agree. A change to any of the three without the others fails CI.
 
-This freeze describes the code on the **unmerged branch
-`fix/validate-lowers-ui-to-api`**. Until that branch merges to `master`, a SHA
-citation must point at a commit on that branch.
+This freeze describes code on `main`. A SHA citation points at the commit that
+contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
