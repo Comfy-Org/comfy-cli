@@ -3065,6 +3065,11 @@ _RootGroup.lazy_subcommands = {
         "comfy_cli.command.code_search", attr="code_search", help="Search code across ComfyUI repositories."
     ),
     "cs": LazyCommand("comfy_cli.command.code_search", attr="code_search", hidden=True),
+    "code-search-context": LazyCommand(
+        "comfy_cli.command.code_search",
+        attr="code_search_context",
+        help="Read a bounded range from a pinned code-search result.",
+    ),
     "tracking": LazySubcommand("comfy_cli.tracking", help="Manage analytics tracking settings."),
     "cloud": LazySubcommand("comfy_cli.cloud.command", help="Comfy Cloud — sign in, route commands, inspect session."),
     "auth": LazySubcommand("comfy_cli.auth.command", help="Manage API tokens for model hosts (Civitai, Hugging Face)."),

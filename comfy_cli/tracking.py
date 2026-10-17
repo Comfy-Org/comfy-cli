@@ -114,6 +114,9 @@ _SENSITIVE_EXACT = frozenset(
         "capability",
         "query",
         "repo",
+        "repository",
+        "commit",
+        "file",
     }
 )
 

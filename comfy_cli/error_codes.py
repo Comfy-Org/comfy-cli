@@ -873,6 +873,26 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "envelope) — the search itself still succeeds and the other hits still expand.",
         "the hit itself is still valid; inspect it directly with `comfy nodes show <class_type>`",
     ),
+    # --- code search ----------------------------------------------------------
+    ErrorCode(
+        "bad_args",
+        "`comfy code-search-context` was given a line range it cannot serve: `--start-line` below 1, "
+        "`--end-line` before `--start-line`, a span over 200 lines, a `--commit` that is not a full "
+        "40-character SHA, a `--repo` that is not an `owner/name` pair, or a `--file` that is absolute "
+        "or contains `..`. Nothing was fetched, so no third-party bytes entered the caller. Pinning is "
+        "the point of the command: a branch name or a URL is refused rather than resolved, because the "
+        "range a caller copied off a search result only means anything at the commit it came from.",
+        "copy `repository`, `commit`, `file` verbatim from the search result and request at most 200 lines",
+    ),
+    ErrorCode(
+        "context_unavailable",
+        "`comfy code-search-context` could not return a pinned range that was itself well-formed: the "
+        "file is missing at that commit, the fetch failed or was redirected, the file exceeds the 1 MiB "
+        "cap, the range exceeds the 16 KiB snippet cap, or the content is not UTF-8 text. The search hit "
+        "it came from is still valid -- only the expansion failed, and the bounded window already on the "
+        "match is usually enough.",
+        "continue from the source window already on the match, or request a smaller range at the same commit",
+    ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
         "upload_failed",

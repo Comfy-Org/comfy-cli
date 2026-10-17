@@ -1,17 +1,21 @@
 """Tests for the code-search command."""
 
+import ast
+import io
 import json
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from rich.console import Console
 from typer.testing import CliRunner
 
 from comfy_cli._lazy import LazyCommand
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
+    MAX_CONTEXT_FILES,
     MAX_COUNT,
     MAX_QUERY_BYTES,
     MAX_RESPONSE_BYTES,
@@ -20,19 +24,314 @@ from comfy_cli.command.code_search import (
     QueryRejectedError,
     ResponseTooLargeError,
     SearchUnavailableError,
+    _attach_context,
     _build_query,
     _decode_search,
+    _fetch_pinned_source,
     _fetch_results,
     _format_results,
     _get_stats,
     _print_results,
     _safe_markup_text,
+    _source_slice,
     _strip_control_chars,
     _validate_query,
+    _validate_source_identity,
     app,
+    code_search_context,
+    console,
 )
 
 runner = CliRunner()
+
+
+def test_source_slice_preserves_pinned_range_and_class_body():
+    source = (
+        "header\nclass Example:\n    INPUT = 'NORMALIZED_AMPLITUDE'\n    def run(self):\n        return self.INPUT\n"
+    )
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 2, 5)
+    assert snippet["repository"] == "owner/repo"
+    assert snippet["commit"] == "a" * 40
+    assert snippet["start_line"] == 2
+    assert snippet["end_line"] == 5
+    assert "NORMALIZED_AMPLITUDE" in snippet["text"]
+    assert snippet["url"].endswith("#L2-L5")
+
+
+def test_untrusted_content_note_covers_pinned_source_snippets():
+    from comfy_cli.command.code_search import UNTRUSTED_CONTENT_NOTE
+
+    assert "pinned source snippets" in UNTRUSTED_CONTENT_NOTE
+
+
+def test_attach_context_makes_declaration_only_match_implementation_usable():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": 2, "preview": "class Example:", "url": "match"}],
+        }
+    ]
+    source = "header\nclass Example:\n    TYPE = 'NORMALIZED_AMPLITUDE'\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        _attach_context(results)
+    match = results[0]["matches"][0]
+    assert match["preview"] == "class Example:"
+    assert match["snippet"]["text"] != match["preview"]
+    assert "NORMALIZED_AMPLITUDE" in match["snippet"]["text"]
+
+
+def test_source_slice_returns_one_text_line_per_pinned_line():
+    """The window must arrive as the lines it claims, not as one joined row.
+
+    `_strip_control_chars` strips `\x0a` deliberately, for single-row service
+    previews. Applied to a multi-line pinned window it deleted every
+    separator: a 49-line KJNodes class came back as one 2 KiB line with no
+    indentation, so the structure a Python reference is read for was gone even
+    though the bytes were all present. Nothing here asserted line structure,
+    which is how that shipped.
+    """
+    source = "".join(f"line{n}\n" for n in range(1, 11))
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 3, 7)
+    assert snippet["text"].split("\n") == ["line3", "line4", "line5", "line6", "line7"]
+    assert snippet["line_count"] == 5
+    assert snippet["line_count"] == snippet["end_line"] - snippet["start_line"] + 1
+
+
+def test_source_slice_window_is_still_parseable_python():
+    source = (
+        "header\n"
+        "class Example:\n"
+        "    @classmethod\n"
+        "    def INPUT_TYPES(s):\n"
+        '        return {"required": {"amp": ("NORMALIZED_AMPLITUDE",)}}\n'
+    )
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 2, 5)
+    # Indentation-significant source only survives transport if the newlines do.
+    ast.parse(snippet["text"])
+
+
+def test_source_slice_still_strips_escapes_inside_each_line():
+    source = "safe\nbefore\x1b[2Jafter\x00\x9b\ntail\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    # ESC and the C0/C1 bytes go, exactly as for a single-row preview; the
+    # inert residue of a sequence is left alone, as it already was. What is
+    # new is only that the three lines are still three lines.
+    assert snippet["text"].split("\n") == ["safe", "before[2Jafter", "tail"]
+    assert "\x1b" not in snippet["text"]
+    assert "\x00" not in snippet["text"]
+    assert "\x9b" not in snippet["text"]
+    assert snippet["line_count"] == 3
+
+
+def test_source_slice_does_not_promote_unicode_separator_to_new_line():
+    source = "safe\ncomment\u2028code\ntail\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"].split("\n") == ["safe", "commentcode", "tail"]
+    assert snippet["line_count"] == 3
+
+
+def test_source_slice_strips_bidi_and_other_format_controls():
+    source = "safe\nleft\u202eright\nzero\u200bwidth\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"].split("\n") == ["safe", "leftright", "zerowidth"]
+
+
+def test_context_human_output_prints_source_as_literal_text():
+    source = 'lines[i]\ndict[str, int]\nr"[/\\\\]"\n'
+    output = io.StringIO()
+    literal_console = Console(file=output, force_terminal=False, width=200)
+    with (
+        patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source),
+        patch("comfy_cli.command.code_search.console", literal_console),
+    ):
+        code_search_context("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    rendered = output.getvalue()
+    assert "lines[i]" in rendered
+    assert "dict[str, int]" in rendered
+    assert 'r"[/\\\\]"' in rendered
+
+
+def test_attach_context_preserves_line_structure():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": 2, "preview": "class Example:", "url": "match"}],
+        }
+    ]
+    source = "header\nclass Example:\n    TYPE = 'NORMALIZED_AMPLITUDE'\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        _attach_context(results)
+    snippet = results[0]["matches"][0]["snippet"]
+    assert snippet["text"].split("\n") == ["header", "class Example:", "    TYPE = 'NORMALIZED_AMPLITUDE'"]
+    assert snippet["line_count"] == 3
+
+
+def test_source_slice_rejects_unpinned_or_oversized_expansion():
+    with pytest.raises(ValueError, match="40-character"):
+        _source_slice("owner/repo", "main", "nodes.py", 1, 2)
+    with pytest.raises(ValueError, match="at most 200"):
+        _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 201)
+
+
+def test_source_slice_preserves_newlines_while_sanitizing_each_line():
+    source = "first\x1b\n\tsecond\x00\nthird\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"] == "first\n\tsecond\nthird"
+
+
+def test_source_slice_only_counts_newline_as_a_line_separator():
+    source = "first\u2028still first\nsecond\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 2, 2)
+    assert snippet["start_line"] == 2
+    assert snippet["text"] == "second"
+
+
+class _StreamingResponse:
+    def __init__(self, chunks, *, redirect=False):
+        self.chunks = chunks
+        self.is_redirect = redirect
+        self.is_permanent_redirect = False
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.closed = True
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        assert chunk_size == 1024
+        yield from self.chunks
+
+
+def test_fetch_pinned_source_enforces_total_deadline_and_closes_response():
+    response = _StreamingResponse([b"first", b"second"])
+    with (
+        patch("requests.get", return_value=response),
+        patch("time.monotonic", side_effect=[0, TOTAL_REQUEST_DEADLINE + 1]),
+        pytest.raises(requests.Timeout, match="total request deadline"),
+    ):
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+    assert response.closed
+
+
+def test_fetch_pinned_source_closes_response_on_redirect_refusal():
+    response = _StreamingResponse([], redirect=True)
+    with patch("requests.get", return_value=response), pytest.raises(Exception, match="redirect"):
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+    assert response.closed
+
+
+@pytest.mark.parametrize("chunks", [[b"x" * (1024 * 1024 + 1)], [b"\xff"]])
+def test_fetch_pinned_source_closes_response_on_early_error(chunks):
+    response = _StreamingResponse(chunks)
+    with patch("requests.get", return_value=response), pytest.raises(Exception):
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+    assert response.closed
+
+
+def test_fetch_pinned_source_only_sends_origin_header_for_agents():
+    plain = _StreamingResponse([b"ok"])
+    agent = _StreamingResponse([b"ok"])
+    with patch("requests.get", side_effect=[plain, agent]) as get:
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py", agent_origin=True)
+    assert "X-Comfy-Code-Search-Origin" not in get.call_args_list[0].kwargs["headers"]
+    assert get.call_args_list[1].kwargs["headers"]["X-Comfy-Code-Search-Origin"] == "agent"
+
+
+@pytest.mark.parametrize("repository", ["owner/.", "owner/..", "./repo", "../repo"])
+def test_validate_source_identity_rejects_dot_only_segments(repository):
+    with pytest.raises(ValueError, match="dots"):
+        _validate_source_identity(repository, "a" * 40, "nodes.py")
+
+
+def test_attach_context_caps_failed_fetch_attempts():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": line, "preview": "missing", "url": "match"} for line in range(1, 8)],
+        }
+    ]
+    with patch("comfy_cli.command.code_search._source_slice", side_effect=requests.Timeout) as source_slice:
+        _attach_context(results)
+    assert source_slice.call_count == MAX_CONTEXT_FILES
+    assert "response cap" in results[0]["matches"][MAX_CONTEXT_FILES]["context_error"]
+
+
+def test_attach_context_flags_stale_index_preview():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": 2, "preview": "old content", "url": "match"}],
+        }
+    ]
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value="header\nnew content\n"):
+        _attach_context(results)
+    match = results[0]["matches"][0]
+    assert "does not match indexed preview" in match["context_error"]
+    assert "snippet" not in match
+
+
+def test_attach_context_flags_eof_truncated_window_without_aborting_search():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [
+                {"line": 500, "preview": "near eof", "url": "match-1"},
+                {"line": 5, "preview": "later match", "url": "match-2"},
+            ],
+        }
+    ]
+    eof_snippet = {"url": "match-1", "text": "only one line", "start_line": 498}
+    with patch(
+        "comfy_cli.command.code_search._source_slice",
+        side_effect=[eof_snippet, requests.Timeout],
+    ):
+        _attach_context(results)
+    first, second = results[0]["matches"]
+    assert "context unavailable" in first["context_error"]
+    assert "snippet" not in first
+    assert "context_error" in second
+
+
+def test_context_console_prints_remote_source_as_literal_text():
+    snippet = {
+        "url": "https://example.test/source#L1-L1",
+        "text": "data[i] list[int] unmatched [/] [link=https://evil.test]fake[/link]",
+    }
+    caller = MagicMock(agentic=False, source_env=None)
+    with (
+        patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+        patch("comfy_cli.command.code_search._source_slice", return_value=snippet),
+        console.capture() as capture,
+    ):
+        code_search_context.__wrapped__("owner/repo", "a" * 40, "nodes.py", 1, 1, False)
+    output = capture.get()
+    assert "data[i]" in output
+    assert "list[int]" in output
+    assert "[link=https://evil.test]fake[/link]" in output
 
 
 # ---------------------------------------------------------------------------
