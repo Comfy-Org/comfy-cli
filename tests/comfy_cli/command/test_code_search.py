@@ -56,6 +56,12 @@ def test_source_slice_preserves_pinned_range_and_class_body():
     assert snippet["url"].endswith("#L2-L5")
 
 
+def test_untrusted_content_note_covers_pinned_source_snippets():
+    from comfy_cli.command.code_search import UNTRUSTED_CONTENT_NOTE
+
+    assert "pinned source snippets" in UNTRUSTED_CONTENT_NOTE
+
+
 def test_attach_context_makes_declaration_only_match_implementation_usable():
     results = [
         {
