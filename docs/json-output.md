@@ -504,7 +504,7 @@ On `--wait` success, `data` carries:
 | `elapsed_seconds`   | float \| null   | Wall-clock duration (null when not waiting)            |
 | `host` / `port`     | str / int       | **Local only.** Target server                          |
 | `base_url`          | str             | **Cloud only.** Target cloud endpoint                  |
-| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`) |
+| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`); null when no record could be written — see [below](#known-limit-a-state-file-failure-is-never-a-run-failure) |
 
 `cached_node_ids` and `executed_node_ids` may overlap: a cached
 output-bearing node emits both `execution_cached` and `executed`. Agents
@@ -520,6 +520,21 @@ watcher keeps the state file updated; follow up with
 the same on both targets, `watcher_spawned` included (add `--where cloud` to
 the follow-up commands for a cloud job). The async envelope carries no
 `outputs_by_node` / `outputs_by_item` / `warnings` — nothing has run yet.
+
+### Known limit: a state-file failure is never a run failure
+
+Writing the job's state file is best-effort on every path. If the state
+directory can't be written — a config root that resolved somewhere
+unreachable, a read-only or sandboxed home, a full disk — the submit still
+reports `ok: true` with `data.status: "queued"` and `data.state_file: null`,
+because by then the server has already accepted the prompt. **`state_file:
+null` is not a failed run**, and in particular it is not a transport error:
+there is nothing to retry, and re-submitting queues a second job for a prompt
+that is already running. Follow the job by `prompt_id`
+(`comfy jobs status <prompt_id>`) and treat a missing record as "unknown",
+not "did not run".
+
+Run with `LOG_LEVEL=DEBUG` to see the swallowed cause.
 
 ### Known limit: `--wait` has no background watcher
 

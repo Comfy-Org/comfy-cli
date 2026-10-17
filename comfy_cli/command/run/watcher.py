@@ -41,8 +41,18 @@ def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
     writing after we return — we just give the human a few seconds of
     "alive" feedback before the foreground exits.
 
-    Always safe to call; no-ops if the renderer isn't pretty or the user
-    Ctrl-Cs out.
+    Always safe to call; no-ops if the renderer isn't pretty, the state file
+    can't be read at all, or the user Ctrl-Cs out.
+
+    That "can't be read at all" case is load-bearing, not defensive padding.
+    This runs from ``_announce_async_queued``, i.e. inside ``execute``'s
+    ``except (WebSocketException, ConnectionError, OSError)`` block's try and
+    *after* the server accepted the prompt. An ``OSError`` escaping here —
+    ``state_dir()``'s mkdir under a config root that resolved outside the
+    sandbox, a read-only directory — would therefore be reported to the caller
+    as ``ws_disconnected`` with a "re-run the command" hint, for a job that is
+    already queued. See the same guarantee on ``_write_state`` in
+    ``comfy_cli/command/run/__init__.py``.
     """
     import time as _t
 
@@ -59,13 +69,25 @@ def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
     def render(status: str, elapsed: float) -> Text:
         return Text.from_markup(f"  {status_glyph(status)}  [dim]· {elapsed:.1f}s · {prompt_id[:8]}…[/dim]")
 
+    def read_state():
+        """``(state, readable)``. ``readable`` is False only when the record
+        could not be consulted at all, which is unrecoverable for the whole
+        tail — distinct from ``state is None``, the ordinary "nothing written
+        yet" the poll loop is built to wait through."""
+        try:
+            return jobs_state.read(prompt_id), True
+        except OSError:
+            return None, False
+
     deadline = _t.time() + seconds
     last_status = "queued"
     start = _t.time()
     try:
         with Live(render(last_status, 0.0), console=renderer.console(), refresh_per_second=4, transient=True) as live:
             while _t.time() < deadline:
-                state = jobs_state.read(prompt_id)
+                state, readable = read_state()
+                if not readable:
+                    return
                 if state is not None:
                     last_status = state.status
                     live.update(render(last_status, _t.time() - start))
@@ -75,7 +97,7 @@ def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
     except KeyboardInterrupt:
         pass
 
-    final_state = jobs_state.read(prompt_id)
+    final_state, _readable = read_state()
     if final_state is None:
         return
     elapsed = _t.time() - start

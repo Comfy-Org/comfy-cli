@@ -2267,6 +2267,102 @@ class TestQueuedFollowsStatePersistence:
         assert log.index(("state_write",)) < log.index(("queued_emit",))
 
 
+class TestStateWriteFailureIsNotADisconnect:
+    """A local filesystem failure writing the job-state file must never be
+    reported to the caller as a lost server connection (OBL-192).
+
+    Under Comfy Desktop on Windows the `clishim` broker forwards `HOME` and
+    `XDG_CONFIG_HOME` but not `USERPROFILE`, and Windows `expanduser("~")` keys
+    off `USERPROFILE` — so `constants.DEFAULT_CONFIG`'s root resolved outside
+    the sandbox and every `jobs_state.write` raised an `OSError`
+    (ENOENT/EACCES). The async submit branch called `jobs_state.write` raw
+    inside the try whose handler is `except (WebSocketException,
+    ConnectionError, OSError)`, so a purely local write error came back to the
+    caller as `ws_disconnected` with a "re-run the command" hint — and the
+    in-app agent obeyed the hint. The server had accepted the prompt every
+    time, so each retry queued another GPU job: 16 jobs for 6 requests in
+    overnight QA.
+
+    The fix routes both async call sites through the file's existing
+    best-effort `_write_state` wrapper, so a submit the server accepted still
+    reports `queued`, just with `state_file: null`.
+    """
+
+    # Where the OBL-192 `OSError` surfaces, outermost call last. Patching each
+    # in turn pins the behaviour on the *handler*, not on one mock shape.
+    FAILURE_POINTS = {
+        # `state_dir()`'s mkdir under the un-forwarded config root — the actual
+        # Windows-under-Desktop shape.
+        "state_dir": FileNotFoundError(2, "No such file or directory"),
+        # The atomic write itself, where the directory lookup happened to work
+        # but the file did not (sandboxed/read-only root).
+        "atomic_write_text": PermissionError(13, "Permission denied"),
+        # `jobs_state.write` whole, which is what the call site actually sees.
+        "write": OSError(5, "Input/output error"),
+    }
+
+    @staticmethod
+    def _break_state_writes(monkeypatch, failure_point):
+        from comfy_cli import jobs_state as jobs_state_mod
+
+        exc = TestStateWriteFailureIsNotADisconnect.FAILURE_POINTS[failure_point]
+
+        def _boom(*_a, **_k):
+            raise exc
+
+        monkeypatch.setattr(jobs_state_mod, failure_point, _boom)
+
+    @staticmethod
+    def _assert_queued_without_disconnect(lines, exit_code, prompt_id):
+        assert exit_code == 0, "a local state-file failure must not fail an accepted submit"
+        env = _envelope(lines)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["status"] == "queued"
+        assert data["prompt_id"] == prompt_id
+        # The one visible consequence of the swallowed failure: no durable
+        # record to point the caller at.
+        assert data["state_file"] is None
+        # (a) nothing told the caller the server went away, and (b) nothing
+        # told it to re-run — that hint is what multiplied the GPU jobs.
+        blob = json.dumps(lines)
+        assert "ws_disconnected" not in blob
+        assert "re-run the command" not in blob
+        # (c) the caller still gets the whole documented async stream.
+        assert [ln["type"] for ln in lines] == ["prompt_preview", "queued", "envelope"]
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_local_async(self, failure_point, monkeypatch, workflow_file, capsys):
+        self._break_state_writes(monkeypatch, failure_point)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                {"prompt_id": "obl192-local"}
+            ).encode()
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        self._assert_queued_without_disconnect(lines, exit_code, "obl192-local")
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_cloud_async(self, failure_point, monkeypatch, workflow_file, capsys):
+        """Same shared helper, the other call site. `execute_cloud`'s non-wait
+        branch has no broad handler at all, so there the raw write turned an
+        already-accepted — and billable — cloud job into an uncaught
+        traceback."""
+        from comfy_cli import jobs_state as jobs_state_mod
+
+        real_write = jobs_state_mod.write
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=_FakeSubmit(prompt_id="obl192-cloud")))
+        # The stubs no-op `jobs_state.write`; restore the real one so the
+        # failure injected below is actually reached.
+        monkeypatch.setattr(jobs_state_mod, "write", real_write)
+        self._break_state_writes(monkeypatch, failure_point)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+        self._assert_queued_without_disconnect(lines, exit_code, "obl192-cloud")
+
+
 class TestBrokenPipeAtTheQueuedEmit:
     """A closed stdout at the `queued` line is the consumer leaving. It must
     propagate as itself — `__main__` turns that into the documented silent exit

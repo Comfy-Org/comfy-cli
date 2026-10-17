@@ -8,6 +8,7 @@ patch surface stays stable.
 """
 
 import json
+import logging
 import sys
 import time
 import uuid
@@ -54,6 +55,8 @@ from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
+
+logger = logging.getLogger(__name__)
 
 # Bounds on the `partner_nodes` telemetry property and on the partner-node names
 # echoed in the missing-credential error. class_type strings are attacker- (or
@@ -759,7 +762,12 @@ def _write_state(state):
     """
     try:
         return jobs_state.write(state)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        # The caller gets a null `state_file` and no error, so this log line is
+        # the only trail a swallowed failure leaves — and the one that names
+        # the resolved path when the config root is unwritable. `LOG_LEVEL`
+        # (comfy_cli.logging) surfaces it.
+        logger.debug("job state write failed for %r, continuing: %s", getattr(state, "prompt_id", None), e)
         return None
 
 
@@ -875,7 +883,20 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     watcher pid + create_time before the first write.
 
     ``where_fields`` carries the target-specific locators (``host``/``port`` for
-    local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair."""
+    local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair,
+    whose second element is None when the write could not land.
+
+    The write goes through ``_write_state``, not ``jobs_state.write`` directly,
+    and that is load-bearing: both callers run *after* the server accepted the
+    prompt, and the local one runs inside the ``except (WebSocketException,
+    ConnectionError, OSError)`` block's try. A raw call let a purely local
+    filesystem error — a config root resolved outside the sandbox, a read-only
+    or missing directory — surface to the caller as ``ws_disconnected`` with a
+    "re-run the command" hint, which an agent caller obeys, submitting another
+    GPU job for a prompt that was already queued. On the cloud side, where
+    there is no handler at all, the same raw call turned an accepted billable
+    job into an uncaught traceback. A state-file failure costs the caller the
+    durable record (``state_file`` comes back null) and nothing else."""
     state = jobs_state.new(
         prompt_id=prompt_id,
         client_id=client_id,
@@ -884,7 +905,7 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
         **where_fields,
     )
     state.item_map = (compose_meta or {}).get("items")
-    state_file = jobs_state.write(state)
+    state_file = _write_state(state)
     return state, state_file
 
 

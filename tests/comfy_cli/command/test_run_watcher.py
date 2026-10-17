@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from comfy_cli.command.run.watcher import _no_watch_requested, _spawn_watcher
+import pytest
+
+from comfy_cli.command.run.watcher import _no_watch_requested, _spawn_watcher, _tail_state_file
 
 
 class TestNoWatchRequested:
@@ -65,3 +67,61 @@ class TestSpawnWatcherHonorsKillSwitch:
 
         mock_popen.assert_not_called()
         assert result is False
+
+
+class TestTailStateFileToleratesAnUnreadableStateDir:
+    """A state-file read that can't happen at all must not fail the run.
+
+    ``_tail_state_file`` is called from ``_announce_async_queued`` — inside
+    ``execute``'s ``except (WebSocketException, ConnectionError, OSError)``
+    block's try, and after the server already accepted the prompt. So an
+    ``OSError`` escaping it is reported to the caller as ``ws_disconnected``
+    with a "re-run the command" hint for a job that is already queued, and an
+    agent caller obeys that hint (OBL-192: under Comfy Desktop on Windows the
+    `clishim` broker forwards ``HOME`` but not ``USERPROFILE``, so
+    ``expanduser("~")`` put the config root outside the sandbox and every
+    touch of the jobs dir raised ENOENT).
+
+    Pretty mode only, because that is the only mode that tails at all — but it
+    is the mode a human at a Desktop terminal is in.
+    """
+
+    FAILURES = [
+        FileNotFoundError(2, "No such file or directory"),
+        PermissionError(13, "Permission denied"),
+    ]
+
+    @staticmethod
+    def _pretty():
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        set_renderer(Renderer(mode=OutputMode.PRETTY, command="run"))
+
+    @staticmethod
+    def _unreadable(monkeypatch, exc):
+        from comfy_cli import jobs_state
+
+        def _boom(*_a, **_k):
+            raise exc
+
+        monkeypatch.setattr(jobs_state, "read", _boom)
+
+    @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
+    def test_poll_loop_read_returns_instead_of_raising(self, monkeypatch, capsys, exc):
+        self._pretty()
+        self._unreadable(monkeypatch, exc)
+        # A non-zero budget so the poll loop runs at least once; the assertion
+        # is simply that this call returns.
+        _tail_state_file("obl192-tail", seconds=0.05)
+        capsys.readouterr()
+
+    @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
+    def test_final_read_returns_instead_of_raising(self, monkeypatch, capsys, exc):
+        """``seconds=0`` skips the poll loop entirely, isolating the second
+        read — the one after the ``Live`` block, which is outside its
+        ``except``."""
+        self._pretty()
+        self._unreadable(monkeypatch, exc)
+        _tail_state_file("obl192-tail", seconds=0.0)
+        capsys.readouterr()
