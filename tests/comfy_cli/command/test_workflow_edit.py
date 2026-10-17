@@ -783,7 +783,7 @@ _SG_UUID = "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
 
 
 def _subgraph_workflow() -> dict:
-    """A minimal LEGACY subgraph template, shaped like the pre-ADR 0009 saves
+    """A minimal LEGACY subgraph template, shaped like the pre-ADR-SUBGRAPH-PROMOTION-0009 saves
     in the gallery (e.g. ``flux_dev_checkpoint_example.json`` node 56 → 52):
     a top-level subgraph instance `57` whose promoted `text`/`seed`/`steps`
     exist ONLY as `properties.proxyWidgets` entries routing to interior

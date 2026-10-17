@@ -199,7 +199,7 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     """Apply host-owned promoted widget values onto the expanded interior nodes.
 
     A promoted widget's value lives on the HOST instance (``widgets_values``
-    positional over the widget-backed subgraph inputs — ADR 0009); the
+    positional over the widget-backed subgraph inputs — ADR-SUBGRAPH-PROMOTION-0009); the
     interior widget is only its default. Expansion above copied the interior
     default, so a post-migration save (host prompt filled in, interior
     ``caption`` still ``''``) would submit the wrong prompt. Precedence, as the

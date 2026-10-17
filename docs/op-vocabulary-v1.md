@@ -890,7 +890,7 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 ## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
 
-The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+The frontend (ComfyUI_frontend ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted subgraph widget's
 value on the HOST instance — `widgets_values[i]` on the instance, positional
 over the definition's inputs that resolve to an interior widget — and runs
 that value over the interior default. Interior `path` writes (§8.7) therefore

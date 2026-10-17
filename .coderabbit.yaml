@@ -1,0 +1,26 @@
+reviews:
+  pre_merge_checks:
+    custom_checks:
+      - name: Architecture decision compliance
+        mode: warning
+        instructions: |
+          Review only the pull request's changed files, description, and diff.
+          Treat `docs/adr/*.md`, excluding `docs/adr/TEMPLATE.md`, as the
+          repository's architecture decisions. For each relevant ADR, read its
+          Status, Decision, and Consequences sections.
+
+          Warn when the diff contradicts an Accepted ADR. Treat a Proposed ADR
+          as directional guidance and say so. Also warn when the diff creates a
+          durable architectural boundary, invariant, data-ownership rule,
+          compatibility contract, or dependency choice but neither adds or
+          amends an ADR nor explains why the choice is local and reversible.
+
+          Do not flag pre-existing behavior, routine refactors, tests, docs, or
+          reversible implementation details. Every finding must name and link
+          the exact ADR when one applies and identify the changed line that
+          introduces the conflict.
+  path_instructions:
+    - path: "comfy_cli/**"
+      instructions: |
+        Treat accepted records under `docs/adr/` as required architecture
+        context and proposed records as directional guidance.

@@ -1,6 +1,6 @@
 """Promoted subgraph widgets — the host-owned value model.
 
-The frontend (``ComfyUI_frontend`` ADR 0009 *"Subgraph promoted widgets use
+The frontend (``ComfyUI_frontend`` ADR-SUBGRAPH-PROMOTION-0009 *"Subgraph promoted widgets use
 linked inputs"*, ``SubgraphNode.ts``) represents a promoted widget as a
 **linked subgraph input**:
 
@@ -475,7 +475,7 @@ def resolve_write(
 ) -> WriteTarget:
     """Resolve a widget address to the place whose value the graph runs.
 
-    * ``<instance>.<promoted>`` — the host instance's own value (ADR 0009)…
+    * ``<instance>.<promoted>`` — the host instance's own value (ADR-SUBGRAPH-PROMOTION-0009)…
       unless an outside link feeds that input, in which case the write follows
       the link to its source (a primitive's single widget, through reroutes);
       a source that is not a primitive is refused by name, because no widget
@@ -672,7 +672,7 @@ def trace_upstream_write(
 # --------------------------------------------------------------------------- #
 #
 # A port of the frontend's ``flushProxyWidgetMigration``
-# (``src/core/graph/subgraph/migration/proxyWidgetMigration.ts``; ADR 0009
+# (``src/core/graph/subgraph/migration/proxyWidgetMigration.ts``; ADR-SUBGRAPH-PROMOTION-0009
 # "Forward migration", "Primitive-node repair", "Proxy widget error
 # quarantine", "Serialization"). The frontend runs it on every subgraph host
 # when a workflow loads; the CLI runs it on the one instance whose legacy

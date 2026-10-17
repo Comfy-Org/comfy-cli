@@ -569,7 +569,7 @@ history.
   the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
   a same-day torch release resolved ahead of its matching torchvision.
 - Promoted subgraph widgets are edited where the frontend reads them. The
-  frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
+  frontend (ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted widget's value on the HOST instance
   (`widgets_values` positional over the widget-backed subgraph inputs) and
   runs that value over the interior default; `set-widget 57.width` used to
   follow the legacy `proxyWidgets` route into the interior node, so the edit

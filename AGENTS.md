@@ -63,3 +63,27 @@ The default branch is **`main`** — branch off `main` and open PRs against it.
   for the boilerplate.
 - End-to-end tests are disabled by default; enable them with `TEST_E2E=true pytest
   tests/e2e/` (see [`docs/TESTING-e2e.md`](docs/TESTING-e2e.md)).
+
+## Architecture Decision Records
+
+Architectural decisions live in `docs/adr/`. Code changes must be consistent
+with accepted ADRs. Proposed ADRs express design direction and should be
+treated as guidance during review. See `.agents/checks/adr-compliance.md` for
+the automated review rules.
+
+Write an ADR when a decision establishes a durable boundary, invariant, data
+ownership rule, compatibility contract, or dependency choice. Keep transient
+implementation details in the PR instead. Capture the context, alternatives,
+tradeoffs, and consequences that a future maintainer cannot infer from code.
+Start from `docs/adr/TEMPLATE.md`.
+
+ADR files are named
+`<DOMAIN>[-<SUBDOMAIN>]-<NNNN>-descriptive-title.md`: use at most two
+broad-to-narrow tags, with the owning subsystem first, followed by the next
+unused four-digit sequence number. Each ADR opens with
+`# ADR-<IDENTIFIER>: Title`, a `Date: YYYY-MM-DD` line, and a `## Status`
+section whose value is `Proposed`, `Accepted`, `Rejected`, `Deprecated`, or
+`Superseded`. Run `python scripts/check_adrs.py`; CI and pre-commit enforce the
+filename, metadata, identifier uniqueness, companion-directory naming,
+non-legacy references, and ADR-link integrity. There is deliberately no
+manually maintained index; list `docs/adr/` to discover records.

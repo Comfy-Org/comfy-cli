@@ -1,6 +1,6 @@
 """Promoted subgraph widgets: the host-owned value model (the "agent editing subgraph" report, scenarios 1/2).
 
-The frontend (``ComfyUI_frontend`` ADR 0009, ``SubgraphNode.ts``) represents a
+The frontend (``ComfyUI_frontend`` ADR-SUBGRAPH-PROMOTION-0009, ``SubgraphNode.ts``) represents a
 promoted widget as a *linked subgraph input*: the subgraph definition declares
 an input, a boundary link feeds it into an interior node's widget-backed input,
 and the HOST instance owns the value — ``widgets_values[i]`` on the instance,
@@ -120,7 +120,7 @@ def test_effective_value_falls_back_to_the_interior_widget(graph):
 
 
 def test_quarantined_host_value_wins_by_name(graph):
-    """ADR 0009: a repaired-but-unresolved legacy entry keeps its host value in
+    """ADR-SUBGRAPH-PROMOTION-0009: a repaired-but-unresolved legacy entry keeps its host value in
     ``proxyWidgetErrorQuarantine``; the frontend reads it before ``widgets_values``."""
     wf = _load("audio_minimax_music_3.json")
     inst = _instance(wf, 37)
