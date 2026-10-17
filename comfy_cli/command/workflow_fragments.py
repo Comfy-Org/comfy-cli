@@ -271,7 +271,7 @@ def decompose_cmd(
             api_workflow = convert_ui_to_api(data, object_info)
         except WorkflowConversionError as e:
             renderer.error(
-                code="workflow_conversion_failed",
+                code=e.code or "workflow_conversion_failed",
                 message=f"Could not convert frontend workflow to API format: {e}",
                 hint="re-export from ComfyUI, or pass a matching --input object_info.json",
             )

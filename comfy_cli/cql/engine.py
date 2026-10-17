@@ -4176,13 +4176,30 @@ def _dynamic_group_widgets(port: Port, prefix: str = "") -> list[Port]:
 
 
 class DynamicGroupBindingError(ValueError):
-    pass
+    """A DynamicGroup refusal; ``code`` is its ``error.code`` in ``comfy_cli/error_codes.py``.
+
+    Raised directly, it means the class's DynamicGroup schema is one this CLI does not support.
+    """
+
+    code = "dynamic_group_unsupported"
+
+
+class DynamicGroupLayoutError(DynamicGroupBindingError):
+    code = "dynamic_group_binding_mismatch"
+
+
+class DynamicGroupCountError(DynamicGroupBindingError):
+    code = "dynamic_group_count_out_of_range"
+
+
+class DynamicGroupLinkedRowsError(DynamicGroupBindingError):
+    code = "dynamic_group_rows_linked"
 
 
 def _dynamic_group_row_count(value: Any, available: int, width: int) -> int:
     # A corrupt controller must not allocate a roster larger than the saved data.
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or not width or value * width > available:
-        raise DynamicGroupBindingError("DynamicGroup row count does not match the saved widget values")
+        raise DynamicGroupLayoutError("DynamicGroup row count does not match the saved widget values")
     return value
 
 
@@ -4262,28 +4279,28 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
     source = values
     if "widgets_values_form" in node:
         if not isinstance(form, dict) or set(form) != {"order"}:
-            raise DynamicGroupBindingError("widgets_values_form must contain only an order array")
+            raise DynamicGroupLayoutError("widgets_values_form must contain only an order array")
         order = form["order"]
         if not isinstance(order, list) or not order or any(not isinstance(n, str) or not n for n in order):
-            raise DynamicGroupBindingError("widgets_values_form.order must be a non-empty array of widget names")
+            raise DynamicGroupLayoutError("widgets_values_form.order must be a non-empty array of widget names")
         if isinstance(values, list):
             if len(values) != len(order):
-                raise DynamicGroupBindingError("widgets_values_form length does not match widgets_values")
+                raise DynamicGroupLayoutError("widgets_values_form length does not match widgets_values")
             source = dict(zip(order, values))
         elif isinstance(values, dict):
             if len(order) != len(set(order)) or any(n not in values for n in order):
-                raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
+                raise DynamicGroupLayoutError("widgets_values_form has duplicated or missing named values")
         else:
-            raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
+            raise DynamicGroupLayoutError("widgets_values_form requires array or object widgets_values")
     entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
     saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
     if saved_length is not None:
         while len(entries) > saved_length and entries[-1].frontend_injected:
             entries.pop()
     if form is not None and form["order"] != [e.name for e in entries]:
-        raise DynamicGroupBindingError("widgets_values_form does not match the available DynamicGroup schema")
+        raise DynamicGroupLayoutError("widgets_values_form does not match the available DynamicGroup schema")
     if isinstance(values, list) and len(entries) != len(values):
-        raise DynamicGroupBindingError("DynamicGroup schema does not match the saved widget values")
+        raise DynamicGroupLayoutError("DynamicGroup schema does not match the saved widget values")
     for index, entry in enumerate(entries):
         if entry.owner is None or entry.port is None or entry.port.raw_spec is not None:
             continue
@@ -4291,7 +4308,7 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
             continue
         companion = source[entry.name] if isinstance(source, dict) else source[index]
         if entry.port.validate_shape(companion) or entry.port.validate_catalog(companion):
-            raise DynamicGroupBindingError(f"DynamicGroup companion {entry.name!r} must use a supported control mode")
+            raise DynamicGroupLayoutError(f"DynamicGroup companion {entry.name!r} must use a supported control mode")
     return entries
 
 
@@ -4352,7 +4369,7 @@ def _expand_widget_entries(
                     ):
                         rows.add(row)
                 if rows and name not in widgets_values:
-                    raise DynamicGroupBindingError(f"DynamicGroup controller {name!r} is missing for saved rows")
+                    raise DynamicGroupLayoutError(f"DynamicGroup controller {name!r} is missing for saved rows")
                 count = _dynamic_group_row_count(saved_value(name, idx, 0), len(rows), 1)
                 limit = str(count)
                 count = _dynamic_group_row_count(count, sum((len(row), row) < (len(limit), limit) for row in rows), 1)
@@ -4701,7 +4718,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     group_entries = _validate_dynamic_group_layout(node, m)
     has_group = group_entries is not None
     if has_group and "widgets_values_named" in node and not isinstance(node["widgets_values_named"], dict):
-        raise ValueError("widgets_values_named must be an object before editing widgets")
+        raise DynamicGroupLayoutError("widgets_values_named must be an object before editing widgets")
     raw_values = node.get("widgets_values")
     # Stage normalization, padding, and selector defaults locally. A refused or
     # invalid write promises that nothing changed, so none of this may reach the
@@ -4869,7 +4886,7 @@ def _write_dynamic_group_count(
     minimum = port.options.min if port.options.min is not None else 0
     maximum = port.options.max if port.options.max is not None else 20
     if isinstance(count, bool) or not isinstance(count, int) or not minimum <= count <= maximum:
-        raise ValueError(f"{port.name}: row count must be an integer between {minimum} and {maximum}")
+        raise DynamicGroupCountError(f"{port.name}: row count must be an integer between {minimum} and {maximum}")
     if "inputs" in node and (
         not isinstance(node["inputs"], list) or any(not isinstance(inp, dict) for inp in node["inputs"])
     ):
@@ -4885,14 +4902,14 @@ def _write_dynamic_group_count(
     names = {p.name for p in new_fields}
     removed = {e.name for e in old_entries} - names
     if any(i.get("name") in removed and i.get("link") is not None for i in node.get("inputs", [])):
-        raise ValueError(f"{port.name}: disconnect the removed rows before reducing their count")
+        raise DynamicGroupLinkedRowsError(f"{port.name}: disconnect the removed rows before reducing their count")
     surviving_inputs = [
         (index, inp) for index, inp in enumerate(node.get("inputs") or []) if inp.get("name") not in removed
     ]
     if any(
         inp.get("link") is not None and previous != current for current, (previous, inp) in enumerate(surviving_inputs)
     ):
-        raise ValueError(f"{port.name}: disconnect shifted inputs before reducing their count")
+        raise DynamicGroupLinkedRowsError(f"{port.name}: disconnect shifted inputs before reducing their count")
     old_names = {e.name for e in old_entries}
     new_values = {
         p.name: old_values[p.name] if p.name in old_values else _widget_default(p)

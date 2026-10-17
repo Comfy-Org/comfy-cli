@@ -830,8 +830,29 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "dynamic_group_unsupported",
         "A node class has a DynamicGroup schema this CLI does not support, so `comfy nodes widget-catalog` "
         "left it out of `types`. Consumers store that class's values opaquely and refuse widget writes to it. "
-        "Surfaced in `data.warnings[]` (not as an error envelope) so every other class is still published.",
+        "Surfaced in `data.warnings[]` (not as an error envelope) so every other class is still published. "
+        "The workflow edit commands, `workflow apply`/`foreach`, `workflow slots`, `workflow validate`, `run` "
+        "and `workflow decompose` raise it as the error code when a workflow uses such a class; nothing is "
+        "written.",
         "update comfy-cli, or leave the class's widgets unedited",
+    ),
+    ErrorCode(
+        "dynamic_group_binding_mismatch",
+        "A node's saved DynamicGroup values do not bind to its class's DynamicGroup schema: the saved row count "
+        "or controller disagrees with the saved rows, `widgets_values_form` or `widgets_values_named` is "
+        "malformed or disagrees with the schema, or a row's seed control mode is unsupported. Raised by the same "
+        "commands as `dynamic_group_unsupported`, before anything is read or written.",
+        "re-save the workflow in a ComfyUI frontend whose node schema matches the catalog, then retry",
+    ),
+    ErrorCode(
+        "dynamic_group_count_out_of_range",
+        "A DynamicGroup row-count write was not an integer between the group's `min` and `max`. Nothing was written.",
+        "read the group's `min`/`max` from `comfy nodes widget-catalog` (`dynamic_groups`) and write a count in range",
+    ),
+    ErrorCode(
+        "dynamic_group_rows_linked",
+        "Reducing a DynamicGroup row count would drop or shift a row input that has a link. Nothing was written.",
+        "disconnect the links into the rows being removed or shifted, then reduce the count",
     ),
     ErrorCode(
         "description_ignored",
