@@ -217,50 +217,73 @@ def _fetch_results(query: str, *, agent_origin: bool = False) -> dict:
 def _validate_source_identity(repository: str, commit: str, path: str) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("repository must be an owner/name pair")
+    if any(set(segment) == {"."} for segment in repository.split("/")):
+        raise ValueError("repository owner and name must not consist only of dots")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
         raise ValueError("commit must be a full 40-character Git SHA")
     if not path or path.startswith(("/", "\\")) or ".." in path.split("/"):
         raise ValueError("file must be a relative repository path without '..'")
 
 
-def _fetch_pinned_source(repository: str, commit: str, path: str) -> str:
+def _fetch_pinned_source(repository: str, commit: str, path: str, *, agent_origin: bool = False) -> str:
     """Fetch only a validated GitHub path at an immutable commit."""
+    import time
+
     import requests
 
     _validate_source_identity(repository, commit, path)
     url = f"https://raw.githubusercontent.com/{repository}/{commit}/{quote(path, safe='/')}"
+    deadline = time.monotonic() + TOTAL_REQUEST_DEADLINE
     response = requests.get(
         url,
         timeout=REQUEST_TIMEOUT,
         allow_redirects=False,
         stream=True,
-        headers={"Accept-Encoding": "identity", "X-Comfy-Code-Search-Origin": "agent"},
+        headers={
+            "Accept-Encoding": "identity",
+            **({"X-Comfy-Code-Search-Origin": "agent"} if agent_origin else {}),
+        },
     )
-    response.raise_for_status()
-    if response.is_redirect or response.is_permanent_redirect:
-        raise SourceContextError("source context refused an unexpected redirect")
-    body = bytearray()
-    for chunk in response.iter_content(chunk_size=4096):
-        body.extend(chunk)
-        if len(body) > MAX_SOURCE_BYTES:
-            raise SourceContextError("pinned source file exceeds the 1 MiB fetch cap")
-    try:
-        return body.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise SourceContextError("pinned source file is not UTF-8 text") from exc
+    with response:
+        response.raise_for_status()
+        if response.is_redirect or response.is_permanent_redirect:
+            raise SourceContextError("source context refused an unexpected redirect")
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=1024):
+            if time.monotonic() > deadline:
+                raise requests.Timeout("source context exceeded the total request deadline")
+            body.extend(chunk)
+            if len(body) > MAX_SOURCE_BYTES:
+                raise SourceContextError("pinned source file exceeds the 1 MiB fetch cap")
+        if time.monotonic() > deadline:
+            raise requests.Timeout("source context exceeded the total request deadline")
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SourceContextError("pinned source file is not UTF-8 text") from exc
 
 
-def _source_slice(repository: str, commit: str, path: str, start_line: int, end_line: int) -> dict:
+def _source_slice(
+    repository: str,
+    commit: str,
+    path: str,
+    start_line: int,
+    end_line: int,
+    *,
+    agent_origin: bool = False,
+) -> dict:
     if start_line < 1 or end_line < start_line:
         raise ValueError("line range must satisfy 1 <= start_line <= end_line")
     if end_line - start_line + 1 > MAX_CONTEXT_LINES:
         raise ValueError(f"line range may contain at most {MAX_CONTEXT_LINES} lines")
-    source = _fetch_pinned_source(repository, commit, path)
-    lines = source.splitlines()
+    source = _fetch_pinned_source(repository, commit, path, agent_origin=agent_origin)
+    lines = source.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     if start_line > len(lines):
         raise ValueError(f"start_line {start_line} is past end of file ({len(lines)} lines)")
     actual_end = min(end_line, len(lines))
-    text = "\n".join(lines[start_line - 1 : actual_end])
+    text = "\n".join(_strip_control_chars(line) for line in lines[start_line - 1 : actual_end])
     if len(text.encode("utf-8")) > MAX_SNIPPET_BYTES:
         raise SourceContextError("requested source range exceeds the 16 KiB snippet cap; request a smaller range")
     encoded_path = quote(path, safe="/")
@@ -271,32 +294,39 @@ def _source_slice(repository: str, commit: str, path: str, start_line: int, end_
         "start_line": start_line,
         "end_line": actual_end,
         "url": f"https://github.com/{repository}/blob/{commit}/{encoded_path}#L{start_line}-L{actual_end}",
-        "text": _strip_control_chars(text),
+        "text": text,
         "truncated": actual_end < end_line,
     }
 
 
-def _attach_context(results: list[dict]) -> None:
+def _attach_context(results: list[dict], *, agent_origin: bool = False) -> None:
     """Attach bounded fallback line windows to the first pinned matches."""
     total = 0
-    attached = 0
+    attempted = 0
     for result in results:
         commit = result.get("commit") or ""
         for match in result["matches"]:
             if not commit:
                 match["context_error"] = "context unavailable: result has no immutable commit"
                 continue
-            if attached >= MAX_CONTEXT_FILES:
+            if attempted >= MAX_CONTEXT_FILES:
                 match["context_error"] = (
                     f"context omitted: response cap allows {MAX_CONTEXT_FILES} snippets; use pinned expansion"
                 )
                 continue
             start = max(1, match["line"] - DEFAULT_CONTEXT_BEFORE)
             end = match["line"] + DEFAULT_CONTEXT_AFTER
+            attempted += 1
             try:
-                snippet = _source_slice(result["repository"], commit, result["file"], start, end)
+                snippet = _source_slice(
+                    result["repository"], commit, result["file"], start, end, agent_origin=agent_origin
+                )
             except Exception as exc:
                 match["context_error"] = f"context unavailable: {type(exc).__name__}"
+                continue
+            source_line = snippet["text"].split("\n")[match["line"] - snippet["start_line"]]
+            if source_line.rstrip() != match["preview"]:
+                match["context_error"] = "context unavailable: pinned source does not match indexed preview"
                 continue
             size = len(snippet["text"].encode("utf-8"))
             if total + size > MAX_TOTAL_SNIPPET_BYTES:
@@ -304,7 +334,6 @@ def _attach_context(results: list[dict]) -> None:
                 continue
             match["snippet"] = snippet
             total += size
-            attached += 1
 
 
 # Our own out-of-band channel on the validated `search` node for carrying a
@@ -667,7 +696,7 @@ def code_search(
         console.print("[bold red]Error: Code search is unavailable.[/bold red]")
         raise typer.Exit(code=1)
     if json_output:
-        _attach_context(results)
+        _attach_context(results, agent_origin=agent_origin)
     _print_results(results, stats, json_output=json_output)
 
 
@@ -684,7 +713,9 @@ def code_search_context(
     import requests
 
     try:
-        snippet = _source_slice(repository, commit, file, start_line, end_line)
+        caller = detect_caller()
+        agent_origin = caller.agentic and caller.source_env is not None
+        snippet = _source_slice(repository, commit, file, start_line, end_line, agent_origin=agent_origin)
     except ValueError as exc:
         message = str(exc)
         if json_output:
@@ -705,4 +736,4 @@ def code_search_context(
     else:
         console.print(f"[yellow]{UNTRUSTED_CONTENT_NOTE}[/yellow]")
         console.print(f"[cyan]{snippet['url']}[/cyan]")
-        console.print(snippet["text"])
+        console.print(Text(snippet["text"]))

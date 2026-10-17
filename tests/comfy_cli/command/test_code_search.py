@@ -12,6 +12,7 @@ from comfy_cli._lazy import LazyCommand
 from comfy_cli.command.code_search import (
     API_URL,
     DEFAULT_COUNT,
+    MAX_CONTEXT_FILES,
     MAX_COUNT,
     MAX_QUERY_BYTES,
     MAX_RESPONSE_BYTES,
@@ -23,6 +24,7 @@ from comfy_cli.command.code_search import (
     _attach_context,
     _build_query,
     _decode_search,
+    _fetch_pinned_source,
     _fetch_results,
     _format_results,
     _get_stats,
@@ -31,7 +33,10 @@ from comfy_cli.command.code_search import (
     _source_slice,
     _strip_control_chars,
     _validate_query,
+    _validate_source_identity,
     app,
+    code_search_context,
+    console,
 )
 
 runner = CliRunner()
@@ -74,6 +79,133 @@ def test_source_slice_rejects_unpinned_or_oversized_expansion():
         _source_slice("owner/repo", "main", "nodes.py", 1, 2)
     with pytest.raises(ValueError, match="at most 200"):
         _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 201)
+
+
+def test_source_slice_preserves_newlines_while_sanitizing_each_line():
+    source = "first\x1b\n\tsecond\x00\nthird\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"] == "first\n\tsecond\nthird"
+
+
+def test_source_slice_only_counts_newline_as_a_line_separator():
+    source = "first\u2028still first\nsecond\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 2, 2)
+    assert snippet["start_line"] == 2
+    assert snippet["text"] == "second"
+
+
+class _StreamingResponse:
+    def __init__(self, chunks, *, redirect=False):
+        self.chunks = chunks
+        self.is_redirect = redirect
+        self.is_permanent_redirect = False
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.closed = True
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        assert chunk_size == 1024
+        yield from self.chunks
+
+
+def test_fetch_pinned_source_enforces_total_deadline_and_closes_response():
+    response = _StreamingResponse([b"first", b"second"])
+    with (
+        patch("requests.get", return_value=response),
+        patch("time.monotonic", side_effect=[0, TOTAL_REQUEST_DEADLINE + 1]),
+        pytest.raises(requests.Timeout, match="total request deadline"),
+    ):
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+    assert response.closed
+
+
+def test_fetch_pinned_source_closes_response_on_redirect_refusal():
+    response = _StreamingResponse([], redirect=True)
+    with patch("requests.get", return_value=response), pytest.raises(Exception, match="redirect"):
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+    assert response.closed
+
+
+@pytest.mark.parametrize("chunks", [[b"x" * (1024 * 1024 + 1)], [b"\xff"]])
+def test_fetch_pinned_source_closes_response_on_early_error(chunks):
+    response = _StreamingResponse(chunks)
+    with patch("requests.get", return_value=response), pytest.raises(Exception):
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+    assert response.closed
+
+
+def test_fetch_pinned_source_only_sends_origin_header_for_agents():
+    plain = _StreamingResponse([b"ok"])
+    agent = _StreamingResponse([b"ok"])
+    with patch("requests.get", side_effect=[plain, agent]) as get:
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py")
+        _fetch_pinned_source("owner/repo", "a" * 40, "nodes.py", agent_origin=True)
+    assert "X-Comfy-Code-Search-Origin" not in get.call_args_list[0].kwargs["headers"]
+    assert get.call_args_list[1].kwargs["headers"]["X-Comfy-Code-Search-Origin"] == "agent"
+
+
+@pytest.mark.parametrize("repository", ["owner/.", "owner/..", "./repo", "../repo"])
+def test_validate_source_identity_rejects_dot_only_segments(repository):
+    with pytest.raises(ValueError, match="dots"):
+        _validate_source_identity(repository, "a" * 40, "nodes.py")
+
+
+def test_attach_context_caps_failed_fetch_attempts():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": line, "preview": "missing", "url": "match"} for line in range(1, 8)],
+        }
+    ]
+    with patch("comfy_cli.command.code_search._source_slice", side_effect=requests.Timeout) as source_slice:
+        _attach_context(results)
+    assert source_slice.call_count == MAX_CONTEXT_FILES
+    assert "response cap" in results[0]["matches"][MAX_CONTEXT_FILES]["context_error"]
+
+
+def test_attach_context_flags_stale_index_preview():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": 2, "preview": "old content", "url": "match"}],
+        }
+    ]
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value="header\nnew content\n"):
+        _attach_context(results)
+    match = results[0]["matches"][0]
+    assert "does not match indexed preview" in match["context_error"]
+    assert "snippet" not in match
+
+
+def test_context_console_prints_remote_source_as_literal_text():
+    snippet = {
+        "url": "https://example.test/source#L1-L1",
+        "text": "data[i] list[int] unmatched [/] [link=https://evil.test]fake[/link]",
+    }
+    caller = MagicMock(agentic=False, source_env=None)
+    with (
+        patch("comfy_cli.command.code_search.detect_caller", return_value=caller),
+        patch("comfy_cli.command.code_search._source_slice", return_value=snippet),
+        console.capture() as capture,
+    ):
+        code_search_context.__wrapped__("owner/repo", "a" * 40, "nodes.py", 1, 1, False)
+    output = capture.get()
+    assert "data[i]" in output
+    assert "list[int]" in output
+    assert "[link=https://evil.test]fake[/link]" in output
 
 
 # ---------------------------------------------------------------------------

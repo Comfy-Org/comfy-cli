@@ -530,6 +530,22 @@ class TestTrackCommandRedaction:
         assert properties["count"] == 20
         assert "private" not in str(properties)
 
+    def test_code_search_context_identity_is_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("code-search-context")
+        def context(repository, commit, file):
+            return None
+
+        context(repository="private/repository", commit="a-secret-sha", file="private/path.py")
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["repository"] == "<redacted>"
+        assert properties["commit"] == "<redacted>"
+        assert properties["file"] == "<redacted>"
+        assert "private" not in str(properties)
+        assert "a-secret-sha" not in str(properties)
+
     def test_set_civitai_api_token_is_redacted(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
