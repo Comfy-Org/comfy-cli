@@ -855,3 +855,86 @@ def test_permissions_grant_names_the_cli_as_it_was_invoked(home: Path, monkeypat
     res = CliRunner().invoke(app, ["permissions"])
     assert res.exit_code == 0, res.stdout
     assert _envelope(res)["data"]["grant"]["deny"] == f"{want} agent deny <id>"
+
+
+def _live(monkeypatch, sandbox: dict | None = None) -> None:
+    """Make ``/health`` answer, so the CLI sees a live agent, not a stale file."""
+    from comfy_cli.agent import command
+
+    body = json.dumps({"sandbox": sandbox or {"mode": "seatbelt"}}).encode()
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(body))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["allow", "--approve", "0123456789abcdef"],
+        ["allow", "--path", "<folder>", "--reason", "reference photos"],
+        ["allow", "--host", "models.example.com", "--reason", "a VAE"],
+        ["deny", "0123456789abcdef"],
+    ],
+)
+def test_cli_refuses_to_write_while_an_agent_is_answering(tmp_path: Path, monkeypatch, argv: list[str]):
+    """A running agent is the only writer: the CLI refuses instead of losing the edit."""
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    before = (root / "permissions.json").read_text()
+    _live(monkeypatch)
+
+    argv = [str(folder) if a == "<folder>" else a for a in argv]
+    res = CliRunner().invoke(app, [*argv, "--data-dir", str(root)])
+    assert res.exit_code == 1, res.stdout
+    err = _envelope(res)["error"]
+    assert err["code"] == "agent_running"
+    assert "8190" in err["message"]
+    assert "agent panel" in err["hint"]
+    assert (root / "permissions.json").read_text() == before, "a refused write must leave the file alone"
+    assert not (root / "egress-allow.json").exists()
+
+
+def test_cli_writes_when_the_discovery_file_is_stale(tmp_path: Path, monkeypatch):
+    """A crashed agent leaves agent.json behind; that must not lock the user out."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    monkeypatch.setattr(command, "_sandbox_status", lambda port: None)
+
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["approved"]["target"] == str(folder)
+    assert "next start" in data["note"] and "20 second" not in data["note"]
+    _validate(data)
+    assert read_state(root).paths[0]["path"] == str(folder)
+
+
+def test_permissions_offers_no_cli_grant_while_an_agent_is_answering(tmp_path: Path, monkeypatch):
+    root = tmp_path / "data"
+    req = _req("0123456789abcdef", "host", "models.example.com", "a VAE")
+    _write_pending(root, req)
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    _live(monkeypatch)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["agent"]["running"] is True
+    assert data["grant"] == {}, "no command here would take effect, so none is offered"
+    assert "agent panel" in data["answer_in"]
+    assert data["pending"] == [req]
+    _validate(data)
+
+    _pin_renderer(OutputMode.PRETTY)
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.output
+    assert res.exception is None
+    assert "agent panel" in res.output
+    assert "--approve" not in res.output, "the pretty output must not hand over a command that is refused"
