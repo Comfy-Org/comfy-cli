@@ -1312,6 +1312,31 @@ class TestDelete:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_edit_invalid"
 
+    def test_success_and_error_envelopes_name_the_same_command(self, patched_graph, tmp_path, capsys):
+        """Both envelopes must say ``workflow delete-node`` — the invoked command.
+
+        Regression: the success path passed ``"workflow delete"`` to ``_finish``
+        while the error path fell back to ``renderer.command``, so the two
+        envelopes disagreed and the success one named a DIFFERENT, real command
+        (the cloud/local CRUD ``comfy workflow delete``). Because that name is
+        itself registered in ``COMMAND_SCHEMAS``, the discovery ratchet stayed
+        green while agents were routed to the wrong command and schema — a name
+        that only looked registered.
+        """
+        ok = _run(["delete-node", str(_write(tmp_path, _base_workflow(), "ok.json")), "7"], capsys)
+        err = _run(["delete-node", str(_write(tmp_path, _base_workflow(), "err.json")), "999"], capsys)
+        assert ok["ok"] is True, ok
+        assert err["ok"] is False, err
+        assert ok["command"] == "workflow delete-node"
+        assert err["command"] == "workflow delete-node"
+        assert ok["command"] == err["command"]
+
+    def test_delete_node_command_name_resolves_to_a_registered_schema(self):
+        """The emitted name must be the registered one, not a near-miss sibling."""
+        from comfy_cli.discovery import COMMAND_SCHEMAS
+
+        assert COMMAND_SCHEMAS["comfy workflow delete-node"] == "workflow"
+
 
 # ---------------------------------------------------------------------------
 # clear
