@@ -523,16 +523,24 @@ the follow-up commands for a cloud job). The async envelope carries no
 
 ### Known limit: a state-file failure is never a run failure
 
-On an **async submit** (the default, no `--wait`, local or cloud) and on local
-`--wait`, writing the job's state file is best-effort. If the state directory
+Writing the job's state file is best-effort on an **async submit** (the default,
+no `--wait`, local or cloud) and on **local `--wait`**. If the state directory
 can't be written — a config root that resolved somewhere unreachable, a
-read-only or sandboxed home, a full disk — the submit still reports `ok: true`
-with `data.status: "queued"` and `data.state_file: null`, because by then the
-server has already accepted the prompt. **`state_file: null` is not a failed
-run**, and in particular it is not a transport error: there is nothing to
-retry, and re-submitting queues a second job for a prompt that is already
-running. Follow the job by `prompt_id` (`comfy jobs status <prompt_id>`) and
-treat a missing record as "unknown", not "did not run".
+read-only or sandboxed home, a full disk — the run still reports `ok: true`,
+because by then the server has already accepted the prompt. What the envelope
+says depends on the path, and `data.state_file` is `null` on both:
+
+- **async submit** — `data.status: "queued"`, exactly as it would be with the
+  record written.
+- **local `--wait`** — the run goes on to completion in the foreground and
+  finishes `data.status: "completed"` with its outputs, so a failed state write
+  costs you only the on-disk record, not the result.
+
+**`state_file: null` is not a failed run**, and in particular it is not a
+transport error: there is nothing to retry, and re-submitting queues a second
+job for a prompt that is already running. Follow an async job by `prompt_id`
+(`comfy jobs status <prompt_id>`) and treat a missing record as "unknown", not
+"did not run".
 
 With no record there is also nothing for a background watcher to update, so the
 spawn is skipped and `data.watcher_spawned` is `false` — poll

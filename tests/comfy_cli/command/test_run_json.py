@@ -2361,6 +2361,75 @@ class TestStateWriteFailureIsNotADisconnect:
         assert spawned == [], "no record to update, so no watcher should have been launched"
 
     @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_local_wait_still_completes(self, failure_point, monkeypatch, workflow_file, capsys):
+        """`--wait` writes twice — at submit and at completion — and both already
+        went through `_write_state`. Pinned here because the documented envelope
+        differs from the async one: this path runs to completion in the
+        foreground, so it ends `completed` with its outputs, not `queued`."""
+        self._break_state_writes(monkeypatch, failure_point)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            # "p" is what `_local_ws_that_finishes` stamps on its `executing`
+            # frame; any other id leaves the recv loop waiting forever.
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            _local_ws_that_finishes(MockWs)
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=True)
+
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        # NOT `queued`: this path ran to completion in the foreground, so the
+        # lost record costs the caller the record and nothing else.
+        assert data["status"] == "completed"
+        assert data["state_file"] is None
+        assert data["prompt_id"] == "p"
+        blob = json.dumps(lines)
+        assert "ws_disconnected" not in blob
+        assert "re-run the command" not in blob
+
+    @pytest.mark.parametrize(
+        ("evil", "expect"),
+        [("x[/]y", "[/]"), ("x[bold red]y[/bold red]", "[bold red]")],
+        ids=["stray_closing_tag", "well_formed_tag"],
+    )
+    def test_a_markup_bearing_prompt_id_does_not_abort_the_pretty_panel(
+        self, evil, expect, monkeypatch, workflow_file, capsys
+    ):
+        """`prompt_id` reaches the pretty queued panel TWICE: on its own line,
+        and inside `watch_command`, which both callers build as
+        `comfy jobs watch <prompt_id>`.
+
+        Reachable from this PR's change: an id carrying markup also fails
+        `_SAFE_PROMPT_ID`, so it used to stop at the submit-time write.
+
+        Two payloads, because they fail differently. A stray CLOSING tag raises
+        `MarkupError` — a crash after the server accepted the job. A WELL-FORMED
+        tag raises nothing at all and simply lets the server restyle the user's
+        terminal, which is the quieter half of the same hole.
+        """
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        set_renderer(Renderer(mode=OutputMode.PRETTY, command="run"))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.command.run._tail_state_file"),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": evil}).encode()
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=False, verbose=False, timeout=30)
+        combined = "".join(capsys.readouterr())
+
+        assert "comfy jobs watch" in combined, "the panel must still render"
+        # Escaped means SHOWN LITERALLY, so PRESENCE is the proof: an
+        # interpreted tag would have been consumed and absent from the text.
+        # Twice, because both sinks carry the id.
+        assert combined.count(expect) >= 2, f"{expect!r} should appear inert on both lines, got:\n{combined}"
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
     def test_cloud_async(self, failure_point, monkeypatch, workflow_file, capsys):
         """Same shared helper, the other call site. `execute_cloud`'s non-wait
         branch has no broad handler at all, so there the raw write turned an

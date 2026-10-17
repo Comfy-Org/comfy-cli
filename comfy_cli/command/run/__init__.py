@@ -948,11 +948,15 @@ def _announce_async_queued(
         # a run that otherwise succeeded.
         state_line = state_file if state_file else "[dim]not written — track by prompt_id[/dim]"
         pprint(
-            # `prompt_id` is server-chosen: a value carrying Rich markup would
-            # otherwise raise MarkupError here, or inject into the terminal.
+            # `prompt_id` is server-chosen, and it appears TWICE here: on its
+            # own line, and again inside `watch_command`, which both callers
+            # build as `comfy jobs watch <prompt_id>`. A value carrying Rich
+            # markup raises MarkupError at either sink — aborting pretty output
+            # for a job that was already accepted — or injects into the
+            # terminal, so both are escaped.
             f"{status_glyph('queued')} [dim]{sanitize_markup(prompt_id)}[/dim]\n"
             f"  [dim]workflow [/dim]{workflow_name}\n"
-            f"  [dim]watch    [/dim][cyan]{watch_command}[/cyan]\n"
+            f"  [dim]watch    [/dim][cyan]{sanitize_markup(watch_command)}[/cyan]\n"
             f"  [dim]state    [/dim]{state_line}"
         )
         if not watcher_spawned:
