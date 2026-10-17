@@ -84,6 +84,28 @@ def _strip_control_chars(text: str) -> str:
     return _CONTROL_CHARS_RE.sub("", text)
 
 
+def _strip_control_chars_per_line(lines: list[str]) -> str:
+    """Scrub each pinned source line, then rejoin with the separators we own.
+
+    `_strip_control_chars` removes `\x0a` on purpose, for the single-row
+    preview case its comment describes: one forged newline there lets an
+    indexed repository emit a second row indistinguishable from a real match.
+    A pinned source window is the other case. It is a multi-line block by
+    construction, the caller already split the fetched file on its own line
+    breaks, and the only `\x0a` left are the joiners inserted here — so
+    stripping them deletes exactly the structure and nothing hostile. Doing it
+    cost the whole window: a 49-line Python class came back as one 2 KiB line
+    with no indentation, which does not parse and is not readable reference
+    source for an indentation-significant language.
+
+    Scrubbing per line keeps ESC/C1 out while preserving line structure, and
+    the result still carries its own integrity check: the window's line count
+    must equal `end_line - start_line + 1`, so no forged row can be smuggled
+    in under the pinned range.
+    """
+    return "\n".join(_strip_control_chars(line) for line in lines)
+
+
 def _safe_markup_text(text: str) -> str:
     """Escape Rich markup and strip control chars from service-controlled text
     destined for an f-string passed to console.print (rather than a Text
@@ -260,7 +282,8 @@ def _source_slice(repository: str, commit: str, path: str, start_line: int, end_
     if start_line > len(lines):
         raise ValueError(f"start_line {start_line} is past end of file ({len(lines)} lines)")
     actual_end = min(end_line, len(lines))
-    text = "\n".join(lines[start_line - 1 : actual_end])
+    window = lines[start_line - 1 : actual_end]
+    text = _strip_control_chars_per_line(window)
     if len(text.encode("utf-8")) > MAX_SNIPPET_BYTES:
         raise SourceContextError("requested source range exceeds the 16 KiB snippet cap; request a smaller range")
     encoded_path = quote(path, safe="/")
@@ -271,7 +294,8 @@ def _source_slice(repository: str, commit: str, path: str, start_line: int, end_
         "start_line": start_line,
         "end_line": actual_end,
         "url": f"https://github.com/{repository}/blob/{commit}/{encoded_path}#L{start_line}-L{actual_end}",
-        "text": _strip_control_chars(text),
+        "text": text,
+        "line_count": len(window),
         "truncated": actual_end < end_line,
     }
 
