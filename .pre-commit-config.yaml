@@ -4,7 +4,7 @@ repos:
       - id: adr-validation
         name: validate architecture decision records
         entry: python scripts/check_adrs.py
-        language: system
+        language: python
         pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
