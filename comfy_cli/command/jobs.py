@@ -2356,9 +2356,23 @@ def _is_cloud(where: str | None) -> bool:
     try:
         decision = where_module.resolve_default(flag=where)
     except ValueError:
-        # Invalid value — fall back to local; the validating command
-        # (cmdline.py top-level option) will surface ``where_invalid``.
-        return False
+        # An invalid persisted ``where_default`` shouldn't be fatal; fall back to
+        # the flag (if valid) or auto-detect with the bad config value dropped.
+        try:
+            decision = where_module.resolve(flag=where, config_value=None)
+        except ValueError as exc:
+            # The flag/env/project value itself is bad, so dropping the config
+            # changed nothing and no further fallback can make it valid. Emit the
+            # shared ``where_invalid`` envelope and exit, exactly as ``nodes``
+            # does — this used to `return False`, on the assumption that
+            # ``cmdline.py``'s top-level ``--where`` had already validated the
+            # value, but that only covers ``comfy --where X jobs ls``. A
+            # per-command ``comfy jobs ls --where bogus`` (or an exported
+            # ``COMFY_WHERE=bogus``) reaches no such validator, so it silently
+            # routed to local and exited 0 with ``ok: true``: a machine consumer
+            # got a successful *local* answer to a question about a target it
+            # never named.
+            raise where_module.where_invalid_exit(exc) from exc
     return decision.target is where_module.WhereTarget.CLOUD
 
 
