@@ -1,11 +1,14 @@
 """Tests for the code-search command."""
 
+import ast
+import io
 import json
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from rich.console import Console
 from typer.testing import CliRunner
 
 from comfy_cli._lazy import LazyCommand
@@ -78,6 +81,99 @@ def test_attach_context_makes_declaration_only_match_implementation_usable():
     assert match["preview"] == "class Example:"
     assert match["snippet"]["text"] != match["preview"]
     assert "NORMALIZED_AMPLITUDE" in match["snippet"]["text"]
+
+
+def test_source_slice_returns_one_text_line_per_pinned_line():
+    """The window must arrive as the lines it claims, not as one joined row.
+
+    `_strip_control_chars` strips `\x0a` deliberately, for single-row service
+    previews. Applied to a multi-line pinned window it deleted every
+    separator: a 49-line KJNodes class came back as one 2 KiB line with no
+    indentation, so the structure a Python reference is read for was gone even
+    though the bytes were all present. Nothing here asserted line structure,
+    which is how that shipped.
+    """
+    source = "".join(f"line{n}\n" for n in range(1, 11))
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 3, 7)
+    assert snippet["text"].split("\n") == ["line3", "line4", "line5", "line6", "line7"]
+    assert snippet["line_count"] == 5
+    assert snippet["line_count"] == snippet["end_line"] - snippet["start_line"] + 1
+
+
+def test_source_slice_window_is_still_parseable_python():
+    source = (
+        "header\n"
+        "class Example:\n"
+        "    @classmethod\n"
+        "    def INPUT_TYPES(s):\n"
+        '        return {"required": {"amp": ("NORMALIZED_AMPLITUDE",)}}\n'
+    )
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 2, 5)
+    # Indentation-significant source only survives transport if the newlines do.
+    ast.parse(snippet["text"])
+
+
+def test_source_slice_still_strips_escapes_inside_each_line():
+    source = "safe\nbefore\x1b[2Jafter\x00\x9b\ntail\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    # ESC and the C0/C1 bytes go, exactly as for a single-row preview; the
+    # inert residue of a sequence is left alone, as it already was. What is
+    # new is only that the three lines are still three lines.
+    assert snippet["text"].split("\n") == ["safe", "before[2Jafter", "tail"]
+    assert "\x1b" not in snippet["text"]
+    assert "\x00" not in snippet["text"]
+    assert "\x9b" not in snippet["text"]
+    assert snippet["line_count"] == 3
+
+
+def test_source_slice_does_not_promote_unicode_separator_to_new_line():
+    source = "safe\ncomment\u2028code\ntail\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"].split("\n") == ["safe", "commentcode", "tail"]
+    assert snippet["line_count"] == 3
+
+
+def test_source_slice_strips_bidi_and_other_format_controls():
+    source = "safe\nleft\u202eright\nzero\u200bwidth\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"].split("\n") == ["safe", "leftright", "zerowidth"]
+
+
+def test_context_human_output_prints_source_as_literal_text():
+    source = 'lines[i]\ndict[str, int]\nr"[/\\\\]"\n'
+    output = io.StringIO()
+    literal_console = Console(file=output, force_terminal=False, width=200)
+    with (
+        patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source),
+        patch("comfy_cli.command.code_search.console", literal_console),
+    ):
+        code_search_context("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    rendered = output.getvalue()
+    assert "lines[i]" in rendered
+    assert "dict[str, int]" in rendered
+    assert 'r"[/\\\\]"' in rendered
+
+
+def test_attach_context_preserves_line_structure():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [{"line": 2, "preview": "class Example:", "url": "match"}],
+        }
+    ]
+    source = "header\nclass Example:\n    TYPE = 'NORMALIZED_AMPLITUDE'\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        _attach_context(results)
+    snippet = results[0]["matches"][0]["snippet"]
+    assert snippet["text"].split("\n") == ["header", "class Example:", "    TYPE = 'NORMALIZED_AMPLITUDE'"]
+    assert snippet["line_count"] == 3
 
 
 def test_source_slice_rejects_unpinned_or_oversized_expansion():
