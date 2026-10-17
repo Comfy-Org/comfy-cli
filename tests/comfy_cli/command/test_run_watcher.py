@@ -86,9 +86,11 @@ class TestTailStateFileToleratesAnUnreadableStateDir:
     is the mode a human at a Desktop terminal is in.
     """
 
+    # Factories, not instances: a shared exception instance would pin its
+    # `__traceback__` on a class attribute for the whole session.
     FAILURES = [
-        FileNotFoundError(2, "No such file or directory"),
-        PermissionError(13, "Permission denied"),
+        lambda: FileNotFoundError(2, "No such file or directory"),
+        lambda: PermissionError(13, "Permission denied"),
     ]
 
     @staticmethod
@@ -99,29 +101,29 @@ class TestTailStateFileToleratesAnUnreadableStateDir:
         set_renderer(Renderer(mode=OutputMode.PRETTY, command="run"))
 
     @staticmethod
-    def _unreadable(monkeypatch, exc):
+    def _unreadable(monkeypatch, make_exc):
         from comfy_cli import jobs_state
 
         def _boom(*_a, **_k):
-            raise exc
+            raise make_exc()
 
         monkeypatch.setattr(jobs_state, "read", _boom)
 
-    @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
-    def test_poll_loop_read_returns_instead_of_raising(self, monkeypatch, capsys, exc):
+    @pytest.mark.parametrize("make_exc", FAILURES, ids=lambda f: type(f()).__name__)
+    def test_poll_loop_read_returns_instead_of_raising(self, monkeypatch, capsys, make_exc):
         self._pretty()
-        self._unreadable(monkeypatch, exc)
+        self._unreadable(monkeypatch, make_exc)
         # A non-zero budget so the poll loop runs at least once; the assertion
         # is simply that this call returns.
         _tail_state_file("obl192-tail", seconds=0.05)
         capsys.readouterr()
 
-    @pytest.mark.parametrize("exc", FAILURES, ids=lambda e: type(e).__name__)
-    def test_final_read_returns_instead_of_raising(self, monkeypatch, capsys, exc):
+    @pytest.mark.parametrize("make_exc", FAILURES, ids=lambda f: type(f()).__name__)
+    def test_final_read_returns_instead_of_raising(self, monkeypatch, capsys, make_exc):
         """``seconds=0`` skips the poll loop entirely, isolating the second
         read — the one after the ``Live`` block, which is outside its
         ``except``."""
         self._pretty()
-        self._unreadable(monkeypatch, exc)
+        self._unreadable(monkeypatch, make_exc)
         _tail_state_file("obl192-tail", seconds=0.0)
         capsys.readouterr()

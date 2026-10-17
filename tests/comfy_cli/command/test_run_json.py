@@ -2290,25 +2290,29 @@ class TestStateWriteFailureIsNotADisconnect:
 
     # Where the OBL-192 `OSError` surfaces, outermost call last. Patching each
     # in turn pins the behaviour on the *handler*, not on one mock shape.
+    # Each value builds a FRESH exception per raise. A shared instance would
+    # pin its `__traceback__` — and so every frame it passed through — on a
+    # class attribute for the rest of the session; this suite has already been
+    # OOM-killed once by retained frames (see `_mock_exec` in `test_run.py`).
     FAILURE_POINTS = {
         # `state_dir()`'s mkdir under the un-forwarded config root — the actual
         # Windows-under-Desktop shape.
-        "state_dir": FileNotFoundError(2, "No such file or directory"),
+        "state_dir": lambda: FileNotFoundError(2, "No such file or directory"),
         # The atomic write itself, where the directory lookup happened to work
         # but the file did not (sandboxed/read-only root).
-        "atomic_write_text": PermissionError(13, "Permission denied"),
+        "atomic_write_text": lambda: PermissionError(13, "Permission denied"),
         # `jobs_state.write` whole, which is what the call site actually sees.
-        "write": OSError(5, "Input/output error"),
+        "write": lambda: OSError(5, "Input/output error"),
     }
 
     @staticmethod
     def _break_state_writes(monkeypatch, failure_point):
         from comfy_cli import jobs_state as jobs_state_mod
 
-        exc = TestStateWriteFailureIsNotADisconnect.FAILURE_POINTS[failure_point]
+        make_exc = TestStateWriteFailureIsNotADisconnect.FAILURE_POINTS[failure_point]
 
         def _boom(*_a, **_k):
-            raise exc
+            raise make_exc()
 
         monkeypatch.setattr(jobs_state_mod, failure_point, _boom)
 
