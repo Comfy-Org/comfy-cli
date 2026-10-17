@@ -292,6 +292,30 @@ def test_attach_context_flags_stale_index_preview():
     assert "snippet" not in match
 
 
+def test_attach_context_flags_eof_truncated_window_without_aborting_search():
+    results = [
+        {
+            "repository": "owner/repo",
+            "commit": "b" * 40,
+            "file": "nodes.py",
+            "matches": [
+                {"line": 500, "preview": "near eof", "url": "match-1"},
+                {"line": 5, "preview": "later match", "url": "match-2"},
+            ],
+        }
+    ]
+    eof_snippet = {"url": "match-1", "text": "only one line", "start_line": 498}
+    with patch(
+        "comfy_cli.command.code_search._source_slice",
+        side_effect=[eof_snippet, requests.Timeout],
+    ):
+        _attach_context(results)
+    first, second = results[0]["matches"]
+    assert "context unavailable" in first["context_error"]
+    assert "snippet" not in first
+    assert "context_error" in second
+
+
 def test_context_console_prints_remote_source_as_literal_text():
     snippet = {
         "url": "https://example.test/source#L1-L1",

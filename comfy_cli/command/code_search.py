@@ -352,10 +352,10 @@ def _attach_context(results: list[dict], *, agent_origin: bool = False) -> None:
                 snippet = _source_slice(
                     result["repository"], commit, result["file"], start, end, agent_origin=agent_origin
                 )
+                source_line = snippet["text"].split("\n")[match["line"] - snippet["start_line"]]
             except Exception as exc:
                 match["context_error"] = f"context unavailable: {type(exc).__name__}"
                 continue
-            source_line = snippet["text"].split("\n")[match["line"] - snippet["start_line"]]
             if source_line.rstrip() != match["preview"]:
                 match["context_error"] = "context unavailable: pinned source does not match indexed preview"
                 continue
