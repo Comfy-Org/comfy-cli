@@ -135,6 +135,18 @@ history.
 
 ### Fixed
 
+- `comfy run` no longer reports a failure to write its own job-state file as a
+  lost connection to the ComfyUI server. The state file is a convenience
+  record, written after the server has already accepted the prompt, so a
+  config directory the CLI cannot write — an unreachable or read-only home, a
+  sandboxed process, a full disk — used to surface as `ws_disconnected` with a
+  "check the server is still running; re-run the command" hint. Re-running on
+  that advice submits the same workflow a second time, and an automated caller
+  obeying the hint could queue several GPU jobs for one request. A submit the
+  server accepted now reports `queued` as usual, with `state_file: null` to say
+  no record was kept; follow the job by its `prompt_id` instead, and run with
+  `LOG_LEVEL=DEBUG` to see what the write failed on. Real transport failures
+  are reported exactly as before.
 - `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
   when the sign-in token it started with expires mid-run. The token lasts
   fifteen minutes, and the run sent the one it started with for every request
