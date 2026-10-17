@@ -131,7 +131,11 @@ history.
 - `comfy workflow print` renders a graph with broken links instead of refusing
   it: the input prints `None`, the line is marked `BROKEN`, and a warning names
   the `connect` that repairs it. A stale row whose value already reaches the
-  node through another link is reported as a leftover.
+  node through another link is reported as a leftover. Recoverable stale
+  target slots and duplicate link rows now follow the same live-holder and
+  last-row-wins rules as workflow conversion, with warnings instead of losing
+  the graph; malformed and ambiguous promotion boundaries remain bounded and
+  fail closed.
 
 ### Fixed
 
