@@ -1,47 +1,41 @@
 """``comfy agent`` — the Typer surface over :mod:`comfy_cli.agent`.
 
 ``permissions`` shows the agent's requests waiting for a human, what the local
-agent may reach beyond its defaults, and whether one is running; ``allow
---approve <id>`` / ``deny <id>`` answer a request the agent's ``request_path``
-/ ``request_host`` tools recorded (the model cannot answer its own request);
-``allow --path`` / ``--host`` grants a folder or a host outright.
+agent may reach beyond its defaults, and whether one is running. It only reads:
+the user approves or denies a request in the agent panel, never from this CLI,
+since the agent's model can run this CLI and must not answer its own request.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
-import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.agent import (
-    DISCOVERY_FILE,
-    StateError,
-    UnknownRequestError,
-    allow_host,
-    allow_path,
-    approve,
-    data_dir,
-    deny,
-    read_state,
-    vet_host,
-    vet_path,
-)
+from comfy_cli.agent import StateError, data_dir, read_state
 from comfy_cli.http import build_http_only_opener
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup as esc
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="The local comfy agent: what it may reach, and how to let it reach more.",
+    help="The local comfy agent: what it may reach. Approve its requests in the agent panel.",
 )
+
+
+@app.callback()
+def _agent_group() -> None:
+    # With one command and no callback, Typer would collapse this app into that
+    # command when invoked on its own; the callback keeps ``permissions`` a
+    # subcommand everywhere.
+    pass
+
 
 _DATA_DIR_OPT = Annotated[
     str | None,
@@ -50,57 +44,10 @@ _DATA_DIR_OPT = Annotated[
     ),
 ]
 
-PICKUP_NOTE = "a running agent picks this up within about 20 seconds; otherwise it applies at the agent's next start"
-REFUSED_HINT = (
-    "a narrower folder that holds only what is needed may be allowed; credential stores, the home folder "
-    "and the whole disk never are. A host must be a full name or a routable address"
+NOTE = (
+    "approve or deny a pending request on its card in the agent panel; the agent cannot approve its own "
+    "requests. A request whose card closed unanswered gets a new card when the agent asks for it again"
 )
-REFUSED_REQUEST_HINT = (
-    "the request stays pending and nothing was approved: `comfy agent deny <id>` clears it, or "
-    "`comfy agent allow --path <narrower folder>` grants what is actually needed. " + REFUSED_HINT
-)
-UNKNOWN_REQUEST_HINT = "run `comfy agent permissions` to see the requests waiting; each shows its id"
-GRANT_HINTS = {
-    "approve": "{cli} agent allow{dir} --approve <id>",
-    "deny": "{cli} agent deny{dir} <id>",
-    "path": '{cli} agent allow{dir} --path "<folder>" --reason "<why>"',
-    "host": "{cli} agent allow{dir} --host <host> --reason <why>",
-}
-
-# The entry points pyproject installs. Anything else in argv[0] -- a test
-# runner, an embedding host -- is not a way to call this CLI, so the hints name
-# the installed command rather than whatever started the process.
-_CLI_NAMES = frozenset({"comfy", "comfy-cli", "comfycli"})
-
-
-def _cli_invocation() -> str:
-    """How to call this CLI, as this process was started.
-
-    ``comfy`` for an installed entry point (``comfy.exe`` folded to the same),
-    ``<python> -m comfy_cli`` when started as a module, and ``comfy`` for
-    anything else -- a hint is for the user's terminal, and a path that only
-    works inside the agent's sandbox is exactly what sent users to paste a venv
-    path that answered "Access is denied".
-    """
-    argv0 = Path(sys.argv[0] or "")
-    if argv0.name == "__main__.py":
-        return f"{Path(sys.executable).name} -m comfy_cli"
-    name = argv0.name[:-4] if argv0.name.lower().endswith(".exe") else argv0.name
-    return name if name in _CLI_NAMES else "comfy"
-
-
-def grant_hints(root: Path) -> dict[str, str]:
-    """The exact commands that approve or grant against ``root``.
-
-    ``--data-dir`` rides along whenever the agent's dir is not the one a bare
-    terminal resolves (``AGENT_DATA_DIR``, else ``~/.comfy-agent``): the user's
-    shell is a different process, and without it ``--approve`` answers
-    ``agent_unknown_request`` while the request is still waiting. A relative
-    dir is emitted absolute: the user's shell need not share this process's cwd.
-    """
-    flag = "" if root.is_absolute() and root == data_dir(None) else f' --data-dir "{root.absolute()}"'
-    cli = _cli_invocation()
-    return {k: v.format(cli=cli, dir=flag) for k, v in GRANT_HINTS.items()}
 
 
 def _age(requested_at: object, now: datetime | None = None) -> str:
@@ -121,16 +68,6 @@ def _age(requested_at: object, now: datetime | None = None) -> str:
     if seconds < 86400:
         return f"{seconds // 3600}h"
     return f"{seconds // 86400}d"
-
-
-def _no_agent_warning(root) -> str:
-    # No agent has ever published itself here. A running agent started with
-    # another AGENT_DATA_DIR (the launcher's, or a typo in --data-dir) will
-    # never read this file; say so rather than promise a pick-up.
-    return (
-        f"no {DISCOVERY_FILE} in {root}: no agent has run from this data dir. A running agent that uses "
-        "another data dir will not see this approval; pass --data-dir or set AGENT_DATA_DIR to match it"
-    )
 
 
 def _open_health(url: str):
@@ -166,6 +103,18 @@ def _sandbox_status(port: int | None) -> dict | None:
     return out
 
 
+@app.command("allow", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("deny", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def _moved_to_the_panel(ctx: typer.Context):
+    """Kept hidden so an older agent's instructions get an answer: approving here was removed, and changes nothing."""
+    get_renderer().error(
+        code="agent_approval_moved",
+        message=f"comfy agent {ctx.info_name} was removed: a script the agent ran could approve its own requests",
+        hint="approve or deny the request on its card in the agent panel",
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command(
     "permissions",
     help="Show the agent's requests waiting for approval, the approved folders and hosts, and a running agent's sandbox.",
@@ -188,7 +137,7 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
         "pending": state.pending,
         "paths": state.paths,
         "hosts": state.hosts,
-        "grant": grant_hints(root),
+        "note": NOTE,
     }
     if renderer.is_pretty():
         # Everything interpolated below came from files on disk or a local
@@ -207,162 +156,11 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
                 f"  [dim]({_age(e.get('requested_at'))} ago)[/dim]"
             )
         if state.pending:
-            first = state.pending[0]["id"]
-            approve_cmd, deny_cmd = (payload["grant"][k].replace("<id>", first) for k in ("approve", "deny"))
-            rprint(f"  [dim]{esc(approve_cmd)}    {esc(deny_cmd)}[/dim]")
+            rprint(f"  [dim]{NOTE}[/dim]")
         rprint("[bold]folders the user approved[/bold]" + ("" if state.paths else "  (none)"))
         for e in state.paths:
             rprint(f"  {esc(e.get('path'))}  — {esc(e.get('reason', ''))}")
         rprint("[bold]hosts the user approved[/bold]" + ("" if state.hosts else "  (none)"))
         for e in state.hosts:
             rprint(f"  {esc(e.get('host'))}  — {esc(e.get('reason', ''))}")
-        rprint("\n[dim]" + "\n".join(esc(h) for h in payload["grant"].values()) + "[/dim]")
     renderer.emit(payload, command="agent permissions")
-
-
-def _approve_request(root, request_id: str) -> None:
-    """``comfy agent allow --approve <id>``: answer one request the agent recorded."""
-    renderer = get_renderer()
-    try:
-        state = read_state(root)
-        record, kind = approve(root, request_id)
-    except StateError as exc:
-        renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")
-        raise typer.Exit(code=1) from exc
-    except UnknownRequestError as exc:
-        renderer.error(code="agent_unknown_request", message=str(exc), hint=UNKNOWN_REQUEST_HINT)
-        raise typer.Exit(code=1) from exc
-    except ValueError as exc:
-        renderer.error(code="agent_refused", message=str(exc), hint=REFUSED_REQUEST_HINT)
-        raise typer.Exit(code=1) from exc
-    except OSError as exc:
-        renderer.error(
-            code="agent_state_unwritable",
-            message=f"{root}: cannot write: {exc}",
-            hint="check the data dir's permissions, or pass --data-dir for the dir the agent uses",
-        )
-        raise typer.Exit(code=1) from exc
-    approved = {"id": request_id, "kind": kind, "target": record[kind]}
-    payload: dict = {"data_dir": str(root), "approved": approved, "note": PICKUP_NOTE}
-    if not state.running:
-        payload["warning"] = _no_agent_warning(root)
-    if renderer.is_pretty():
-        rprint(f"[green]approved[/green] {kind}: {esc(approved['target'])}  (request {esc(request_id)})")
-        rprint(f"[dim]{PICKUP_NOTE}[/dim]")
-        if "warning" in payload:
-            renderer.warn(payload["warning"])
-    renderer.emit(payload, command="agent allow")
-
-
-@app.command(
-    "allow",
-    help="Approve one of the agent's pending requests (--approve <id>), or let it reach a folder (--path) or host (--host).",
-)
-@tracking.track_command("agent")
-def allow_cmd(
-    approve_id: Annotated[
-        str | None,
-        typer.Option(
-            "--approve", show_default=False, help="The id of a pending request (see `comfy agent permissions`)."
-        ),
-    ] = None,
-    path: Annotated[
-        str | None, typer.Option("--path", show_default=False, help="An absolute, existing folder.")
-    ] = None,
-    host: Annotated[str | None, typer.Option("--host", show_default=False, help="A host name, no scheme.")] = None,
-    reason: Annotated[
-        str, typer.Option("--reason", help="Why; recorded with the approval.")
-    ] = "allowed with comfy agent allow",
-    data_dir_opt: _DATA_DIR_OPT = None,
-):
-    renderer = get_renderer()
-    if approve_id and (path or host):
-        # A request names its own target and reason; --path/--host beside it
-        # would leave which target got approved to the reader's guess.
-        renderer.error(
-            code="agent_bad_args",
-            message="--approve answers one recorded request and cannot be combined with --path or --host",
-            hint="run `comfy agent allow --approve <id>` on its own, then `--path`/`--host` as a separate command",
-        )
-        raise typer.Exit(code=2)
-    if not path and not host and not approve_id:
-        renderer.error(
-            code="agent_bad_args",
-            message="nothing to allow",
-            hint="pass --approve <id> for a pending request, or --path <folder> and/or --host <host>",
-        )
-        raise typer.Exit(code=2)
-    root = data_dir(data_dir_opt)
-    if approve_id:
-        _approve_request(root, approve_id.strip())
-        return
-    added: dict = {}
-    try:
-        # Read every state file and vet every value before the first write, so
-        # a refused --host or a broken egress-allow.json does not leave a
-        # --path approved behind a failure exit.
-        state = read_state(root)
-        if path:
-            vet_path(path, root=root)
-        if host:
-            vet_host(host)
-        if path:
-            folder, is_new = allow_path(root, path, reason)
-            added["path"] = {"path": str(folder), "added": is_new}
-        if host:
-            h, is_new = allow_host(root, host, reason)
-            added["host"] = {"host": h, "added": is_new}
-    except StateError as exc:
-        renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")
-        raise typer.Exit(code=1) from exc
-    except ValueError as exc:
-        renderer.error(code="agent_refused", message=str(exc), hint=REFUSED_HINT)
-        raise typer.Exit(code=1) from exc
-    except OSError as exc:
-        renderer.error(
-            code="agent_state_unwritable",
-            message=f"{root}: cannot write: {exc}",
-            hint="check the data dir's permissions, or pass --data-dir for the dir the agent uses",
-        )
-        raise typer.Exit(code=1) from exc
-    payload: dict = {"data_dir": str(root), **added, "note": PICKUP_NOTE}
-    if not state.running:
-        payload["warning"] = _no_agent_warning(root)
-    if renderer.is_pretty():
-        for kind, entry in added.items():
-            rprint(f"[green]{'allowed' if entry['added'] else 'already allowed'}[/green] {kind}: {esc(entry[kind])}")
-        rprint(f"[dim]{PICKUP_NOTE}[/dim]")
-        if "warning" in payload:
-            renderer.warn(payload["warning"])
-    renderer.emit(payload, command="agent allow")
-
-
-@app.command("deny", help="Refuse one of the agent's pending requests; nothing is approved and the request is dropped.")
-@tracking.track_command("agent")
-def deny_cmd(
-    request_id: Annotated[str, typer.Argument(help="The id of a pending request (see `comfy agent permissions`).")],
-    data_dir_opt: _DATA_DIR_OPT = None,
-):
-    renderer = get_renderer()
-    root = data_dir(data_dir_opt)
-    request_id = request_id.strip()
-    try:
-        req = deny(root, request_id)
-    except StateError as exc:
-        renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")
-        raise typer.Exit(code=1) from exc
-    except UnknownRequestError as exc:
-        renderer.error(code="agent_unknown_request", message=str(exc), hint=UNKNOWN_REQUEST_HINT)
-        raise typer.Exit(code=1) from exc
-    except OSError as exc:
-        renderer.error(
-            code="agent_state_unwritable",
-            message=f"{root}: cannot write: {exc}",
-            hint="check the data dir's permissions, or pass --data-dir for the dir the agent uses",
-        )
-        raise typer.Exit(code=1) from exc
-    denied = {"id": request_id, "kind": req["kind"], "target": req["target"]}
-    payload = {"data_dir": str(root), "denied": denied}
-    if renderer.is_pretty():
-        rprint(f"[yellow]denied[/yellow] {denied['kind']}: {esc(denied['target'])}  (request {esc(request_id)})")
-    renderer.emit(payload, command="agent deny")

@@ -3086,7 +3086,7 @@ _RootGroup.lazy_subcommands = {
     ),
     "agent": LazySubcommand(
         "comfy_cli.agent.command",
-        help="The local comfy agent: what it may reach, and how to let it reach more.",
+        help="The local comfy agent: what it may reach. Approve its requests in the agent panel.",
     ),
     "skills": LazySubcommand(
         "comfy_cli.skills.command",
