@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import os
@@ -9,6 +10,7 @@ import socket
 import stat
 import sys
 import threading
+import urllib.error
 from pathlib import Path
 
 import jsonschema
@@ -942,7 +944,9 @@ def test_cli_writes_when_the_discovery_file_is_stale(tmp_path: Path, monkeypatch
     folder.mkdir()
     _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
     (root / "agent.json").write_text(json.dumps({"port": 8190}))
-    monkeypatch.setattr(command, "_sandbox_status", lambda port: None)
+    # Patch the probe, not `_sandbox_status`: the write guard calls the probe,
+    # so patching the wrapper would let this test reach the real loopback port.
+    monkeypatch.setattr(command, "_probe_agent", lambda port: (command._AGENT_GONE, None))
 
     res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
     assert res.exit_code == 0, res.stdout
@@ -976,3 +980,102 @@ def test_permissions_offers_no_cli_grant_while_an_agent_is_answering(tmp_path: P
     assert res.exception is None
     assert "agent panel" in res.output
     assert "--approve" not in res.output, "the pretty output must not hand over a command that is refused"
+
+
+def _raises(exc):
+    """An `_open_health` stand-in that fails the way a real probe would."""
+
+    def _open(url):
+        raise exc
+
+    return _open
+
+
+def _refused_connection(url):
+    """What `_open_health` raises when nothing is listening on the port."""
+    raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+
+def test_probe_reads_the_agents_plain_ok_as_live(monkeypatch):
+    """The agent's own server answers `"ok"` until it has something to report.
+
+    Reading that as "not the agent" was a silent-loss hole: `allow`/`deny`
+    wrote files the running agent then overwrote on its next save, and nothing
+    told the user the approval was gone.
+    """
+    from comfy_cli.agent import command
+
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'"ok"'))
+    assert command._probe_agent(8190) == (command._AGENT_LIVE, None)
+    # Still nothing to display, which is what `_sandbox_status` reports.
+    assert command._sandbox_status(8190) is None
+
+
+@pytest.mark.parametrize(
+    ("raiser", "want"),
+    [
+        (_refused_connection, "gone"),
+        (_raises(ConnectionRefusedError(111, "Connection refused")), "gone"),
+        (_raises(http.client.BadStatusLine("SSH-2.0-OpenSSH")), "gone"),
+        (_raises(TimeoutError("timed out")), "unconfirmed"),
+        (_raises(urllib.error.URLError(TimeoutError("timed out"))), "unconfirmed"),
+        (
+            _raises(urllib.error.HTTPError("http://127.0.0.1:8190/health", 503, "busy", {}, None)),
+            "unconfirmed",
+        ),
+    ],
+)
+def test_probe_separates_a_proven_absence_from_an_unsettled_one(monkeypatch, raiser, want):
+    """Only what the probe proves is not the agent may permit a write."""
+    from comfy_cli.agent import command
+
+    monkeypatch.setattr(command, "_open_health", raiser)
+    assert command._probe_agent(8190) == (want, None)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _raises(TimeoutError("timed out")),
+        lambda url: _Resp(b"not json at all"),
+        lambda url: _Resp(b"[1, 2]"),
+    ],
+)
+def test_cli_refuses_to_write_when_it_cannot_confirm_the_agent_is_gone(tmp_path: Path, monkeypatch, answer):
+    """An unsettled probe must not write: the loss is silent, the refusal is not."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    before = (root / "permissions.json").read_text()
+    monkeypatch.setattr(command, "_open_health", answer)
+
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 1, res.stdout
+    err = _envelope(res)["error"]
+    assert err["code"] == "agent_unconfirmed"
+    assert "8190" in err["message"]
+    assert "agent.json" in err["hint"], "the hint must name the recovery when no agent is in fact running"
+    assert (root / "permissions.json").read_text() == before, "a refused write must leave the file alone"
+
+
+def test_permissions_offers_no_cli_grant_it_would_then_refuse(tmp_path: Path, monkeypatch):
+    """`permissions` and `allow` must agree: no handing over a refused command."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    req = _req("0123456789abcdef", "host", "models.example.com", "a VAE")
+    _write_pending(root, req)
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    monkeypatch.setattr(command, "_open_health", _raises(TimeoutError("timed out")))
+
+    res = CliRunner().invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["agent"]["running"] is False, "an unsettled probe is not a confirmed agent"
+    assert data["grant"] == {}, "`allow` would refuse, so no command is offered"
+    assert "agent panel" in data["answer_in"]
+    _validate(data)

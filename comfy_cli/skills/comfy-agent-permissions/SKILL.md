@@ -51,9 +51,14 @@ returned, and they approve or deny that exact target.
 approval they thought they gave is gone at the agent's next save. The CLI
 refuses it for the same reason: with an agent answering on its port,
 `comfy agent allow` and `comfy agent deny` exit with `agent_running` and write
-nothing. You cannot run these commands either — your comfy tool and the shell
-broker refuse every `comfy agent` command, and that refusal is the guard that
-stops injected text from approving the request it made you ask for.
+nothing. They also refuse with `agent_unconfirmed` when the data dir names a
+port but nothing answers on it as this agent — the refusal errs that way on
+purpose, because a write that a running agent then overwrites leaves nothing
+behind to show the approval was lost. That one names the stale `agent.json`
+the user deletes if no agent is in fact running. You cannot run these commands
+either — your comfy tool and the shell broker refuse every `comfy agent`
+command, and that refusal is the guard that stops injected text from approving
+the request it made you ask for.
 
 **If the session has no panel and no in-chat card** (an older frontend, a
 headless or API client, a plain chat surface), say so plainly: the only way to

@@ -73,6 +73,14 @@ AGENT_RUNNING_HINT = (
     "answer a waiting request in the agent panel or on the card in chat, which call the running agent's "
     "own API; to write these files from here instead, stop the agent first"
 )
+AGENT_UNCONFIRMED_MESSAGE = (
+    "something is answering on port {port}, which {root} names as its agent's, but it did not answer as that "
+    "agent: a write here is lost without a trace if an agent is in fact running, so none was made"
+)
+AGENT_UNCONFIRMED_HINT = (
+    "if an agent is running, answer the request in the agent panel or on the card in chat; if none is, delete "
+    "the stale agent.json in that data dir and run this again"
+)
 REFUSED_HINT = (
     "a narrower folder that holds only what is needed may be allowed; credential stores, the home folder "
     "and the whole disk never are. A host must be a full name or a routable address"
@@ -155,30 +163,39 @@ def _no_agent_warning(root) -> str:
     )
 
 
-def _live_agent_port(state) -> int | None:
-    """The port an agent is actually answering on, or ``None``.
+def _refuse_while_live(root, state) -> None:
+    """Refuse a write to the permission files unless the agent is known gone.
 
     ``state.running`` only says a discovery file exists; a crashed agent
-    leaves one behind. Writing is refused on a *live* agent, so the refusal
-    probes ``/health`` the same way ``permissions`` does rather than trusting
-    the file — otherwise a stale discovery file would lock the user out of the
-    only way to edit these files.
+    leaves one behind, so this probes ``/health`` rather than trusting the
+    file — otherwise a stale file would lock the user out of the only way to
+    edit these files.
+
+    It refuses on ``unconfirmed`` as well as ``live``, which is the whole
+    reason :func:`_probe_agent` has three outcomes rather than two. The two
+    mistakes are not symmetric: writing while an agent runs is overwritten by
+    its next save and the user never learns the approval was lost, while a
+    refusal names the data dir and what to do about it. Only what the probe
+    *establishes* is not this agent permits the write.
     """
     if not state.running:
-        return None
-    return state.port if _sandbox_status(state.port) is not None else None
-
-
-def _refuse_while_live(root, state) -> None:
-    """Refuse a write to the permission files while an agent is answering."""
-    port = _live_agent_port(state)
-    if port is None:
         return
-    get_renderer().error(
-        code="agent_running",
-        message=AGENT_RUNNING_MESSAGE.format(port=port, root=root),
-        hint=AGENT_RUNNING_HINT,
-    )
+    verdict, _ = _probe_agent(state.port)
+    if verdict == _AGENT_GONE:
+        return
+    renderer = get_renderer()
+    if verdict == _AGENT_LIVE:
+        renderer.error(
+            code="agent_running",
+            message=AGENT_RUNNING_MESSAGE.format(port=state.port, root=root),
+            hint=AGENT_RUNNING_HINT,
+        )
+    else:
+        renderer.error(
+            code="agent_unconfirmed",
+            message=AGENT_UNCONFIRMED_MESSAGE.format(port=state.port, root=root),
+            hint=AGENT_UNCONFIRMED_HINT,
+        )
     raise typer.Exit(code=1)
 
 
@@ -212,24 +229,61 @@ _AGENT_HEALTH_KEYS = (
 )
 
 
-def _sandbox_status(port: int | None) -> dict | None:
+# What a /health probe on the discovery port established. Three outcomes, not
+# two, because the write guard needs the distinction: GONE is only for what the
+# probe *proved* is not this agent, and everything it could not settle is
+# UNCONFIRMED. `_sandbox_status` collapses both onto None, which is right for
+# display — either way there is no sandbox to show — and wrong for a refusal.
+_AGENT_LIVE = "live"
+_AGENT_GONE = "gone"
+_AGENT_UNCONFIRMED = "unconfirmed"
+
+
+def _probe_agent(port: int | None) -> tuple[str, dict | None]:
+    """Ask the discovery port whether this agent is answering on it.
+
+    Returns the verdict and, when the answer carried them, the sandbox and
+    workspace fields `permissions` displays.
+    """
     if not port:
-        return None
+        return _AGENT_GONE, None
     try:
         with _open_health(f"http://127.0.0.1:{port}/health") as resp:
             body = json.loads(resp.read().decode("utf-8"))
-    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
+    except urllib.error.HTTPError:
+        # Something serves HTTP here and refused the probe. Whether it is the
+        # agent is exactly what this failed to establish.
+        return _AGENT_UNCONFIRMED, None
+    except urllib.error.URLError as exc:
+        # urllib wraps the transport error; a refused connection is the one
+        # that proves nothing is listening, so agent.json is stale.
+        return (_AGENT_GONE if isinstance(exc.reason, ConnectionRefusedError) else _AGENT_UNCONFIRMED), None
+    except ConnectionRefusedError:
+        return _AGENT_GONE, None
+    except http.client.HTTPException:
         # HTTPException is not an OSError: a stale port taken by something
-        # that is not HTTP (an SSH banner) raises BadStatusLine here.
-        return None
+        # that is not HTTP (an SSH banner) raises BadStatusLine here. Proof
+        # enough that this is not the agent.
+        return _AGENT_GONE, None
+    except (OSError, ValueError):
+        # A timeout (the 2 s budget in _open_health), a reset mid-read, or a
+        # body that is not JSON. Something is there; what it is is unsettled.
+        return _AGENT_UNCONFIRMED, None
+    if body == "ok":
+        # The agent's own server answers the plain string "ok" until it has
+        # something to report (cloud services/agent/local/internal/server/
+        # server.go, healthPayload), so this is the agent, early — not a
+        # foreign service. Reading it as "gone" was how a write could still
+        # be made to files a running agent was about to overwrite.
+        return _AGENT_LIVE, None
     if not isinstance(body, dict):
-        return None  # a stale port answered by something that is not the agent
+        # Neither the agent's own early answer nor anything judgeable.
+        return _AGENT_UNCONFIRMED, None
     if not any(key in body for key in _AGENT_HEALTH_KEYS):
-        # A reused port can be held by an unrelated local service whose
-        # /health answers `{"status": "ok"}`. That is not this agent, and
-        # treating it as one would refuse `allow`/`deny` (_refuse_while_live)
-        # and leave the user no way to edit the files at all.
-        return None
+        # A reused port held by an unrelated local service whose /health
+        # answers `{"status": "ok"}`. Established: not this agent, so the
+        # user is not locked out of editing the files at all.
+        return _AGENT_GONE, None
     # The envelope schema says sandbox is an object or null and comfy_path a
     # string or null; a stale or foreign server's shapes are not passed on.
     sandbox = body.get("sandbox")
@@ -237,7 +291,18 @@ def _sandbox_status(port: int | None) -> dict | None:
     cli = body.get("cli")
     if isinstance(cli, dict) and isinstance(cli.get("workspace"), str) and cli["workspace"]:
         out["comfy_path"] = cli["workspace"]
-    return out
+    return _AGENT_LIVE, out
+
+
+def _sandbox_status(port: int | None) -> dict | None:
+    """The sandbox and workspace to display, or ``None`` when there are none.
+
+    Two-valued on purpose: a caller that only renders state has nothing to do
+    differently for a port it could not reach and one it reached and dismissed.
+    A caller that *writes* must use :func:`_probe_agent` directly.
+    """
+    verdict, detail = _probe_agent(port)
+    return detail if verdict == _AGENT_LIVE else None
 
 
 @app.command(
@@ -253,8 +318,12 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
     except StateError as exc:
         renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")
         raise typer.Exit(code=1) from exc
-    health = _sandbox_status(state.port) if state.running else None
-    live = state.running and health is not None
+    # One probe serves both readings: whether to show the agent as running,
+    # and whether a `grant` command offered here would be refused by
+    # `_refuse_while_live`. Offering one it would refuse was the contradiction.
+    verdict, health = _probe_agent(state.port) if state.running else (_AGENT_GONE, None)
+    live = verdict == _AGENT_LIVE
+    writable = verdict == _AGENT_GONE
     payload = {
         "data_dir": str(root),
         "agent": {"running": live, "port": state.port},
@@ -263,12 +332,13 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
         "pending": state.pending,
         "paths": state.paths,
         "hosts": state.hosts,
-        # While an agent is answering it is the only writer of these files, so
-        # there is no command here that would take effect: an empty `grant` is
-        # the honest answer, not a missing one.
-        "grant": {} if live else grant_hints(root),
+        # Offered only when a write from here would actually land. While an
+        # agent is answering it is the only writer of these files, and when
+        # the probe could not settle that, `allow`/`deny` refuse too — so an
+        # empty `grant` is the honest answer, not a missing one.
+        "grant": grant_hints(root) if writable else {},
     }
-    if live:
+    if not writable:
         payload["answer_in"] = ANSWER_IN_PANEL
     if renderer.is_pretty():
         # Everything interpolated below came from files on disk or a local
@@ -286,7 +356,7 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
                 f"  {esc(e['id'])}  {e['kind']:<4} {esc(e['target'])}  — {esc(e.get('reason', ''))}"
                 f"  [dim]({_age(e.get('requested_at'))} ago)[/dim]"
             )
-        if state.pending and not live:
+        if state.pending and writable:
             first = state.pending[0]["id"]
             approve_cmd, deny_cmd = (payload["grant"][k].replace("<id>", first) for k in ("approve", "deny"))
             rprint(f"  [dim]{esc(approve_cmd)}    {esc(deny_cmd)}[/dim]")
@@ -298,10 +368,10 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
         rprint("[bold]hosts the user approved[/bold]" + ("" if state.hosts else "  (none)"))
         for e in state.hosts:
             rprint(f"  {esc(e.get('host'))}  — {esc(e.get('reason', ''))}")
-        if live:
-            rprint(f"\n[dim]{esc(ANSWER_IN_PANEL)}[/dim]")
-        else:
+        if writable:
             rprint("\n[dim]" + "\n".join(esc(h) for h in payload["grant"].values()) + "[/dim]")
+        else:
+            rprint(f"\n[dim]{esc(ANSWER_IN_PANEL)}[/dim]")
     renderer.emit(payload, command="agent permissions")
 
 
