@@ -1,12 +1,14 @@
 """Tests for the code-search command."""
 
 import ast
+import io
 import json
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from rich.console import Console
 from typer.testing import CliRunner
 
 from comfy_cli._lazy import LazyCommand
@@ -33,6 +35,7 @@ from comfy_cli.command.code_search import (
     _strip_control_chars,
     _validate_query,
     app,
+    code_search_context,
 )
 
 runner = CliRunner()
@@ -114,6 +117,36 @@ def test_source_slice_still_strips_escapes_inside_each_line():
     assert "\x00" not in snippet["text"]
     assert "\x9b" not in snippet["text"]
     assert snippet["line_count"] == 3
+
+
+def test_source_slice_does_not_promote_unicode_separator_to_new_line():
+    source = "safe\ncomment\u2028code\ntail\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"].split("\n") == ["safe", "commentcode", "tail"]
+    assert snippet["line_count"] == 3
+
+
+def test_source_slice_strips_bidi_and_other_format_controls():
+    source = "safe\nleft\u202eright\nzero\u200bwidth\n"
+    with patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source):
+        snippet = _source_slice("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    assert snippet["text"].split("\n") == ["safe", "leftright", "zerowidth"]
+
+
+def test_context_human_output_prints_source_as_literal_text():
+    source = 'lines[i]\ndict[str, int]\nr"[/\\\\]"\n'
+    output = io.StringIO()
+    literal_console = Console(file=output, force_terminal=False, width=200)
+    with (
+        patch("comfy_cli.command.code_search._fetch_pinned_source", return_value=source),
+        patch("comfy_cli.command.code_search.console", literal_console),
+    ):
+        code_search_context("owner/repo", "a" * 40, "nodes.py", 1, 3)
+    rendered = output.getvalue()
+    assert "lines[i]" in rendered
+    assert "dict[str, int]" in rendered
+    assert 'r"[/\\\\]"' in rendered
 
 
 def test_attach_context_preserves_line_structure():

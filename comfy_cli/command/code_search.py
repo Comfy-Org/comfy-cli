@@ -3,6 +3,7 @@
 import json
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import Annotated
 from urllib.parse import quote
@@ -77,11 +78,14 @@ _INJECTED_FILTER_RE = re.compile(
 # indistinguishable from the real ones. Sourcegraph previews are single lines
 # by contract, so removing newlines costs nothing legitimate.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+_UNICODE_LINE_SEPARATORS_RE = re.compile(r"[\u2028\u2029]")
 
 
 def _strip_control_chars(text: str) -> str:
-    """Remove C0/C1 control characters (including ESC) from untrusted text."""
-    return _CONTROL_CHARS_RE.sub("", text)
+    """Remove terminal controls and invisible format characters from untrusted text."""
+    text = _CONTROL_CHARS_RE.sub("", text)
+    text = _UNICODE_LINE_SEPARATORS_RE.sub("", text)
+    return "".join(char for char in text if unicodedata.category(char) != "Cf")
 
 
 def _strip_control_chars_per_line(lines: list[str]) -> str:
@@ -91,17 +95,16 @@ def _strip_control_chars_per_line(lines: list[str]) -> str:
     preview case its comment describes: one forged newline there lets an
     indexed repository emit a second row indistinguishable from a real match.
     A pinned source window is the other case. It is a multi-line block by
-    construction, the caller already split the fetched file on its own line
-    breaks, and the only `\x0a` left are the joiners inserted here — so
+    construction, the caller already split the fetched file on `\x0a`, the
+    line separator used by Python and source-host line anchors, and the only
+    `\x0a` left are the joiners inserted here — so
     stripping them deletes exactly the structure and nothing hostile. Doing it
     cost the whole window: a 49-line Python class came back as one 2 KiB line
     with no indentation, which does not parse and is not readable reference
     source for an indentation-significant language.
 
-    Scrubbing per line keeps ESC/C1 out while preserving line structure, and
-    the result still carries its own integrity check: the window's line count
-    must equal `end_line - start_line + 1`, so no forged row can be smuggled
-    in under the pinned range.
+    Scrubbing per line keeps ESC/C1, Unicode line separators, and invisible
+    format controls out while preserving the source's real line structure.
     """
     return "\n".join(_strip_control_chars(line) for line in lines)
 
@@ -278,7 +281,13 @@ def _source_slice(repository: str, commit: str, path: str, start_line: int, end_
     if end_line - start_line + 1 > MAX_CONTEXT_LINES:
         raise ValueError(f"line range may contain at most {MAX_CONTEXT_LINES} lines")
     source = _fetch_pinned_source(repository, commit, path)
-    lines = source.splitlines()
+    # `str.splitlines()` treats several repository-controlled characters as
+    # line boundaries even though Python, GitHub anchors, and Sourcegraph do
+    # not. Split only on LF and leave every other separator in the line so the
+    # per-line scrub removes it instead of turning it into a forged new row.
+    lines = source.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     if start_line > len(lines):
         raise ValueError(f"start_line {start_line} is past end of file ({len(lines)} lines)")
     actual_end = min(end_line, len(lines))
@@ -729,4 +738,4 @@ def code_search_context(
     else:
         console.print(f"[yellow]{UNTRUSTED_CONTENT_NOTE}[/yellow]")
         console.print(f"[cyan]{snippet['url']}[/cyan]")
-        console.print(snippet["text"])
+        console.print(Text(snippet["text"]))
