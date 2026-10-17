@@ -237,31 +237,55 @@ def initialize_project_config():
     with open("pyproject.toml") as file:
         document = tomlkit.parse(file.read())
 
-    # Get the current git remote URL
+    # Get the current git remote URL.
+    #
+    # A first publication is often made from a plain folder with no git
+    # repository, or from one with no `origin` remote yet. That is not an
+    # error for the Registry route: publishing needs `project.name` and
+    # `project.version`, and `[project.urls]` is optional (``URLs`` defaults
+    # every field to ""). Scaffold without the URLs instead of aborting —
+    # ``create_comfynode_config()`` above has ALREADY written pyproject.toml by
+    # this point, and ``comfy node init`` refuses to overwrite an existing one,
+    # so raising here left the user unable to retry even after ``git init``.
+    #
+    # A git that is absent or refused is still fatal: ``BinaryNotFoundError``
+    # subclasses ``OSError`` and the two cases call for different remediation
+    # than "you have no remote yet".
+    git_remote_url = ""
     try:
         git_bin = resolve_required_binary("git")
-        git_remote_url = subprocess.check_output([git_bin, "remote", "get-url", "origin"]).decode().strip()
+        git_remote_url = (
+            subprocess.check_output([git_bin, "remote", "get-url", "origin"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
         git_remote_url = _strip_url_credentials(git_remote_url)
-    except (subprocess.CalledProcessError, OSError) as e:
-        # ``OSError`` also covers ``BinaryNotFoundError`` — git absent, or found
-        # and refused. Without it that escapes as a traceback *after*
-        # ``create_comfynode_config()`` above has already written pyproject.toml,
-        # leaving a half-initialized project behind.
-        raise Exception(f"Could not retrieve Git remote URL. Are you in a Git repository? ({e})") from e
-
-    # Convert SSH URL to HTTPS if needed
-    if git_remote_url.startswith("git@github.com:"):
-        git_remote_url = git_remote_url.replace("git@github.com:", "https://github.com/")
-
-    # Ensure the URL ends with `.git` and remove it to obtain the plain URL
-    repo_name = git_remote_url.rsplit("/", maxsplit=1)[-1].replace(".git", "")
-    git_remote_url = git_remote_url.replace(".git", "")
+    except subprocess.CalledProcessError:
+        print(
+            "Warning: no git `origin` remote found (not a git repository, or no remote yet). "
+            "Leaving `[project.urls]` empty — set `Repository` in pyproject.toml before publishing."
+        )
+    except OSError as e:
+        raise Exception(f"Could not run git to read the remote URL. ({e})") from e
 
     project = document.get("project", tomlkit.table())
     urls = project.get("urls", tomlkit.table())
-    urls["Repository"] = git_remote_url
-    urls["Documentation"] = git_remote_url + "/wiki"
-    urls["Bug Tracker"] = git_remote_url + "/issues"
+
+    if git_remote_url:
+        # Convert SSH URL to HTTPS if needed
+        if git_remote_url.startswith("git@github.com:"):
+            git_remote_url = git_remote_url.replace("git@github.com:", "https://github.com/")
+
+        # Ensure the URL ends with `.git` and remove it to obtain the plain URL
+        repo_name = git_remote_url.rsplit("/", maxsplit=1)[-1].replace(".git", "")
+        git_remote_url = git_remote_url.replace(".git", "")
+
+        urls["Repository"] = git_remote_url
+        urls["Documentation"] = git_remote_url + "/wiki"
+        urls["Bug Tracker"] = git_remote_url + "/issues"
+    else:
+        # No remote to name the pack after; the folder is the only thing that does.
+        repo_name = os.path.basename(os.getcwd().rstrip(os.sep))
 
     project["name"] = sanitize_node_name(repo_name)
     project["description"] = ""

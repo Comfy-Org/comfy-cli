@@ -1144,3 +1144,64 @@ def test_generated_pyproject_has_no_trailing_whitespace(tmp_path, monkeypatch):
     assert [line for line in content.splitlines() if line != line.rstrip()] == []
     # The separators must still be comments, so the block stays one uncommentable unit.
     assert "#\n#     # OR for OS-specific nodes" in content
+
+
+# A first publication is often made from a folder that is not a git repository,
+# or from one with no `origin` remote yet. `comfy node init` used to raise there
+# — AFTER create_comfynode_config() had written pyproject.toml — and the command
+# then refuses to overwrite that file, so the user could not retry even after
+# running `git init`.
+
+
+def test_initialize_project_config_without_git_repository(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ComfyUI-MyFirstPack"
+    target.mkdir()
+    monkeypatch.chdir(target)
+
+    initialize_project_config()
+
+    data = tomlkit.parse((target / "pyproject.toml").read_text())
+    # Named after the folder, since there is no remote to name it after.
+    assert data["project"]["name"] == "myfirstpack"
+    assert data["tool"]["comfy"]["DisplayName"] == "ComfyUI-MyFirstPack"
+    # The optional URLs are left as the scaffold's empty value, not invented.
+    assert data["project"]["urls"]["Repository"] == ""
+    assert "Documentation" not in data["project"]["urls"]
+    assert "Bug Tracker" not in data["project"]["urls"]
+    assert "no git `origin` remote found" in capsys.readouterr().out
+
+
+def test_initialize_project_config_git_repo_without_origin(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "ComfyUI-NoRemote"
+    target.mkdir()
+    subprocess.run(["git", "init"], cwd=target, check=True, capture_output=True)
+    monkeypatch.chdir(target)
+
+    initialize_project_config()
+
+    data = tomlkit.parse((target / "pyproject.toml").read_text())
+    assert data["project"]["name"] == "noremote"
+    assert data["project"]["urls"]["Repository"] == ""
+    assert "no git `origin` remote found" in capsys.readouterr().out
+
+
+def test_initialize_project_config_is_retryable_after_adding_a_remote(tmp_path, monkeypatch):
+    # The point of not raising: the first run must leave a pyproject.toml the
+    # user can finish by hand or by re-running after `git remote add`.
+    target = tmp_path / "ComfyUI-Retry"
+    target.mkdir()
+    monkeypatch.chdir(target)
+    initialize_project_config()
+
+    subprocess.run(["git", "init"], cwd=target, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/user/ComfyUI-Retry.git"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+    )
+    initialize_project_config()
+
+    data = tomlkit.parse((target / "pyproject.toml").read_text())
+    assert data["project"]["urls"]["Repository"] == "https://github.com/user/ComfyUI-Retry"
+    assert data["project"]["name"] == "retry"
