@@ -5,6 +5,11 @@ agent may reach beyond its defaults, and whether one is running; ``allow
 --approve <id>`` / ``deny <id>`` answer a request the agent's ``request_path``
 / ``request_host`` tools recorded (the model cannot answer its own request);
 ``allow --path`` / ``--host`` grants a folder or a host outright.
+
+Every one of those writes refuses while an agent is answering on its port: a
+running agent is the only writer of its permission files, so the write would
+be ignored and then overwritten. While one runs, requests are answered in the
+agent panel or on the in-chat card, which call the agent's own API.
 """
 
 from __future__ import annotations
@@ -50,7 +55,24 @@ _DATA_DIR_OPT = Annotated[
     ),
 ]
 
-PICKUP_NOTE = "a running agent picks this up within about 20 seconds; otherwise it applies at the agent's next start"
+# A running agent is the only writer of its permission files: it loads them at
+# start and saves its whole state on every change, so an edit made here while
+# it runs is never read and is then overwritten by the agent's next save.
+# Hence NEXT_START_NOTE, and the refusals below. The rule is the agent's, and
+# is stated in its own `services/agent/local/README.md`.
+NEXT_START_NOTE = "this applies at the agent's next start; a running agent does not read it"
+AGENT_RUNNING_MESSAGE = (
+    "an agent is answering on port {port} from {root}: a running agent is the only writer of its "
+    "permission files, so this edit would be ignored and then overwritten"
+)
+ANSWER_IN_PANEL = (
+    "a running agent is the only writer of these files: answer a waiting request in the agent panel or "
+    "on the card in chat, or stop the agent to edit them from here"
+)
+AGENT_RUNNING_HINT = (
+    "answer a waiting request in the agent panel or on the card in chat, which call the running agent's "
+    "own API; to write these files from here instead, stop the agent first"
+)
 REFUSED_HINT = (
     "a narrower folder that holds only what is needed may be allowed; credential stores, the home folder "
     "and the whole disk never are. A host must be a full name or a routable address"
@@ -133,6 +155,33 @@ def _no_agent_warning(root) -> str:
     )
 
 
+def _live_agent_port(state) -> int | None:
+    """The port an agent is actually answering on, or ``None``.
+
+    ``state.running`` only says a discovery file exists; a crashed agent
+    leaves one behind. Writing is refused on a *live* agent, so the refusal
+    probes ``/health`` the same way ``permissions`` does rather than trusting
+    the file — otherwise a stale discovery file would lock the user out of the
+    only way to edit these files.
+    """
+    if not state.running:
+        return None
+    return state.port if _sandbox_status(state.port) is not None else None
+
+
+def _refuse_while_live(root, state) -> None:
+    """Refuse a write to the permission files while an agent is answering."""
+    port = _live_agent_port(state)
+    if port is None:
+        return
+    get_renderer().error(
+        code="agent_running",
+        message=AGENT_RUNNING_MESSAGE.format(port=port, root=root),
+        hint=AGENT_RUNNING_HINT,
+    )
+    raise typer.Exit(code=1)
+
+
 def _open_health(url: str):
     """Open the agent's /health on loopback, ignoring any HTTP(S)_PROXY in the environment.
 
@@ -142,6 +191,25 @@ def _open_health(url: str):
     environment.
     """
     return build_http_only_opener(urllib.request.ProxyHandler({})).open(url, timeout=2)
+
+
+# The keys only the agent's own /health carries. The standalone binary serves
+# the plain string "ok" until it has something to report and a JSON object
+# once it has, and its startup reports sandbox and cli together, so a JSON
+# object carrying none of these is some other service on a reused port (cloud
+# services/agent/local/internal/server/server.go, healthPayload). `status` is
+# deliberately not in the list: every other health endpoint has one too.
+_AGENT_HEALTH_KEYS = (
+    "sandbox",
+    "skills",
+    "crdt",
+    "doc_host",
+    "prompt",
+    "cli",
+    "assets",
+    "memory",
+    "node_trees",
+)
 
 
 def _sandbox_status(port: int | None) -> dict | None:
@@ -156,6 +224,12 @@ def _sandbox_status(port: int | None) -> dict | None:
         return None
     if not isinstance(body, dict):
         return None  # a stale port answered by something that is not the agent
+    if not any(key in body for key in _AGENT_HEALTH_KEYS):
+        # A reused port can be held by an unrelated local service whose
+        # /health answers `{"status": "ok"}`. That is not this agent, and
+        # treating it as one would refuse `allow`/`deny` (_refuse_while_live)
+        # and leave the user no way to edit the files at all.
+        return None
     # The envelope schema says sandbox is an object or null and comfy_path a
     # string or null; a stale or foreign server's shapes are not passed on.
     sandbox = body.get("sandbox")
@@ -180,16 +254,22 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
         renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")
         raise typer.Exit(code=1) from exc
     health = _sandbox_status(state.port) if state.running else None
+    live = state.running and health is not None
     payload = {
         "data_dir": str(root),
-        "agent": {"running": state.running and health is not None, "port": state.port},
+        "agent": {"running": live, "port": state.port},
         "sandbox": (health or {}).get("sandbox"),
         "comfy_path": (health or {}).get("comfy_path"),
         "pending": state.pending,
         "paths": state.paths,
         "hosts": state.hosts,
-        "grant": grant_hints(root),
+        # While an agent is answering it is the only writer of these files, so
+        # there is no command here that would take effect: an empty `grant` is
+        # the honest answer, not a missing one.
+        "grant": {} if live else grant_hints(root),
     }
+    if live:
+        payload["answer_in"] = ANSWER_IN_PANEL
     if renderer.is_pretty():
         # Everything interpolated below came from files on disk or a local
         # server; it is escaped so a "[/]" in a reason cannot crash the print.
@@ -206,17 +286,22 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
                 f"  {esc(e['id'])}  {e['kind']:<4} {esc(e['target'])}  — {esc(e.get('reason', ''))}"
                 f"  [dim]({_age(e.get('requested_at'))} ago)[/dim]"
             )
-        if state.pending:
+        if state.pending and not live:
             first = state.pending[0]["id"]
             approve_cmd, deny_cmd = (payload["grant"][k].replace("<id>", first) for k in ("approve", "deny"))
             rprint(f"  [dim]{esc(approve_cmd)}    {esc(deny_cmd)}[/dim]")
+        elif state.pending:
+            rprint(f"  [dim]{esc(ANSWER_IN_PANEL)}[/dim]")
         rprint("[bold]folders the user approved[/bold]" + ("" if state.paths else "  (none)"))
         for e in state.paths:
             rprint(f"  {esc(e.get('path'))}  — {esc(e.get('reason', ''))}")
         rprint("[bold]hosts the user approved[/bold]" + ("" if state.hosts else "  (none)"))
         for e in state.hosts:
             rprint(f"  {esc(e.get('host'))}  — {esc(e.get('reason', ''))}")
-        rprint("\n[dim]" + "\n".join(esc(h) for h in payload["grant"].values()) + "[/dim]")
+        if live:
+            rprint(f"\n[dim]{esc(ANSWER_IN_PANEL)}[/dim]")
+        else:
+            rprint("\n[dim]" + "\n".join(esc(h) for h in payload["grant"].values()) + "[/dim]")
     renderer.emit(payload, command="agent permissions")
 
 
@@ -225,6 +310,7 @@ def _approve_request(root, request_id: str) -> None:
     renderer = get_renderer()
     try:
         state = read_state(root)
+        _refuse_while_live(root, state)
         record, kind = approve(root, request_id)
     except StateError as exc:
         renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")
@@ -243,12 +329,12 @@ def _approve_request(root, request_id: str) -> None:
         )
         raise typer.Exit(code=1) from exc
     approved = {"id": request_id, "kind": kind, "target": record[kind]}
-    payload: dict = {"data_dir": str(root), "approved": approved, "note": PICKUP_NOTE}
+    payload: dict = {"data_dir": str(root), "approved": approved, "note": NEXT_START_NOTE}
     if not state.running:
         payload["warning"] = _no_agent_warning(root)
     if renderer.is_pretty():
         rprint(f"[green]approved[/green] {kind}: {esc(approved['target'])}  (request {esc(request_id)})")
-        rprint(f"[dim]{PICKUP_NOTE}[/dim]")
+        rprint(f"[dim]{NEXT_START_NOTE}[/dim]")
         if "warning" in payload:
             renderer.warn(payload["warning"])
     renderer.emit(payload, command="agent allow")
@@ -302,6 +388,7 @@ def allow_cmd(
         # a refused --host or a broken egress-allow.json does not leave a
         # --path approved behind a failure exit.
         state = read_state(root)
+        _refuse_while_live(root, state)
         if path:
             vet_path(path, root=root)
         if host:
@@ -325,13 +412,13 @@ def allow_cmd(
             hint="check the data dir's permissions, or pass --data-dir for the dir the agent uses",
         )
         raise typer.Exit(code=1) from exc
-    payload: dict = {"data_dir": str(root), **added, "note": PICKUP_NOTE}
+    payload: dict = {"data_dir": str(root), **added, "note": NEXT_START_NOTE}
     if not state.running:
         payload["warning"] = _no_agent_warning(root)
     if renderer.is_pretty():
         for kind, entry in added.items():
             rprint(f"[green]{'allowed' if entry['added'] else 'already allowed'}[/green] {kind}: {esc(entry[kind])}")
-        rprint(f"[dim]{PICKUP_NOTE}[/dim]")
+        rprint(f"[dim]{NEXT_START_NOTE}[/dim]")
         if "warning" in payload:
             renderer.warn(payload["warning"])
     renderer.emit(payload, command="agent allow")
@@ -347,6 +434,7 @@ def deny_cmd(
     root = data_dir(data_dir_opt)
     request_id = request_id.strip()
     try:
+        _refuse_while_live(root, read_state(root))
         req = deny(root, request_id)
     except StateError as exc:
         renderer.error(code="agent_state_unreadable", message=str(exc), hint="fix or remove the file and try again")

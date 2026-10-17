@@ -116,7 +116,7 @@
         },
         "grant": {
           "type": "object",
-          "description": "The commands that grant more, approving a pending request first.",
+          "description": "The commands that grant more, approving a pending request first. Empty while an agent is answering: it is then the only writer of its permission files, so no command here would take effect and `answer_in` says where the user answers instead.",
           "properties": {
             "approve": {
               "type": "string"
@@ -130,13 +130,11 @@
             "host": {
               "type": "string"
             }
-          },
-          "required": [
-            "approve",
-            "deny",
-            "path",
-            "host"
-          ]
+          }
+        },
+        "answer_in": {
+          "type": "string",
+          "description": "Present only while an agent is answering: where a waiting request is answered, since the CLI cannot write the files then."
         }
       },
       "required": [
