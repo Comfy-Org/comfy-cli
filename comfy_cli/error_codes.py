@@ -583,6 +583,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
         "`name,inputs`",
     ),
+    # --- code search ---------------------------------------------------------
+    ErrorCode(
+        "bad_args",
+        "`comfy code-search context` rejected the pinned source request before fetching it: the repository, "
+        "commit SHA, file path, or requested line range was invalid. The exit code is 2.",
+        "fix the named argument; use the repository, full commit SHA, file path, and line range from a "
+        "`comfy code-search --json` result",
+    ),
+    ErrorCode(
+        "context_unavailable",
+        "`comfy code-search context` could not fetch or decode the requested pinned GitHub source because "
+        "the request failed, GitHub returned an error, or the response was not valid UTF-8 text. The exit code is 1.",
+        "verify the repository, commit, and file still resolve on GitHub, then retry the pinned context request",
+    ),
     # --- agent ---------------------------------------------------------------
     ErrorCode(
         "agent_state_unreadable",
