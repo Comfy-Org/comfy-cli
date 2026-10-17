@@ -421,8 +421,12 @@ def test_sandbox_status_rejects_another_service_on_a_reused_port(monkeypatch):
         assert command._sandbox_status(8190) is None, body
 
     # One agent-only key is enough, even with no sandbox reported yet.
-    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"status": "ok", "version": "1.2.3"}'))
-    assert command._sandbox_status(8190) == {"sandbox": None}
+    monkeypatch.setattr(
+        command,
+        "_open_health",
+        lambda url: _Resp(b'{"status": "ok", "cli": {"source": "pinned", "workspace": "/opt/ComfyUI"}}'),
+    )
+    assert command._sandbox_status(8190) == {"sandbox": None, "comfy_path": "/opt/ComfyUI"}
 
 
 def test_allow_writes_when_another_service_holds_the_agents_old_port(tmp_path: Path, monkeypatch):

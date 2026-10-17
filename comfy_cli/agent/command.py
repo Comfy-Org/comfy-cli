@@ -193,12 +193,23 @@ def _open_health(url: str):
     return build_http_only_opener(urllib.request.ProxyHandler({})).open(url, timeout=2)
 
 
-# The keys only the agent's own /health carries. Its handler answers the plain
-# string "ok" until at least one of these is reported and a JSON object once
-# any is, so an object without one of them is some other service on a reused
-# port (cloud services/agent/server/server.go, healthPayload). `status` is
-# deliberately not in the list: every other health endpoint has it too.
-_AGENT_HEALTH_KEYS = ("sandbox", "skills", "crdt", "doc_host", "prompt", "version")
+# The keys only the agent's own /health carries. The standalone binary serves
+# the plain string "ok" until it has something to report and a JSON object
+# once it has, and its startup reports sandbox and cli together, so a JSON
+# object carrying none of these is some other service on a reused port (cloud
+# services/agent/local/internal/server/server.go, healthPayload). `status` is
+# deliberately not in the list: every other health endpoint has one too.
+_AGENT_HEALTH_KEYS = (
+    "sandbox",
+    "skills",
+    "crdt",
+    "doc_host",
+    "prompt",
+    "cli",
+    "assets",
+    "memory",
+    "node_trees",
+)
 
 
 def _sandbox_status(port: int | None) -> dict | None:
