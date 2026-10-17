@@ -1283,9 +1283,39 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_workflow_invalid",
-        "`comfy build init --from-workflow <path>` or `comfy build update --from-workflow <path>` could not "
-        "read the workflow file, or it is not a JSON object. `details.path` carries the path.",
+        "`comfy build init --from-workflow <path>`, `comfy build update --from-workflow <path>`, or the "
+        "`--workflow <path>` of `comfy build validate` and `comfy build push`, could not read the workflow "
+        "file, or it is not a JSON object. Nothing was sent. `details.path` carries the path.",
         "pass a workflow saved from ComfyUI (either the editing format or the API export)",
+    ),
+    ErrorCode(
+        "build_workflow_nodes_missing",
+        "`comfy build validate --workflow` or `comfy build push --workflow` asked the builder to compare the "
+        "workflow with the LOCAL spec's definition, and the definition lacks node packs the workflow's classes "
+        "need. The message lists each pack as `<packId>: <classes>` and the source to add it from, then any "
+        "class the builder could not decide; `details.missing` carries each pack as `{packId, classes, name?, repository?, latestVersion?}` "
+        "and `details.unverified` each undecided class as `{classType, reason, packId?}`. `push` stops before "
+        "it uploads, saves or releases anything.",
+        "add each named pack to the spec's definition.customNodes as its line says: a published pack as `id` + "
+        "`registryVersion`, an unpublished one as `repository` + `gitRef` (a commit); then run the command again",
+    ),
+    ErrorCode(
+        "build_workflow_unverified",
+        "`comfy build validate --workflow` or `comfy build push --workflow`: no pack is confirmed missing, but "
+        "the builder could not decide whether the local definition installs some of the workflow's classes, "
+        "so the workflow is not verified. `details.unverified` carries each as `{classType, reason, packId?}`; "
+        "`reason` is the builder's: `unknownClass`, `lookupFailed` (the registry did not answer), "
+        "`pinnedVersion`, `uploadedPack` or `unmatchedUpload` (a local node, which a push uploads, counts as "
+        "an upload). `push` stops before it uploads, saves or releases anything.",
+        "retry for `lookupFailed`; check the other classes yourself, then run without --workflow",
+    ),
+    ErrorCode(
+        "build_workflow_check_unavailable",
+        "`comfy build validate --workflow` or `comfy build push --workflow` could not have the workflow "
+        "checked: the builder has no POST /v1/workflows/validate route (it answered 404, 405 or 501), or it "
+        "answered something other than the coverage shape. Nothing was verified, and `push` stops before it "
+        "uploads, saves or releases anything. An error answer from the route itself is `build_builder_error`.",
+        "use a builder that serves POST /v1/workflows/validate (--builder-url), or drop --workflow",
     ),
     ErrorCode(
         "build_not_signed_in",

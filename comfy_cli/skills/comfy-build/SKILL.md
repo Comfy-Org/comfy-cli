@@ -56,7 +56,7 @@ pull      Replace the local spec with a fetched Build, keeping local asset ident
 status    Report how far the spec is from the remote Build and from the install.
 ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
-validate  Validate the local spec without contacting the builder.
+validate  Validate the local spec (only --remote and --workflow reach the builder).
 delete    Delete a Build (soft-delete).
 release   create · ls · show · logs · manifest · delete
 refs      resolve · base-images · build-targets · model-dirs
@@ -72,8 +72,9 @@ blob      ls                                    (hidden; workspace private blobs
 - **Only sign in when told to.** On `build_not_signed_in`, do what its hint
   says. Run `comfy cloud login` only when nobody is signed in or the sign-in
   was refused, and not before. Everything under `refs`, both importers
-  (`--from-snapshot`, `--from-workflow`), `validate --remote`, and every command
-  that reaches the builder need it; a plain scan and a plain `validate` do not.
+  (`--from-snapshot`, `--from-workflow`), `validate --remote`, `--workflow`, and
+  every command that reaches the builder need it; a plain scan and a plain
+  `validate` do not.
   A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
   key wins over a stored sign-in, so when the hint says that key was refused,
   signing in cannot help: replace the key.
@@ -123,6 +124,19 @@ Read what it plans, decide the pins, run the conflict prediction in
 comfy build push <install>
 comfy build release create <install> --target linux/nvidia --watch
 ```
+
+**When the build is for a workflow, check the workflow against the spec before
+anything uploads.** `comfy build validate <install> --workflow <workflow>.json`
+(signed in) sends the workflow and the LOCAL spec's definition, unsaved edits
+included, to the builder, which names each node pack the definition lacks
+(`build_workflow_nodes_missing`, `details.missing[]` as `{packId, classes}`). Add
+those packs, then validate again. `push --workflow <workflow>.json` runs the same
+check before its first upload and stops on any gap; it cannot be combined with
+`--dry-run`. Only a complete answer passes: a class the builder could not decide
+(an unknown class, a registry that did not answer, a pinned or uploaded pack, and
+a local node counts as uploaded) exits 1 as `build_workflow_unverified`, and a
+builder without the check exits 1 as `build_workflow_check_unavailable`. Either
+format of workflow file works.
 
 **A push that uploads models can run for a long time, and it tells you how it is
 going.** It opens with an `upload_plan` line (files, bytes, how many local files

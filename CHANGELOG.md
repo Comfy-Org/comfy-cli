@@ -17,6 +17,15 @@ history.
 
 ### Added
 
+- `comfy build validate --workflow <file>` and `comfy build push --workflow
+  <file>` ask the builder whether the local spec's definition, unsaved edits
+  included, installs every node class the workflow uses, and exit 1 naming
+  each missing pack and its classes (`build_workflow_nodes_missing`). Only a
+  complete answer passes: a class the builder could not decide exits 1 as
+  `build_workflow_unverified`, and a builder without the check as
+  `build_workflow_check_unavailable`. `push` checks before its first upload,
+  and refuses `--workflow` with `--dry-run`.
+
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.

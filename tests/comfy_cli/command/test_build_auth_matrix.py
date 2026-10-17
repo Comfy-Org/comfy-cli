@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
-from build_auth_support import BUILD_ID, RELEASE_ID, RecordingTransport, write_snapshot
+from build_auth_support import BUILD_ID, RELEASE_ID, RecordingTransport, write_snapshot, write_workflow
 from build_push_support import make_workspace, write_spec
 from build_tree_support import leaf_commands
 from deploy_auth_support import (
@@ -51,7 +51,9 @@ class FixtureKind(Enum):
     UPDATE_SNAPSHOT = "update --from-snapshot"
     VALIDATE_REMOTE_ZERO = "validate --remote (zero eligible)"
     VALIDATE_REMOTE_LOOKUP = "validate --remote (lookupable)"
+    VALIDATE_WORKFLOW = "validate --workflow"
     PUSH = "push"
+    PUSH_WORKFLOW = "push --workflow"
     PUSH_DRY_RUN = "push --dry-run"
     PULL = "pull"
     STATUS = "status"
@@ -94,7 +96,10 @@ BUILD_AUTH_CASES = (
     # to tell a case variant of a folder from a new one; the lookups come after it.
     BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 1),
     BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 2),
+    # One call: the workflow check, and nothing else (a spec with models, no --remote).
+    BuildAuthCase(FixtureKind.VALIDATE_WORKFLOW, "validate", True, _ZERO_PLUS, 1),
     BuildAuthCase(FixtureKind.PUSH, "push", True, _ONE_PLUS),
+    BuildAuthCase(FixtureKind.PUSH_WORKFLOW, "push", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.PUSH_DRY_RUN, "push", False, _ZERO),
     BuildAuthCase(FixtureKind.PULL, "pull", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.STATUS, "status", True, _ONE_PLUS),
@@ -159,9 +164,15 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
                 root, models=[{"type": "checkpoints", "filename": "local-only.safetensors", "blobId": "blob-private"}]
             )
             return ["build", "validate", "--remote", str(root)]
+        case FixtureKind.VALIDATE_WORKFLOW:
+            write_spec(root)
+            return ["build", "validate", "--workflow", str(write_workflow(root)), str(root)]
         case FixtureKind.PUSH:
             write_spec(root, models=[], nodes=[])
             return ["build", "push", str(root)]
+        case FixtureKind.PUSH_WORKFLOW:
+            write_spec(root, models=[], nodes=[])
+            return ["build", "push", "--workflow", str(write_workflow(root)), str(root)]
         case FixtureKind.PUSH_DRY_RUN:
             write_spec(root, models=[], nodes=[])
             return ["build", "push", "--dry-run", str(root)]
