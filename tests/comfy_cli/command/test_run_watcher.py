@@ -76,14 +76,14 @@ class TestTailStateFileToleratesAnUnreadableStateDir:
     ``execute``'s ``except (WebSocketException, ConnectionError, OSError)``
     block's try, and after the server already accepted the prompt. So an
     ``OSError`` escaping it is reported to the caller as ``ws_disconnected``
-    with a "re-run the command" hint for a job that is already queued, and an
-    agent caller obeys that hint (OBL-192: under Comfy Desktop on Windows the
-    `clishim` broker forwards ``HOME`` but not ``USERPROFILE``, so
-    ``expanduser("~")`` put the config root outside the sandbox and every
-    touch of the jobs dir raised ENOENT).
+    with a "re-run the command" hint for a job that is already queued, and a
+    caller that obeys that hint submits it again. The state dir is reached through
+    ``expanduser("~")``, so a launcher that does not pass through the variable
+    the platform expands ``~`` from — or a sandboxed, read-only home — makes
+    every touch of the jobs dir raise ENOENT.
 
     Pretty mode only, because that is the only mode that tails at all — but it
-    is the mode a human at a Desktop terminal is in.
+    is the mode a human at a terminal is in.
     """
 
     # Factories, not instances: a shared exception instance would pin its
@@ -115,7 +115,7 @@ class TestTailStateFileToleratesAnUnreadableStateDir:
         self._unreadable(monkeypatch, make_exc)
         # A non-zero budget so the poll loop runs at least once; the assertion
         # is simply that this call returns.
-        _tail_state_file("obl192-tail", seconds=0.05)
+        _tail_state_file("statefail-tail", seconds=0.05)
         capsys.readouterr()
 
     @pytest.mark.parametrize("make_exc", FAILURES, ids=lambda f: type(f()).__name__)
@@ -125,5 +125,5 @@ class TestTailStateFileToleratesAnUnreadableStateDir:
         ``except``."""
         self._pretty()
         self._unreadable(monkeypatch, make_exc)
-        _tail_state_file("obl192-tail", seconds=0.0)
+        _tail_state_file("statefail-tail", seconds=0.0)
         capsys.readouterr()
