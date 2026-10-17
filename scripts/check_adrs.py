@@ -11,7 +11,7 @@ LEGACY_REFERENCE_PATTERN = re.compile(
     r"ADR(?:[- ]?\d{4}(?!-\d{2})|(?:-[A-Z][A-Z0-9]*)?\s*(?:/\s*|\(\s*)\d{4}(?!-\d{2}))|(?:docs/)?adr/\d{4}-"
 )
 STATUS_PATTERN = re.compile(
-    r"^## Status\s+\n+(?:\s*\n)*(Proposed|Accepted|Rejected|Deprecated|Superseded)\b",
+    r"^## Status[ \t]*\n(?:[ \t]*\n)*(Proposed|Accepted|Rejected|Deprecated|Superseded)\b",
     re.MULTILINE,
 )
 SPECIAL_FILES = {"TEMPLATE.md"}
