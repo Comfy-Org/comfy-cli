@@ -149,6 +149,42 @@ def sanitize_node_name(name: str) -> str:
     return name
 
 
+# PEP 508 names are ASCII alphanumerics plus ``.``, ``-`` and ``_``, and must
+# begin and end with an alphanumeric. A folder name is bound by none of that, so
+# a name derived from one has to be normalized before it reaches
+# ``[project].name``: ``comfy node init`` reports success either way and an
+# invalid name only surfaces much later, at build or publish time.
+_PROJECT_NAME_DISALLOWED_RE: re.Pattern[str] = re.compile(r"[^a-z0-9._-]+")
+
+# Used when normalization leaves nothing usable — a folder named ``ComfyUI-``,
+# one whose name is entirely non-ASCII, or the filesystem root. An obviously
+# placeholder name the user is warned about beats an empty one that passes
+# ``init`` and then fails at publish.
+FALLBACK_PROJECT_NAME = "my-custom-nodes"
+
+
+def normalize_project_name(name: str) -> str:
+    """Coerce ``name`` into a valid PEP 508 / Registry ``[project].name``.
+
+    Runs of disallowed characters collapse to a single ``-``, and leading and
+    trailing separators are dropped so the result begins and ends with an
+    alphanumeric. Returns :data:`FALLBACK_PROJECT_NAME`, with a warning, when
+    nothing usable survives.
+
+    Only ``[project].name`` is normalized. ``[tool.comfy].DisplayName`` keeps the
+    original text, which is free-form and is what a human reads.
+    """
+    normalized = _PROJECT_NAME_DISALLOWED_RE.sub("-", name.lower()).strip("._-")
+    if not normalized:
+        print(
+            f'Warning: could not derive a valid project name from "{name}". '
+            f'Using "{FALLBACK_PROJECT_NAME}" — set `[project].name` in '
+            "pyproject.toml before publishing."
+        )
+        return FALLBACK_PROJECT_NAME
+    return normalized
+
+
 def validate_and_extract_os_classifiers(classifiers: list) -> list:
     os_classifiers = [c for c in classifiers if c.startswith("Operating System :: ")]
     if not os_classifiers:
@@ -231,39 +267,167 @@ def _strip_url_credentials(url: str) -> str:
     return url
 
 
+# ``git remote get-url <name>`` exits 2 when there is no such remote — git's
+# documented signal that the config key is simply absent. That is the ONLY
+# non-zero remote exit treated as "you have no remote yet". Every other one is
+# git declining to do its job (a repository-ownership refusal, a corrupt
+# ``.git/config``, a permission error), and falling back there would overwrite a
+# real repository's identity with folder-derived metadata while discarding git's
+# own diagnostic.
+_GIT_NO_SUCH_REMOTE_EXIT_CODE = 2
+
+# git's wording for "there is no repository here, or above here". Matched as an
+# allowlist rather than a denylist: a failure this does not recognise propagates,
+# so a git diagnostic we have never seen fails loudly instead of silently
+# scaffolding the wrong metadata. One deliberate consequence is that a bare
+# repository ("this operation must be run in a work tree") raises with git's
+# message rather than being guessed at.
+_GIT_ABSENT_REPOSITORY_STDERR = "not a git repository"
+
+
+def _run_git(git_bin: str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git, capturing both streams. Never raises on a non-zero exit.
+
+    stderr is captured rather than discarded: it is the only thing that
+    distinguishes "no repository here" from a refusal, and it is what the user
+    needs to see when the refusal is the answer.
+
+    The C locale is forced because that stderr is then *matched* against
+    :data:`_GIT_ABSENT_REPOSITORY_STDERR`. git's messages are gettext-localized
+    and Git for Windows and most distributions ship the translations, so without
+    this a French or Chinese user's "not a git repository" would miss the
+    allowlist and the fallback this function exists to enable would turn into a
+    hard error. ``LANGUAGE`` is cleared as well: it takes precedence over
+    ``LC_ALL`` in gettext's lookup.
+    """
+    env = {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
+    return subprocess.run([git_bin, *args], capture_output=True, text=True, check=False, env=env)
+
+
+def _git_failure(invocation: str, completed: subprocess.CompletedProcess[str]) -> Exception:
+    detail = completed.stderr.strip() or f"exited with status {completed.returncode}"
+    return Exception(f"`git {invocation}` failed and the result is not usable:\n{detail}")
+
+
+def _resolve_origin_url() -> str:
+    """The ``origin`` URL of the git repository rooted at the current directory.
+
+    Returns ``""`` — with a warning naming which case it was — for the three
+    shapes a first publication legitimately has:
+
+    * no git repository at all,
+    * a repository that is not rooted at this folder, and
+    * a repository with no ``origin`` remote yet.
+
+    ``[project.urls]`` is optional for the Registry route, so those are
+    scaffolding conditions rather than errors.
+
+    Raises when git could not answer at all: absent or refused
+    (``BinaryNotFoundError``, an ``OSError`` subclass), an ownership refusal, a
+    corrupt config, a permission error. Those must not be mistaken for "no
+    remote yet" — see :data:`_GIT_NO_SUCH_REMOTE_EXIT_CODE`.
+    """
+    try:
+        git_bin = resolve_required_binary("git")
+
+        # Resolve the repository root first. It answers "is there a repository,
+        # and is it this folder" in one call, and it is what makes the remote
+        # lookup below safe to trust.
+        toplevel = _run_git(git_bin, "rev-parse", "--show-toplevel")
+    except OSError as e:
+        # ``BinaryNotFoundError`` subclasses ``OSError``: git absent, or found
+        # and refused because the only match was CWD-anchored.
+        raise Exception(f"Could not run git to read the remote URL. ({e})") from e
+
+    if toplevel.returncode != 0:
+        if _GIT_ABSENT_REPOSITORY_STDERR not in toplevel.stderr:
+            raise _git_failure("rev-parse --show-toplevel", toplevel)
+        print(
+            "Note: this folder is not a git repository, so there is no `origin` remote to "
+            "read. Leaving `[project.urls]` empty. Setting `Repository` in pyproject.toml is "
+            "recommended — the Registry links it from your pack's page — but it is not required "
+            "to publish."
+        )
+        return ""
+
+    # ``git remote get-url`` searches PARENT directories, so the usual new-pack
+    # layout — a plain folder under ``ComfyUI/custom_nodes/`` inside a cloned
+    # ComfyUI — answers with ComfyUI's own origin. Naming the pack after that
+    # would scaffold, and allow publishing, a pack whose Repository, Docs and
+    # Bug Tracker all point at somebody else's project. So only a repository
+    # rooted at THIS folder is allowed to describe this pack.
+    repository_root = toplevel.stdout.strip()
+    if pathlib.Path(repository_root).resolve() != pathlib.Path.cwd().resolve():
+        print(
+            f"Note: the enclosing git repository is {repository_root}, not this folder, so its "
+            "`origin` remote does not describe this pack. Leaving `[project.urls]` empty. Run "
+            "`git init` here and add an `origin` remote, or set `Repository` in pyproject.toml."
+        )
+        return ""
+
+    remote = _run_git(git_bin, "remote", "get-url", "origin")
+    if remote.returncode == _GIT_NO_SUCH_REMOTE_EXIT_CODE:
+        print(
+            "Note: this git repository has no `origin` remote yet. Leaving `[project.urls]` "
+            "empty. Setting `Repository` in pyproject.toml is recommended — the Registry links "
+            "it from your pack's page — but it is not required to publish."
+        )
+        return ""
+    if remote.returncode != 0:
+        raise _git_failure("remote get-url origin", remote)
+
+    return _strip_url_credentials(remote.stdout.strip())
+
+
 def initialize_project_config():
+    # Resolve git BEFORE create_comfynode_config() writes pyproject.toml.
+    #
+    # ``comfy node init`` refuses to overwrite an existing pyproject.toml, so
+    # anything that raises *after* that first write leaves a half-initialized
+    # project with `name = ""` that the user cannot retry — which is the state
+    # this function used to leave behind whenever git was absent or refused.
+    # Resolving first means a git failure aborts with nothing written and
+    # re-running after the fix works.
+    #
+    # A first publication is often made from a plain folder with no git
+    # repository, or from one with no `origin` remote yet. That is not an error
+    # for the Registry route: publishing needs `project.name` and
+    # `project.version`, and `[project.urls]` is optional (``URLs`` defaults
+    # every field to ""), so those scaffold without the URLs rather than
+    # aborting. A git that cannot answer still aborts — see
+    # :func:`_resolve_origin_url`.
+    git_remote_url = _resolve_origin_url()
+
     create_comfynode_config()
 
     with open("pyproject.toml") as file:
         document = tomlkit.parse(file.read())
 
-    # Get the current git remote URL
-    try:
-        git_bin = resolve_required_binary("git")
-        git_remote_url = subprocess.check_output([git_bin, "remote", "get-url", "origin"]).decode().strip()
-        git_remote_url = _strip_url_credentials(git_remote_url)
-    except (subprocess.CalledProcessError, OSError) as e:
-        # ``OSError`` also covers ``BinaryNotFoundError`` — git absent, or found
-        # and refused. Without it that escapes as a traceback *after*
-        # ``create_comfynode_config()`` above has already written pyproject.toml,
-        # leaving a half-initialized project behind.
-        raise Exception(f"Could not retrieve Git remote URL. Are you in a Git repository? ({e})") from e
-
-    # Convert SSH URL to HTTPS if needed
-    if git_remote_url.startswith("git@github.com:"):
-        git_remote_url = git_remote_url.replace("git@github.com:", "https://github.com/")
-
-    # Ensure the URL ends with `.git` and remove it to obtain the plain URL
-    repo_name = git_remote_url.rsplit("/", maxsplit=1)[-1].replace(".git", "")
-    git_remote_url = git_remote_url.replace(".git", "")
-
     project = document.get("project", tomlkit.table())
     urls = project.get("urls", tomlkit.table())
-    urls["Repository"] = git_remote_url
-    urls["Documentation"] = git_remote_url + "/wiki"
-    urls["Bug Tracker"] = git_remote_url + "/issues"
 
-    project["name"] = sanitize_node_name(repo_name)
+    if git_remote_url:
+        # Convert SSH URL to HTTPS if needed
+        if git_remote_url.startswith("git@github.com:"):
+            git_remote_url = git_remote_url.replace("git@github.com:", "https://github.com/")
+
+        # Strip a trailing `.git` to obtain the plain URL. `removesuffix`, not
+        # `replace`: `replace` removes EVERY occurrence, so a host or path that
+        # contains `.git` — `https://my.gitea.host/u/my.github.io.git` — came out
+        # corrupted and pointing at a different host.
+        repo_name = git_remote_url.rsplit("/", maxsplit=1)[-1].removesuffix(".git")
+        git_remote_url = git_remote_url.removesuffix(".git")
+
+        urls["Repository"] = git_remote_url
+        urls["Documentation"] = git_remote_url + "/wiki"
+        urls["Bug Tracker"] = git_remote_url + "/issues"
+    else:
+        # No remote to name the pack after, so the containing folder is the only
+        # thing that does. ``Path.cwd().name`` is "" at the filesystem root.
+        repo_name = pathlib.Path.cwd().name
+
+    project_name = normalize_project_name(sanitize_node_name(repo_name))
+    project["name"] = project_name
     project["description"] = ""
     project["version"] = "1.0.0"
 
@@ -280,7 +444,10 @@ def initialize_project_config():
 
     tool = document.get("tool", tomlkit.table())
     comfy = tool.get("comfy", tomlkit.table())
-    comfy["DisplayName"] = repo_name
+    # DisplayName keeps the original text — it is free-form and is what a human
+    # reads. It only borrows the normalized name when there was no text at all
+    # (``comfy node init`` run at the filesystem root).
+    comfy["DisplayName"] = repo_name or project_name
     tool["comfy"] = comfy
     document["tool"] = tool
 
