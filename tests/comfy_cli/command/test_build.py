@@ -121,12 +121,19 @@ def test_detect_comfy_version_from_server(monkeypatch):
         def json(self):
             return {"system": {"comfyui_version": "0.3.55"}}
 
-    monkeypatch.setattr("comfy_cli.command.build.requests.get", lambda url, timeout: _Resp())
+    seen = {}
+
+    def fake_get(url, headers, timeout):
+        seen["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setattr("comfy_cli.command.build.requests.get", fake_get)
     assert build.detect_comfy_version_from_server("http://127.0.0.1:8188") == "0.3.55"
+    assert seen["headers"] == {"Comfy-Usage-Source": "comfy-cli"}
 
 
 def test_detect_comfy_version_from_server_none_when_down(monkeypatch):
-    def boom(url, timeout):
+    def boom(url, headers, timeout):
         raise requests.ConnectionError("refused")
 
     monkeypatch.setattr("comfy_cli.command.build.requests.get", boom)

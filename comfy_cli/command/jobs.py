@@ -44,7 +44,7 @@ from comfy_cli import cancellation, execution_errors, jobs_state, tracking
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.host_port import report_usage_error
 from comfy_cli.host_port import resolve_host_port as _resolve_host_port
-from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
+from comfy_cli.http import USAGE_SOURCE_HEADERS, ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer
 from comfy_cli.output.sanitize import sanitize, sanitize_markup
 from comfy_cli.utils import parse_rfc3339
@@ -157,7 +157,7 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
     non-JSON — leaves as a ``RuntimeError``, which is the single family every
     call site below already catches.
     """
-    req = urllib.request.Request(url)
+    req = urllib.request.Request(url, headers=USAGE_SOURCE_HEADERS)
     try:
         with plain_urlopen(req, timeout=timeout) as resp:
             return json.loads(read_capped(resp, url))
@@ -1718,7 +1718,10 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
     # 2. Remove from the pending queue (no-op if not pending).
     queue_body = json.dumps({"delete": [prompt_id]}).encode("utf-8")
     queue_req = urllib.request.Request(
-        f"{base}/queue", data=queue_body, method="POST", headers={"Content-Type": "application/json"}
+        f"{base}/queue",
+        data=queue_body,
+        method="POST",
+        headers={"Content-Type": "application/json", **USAGE_SOURCE_HEADERS},
     )
     queue_ok = True
     try:
@@ -1752,7 +1755,7 @@ def _local_cancel(prompt_id: str, host: str, port: int) -> None:
 
     interrupt_ok = True
     if is_running:
-        interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST")
+        interrupt_req = urllib.request.Request(f"{base}/interrupt", method="POST", headers=USAGE_SOURCE_HEADERS)
         try:
             with plain_urlopen(interrupt_req, timeout=10) as resp:
                 _ = resp.read()
