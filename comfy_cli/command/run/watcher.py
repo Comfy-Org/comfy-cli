@@ -66,17 +66,30 @@ def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
     from comfy_cli import jobs_state
     from comfy_cli.output.glyphs import status_glyph
 
+    # Truncate first, then escape: slicing can split a markup sequence, and
+    # `prompt_id` is server-chosen. Unsafe ids used to stop at the submit-time
+    # `jobs_state.write`; now that `_write_state` swallows that rejection they
+    # reach this render, where raw markup raises MarkupError (or injects into
+    # the terminal) on a job the server already accepted.
+    short_id = sanitize_markup(prompt_id[:8])
+
     def render(status: str, elapsed: float) -> Text:
-        return Text.from_markup(f"  {status_glyph(status)}  [dim]· {elapsed:.1f}s · {prompt_id[:8]}…[/dim]")
+        return Text.from_markup(f"  {status_glyph(status)}  [dim]· {elapsed:.1f}s · {short_id}…[/dim]")
 
     def read_state():
         """``(state, readable)``. ``readable`` is False only when the record
         could not be consulted at all, which is unrecoverable for the whole
         tail — distinct from ``state is None``, the ordinary "nothing written
-        yet" the poll loop is built to wait through."""
+        yet" the poll loop is built to wait through.
+
+        ``ValueError`` is caught alongside ``OSError`` to match
+        ``_write_state``: ``state_path()`` raises it for a server-supplied
+        prompt_id that fails ``_SAFE_PROMPT_ID``, and since ``_write_state``
+        now swallows that at submit, this read is where it would otherwise
+        surface — as a traceback, uncovered by either caller's handler."""
         try:
             return jobs_state.read(prompt_id), True
-        except OSError:
+        except (OSError, ValueError):
             return None, False
 
     deadline = _t.time() + seconds

@@ -578,7 +578,14 @@ def execute(
                 host=host,
                 port=port,
             )
-            watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
+            # No record means nothing for a watcher to update: `_watch-job`
+            # opens with `jobs_state.read` and exits immediately (or dies on
+            # the same error). Spawning it anyway would also report
+            # `watcher_spawned: true`, which tells a consumer something is
+            # keeping the file fresh when nothing is.
+            watcher_spawned = state_file is not None and _spawn_watcher(
+                execution.prompt_id, where="local", host=host, port=port, notify=notify
+            )
             # Emitted after the state file and the watcher spawn attempt, so a
             # consumer reading this line can already `comfy jobs status` it.
             _emit_queued_event(renderer, execution)
@@ -936,11 +943,17 @@ def _announce_async_queued(
     if renderer.is_pretty():
         from comfy_cli.output.glyphs import status_glyph
 
+        # `state_file` is None when the record could not be written. Printing
+        # the bare value gives a human "state    None" with no explanation, on
+        # a run that otherwise succeeded.
+        state_line = state_file if state_file else "[dim]not written — track by prompt_id[/dim]"
         pprint(
-            f"{status_glyph('queued')} [dim]{prompt_id}[/dim]\n"
+            # `prompt_id` is server-chosen: a value carrying Rich markup would
+            # otherwise raise MarkupError here, or inject into the terminal.
+            f"{status_glyph('queued')} [dim]{sanitize_markup(prompt_id)}[/dim]\n"
             f"  [dim]workflow [/dim]{workflow_name}\n"
             f"  [dim]watch    [/dim][cyan]{watch_command}[/cyan]\n"
-            f"  [dim]state    [/dim]{state_file}"
+            f"  [dim]state    [/dim]{state_line}"
         )
         if not watcher_spawned:
             pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
@@ -1265,7 +1278,11 @@ def execute_cloud(
             base_url=target.base_url,
         )
         _journal_run(workflow_name, submit.prompt_id, "cloud")
-        watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
+        # Same rule as the local async branch, and it matters more here: the
+        # watcher inherits COMFY_CLOUD_AUTH_TOKEN / COMFY_CLOUD_API_KEY and
+        # outlives us, so launching one that can read no record is a
+        # credential-holding orphan for nothing.
+        watcher_spawned = state_file is not None and _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
         _announce_async_queued(

@@ -2324,9 +2324,12 @@ class TestStateWriteFailureIsNotADisconnect:
         data = env["data"]
         assert data["status"] == "queued"
         assert data["prompt_id"] == prompt_id
-        # The one visible consequence of the swallowed failure: no durable
-        # record to point the caller at.
+        # The visible consequences of the swallowed failure: no durable record
+        # to point the caller at, and no watcher claimed to be keeping one
+        # fresh. `watcher_spawned: true` here would tell a consumer something
+        # is updating a file that does not exist.
         assert data["state_file"] is None
+        assert data["watcher_spawned"] is False
         # (a) nothing told the caller the server went away, and (b) nothing
         # told it to re-run — that hint is what multiplied the GPU jobs.
         blob = json.dumps(lines)
@@ -2338,16 +2341,24 @@ class TestStateWriteFailureIsNotADisconnect:
     @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
     def test_local_async(self, failure_point, monkeypatch, workflow_file, capsys):
         self._break_state_writes(monkeypatch, failure_point)
+        spawned = []
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
-            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch(
+                "comfy_cli.command.run._spawn_watcher",
+                side_effect=lambda pid, **_k: spawned.append(pid) or True,
+            ),
         ):
             mock_open.return_value.__enter__.return_value.read.return_value = json.dumps(
                 {"prompt_id": "statefail-local"}
             ).encode()
             lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
         self._assert_queued_without_disconnect(lines, exit_code, "statefail-local")
+        # Not merely reported as unspawned — never launched. `_watch-job` opens
+        # with `jobs_state.read`, so it would exit immediately or die on the
+        # same error, and on cloud it inherits credentials while doing so.
+        assert spawned == [], "no record to update, so no watcher should have been launched"
 
     @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
     def test_cloud_async(self, failure_point, monkeypatch, workflow_file, capsys):
@@ -2356,6 +2367,7 @@ class TestStateWriteFailureIsNotADisconnect:
         already-accepted — and billable — cloud job into an uncaught
         traceback."""
         from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.command import run as run_pkg
 
         real_write = jobs_state_mod.write
         _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=_FakeSubmit(prompt_id="statefail-cloud")))
@@ -2363,8 +2375,11 @@ class TestStateWriteFailureIsNotADisconnect:
         # failure injected below is actually reached.
         monkeypatch.setattr(jobs_state_mod, "write", real_write)
         self._break_state_writes(monkeypatch, failure_point)
+        spawned = []
+        monkeypatch.setattr(run_pkg, "_spawn_watcher", lambda pid, **_k: spawned.append(pid) or True)
         lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
         self._assert_queued_without_disconnect(lines, exit_code, "statefail-cloud")
+        assert spawned == [], "a cloud watcher inherits credentials; do not launch one with no record"
 
 
 class TestBrokenPipeAtTheQueuedEmit:
