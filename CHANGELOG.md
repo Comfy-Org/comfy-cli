@@ -135,6 +135,10 @@ history.
 
 ### Fixed
 
+- The widget catalog no longer lists the Load3D buttons (`upload 3d model`,
+  `upload extra resources`, `clear`) on `Load3DAdvanced`, whose frontend node
+  never has them (PM-1932). A workflow saved with them keeps its layout when
+  edited, and still converts.
 - `comfy run` no longer reports a failure to write its own job-state file as a
   lost connection to the ComfyUI server. The state file is a convenience
   record, written after the server has already accepted the prompt, so a
