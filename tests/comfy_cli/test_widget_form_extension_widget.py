@@ -5,7 +5,7 @@ catalog ``widget_order`` is empty, but the extension mounts a client-only
 ``output`` text widget that serializes a value. The frontend fix sends the
 node's name-keyed values plus A24 ``widgets_values_form``, and the doc host
 projects them back verbatim. The printer resolves name-keyed values through the
-catalog order and does not read the form, so a value the catalog cannot name is
+catalog order and, for classes without a DynamicGroup input, does not read the form, so a value the catalog cannot name is
 dropped rather than shifted onto a catalogued widget. These tests pin how the agent's own
 readers treat that projection, so the frontend change cannot silently break
 what the agent sees.
