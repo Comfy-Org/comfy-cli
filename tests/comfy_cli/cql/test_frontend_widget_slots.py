@@ -327,7 +327,50 @@ class TestDomWidgetInputs:
         assert graph.widget_order("Load3D") == ["model_file", *_LOAD_3D_BUTTONS, "image", "width", "height"]
 
     def test_load3d_advanced_server_declared_state_is_not_duplicated(self, graph: Graph):
-        assert graph.widget_order("Load3DAdvanced") == ["model_file", *_LOAD_3D_BUTTONS, "viewport_state", "width"]
+        assert graph.widget_order("Load3DAdvanced") == ["model_file", "viewport_state", "width"]
+
+
+class TestLoad3DAdvancedHasNoButtons:
+    """PM-1932: ``Node 1 (Load3DAdvanced) has no widget 'upload 3d model'``.
+
+    ``Comfy.Load3DAdvanced`` retypes ``viewport_state`` to ``LOAD_3D_ADVANCED``
+    in ``beforeRegisterNodeDef``, so the node is built by the LOAD_3D_ADVANCED
+    factory (viewport only) and the LOAD_3D factory's three buttons are never
+    created. object_info still says ``LOAD_3D``, and the catalog put the
+    buttons on the node anyway: three names the live canvas cannot resolve,
+    and a positional projection that read ``upload3dmodel`` into the viewport
+    and ``uploadExtraResources``/``clear`` into width/height.
+    """
+
+    def test_widget_order_matches_the_live_node(self, graph: Graph):
+        for order in (
+            graph.widget_order("Load3DAdvanced"),
+            graph.widget_order_default("Load3DAdvanced"),
+            graph.widget_order_for_node("Load3DAdvanced", ["none", "", 1024]),
+        ):
+            assert order == ["model_file", "viewport_state", "width"]
+
+    def test_catalog_entry_names_no_button(self, graph: Graph):
+        from comfy_cli.cql.widget_catalog import build_types
+
+        types = build_types(graph)
+        assert types["Load3DAdvanced"]["widget_order"] == ["model_file", "viewport_state", "width"]
+        # Plain Load3D keeps them: its LOAD_3D slot IS built by the button factory.
+        assert types["Load3D"]["widget_order"] == ["model_file", *_LOAD_3D_BUTTONS, "image", "width", "height"]
+
+    def test_a_fresh_node_serializes_the_frontends_exact_shape(self, graph: Graph):
+        assert graph.widget_defaults("Load3DAdvanced") == {"model_file": "none", "viewport_state": "", "width": 1024}
+        wf, _ = workflow_ops.add_node(_empty_workflow(), graph, "Load3DAdvanced")
+        assert wf["nodes"][0]["widgets_values"] == ["none", "", 1024]
+
+    def test_a_button_name_is_not_a_widget_of_the_node(self, graph: Graph):
+        wf, op = workflow_ops.add_node(_empty_workflow(), graph, "Load3DAdvanced")
+        nid = op["node_id"]
+        for name in _LOAD_3D_BUTTONS:
+            with pytest.raises(ValueError, match=name):
+                workflow_ops.set_widget(wf, graph, nid, name, "x")
+        wf, _ = workflow_ops.set_widget(wf, graph, nid, "width", 640)
+        assert wf["nodes"][0]["widgets_values"] == ["none", "", 640]
 
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
