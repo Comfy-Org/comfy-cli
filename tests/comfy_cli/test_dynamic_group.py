@@ -1410,3 +1410,32 @@ def test_group_row_replacement_refuses_an_earlier_write_to_a_dropped_row():
 
     with pytest.raises(ValueError, match=r"loras\.1\.strength is already written"):
         workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
+
+
+def test_pruned_dynamic_group_range_finding_stays_advisory():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["Sink"] = {
+        "input": {"required": {}},
+        "output": [],
+        "output_name": [],
+        "output_node": True,
+    }
+    prompt = {
+        "1": {
+            "class_type": "DevToolsNodeWithDynamicGroup",
+            "inputs": {
+                "before": "head",
+                "after": "tail",
+                "loras.0.lora_name": "A.safetensors",
+                "loras.0.strength": "3",
+            },
+        },
+        "2": {"class_type": "Sink", "inputs": {}},
+    }
+
+    result = Graph.from_object_info(info).validate_workflow(prompt)
+
+    assert result["valid"], result["errors"]
+    findings = {warning["code"]: warning for warning in result["warnings"]}
+    assert findings["above_max"]["field"] == "1.DevToolsNodeWithDynamicGroup.loras.0.strength"
+    assert "set-widget" not in findings["coercible_type"]["hint"]

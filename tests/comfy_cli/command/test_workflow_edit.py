@@ -1076,6 +1076,31 @@ class TestConnect:
         samples = next(i for i in vae["inputs"] if i["name"] == "samples")
         assert samples["link"] == link_id
 
+    def test_disconnect_removes_link_and_both_endpoint_references(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["disconnect", str(path), "3.latent_image"], capsys)
+        assert env["ok"] is True, env
+        expected = {
+            "op": "disconnect",
+            "link_id": 1,
+            "to_node": 3,
+            "to_slot": 3,
+        }
+        assert expected.items() <= env["data"]["op"].items()
+        on_disk = json.loads(path.read_text())
+        assert on_disk["links"] == []
+        sampler = next(n for n in on_disk["nodes"] if n["id"] == 3)
+        source = next(n for n in on_disk["nodes"] if n["id"] == 7)
+        assert sampler["inputs"][3]["link"] is None
+        assert source["outputs"][0]["links"] == []
+
+    def test_disconnect_rejects_an_empty_input(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["disconnect", str(path), "3.model"], capsys)
+        assert env["ok"] is False
+        assert "not connected" in env["error"]["message"]
+        assert json.loads(path.read_text()) == _base_workflow()
+
     def test_autogrow_input_grows_a_slot_per_connection(self, patched_graph, tmp_path, capsys):
         """COMFY_AUTOGROW inputs (BatchImagesNode.images) grow images.image0/1… — the
         assembly wiring the CRDT/apply path needs for video."""
@@ -1092,6 +1117,35 @@ class TestConnect:
         grown = [i for i in bn["inputs"] if i["name"].startswith("images.image")]
         assert {i["name"] for i in grown} == {"images.image0", "images.image1"}
         assert all(i["link"] is not None and i["type"] == "IMAGE" for i in grown)
+
+    def test_disconnect_preserves_dynamic_input_identity(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _autogrow_workflow())
+        connected = _run(["connect", str(path), "20.IMAGE", "10.images"], capsys)
+        grow_id = connected["data"]["op"]["link_id"]
+
+        disconnected = _run(["disconnect", str(path), "10.images.image0"], capsys)
+
+        assert disconnected["ok"] is True, disconnected
+        assert disconnected["data"]["op"]["grow_id"] == grow_id
+
+    def test_disconnect_preserves_widget_converted_input_identity(self, patched_graph):
+        wf = _base_workflow()
+        sampler = next(n for n in wf["nodes"] if n["id"] == 3)
+        sampler["inputs"].append(
+            {
+                "name": "cfg",
+                "type": "FLOAT",
+                "link": 41,
+                "widget": {"name": "cfg"},
+                "grow_id": 41,
+            }
+        )
+        wf["links"].append([41, 7, 0, 3, len(sampler["inputs"]) - 1, "FLOAT"])
+
+        updated, op = workflow_ops.disconnect(wf, patched_graph, 3, "cfg")
+
+        assert op["grow_id"] == 41
+        assert all(link[0] != 41 for link in updated["links"])
 
     def test_autogrow_rejects_malformed_slot_targets(self, patched_graph, tmp_path, capsys):
         """A dotted autogrow target that is not the next sequential slot — an index gap
@@ -1312,6 +1366,31 @@ class TestDelete:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_edit_invalid"
 
+    def test_success_and_error_envelopes_name_the_same_command(self, patched_graph, tmp_path, capsys):
+        """Both envelopes must say ``workflow delete-node`` — the invoked command.
+
+        Regression: the success path passed ``"workflow delete"`` to ``_finish``
+        while the error path fell back to ``renderer.command``, so the two
+        envelopes disagreed and the success one named a DIFFERENT, real command
+        (the cloud/local CRUD ``comfy workflow delete``). Because that name is
+        itself registered in ``COMMAND_SCHEMAS``, the discovery ratchet stayed
+        green while agents were routed to the wrong command and schema — a name
+        that only looked registered.
+        """
+        ok = _run(["delete-node", str(_write(tmp_path, _base_workflow(), "ok.json")), "7"], capsys)
+        err = _run(["delete-node", str(_write(tmp_path, _base_workflow(), "err.json")), "999"], capsys)
+        assert ok["ok"] is True, ok
+        assert err["ok"] is False, err
+        assert ok["command"] == "workflow delete-node"
+        assert err["command"] == "workflow delete-node"
+        assert ok["command"] == err["command"]
+
+    def test_delete_node_command_name_resolves_to_a_registered_schema(self):
+        """The emitted name must be the registered one, not a near-miss sibling."""
+        from comfy_cli.discovery import COMMAND_SCHEMAS
+
+        assert COMMAND_SCHEMAS["comfy workflow delete-node"] == "workflow"
+
 
 # ---------------------------------------------------------------------------
 # clear
@@ -1438,6 +1517,31 @@ class TestLsNodes:
         assert ids == {3, 7}
         types = {n["type"] for n in env["data"]["nodes"]}
         assert types == {"KSampler", "EmptyLatentImage"}
+
+    def test_pretty_table_surfaces_node_state(self, patched_graph, tmp_path, capsys):
+        workflow = _base_workflow()
+        workflow["nodes"][0]["mode"] = 4
+        workflow["nodes"].append({"id": 20, "type": "Reroute", "inputs": [], "outputs": []})
+        path = _write(tmp_path, workflow)
+
+        out, _err, result = _invoke_raw(["ls-nodes", str(path)], capsys, _force_pretty_renderer)
+
+        assert result.exit_code == 0
+        assert "state" in out
+        assert "bypass" in out
+        assert "ui-only" in out
+
+    def test_pretty_table_treats_workflow_cells_as_literal_text(self, patched_graph, tmp_path, capsys):
+        workflow = _base_workflow()
+        workflow["nodes"][0].update({"id": "[link=https://example.test]3[/link]", "type": "[fp16]", "title": "[/]"})
+        path = _write(tmp_path, workflow)
+
+        out, _err, result = _invoke_raw(["ls-nodes", str(path)], capsys, _force_pretty_renderer)
+
+        assert result.exit_code == 0
+        assert "[link=https://example.test]3[/link]" in out
+        assert "[fp16]" in out
+        assert "[/]" in out
 
 
 # ---------------------------------------------------------------------------

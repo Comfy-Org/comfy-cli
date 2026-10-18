@@ -8,6 +8,7 @@ patch surface stays stable.
 """
 
 import json
+import logging
 import sys
 import time
 import uuid
@@ -54,6 +55,8 @@ from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
+
+logger = logging.getLogger(__name__)
 
 # Bounds on the `partner_nodes` telemetry property and on the partner-node names
 # echoed in the missing-credential error. class_type strings are attacker- (or
@@ -575,7 +578,14 @@ def execute(
                 host=host,
                 port=port,
             )
-            watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
+            # No record means nothing for a watcher to update: `_watch-job`
+            # opens with `jobs_state.read` and exits immediately (or dies on
+            # the same error). Spawning it anyway would also report
+            # `watcher_spawned: true`, which tells a consumer something is
+            # keeping the file fresh when nothing is.
+            watcher_spawned = state_file is not None and _spawn_watcher(
+                execution.prompt_id, where="local", host=host, port=port, notify=notify
+            )
             # Emitted after the state file and the watcher spawn attempt, so a
             # consumer reading this line can already `comfy jobs status` it.
             _emit_queued_event(renderer, execution)
@@ -630,19 +640,21 @@ def execute(
         # server that is down (or came back with no record of the prompt).
         if wait_state is not None:
             jobs_state.clear_watcher_identity(wait_state)
+        prompt_id = _submitted_prompt_id(execution)
+        hint, slept_line = _ws_timeout_guidance(prompt_id)
         if renderer.is_pretty():
             pprint(
                 f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
                 "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
+                + slept_line
             )
         details = {"timeout": timeout}
-        prompt_id = _submitted_prompt_id(execution)
         if prompt_id is not None:
             details["prompt_id"] = prompt_id
         renderer.error(
             code="ws_timeout",
             message=f"WebSocket timed out after {timeout}s waiting for server response.",
-            hint="re-run with a larger --timeout (e.g. --timeout 300)",
+            hint=hint,
             details=details,
         )
         raise typer.Exit(code=1)
@@ -757,7 +769,12 @@ def _write_state(state):
     """
     try:
         return jobs_state.write(state)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        # The caller gets a null `state_file` and no error, so this log line is
+        # the only trail a swallowed failure leaves — and the one that names
+        # the resolved path when the config root is unwritable. `LOG_LEVEL`
+        # (comfy_cli.logging) surfaces it.
+        logger.debug("job state write failed for %r, continuing: %s", getattr(state, "prompt_id", None), e)
         return None
 
 
@@ -803,6 +820,23 @@ def _mark_watch_exit(state, exit_code, execution):
     state.status = "error"
     state.error = verdict
     return _write_state(state)
+
+
+def _ws_timeout_guidance(prompt_id: str | None) -> tuple[str, str]:
+    """``(hint, pretty_line)`` for a ``ws_timeout``.
+
+    `execution.connect()` raises the same timeout before anything is queued, so
+    the `comfy jobs status` pointer is only offered when a job actually exists.
+    """
+    hint = "re-run with a larger --timeout (e.g. --timeout 300)"
+    if prompt_id is None:
+        return hint, ""
+    hint += f"; if the machine slept, check `comfy jobs status {prompt_id}`"
+    pretty_line = (
+        "\n[yellow]If the machine slept mid-run, the job may still be running — check "
+        f"`comfy jobs status {prompt_id}`. Keep long local batches awake with `caffeinate` (macOS).[/yellow]"
+    )
+    return hint, pretty_line
 
 
 def _submitted_prompt_id(execution) -> str | None:
@@ -856,7 +890,20 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     watcher pid + create_time before the first write.
 
     ``where_fields`` carries the target-specific locators (``host``/``port`` for
-    local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair."""
+    local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair,
+    whose second element is None when the write could not land.
+
+    The write goes through ``_write_state``, not ``jobs_state.write`` directly,
+    and that is load-bearing: both callers run *after* the server accepted the
+    prompt, and the local one runs inside the ``except (WebSocketException,
+    ConnectionError, OSError)`` block's try. A raw call let a purely local
+    filesystem error — a config root resolved outside the sandbox, a read-only
+    or missing directory — surface to the caller as ``ws_disconnected`` with a
+    "re-run the command" hint, which an agent caller obeys, submitting another
+    GPU job for a prompt that was already queued. On the cloud side, where
+    there is no handler at all, the same raw call turned an accepted billable
+    job into an uncaught traceback. A state-file failure costs the caller the
+    durable record (``state_file`` comes back null) and nothing else."""
     state = jobs_state.new(
         prompt_id=prompt_id,
         client_id=client_id,
@@ -865,7 +912,7 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
         **where_fields,
     )
     state.item_map = (compose_meta or {}).get("items")
-    state_file = jobs_state.write(state)
+    state_file = _write_state(state)
     return state, state_file
 
 
@@ -896,11 +943,21 @@ def _announce_async_queued(
     if renderer.is_pretty():
         from comfy_cli.output.glyphs import status_glyph
 
+        # `state_file` is None when the record could not be written. Printing
+        # the bare value gives a human "state    None" with no explanation, on
+        # a run that otherwise succeeded.
+        state_line = state_file if state_file else "[dim]not written — track by prompt_id[/dim]"
         pprint(
-            f"{status_glyph('queued')} [dim]{prompt_id}[/dim]\n"
+            # `prompt_id` is server-chosen, and it appears TWICE here: on its
+            # own line, and again inside `watch_command`, which both callers
+            # build as `comfy jobs watch <prompt_id>`. A value carrying Rich
+            # markup raises MarkupError at either sink — aborting pretty output
+            # for a job that was already accepted — or injects into the
+            # terminal, so both are escaped.
+            f"{status_glyph('queued')} [dim]{sanitize_markup(prompt_id)}[/dim]\n"
             f"  [dim]workflow [/dim]{workflow_name}\n"
-            f"  [dim]watch    [/dim][cyan]{watch_command}[/cyan]\n"
-            f"  [dim]state    [/dim]{state_file}"
+            f"  [dim]watch    [/dim][cyan]{sanitize_markup(watch_command)}[/cyan]\n"
+            f"  [dim]state    [/dim]{state_line}"
         )
         if not watcher_spawned:
             pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
@@ -1225,7 +1282,11 @@ def execute_cloud(
             base_url=target.base_url,
         )
         _journal_run(workflow_name, submit.prompt_id, "cloud")
-        watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
+        # Same rule as the local async branch, and it matters more here: the
+        # watcher inherits COMFY_CLOUD_AUTH_TOKEN / COMFY_CLOUD_API_KEY and
+        # outlives us, so launching one that can read no record is a
+        # credential-holding orphan for nothing.
+        watcher_spawned = state_file is not None and _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
         _announce_async_queued(

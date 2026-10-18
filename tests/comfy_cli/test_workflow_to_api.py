@@ -949,6 +949,45 @@ class TestMalformedInputHardening:
         assert result["1"]["class_type"] == "Foo"
         assert result["1"]["inputs"]["shape"] == "square"
 
+    def test_v3_combo_conversion_matches_server_boolean_numeric_equality(self):
+        object_info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output_node": True,
+                "display_name": "Foo",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Foo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [True, 7],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"shape": True, "shape.number": 7}
+
     def test_malformed_schema_input_does_not_crash(self):
         # Several helpers do ``schema.get("input") or {}`` then ``.get(section)``.
         # If "input" was ever a non-dict, ``.get`` would AttributeError before
@@ -2899,6 +2938,19 @@ class TestLoad3DInjectedButtonSlots:
         )
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_current_advanced_variant_maps_without_legacy_buttons(self, object_info_3d):
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_truncated_legacy_advanced_variant_keeps_its_viewport_input(self, object_info_3d):
+        # A legacy save cut off after the button markers still describes a
+        # LOAD_3D slot; omitting viewport_state would leave a required input
+        # missing. The engine pads the same shape before a named edit.
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources"])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 1024, "height": 1024}
 
     def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
         # No model_file widget -> no injected buttons. Skipping three slots

@@ -20,6 +20,7 @@ The tests cover:
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import sys
@@ -543,15 +544,39 @@ class TestWebSocketEvents:
             return _run_execute_capture(workflow_file, capsys)
 
     def test_websocket_timeout(self, workflow_file, capsys):
-        lines, exit_code = self._run_with_ws_messages(
-            workflow_file,
-            WebSocketTimeoutException("timed out"),
-            capsys,
-        )
+        # Advance a fake clock past the 30s budget on the first poll so the
+        # wall-clock backstop fires without a real 30s wait.
+        fake_time = MagicMock()
+        fake_time.time.side_effect = itertools.count(1000.0, 31.0).__next__
+        fake_time.monotonic.side_effect = itertools.count(1000.0, 31.0).__next__
+        with patch("comfy_cli.command.run.execution.time", fake_time):
+            lines, exit_code = self._run_with_ws_messages(
+                workflow_file,
+                WebSocketTimeoutException("timed out"),
+                capsys,
+            )
         assert exit_code == 1
         env = _envelope(lines)
         assert env["error"]["code"] == "ws_timeout"
         assert env["error"]["details"]["timeout"] == 30
+        # A job was queued, so the hint names it for `comfy jobs status`.
+        assert "comfy jobs status p" in env["error"]["hint"]
+
+    def test_connect_timeout_hint_names_no_job(self, workflow_file, capsys):
+        """A timeout raised by the websocket handshake fires before anything is
+        queued, so the hint must not send the user to a job that doesn't exist."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open"),
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            MockWs.return_value.connect.side_effect = WebSocketTimeoutException("handshake timed out")
+            lines, exit_code = _run_execute_capture(workflow_file, capsys)
+        assert exit_code == 1
+        env = _envelope(lines)
+        assert env["error"]["code"] == "ws_timeout"
+        assert "prompt_id" not in env["error"]["details"]
+        assert "jobs status" not in env["error"]["hint"]
 
     def test_connection_lost_websocket(self, workflow_file, capsys):
         lines, exit_code = self._run_with_ws_messages(
@@ -2240,6 +2265,190 @@ class TestQueuedFollowsStatePersistence:
         assert exit_code == 0
         assert ("queued_emit",) in log
         assert log.index(("state_write",)) < log.index(("queued_emit",))
+
+
+class TestStateWriteFailureIsNotADisconnect:
+    """A local filesystem failure writing the job-state file must never be
+    reported to the caller as a lost server connection.
+
+    The state file lives under `constants.DEFAULT_CONFIG`, which resolves from
+    `expanduser("~")`. When that root is unwritable — a launcher that does not
+    pass through the environment variable the platform expands `~` from, a
+    sandboxed or read-only home, a full disk — `jobs_state.write` raises an
+    `OSError` (ENOENT/EACCES). The async submit branch called it raw inside the
+    try whose handler is `except (WebSocketException, ConnectionError,
+    OSError)`, so a purely local write error came back to the caller as
+    `ws_disconnected` with a "re-run the command" hint. The server had accepted
+    the prompt every time, so a caller that obeys the hint queues a second GPU
+    job for one request — and an automated caller obeys it every time.
+
+    The fix routes both async call sites through the file's existing
+    best-effort `_write_state` wrapper, so a submit the server accepted still
+    reports `queued`, just with `state_file: null`.
+    """
+
+    # Where the `OSError` surfaces, outermost call last. Patching each in turn
+    # pins the behaviour on the *handler*, not on one mock shape.
+    #
+    # Each value builds a FRESH exception per raise. A shared instance would
+    # pin its `__traceback__` — and so every frame it passed through — on a
+    # class attribute for the rest of the session; this suite has already been
+    # OOM-killed once by retained frames (see `_mock_exec` in `test_run.py`).
+    FAILURE_POINTS = {
+        # `state_dir()`'s mkdir under an unwritable config root — the shape
+        # this was reported as in the field.
+        "state_dir": lambda: FileNotFoundError(2, "No such file or directory"),
+        # The atomic write itself, where the directory lookup happened to work
+        # but the file did not (sandboxed/read-only root).
+        "atomic_write_text": lambda: PermissionError(13, "Permission denied"),
+        # `jobs_state.write` whole, which is what the call site actually sees.
+        "write": lambda: OSError(5, "Input/output error"),
+    }
+
+    @staticmethod
+    def _break_state_writes(monkeypatch, failure_point):
+        from comfy_cli import jobs_state as jobs_state_mod
+
+        make_exc = TestStateWriteFailureIsNotADisconnect.FAILURE_POINTS[failure_point]
+
+        def _boom(*_a, **_k):
+            raise make_exc()
+
+        monkeypatch.setattr(jobs_state_mod, failure_point, _boom)
+
+    @staticmethod
+    def _assert_queued_without_disconnect(lines, exit_code, prompt_id):
+        assert exit_code == 0, "a local state-file failure must not fail an accepted submit"
+        env = _envelope(lines)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["status"] == "queued"
+        assert data["prompt_id"] == prompt_id
+        # The visible consequences of the swallowed failure: no durable record
+        # to point the caller at, and no watcher claimed to be keeping one
+        # fresh. `watcher_spawned: true` here would tell a consumer something
+        # is updating a file that does not exist.
+        assert data["state_file"] is None
+        assert data["watcher_spawned"] is False
+        # (a) nothing told the caller the server went away, and (b) nothing
+        # told it to re-run — that hint is what multiplied the GPU jobs.
+        blob = json.dumps(lines)
+        assert "ws_disconnected" not in blob
+        assert "re-run the command" not in blob
+        # (c) the caller still gets the whole documented async stream.
+        assert [ln["type"] for ln in lines] == ["prompt_preview", "queued", "envelope"]
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_local_async(self, failure_point, monkeypatch, workflow_file, capsys):
+        self._break_state_writes(monkeypatch, failure_point)
+        spawned = []
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch(
+                "comfy_cli.command.run._spawn_watcher",
+                side_effect=lambda pid, **_k: spawned.append(pid) or True,
+            ),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                {"prompt_id": "statefail-local"}
+            ).encode()
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        self._assert_queued_without_disconnect(lines, exit_code, "statefail-local")
+        # Not merely reported as unspawned — never launched. `_watch-job` opens
+        # with `jobs_state.read`, so it would exit immediately or die on the
+        # same error, and on cloud it inherits credentials while doing so.
+        assert spawned == [], "no record to update, so no watcher should have been launched"
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_local_wait_still_completes(self, failure_point, monkeypatch, workflow_file, capsys):
+        """`--wait` writes twice — at submit and at completion — and both already
+        went through `_write_state`. Pinned here because the documented envelope
+        differs from the async one: this path runs to completion in the
+        foreground, so it ends `completed` with its outputs, not `queued`."""
+        self._break_state_writes(monkeypatch, failure_point)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            # "p" is what `_local_ws_that_finishes` stamps on its `executing`
+            # frame; any other id leaves the recv loop waiting forever.
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            _local_ws_that_finishes(MockWs)
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=True)
+
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        # NOT `queued`: this path ran to completion in the foreground, so the
+        # lost record costs the caller the record and nothing else.
+        assert data["status"] == "completed"
+        assert data["state_file"] is None
+        assert data["prompt_id"] == "p"
+        blob = json.dumps(lines)
+        assert "ws_disconnected" not in blob
+        assert "re-run the command" not in blob
+
+    @pytest.mark.parametrize(
+        ("evil", "expect"),
+        [("x[/]y", "[/]"), ("x[bold red]y[/bold red]", "[bold red]")],
+        ids=["stray_closing_tag", "well_formed_tag"],
+    )
+    def test_a_markup_bearing_prompt_id_does_not_abort_the_pretty_panel(
+        self, evil, expect, monkeypatch, workflow_file, capsys
+    ):
+        """`prompt_id` reaches the pretty queued panel TWICE: on its own line,
+        and inside `watch_command`, which both callers build as
+        `comfy jobs watch <prompt_id>`.
+
+        Reachable from this PR's change: an id carrying markup also fails
+        `_SAFE_PROMPT_ID`, so it used to stop at the submit-time write.
+
+        Two payloads, because they fail differently. A stray CLOSING tag raises
+        `MarkupError` — a crash after the server accepted the job. A WELL-FORMED
+        tag raises nothing at all and simply lets the server restyle the user's
+        terminal, which is the quieter half of the same hole.
+        """
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        set_renderer(Renderer(mode=OutputMode.PRETTY, command="run"))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.command.run._tail_state_file"),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": evil}).encode()
+            execute(workflow_file, host="127.0.0.1", port=8188, wait=False, verbose=False, timeout=30)
+        combined = "".join(capsys.readouterr())
+
+        assert "comfy jobs watch" in combined, "the panel must still render"
+        # Escaped means SHOWN LITERALLY, so PRESENCE is the proof: an
+        # interpreted tag would have been consumed and absent from the text.
+        # Twice, because both sinks carry the id.
+        assert combined.count(expect) >= 2, f"{expect!r} should appear inert on both lines, got:\n{combined}"
+
+    @pytest.mark.parametrize("failure_point", sorted(FAILURE_POINTS))
+    def test_cloud_async(self, failure_point, monkeypatch, workflow_file, capsys):
+        """Same shared helper, the other call site. `execute_cloud`'s non-wait
+        branch has no broad handler at all, so there the raw write turned an
+        already-accepted — and billable — cloud job into an uncaught
+        traceback."""
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.command import run as run_pkg
+
+        real_write = jobs_state_mod.write
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=_FakeSubmit(prompt_id="statefail-cloud")))
+        # The stubs no-op `jobs_state.write`; restore the real one so the
+        # failure injected below is actually reached.
+        monkeypatch.setattr(jobs_state_mod, "write", real_write)
+        self._break_state_writes(monkeypatch, failure_point)
+        spawned = []
+        monkeypatch.setattr(run_pkg, "_spawn_watcher", lambda pid, **_k: spawned.append(pid) or True)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+        self._assert_queued_without_disconnect(lines, exit_code, "statefail-cloud")
+        assert spawned == [], "a cloud watcher inherits credentials; do not launch one with no record"
 
 
 class TestBrokenPipeAtTheQueuedEmit:

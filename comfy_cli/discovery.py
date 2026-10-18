@@ -106,11 +106,15 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow insert-workflow": "workflow",
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",
+    "comfy workflow disconnect": "workflow",
     "comfy workflow set-widget": "workflow",
     "comfy workflow set-node-field": "workflow",
     "comfy workflow delete-node": "workflow",
     "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
+    # Whole-document edits: same `_finish` op envelope as the primitives above.
+    "comfy workflow clear": "workflow",
+    "comfy workflow reset-doc": "workflow",
     "comfy workflow apply": "workflow",
     "comfy workflow capture": "workflow",
     "comfy workflow foreach": "workflow",
@@ -174,6 +178,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy knowledge status": "knowledge",
     "comfy knowledge resolve": "knowledge",
     "comfy knowledge pick": "knowledge",
+    "comfy knowledge authoring": "knowledge",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",

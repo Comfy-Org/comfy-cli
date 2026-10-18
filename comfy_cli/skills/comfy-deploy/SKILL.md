@@ -143,7 +143,8 @@ While the status is `provisioning` or `starting` the deployment carries a
 `progress` object, and `status --json` returns it as `data.progress`: `step`
 (`staging_models`, `creating_endpoint`, `waiting_for_worker`) and, while models
 are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
-`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
+`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond`, `etaSeconds` and
+`placingModels`.
 Under `--watch` the same object arrives as `deploy_progress` events, one per new
 sample (the service rewrites it about every three seconds in every step): on **stderr** under `--json`,
 on stdout under `--json-stream`. Relay those numbers instead of "still
@@ -152,6 +153,13 @@ provisioning". Things to read correctly:
 - `bytesTotal` absent means nobody measured the release, so there is no time
   left to quote; `0` means every model was already in place.
 - `bytesTotalIsFloor: true` means "at least this much", with no `etaSeconds`.
+- `placingModels: true` means every byte is in and staging is finishing: the
+  models are being put in place and, on Modal, the release image built beside
+  the upload may still be building, for up to about 4 minutes after the last
+  byte. The step stays `staging_models` with `bytesDone` equal to `bytesTotal`
+  and no rate, and the progress line adds "finishing: putting the models in
+  place" on every provider. That is not a stall, even once `etaSeconds`
+  runs out and is dropped; never infer it from the bytes alone.
 - `etaSeconds` covers staging only. Creating the endpoint and the first worker's
   cold start come after it.
 - `attempt` above 1 means the step was restarted, and `bytesDone` started again.

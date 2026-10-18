@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
+from comfy_cli.credentials import DataPlaneToken
 from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 from comfy_cli.http import target_auth_headers as _auth_headers
@@ -867,6 +869,16 @@ def execute_download(
         raise typer.Exit(code=1)
 
     target = resolve_target(where=where)
+    # The sign-in token expires fifteen minutes after it was minted, so a
+    # download of many outputs re-reads it before each one rather than sending
+    # the token the first file started with. Decided right after resolving, so
+    # the stored sign-in it is compared with is the one just read. An observer:
+    # a failed refresh must not clear the shared session.
+    sign_in = (
+        DataPlaneToken.for_target_token(target.auth_token, base_url=target.base_url, allow_clear=False)
+        if target.is_cloud and target.auth_token
+        else None
+    )
     # Stamp the routed target for direct callers (comfy-mcp); `cmdline.download`
     # already stamped its own before calling us, which is what gives the
     # stdin-parsing errors above a non-null `where` on the CLI path.
@@ -953,6 +965,8 @@ def execute_download(
     is_local_job = state is not None and getattr(state, "where", None) == "local"
 
     for idx, url in enumerate(output_urls):
+        if idx and sign_in is not None:
+            auth_hdrs = _auth_headers(replace(target, auth_token=sign_in.current()))
         entry = _download_one_url(
             url,
             idx,
