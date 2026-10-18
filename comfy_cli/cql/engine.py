@@ -63,6 +63,18 @@ _LOAD_3D_BUTTON_SLOTS: tuple[tuple[str, str], ...] = (
     ("upload extra resources", "uploadExtraResources"),
     ("clear", "clear"),
 )
+# Inputs a frontend extension RETYPES in ``beforeRegisterNodeDef`` before the
+# node is built, keyed ``(class, input) -> frontend type``. ``getCustomWidgets``
+# factories are looked up by the retyped name, so object_info's type says
+# nothing about which factory — and which injected widgets — a node gets.
+# ``Comfy.Load3DAdvanced`` (load3dAdvanced.ts) turns ``viewport_state`` from
+# ``LOAD_3D`` into ``LOAD_3D_ADVANCED``, whose factory adds the viewport and
+# no buttons; reading object_info's ``LOAD_3D`` here advertised three button
+# widgets the live node never has (PM-1932).
+_FRONTEND_RETYPED_INPUTS: dict[tuple[str, str], str] = {
+    ("Load3DAdvanced", "viewport_state"): "LOAD_3D_ADVANCED",
+}
+
 # The values, for the converter's gate: it skips a slot only when the saved
 # value IS one of these, so a shape written without the buttons keeps its
 # straight positional mapping.
@@ -933,16 +945,29 @@ def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
     """The button slots the LOAD_3D custom widget injects into ``m``, if any.
 
     ``getCustomWidgets().LOAD_3D`` attaches them only when the node already
-    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so the loaders
-    (``Load3D``, ``Load3DAdvanced``) get them and the viewers fed by a
-    ``model_3d`` link (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
-    They are constructed before the component widget, so the caller places them
-    immediately BEFORE the ``LOAD_3D`` slot — unlike every entry in
+    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so ``Load3D``
+    gets them and the viewers fed by a ``model_3d`` link (``Preview3DAdvanced``,
+    ``SaveGaussianSplat``, …) do not. ``Load3DAdvanced`` does not either: the
+    frontend retypes its slot to ``LOAD_3D_ADVANCED`` (``frontend_input_type``),
+    so the LOAD_3D factory never runs on it. They are constructed before the
+    component widget, so the caller places them immediately BEFORE the
+    frontend-typed ``LOAD_3D`` slot — unlike every entry in
     ``frontend_extra_widget_names``, which trails the declared inputs.
     """
     if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
         return ()
+    if not any(not p.is_link and frontend_input_type(m, p) == "LOAD_3D" for p in m.inputs):
+        return ()
     return _LOAD_3D_BUTTON_SLOTS
+
+
+def frontend_input_type(m: Morphism, p: Port) -> str:
+    """The type the frontend builds ``p`` as, after ``beforeRegisterNodeDef``.
+
+    Custom widget factories are dispatched on this type, not on object_info's,
+    so a factory's injected widgets follow it (see ``_FRONTEND_RETYPED_INPUTS``).
+    """
+    return _FRONTEND_RETYPED_INPUTS.get((getattr(m, "id", ""), p.name), p.type)
 
 
 def frontend_extra_widget_names(m: Morphism) -> list[str]:
@@ -1701,7 +1726,7 @@ class Graph:
         for p in m.inputs:
             if p.is_link:
                 continue
-            if buttons and p.type == "LOAD_3D":
+            if buttons and frontend_input_type(m, p) == "LOAD_3D":
                 order.extend(name for name, _value in buttons)
             order.append(p.name)
             if _has_control_after_generate_slot(p):
@@ -4383,7 +4408,7 @@ def _expand_widget_entries(
     for p in m.inputs:
         if p.is_link:
             continue
-        if buttons and p.type == "LOAD_3D":
+        if buttons and frontend_input_type(m, p) == "LOAD_3D":
             for name, _value in buttons:
                 entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
         emit(p.name, p, None, 0)

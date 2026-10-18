@@ -1224,8 +1224,12 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     """
     input_def = _schema_input_def(schema)
     # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
-    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
-    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    # attached to the loaders and NOT to the viewers fed by a ``model_3d`` link
+    # (Preview3DAdvanced, SaveGaussianSplat, …). Deliberately broader than the
+    # catalog for Load3DAdvanced, whose live node has no buttons (PM-1932):
+    # workflows projected through a catalog from before that fix carry their
+    # three values, and the skip is gated on those literal values, so the
+    # real button-less shape still maps straight through.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:

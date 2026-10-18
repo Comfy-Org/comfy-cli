@@ -2932,7 +2932,14 @@ class TestLoad3DInjectedButtonSlots:
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
 
-    def test_advanced_variant_skips_the_same_three_slots(self, object_info_3d):
+    def test_advanced_variant_maps_the_live_nodes_shape(self, object_info_3d):
+        # The frontend builds Load3DAdvanced with no buttons (PM-1932).
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_advanced_variant_skips_button_values_from_an_older_catalog(self, object_info_3d):
+        # Shape projected through a catalog that still listed the buttons.
         ui = self._workflow(
             "Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
         )
