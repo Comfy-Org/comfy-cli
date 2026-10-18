@@ -2944,6 +2944,14 @@ class TestLoad3DInjectedButtonSlots:
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
 
+    def test_truncated_legacy_advanced_variant_keeps_its_viewport_input(self, object_info_3d):
+        # A legacy save cut off after the button markers still describes a
+        # LOAD_3D slot; omitting viewport_state would leave a required input
+        # missing. The engine pads the same shape before a named edit.
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources"])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 1024, "height": 1024}
+
     def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
         # No model_file widget -> no injected buttons. Skipping three slots
         # here would eat this node's only two values.
