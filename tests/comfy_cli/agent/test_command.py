@@ -1017,6 +1017,8 @@ def test_probe_reads_the_agents_plain_ok_as_live(monkeypatch):
         (_refused_connection, "gone"),
         (_raises(ConnectionRefusedError(111, "Connection refused")), "gone"),
         (_raises(http.client.BadStatusLine("SSH-2.0-OpenSSH")), "gone"),
+        (_raises(http.client.RemoteDisconnected("closed without a response")), "unconfirmed"),
+        (_raises(http.client.IncompleteRead(b"")), "unconfirmed"),
         (_raises(TimeoutError("timed out")), "unconfirmed"),
         (_raises(urllib.error.URLError(TimeoutError("timed out"))), "unconfirmed"),
         (

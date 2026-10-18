@@ -260,6 +260,16 @@ def _probe_agent(port: int | None) -> tuple[str, dict | None]:
         return (_AGENT_GONE if isinstance(exc.reason, ConnectionRefusedError) else _AGENT_UNCONFIRMED), None
     except ConnectionRefusedError:
         return _AGENT_GONE, None
+    except (http.client.RemoteDisconnected, http.client.IncompleteRead):
+        # Both reach the HTTPException clause below and must not: they come
+        # from a peer that accepted the connection and then failed mid-exchange
+        # -- a live agent shutting down, crashing or overloaded does exactly
+        # this. urllib wraps only h.request() in URLError, not h.getresponse(),
+        # so a RemoteDisconnected (a BadStatusLine as well as a
+        # ConnectionResetError) arrives here unwrapped; an IncompleteRead comes
+        # from resp.read() on a short body. Neither establishes that the
+        # listener is not this agent.
+        return _AGENT_UNCONFIRMED, None
     except http.client.HTTPException:
         # HTTPException is not an OSError: a stale port taken by something
         # that is not HTTP (an SSH banner) raises BadStatusLine here. Proof
