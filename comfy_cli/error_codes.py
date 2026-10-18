@@ -619,6 +619,23 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy agent permissions` to see the requests waiting and their ids; pass --data-dir if the agent "
         "uses another data dir",
     ),
+    ErrorCode(
+        "agent_running",
+        "`comfy agent allow` or `comfy agent deny` refused to write: an agent is answering on its port from "
+        "the same data dir. A running agent is the only writer of its permission files, so a write made here "
+        "would be ignored and then overwritten by the agent's next save.",
+        "answer a waiting request in the agent panel or on the card in chat, which call the running agent's "
+        "own API; to write these files from here instead, stop the agent first",
+    ),
+    ErrorCode(
+        "agent_unconfirmed",
+        "`comfy agent allow` or `comfy agent deny` refused to write: the data dir's agent.json names a port, "
+        "and something answered on it that did not answer as this agent — a probe that timed out, a body that "
+        "was not the agent's. Whether an agent is running is then unsettled, and a write made while one is "
+        "would be overwritten by its next save with nothing to show it was lost, so none was made.",
+        "if an agent is running, answer the request in the agent panel or on the card in chat; if none is, "
+        "delete the stale agent.json in that data dir and run the command again",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
