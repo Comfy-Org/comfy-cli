@@ -113,8 +113,8 @@ def _controlled_combo_workflow(node_extra: dict) -> dict:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="FE-3470: comfy-cli does not read widgets_values_form, so a form that declares an undeclared "
-    "widget ahead of a declared one shifts `steps`; the frontend only declares trailing undeclared widgets until this passes",
+    reason="FE-3470: comfy-cli reads widgets_values by catalog position and ignores widgets_values_form, so the "
+    "frontend only declares a form for fixed-layout nodes whose undeclared widgets trail the declared ones",
 )
 def test_agent_printer_reads_a_declared_form_by_name_when_an_undeclared_widget_precedes_a_declared_one():
     graph = Graph.from_object_info(CONTROLLED_COMBO_OBJECT_INFO)
