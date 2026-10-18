@@ -462,6 +462,18 @@ def test_a_real_widget_name_outranks_the_bare_element_guess():
     assert node["inputs"][idx] == {"name": "image0", "type": "STRING", "widget": {"name": "image0"}, "link": None}
 
 
+def test_a_real_combo_widget_name_outranks_the_bare_element_guess():
+    """A COMBO widget has no socket entry on an agent-built node, so it takes
+    the widget→input conversion, still ahead of the group's element guess."""
+    oi = json.loads(FIXTURE.read_text())
+    oi["BatchImagesNode"]["input"]["required"]["image0"] = [["a", "b"]]
+    oi["BatchImagesNode"]["input_order"]["required"].append("image0")
+    g = Graph.from_object_info(oi)
+    wf, batch = _add_loader(_empty(), g, "BatchImagesNode")
+    _idx, grow = workflow_ops._resolve_input_target(_node(wf, batch), g, "image0", "STRING")
+    assert grow == {"name": "image0", "type": "STRING", "widget": "image0"}
+
+
 def test_replay_collision_never_grows_past_the_schema_max(graph):
     """Two replicas each mint the LAST free slot of a 3-slot group. On
     replay the second arrival collides on ``video_3``; renaming it must not

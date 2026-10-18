@@ -159,3 +159,10 @@ def test_the_agent_print_shows_a_human_link_into_frame_load_cap(graph):
 
     assert "frame_load_cap=primitive_int" in source
     assert "frame_load_cap=0" not in source
+
+
+def test_a_widget_socket_refuses_a_link_of_another_scalar_type(graph):
+    workflow, primitive, video = _built(graph)
+
+    with pytest.raises(ValueError, match=r"type mismatch: INT output .* FLOAT input 'force_rate'"):
+        workflow_ops.connect(workflow, graph, primitive["id"], 0, video["id"], "force_rate")
