@@ -21,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import shlex
 import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
@@ -1882,6 +1883,25 @@ def validate_api_workflow(
             if editable != nid:
                 issue["api_node_id"] = nid
                 issue["node_id"] = editable
+                # Every fully-qualified field on the same input must use the
+                # same canvas address, so companion findings can be paired.
+                field = issue.get("field")
+                if isinstance(field, str) and field.startswith(f"{nid}."):
+                    issue["field"] = f"{editable}.{field[len(nid) + 1 :]}"
+                if issue.get("code") == "coercible_type":
+                    # The actionable command must speak the canvas edit
+                    # surface and keep the entire address shell-quoted.
+                    hint = issue.get("hint")
+                    node_data = wf_data.get(nid)
+                    class_type = node_data.get("class_type") if isinstance(node_data, dict) else None
+                    field_prefix = f"{nid}.{class_type}." if isinstance(class_type, str) else ""
+                    input_name = (
+                        field[len(field_prefix) :] if isinstance(field, str) and field.startswith(field_prefix) else ""
+                    )
+                    if isinstance(hint, str) and input_name and "set-widget" in hint:
+                        old_arg = shlex.quote(f"{nid}.{input_name}")
+                        new_arg = shlex.quote(f"{editable}.{input_name}")
+                        issue["hint"] = hint.replace(f" {old_arg} --", f" {new_arg} --")
     if link_errors or link_warnings:
         result["errors"].extend(link_errors)
         result["warnings"].extend(link_warnings)

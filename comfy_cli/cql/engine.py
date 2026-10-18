@@ -622,6 +622,38 @@ class Port:
                 return f"{self.name}: expected BOOLEAN, got {type(value).__name__}"
         return None
 
+    def server_coercion(self, value: Any) -> Any | None:
+        """The typed value the server makes of a literal :meth:`validate_shape`
+        refuses, or ``None`` when the server's conversion fails or is not
+        mirrored here.
+
+        ``execution.validate_inputs`` runs ``int(val)`` on an INT input,
+        ``float(val)`` on a FLOAT one and ``str(val)`` on a STRING one before
+        any range check, and the node receives the result: a template that saved
+        ``"1536"`` for an INT runs with ``1536``. Only those three conversions
+        are mirrored, and none is relaxed further: ``"1536.0"`` is not
+        converted for INT (the server's ``int("1536.0")`` raises), nor is a
+        non-integral number on INT (``int(1536.9)`` truncates), a bool, a non-finite string (``"nan"``, ``"inf"``; stricter than the
+        server, which takes them) or a non-finite number on a STRING input, and
+        BOOLEAN is not mirrored at all because ``bool("false")`` is true.
+        """
+        if isinstance(value, bool):
+            return None
+        if self.type == "INT" and isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        if self.type == "FLOAT" and isinstance(value, str):
+            try:
+                number = float(value)
+            except ValueError:
+                return None
+            return number if math.isfinite(number) else None
+        if self.type == "STRING" and (isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))):
+            return str(value)
+        return None
+
     def validate_catalog(self, value: Any) -> list[dict]:
         """Catalog findings for ``value``. Returns a list of finding dicts.
 
@@ -2026,12 +2058,14 @@ class Graph:
             # unresolved selection keep the old generic checks.
             dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
             dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combos(
-                node_id, class_type, m, node_inputs
+                node_id, class_type, m, node_inputs, range_is_error=node_id in reachable
             )
             group_errors: list[dict] = []
             group_warnings: list[dict] = []
             for group in (p for p in m.inputs if p.is_dynamic_group):
-                e, w, _ = _check_dynamic_group(node_id, class_type, group, node_inputs)
+                e, w, _ = _check_dynamic_group(
+                    node_id, class_type, group, node_inputs, range_is_error=node_id in reachable
+                )
                 group_errors.extend(e)
                 group_warnings.extend(w)
             for input_name, value in node_inputs.items():
@@ -2317,23 +2351,12 @@ class Graph:
                     }
                     (errors if node_id in reachable else warnings).append(finding)
                     continue
-                # Shape check (hard error)
-                shape_err = port.validate_shape(value)
-                if shape_err:
-                    errors.append(
-                        {
-                            "node_id": node_id,
-                            "field": input_name,
-                            "code": "shape_mismatch",
-                            "message": shape_err,
-                            "hint": f"expected {port.type}; check the value type",
-                        }
-                    )
-                    continue
-                # Catalog checks (enum membership, etc.). Range violations are a
-                # hard reject only on a node the server will actually run; on a
-                # pruned (output-unreachable) node they stay advisory warnings.
-                cat_errors, cat_warnings = _validate_catalog_value(
+                # Shape check (hard error, or a warning when the server converts
+                # the value), then catalog checks (enum membership, etc.). Range
+                # violations are a hard reject only on a node the server will
+                # actually run; on a pruned (output-unreachable) node they stay
+                # advisory warnings.
+                cat_errors, cat_warnings = _validate_literal_value(
                     node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
                 )
                 errors.extend(cat_errors)
@@ -2850,8 +2873,59 @@ def _validate_catalog_value(
     return errors, warnings
 
 
+def _validate_literal_value(
+    node_id: str, class_type: str, input_name: str, port: Port, value: Any, *, range_is_error: bool = True
+) -> tuple[list[dict], list[dict]]:
+    """Shape and catalog checks for one literal input value. Returns (errors, warnings).
+
+    A wrong JSON type is a ``shape_mismatch`` error unless the server converts
+    it (:meth:`Port.server_coercion`): ``"1536"`` on an INT input
+    runs, so it is a ``coercible_type`` warning naming the typed value to
+    store, and the catalog checks judge the converted value, as the server's
+    range check does.
+    """
+    shape_err = port.validate_shape(value)
+    if shape_err is None:
+        return _validate_catalog_value(node_id, class_type, input_name, port, value, range_is_error=range_is_error)
+    coerced = port.server_coercion(value)
+    if coerced is None:
+        error = {
+            "node_id": node_id,
+            "field": input_name,
+            "code": "shape_mismatch",
+            "message": shape_err,
+            "hint": f"expected {port.type}; check the value type",
+        }
+        return [error], []
+    errors, warnings = _validate_catalog_value(
+        node_id, class_type, input_name, port, coerced, range_is_error=range_is_error
+    )
+    typed = json.dumps(coerced)
+    address_arg = shlex.quote(f"{node_id}.{input_name}")
+    typed_arg = shlex.quote(typed)
+    refused = bool(errors) or any(w.get("code") in FATAL_FINDING_CODES for w in warnings)
+    finding = {
+        "node_id": node_id,
+        "field": f"{node_id}.{class_type}.{input_name}",
+        "code": "coercible_type",
+        "severity": finding_severity("coercible_type"),
+        "message": f"{shape_err} — the server converts it to {coerced!r}",
+        "hint": (
+            f"the converted value is refused too: fix {input_name} per its other finding"
+            if refused
+            else f"store the typed value {typed} instead"
+            if port.is_link
+            else f"store the typed value {typed} instead: on a canvas, "
+            f"`comfy workflow set-widget <file> [options] {address_arg} -- {typed_arg}`"
+        ),
+        "value": value,
+        "coerced_value": coerced,
+    }
+    return errors, [finding, *warnings]
+
+
 def _check_dynamic_group(
-    node_id: str, class_type: str, port: Port, present: dict
+    node_id: str, class_type: str, port: Port, present: dict, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict], set[str]]:
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -2907,7 +2981,15 @@ def _check_dynamic_group(
         for field in fields:
             name = f"{port.name}.{row}.{field.name}"
             e, w, _, _ = _check_dynamic_combo_sub(
-                node_id, class_type, name, field.raw_spec, field.required, present, {}, 0
+                node_id,
+                class_type,
+                name,
+                field.raw_spec,
+                field.required,
+                present,
+                {},
+                0,
+                range_is_error=range_is_error,
             )
             errors.extend(e)
             warnings.extend(w)
@@ -2985,7 +3067,7 @@ def _dynamic_combo_options(spec: Any) -> list[dict]:
 
 
 def _check_dynamic_combos(
-    node_id: str, class_type: str, m: Morphism, node_inputs: dict
+    node_id: str, class_type: str, m: Morphism, node_inputs: dict, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Validate every dynamic-combo input against the option its selector names.
 
@@ -3022,7 +3104,14 @@ def _check_dynamic_combos(
     resolved: dict[str, Any] = {}
     for port in dynamic_ports:
         e, w, v, u = _check_dynamic_combo_input(
-            node_id, class_type, port.name, port.raw_spec, port.required, present, resolved
+            node_id,
+            class_type,
+            port.name,
+            port.raw_spec,
+            port.required,
+            present,
+            resolved,
+            range_is_error=range_is_error,
         )
         errors.extend(e)
         warnings.extend(w)
@@ -3119,6 +3208,8 @@ def _check_dynamic_combo_input(
     present: dict,
     resolved: dict[str, Any],
     depth: int = 0,
+    *,
+    range_is_error: bool = True,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """One dynamic-combo input: resolve its selected option, check its sub-inputs.
 
@@ -3260,7 +3351,15 @@ def _check_dynamic_combo_input(
             dotted = f"{name}.{sub_name}"
             valid_keys.add(dotted)
             e, w, v, u = _check_dynamic_combo_sub(
-                node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth
+                node_id,
+                class_type,
+                dotted,
+                sub_spec,
+                sub_required,
+                present,
+                resolved,
+                depth,
+                range_is_error=range_is_error,
             )
             errors.extend(e)
             warnings.extend(w)
@@ -3278,6 +3377,8 @@ def _check_dynamic_combo_sub(
     present: dict,
     resolved: dict[str, Any],
     depth: int,
+    *,
+    range_is_error: bool = True,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Presence + shape + catalog checks for one expanded sub-input.
 
@@ -3290,11 +3391,19 @@ def _check_dynamic_combo_sub(
     if port.is_dynamic_combo:
         # Nested dynamic combo: its own selector/presence rules apply one level down.
         return _check_dynamic_combo_input(
-            node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth + 1
+            node_id,
+            class_type,
+            dotted,
+            sub_spec,
+            sub_required,
+            present,
+            resolved,
+            depth + 1,
+            range_is_error=range_is_error,
         )
 
     if port.is_dynamic_group:
-        errors, warnings, keys = _check_dynamic_group(node_id, class_type, port, present)
+        errors, warnings, keys = _check_dynamic_group(node_id, class_type, port, present, range_is_error=range_is_error)
         return errors, warnings, keys, set()
 
     if port.is_autogrow:
@@ -3382,24 +3491,7 @@ def _check_dynamic_combo_sub(
         # output-index checks on this same key.
         return [], [], set(), set()
 
-    shape_err = port.validate_shape(value)
-    if shape_err:
-        return (
-            [
-                {
-                    "node_id": node_id,
-                    "field": dotted,
-                    "code": "shape_mismatch",
-                    "message": shape_err,
-                    "hint": f"expected {port.type}; check the value type",
-                }
-            ],
-            [],
-            set(),
-            set(),
-        )
-
-    errs, warns = _validate_catalog_value(node_id, class_type, dotted, port, value)
+    errs, warns = _validate_literal_value(node_id, class_type, dotted, port, value, range_is_error=range_is_error)
     return errs, warns, set(), set()
 
 
