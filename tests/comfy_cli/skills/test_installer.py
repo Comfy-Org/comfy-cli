@@ -260,6 +260,35 @@ def test_custom_node_caching_fallback_states_the_silent_failure_mode():
     assert "every ancestor's signature" in text
 
 
+def test_custom_node_caching_fallback_names_the_hiddens_that_are_not_populated():
+    """The signature pass is not an execution pass, so most hiddens are empty.
+
+    `IsChangedCache.get` calls `get_input_data(node["inputs"], class_def, node_id, None)`
+    with no `dynprompt` and no `extra_data`, so `PROMPT` is `{}` and `DYNPROMPT`,
+    `EXTRA_PNGINFO`, `EXECUTION_LIST` and the auth-token hiddens are `None`. Only
+    `UNIQUE_ID` is real. An author told "hidden inputs are real" fingerprints a
+    constant and ships the stale-output bug this slice exists to prevent.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "UNIQUE_ID" in text
+    assert "`PROMPT` arrives as `{}`" in text
+    assert not re.search(r"(?i)hidden inputs are real", text)
+
+
+def test_custom_node_caching_fallback_qualifies_size_and_mtime_with_a_digest():
+    """Size plus mtime misses a same-size in-place rewrite; core hashes contents."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "content digest" in text
+    assert "LoadImage" in text
+
+
+def test_custom_node_caching_fallback_states_what_to_hashable_accepts():
+    """`to_hashable` takes scalars, Mapping and Sequence; anything else is a sentinel."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "unhashable sentinel" in text
+    assert not re.search(r"(?i)containers of those", text)
+
+
 def test_custom_node_initial_context_and_jit_budget_fixture():
     """Measured fixture: unrelated turns pay only for the small router."""
     fixture = json.loads((Path(__file__).parent / "fixtures/custom_node_context_budget.json").read_text())

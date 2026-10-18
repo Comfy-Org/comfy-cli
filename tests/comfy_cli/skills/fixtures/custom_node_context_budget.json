@@ -15,6 +15,6 @@
     "packaging-publishing": { "bytes": 1566, "tokens": 202 },
     "frontend-extension": { "bytes": 1543, "tokens": 223 },
     "v1-to-v3-migration": { "bytes": 1699, "tokens": 245 },
-    "execution-caching": { "bytes": 1934, "tokens": 299 }
+    "execution-caching": { "bytes": 2577, "tokens": 401 }
   }
 }
