@@ -996,16 +996,58 @@ def _refused_connection(url):
     raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
 
 
-def test_probe_reads_the_agents_plain_ok_as_live(monkeypatch):
-    """The agent's own server answers `"ok"` until it has something to report.
+# Every JSON field name the standalone agent's /health can send, transcribed
+# from the `healthPayload` struct tags in the cloud repository at
+# services/agent/local/internal/server/server.go, pinned at commit
+# 6c54e20662aac9a9fc140aa15a5ae1adeecaf67f (the file's current head on cloud
+# `main`). Nothing in this repository can reach that server, so the list is
+# pinned here instead: if the agent renames or drops a field, this test fails
+# and names the rename, rather than `_probe_agent` silently reading a live
+# agent as gone and letting a permission write through.
+_CLOUD_HEALTH_FIELDS = (
+    "status",
+    "sandbox",
+    "skills",
+    "crdt",
+    "doc_host",
+    "prompt",
+    "cli",
+    "assets",
+    "assets_hint",
+    "memory",
+    "node_trees",
+)
+
+
+def test_health_markers_are_fields_the_agent_actually_sends():
+    """Each marker must be a real `healthPayload` field, and `status` must not be."""
+    from comfy_cli.agent import command
+
+    unknown = sorted(set(command._AGENT_HEALTH_KEYS) - set(_CLOUD_HEALTH_FIELDS))
+    assert not unknown, f"not fields the agent sends: {unknown}"
+    assert "status" not in command._AGENT_HEALTH_KEYS, "every health endpoint has a status"
+    # `assets_hint` only ever rides alongside `assets`, so it adds no reach.
+    missing = sorted(set(_CLOUD_HEALTH_FIELDS) - set(command._AGENT_HEALTH_KEYS) - {"status", "assets_hint"})
+    assert not missing, f"fields the agent sends that no marker covers: {missing}"
+
+
+@pytest.mark.parametrize("body", [b"ok", b"ok\n", b'"ok"'])
+def test_probe_reads_the_agents_plain_ok_as_live(monkeypatch, body: bytes):
+    """The agent's own server answers `ok` until it has something to report.
 
     Reading that as "not the agent" was a silent-loss hole: `allow`/`deny`
     wrote files the running agent then overwrote on its next save, and nothing
     told the user the approval was gone.
+
+    The bare form is the one on the wire: cloud's handler ends in
+    `c.String(http.StatusOK, "ok")`, so the body is two bytes of text/plain,
+    not JSON. Parsing before looking at it turned that into "unconfirmed",
+    which refused every write while the agent was early; the JSON-quoted form
+    is covered too so a later `c.JSON` would still be read as live.
     """
     from comfy_cli.agent import command
 
-    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'"ok"'))
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(body))
     assert command._probe_agent(8190) == (command._AGENT_LIVE, None)
     # Still nothing to display, which is what `_sandbox_status` reports.
     assert command._sandbox_status(8190) is None

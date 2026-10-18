@@ -216,6 +216,9 @@ def _open_health(url: str):
 # object carrying none of these is some other service on a reused port (cloud
 # services/agent/local/internal/server/server.go, healthPayload). `status` is
 # deliberately not in the list: every other health endpoint has one too.
+# Checked against that struct's JSON tags at cloud commit 6c54e206, and pinned
+# by test_health_markers_are_fields_the_agent_actually_sends so a rename on the
+# agent's side fails here instead of reading a live agent as gone.
 _AGENT_HEALTH_KEYS = (
     "sandbox",
     "skills",
@@ -238,6 +241,10 @@ _AGENT_LIVE = "live"
 _AGENT_GONE = "gone"
 _AGENT_UNCONFIRMED = "unconfirmed"
 
+# The agent's early answer, in both forms it could reach the probe in: the
+# server sends the bare two bytes, a JSON encoder would quote them.
+_AGENT_EARLY_OK = ("ok", '"ok"')
+
 
 def _probe_agent(port: int | None) -> tuple[str, dict | None]:
     """Ask the discovery port whether this agent is answering on it.
@@ -249,7 +256,7 @@ def _probe_agent(port: int | None) -> tuple[str, dict | None]:
         return _AGENT_GONE, None
     try:
         with _open_health(f"http://127.0.0.1:{port}/health") as resp:
-            body = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError:
         # Something serves HTTP here and refused the probe. Whether it is the
         # agent is exactly what this failed to establish.
@@ -276,16 +283,27 @@ def _probe_agent(port: int | None) -> tuple[str, dict | None]:
         # enough that this is not the agent.
         return _AGENT_GONE, None
     except (OSError, ValueError):
-        # A timeout (the 2 s budget in _open_health), a reset mid-read, or a
-        # body that is not JSON. Something is there; what it is is unsettled.
+        # A timeout (the 2 s budget in _open_health) or a reset mid-read.
+        # Something is there; what it is is unsettled.
         return _AGENT_UNCONFIRMED, None
-    if body == "ok":
-        # The agent's own server answers the plain string "ok" until it has
-        # something to report (cloud services/agent/local/internal/server/
-        # server.go, healthPayload), so this is the agent, early — not a
-        # foreign service. Reading it as "gone" was how a write could still
-        # be made to files a running agent was about to overwrite.
+    if raw.strip() in _AGENT_EARLY_OK:
+        # The agent's own server answers the bare string "ok" until it has
+        # something to report, as text/plain and not as JSON (cloud services/
+        # agent/local/internal/server/server.go: `c.String(http.StatusOK,
+        # "ok")`, the fall-through taken while every reporter is still nil).
+        # So this is the agent, early — not a foreign service. Reading it as
+        # "gone" was how a write could still be made to files a running agent
+        # was about to overwrite; and parsing the body as JSON before looking
+        # at it made the bare answer "unsettled" instead, which refused every
+        # write for as long as the agent stayed early. The JSON-quoted form is
+        # accepted too, so a later switch to `c.JSON` does not reopen it.
         return _AGENT_LIVE, None
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        # Not the early answer, and not JSON either. Something is there; what
+        # it is is unsettled.
+        return _AGENT_UNCONFIRMED, None
     if not isinstance(body, dict):
         # Neither the agent's own early answer nor anything judgeable.
         return _AGENT_UNCONFIRMED, None
