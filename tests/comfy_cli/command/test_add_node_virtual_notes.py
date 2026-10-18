@@ -444,7 +444,7 @@ class TestNoteReadBack:
 
         ls = _run(["ls-nodes", str(path)], capsys)
         assert ls["ok"] is True
-        assert {"id": node_id, "type": "Note", "title": None} in ls["data"]["nodes"]
+        assert {"id": node_id, "type": "Note", "title": None, "ui_only": True} in ls["data"]["nodes"]
 
         notes = _run(["notes", str(path)], capsys)
         assert notes["ok"] is True

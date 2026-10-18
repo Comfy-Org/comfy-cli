@@ -224,7 +224,7 @@ class NoteTextNotWritable(ValueError):
 
     def __init__(self, node_id: Any, class_type: str, widget: str, *, interior: bool = False):
         super().__init__(
-            f"{node_id} is a {class_type}: its text is not a widget set-widget can write "
+            f"{node_id} is a {class_type}: it has no named widgets; its text is not a widget set-widget can write "
             f"(a note has no catalog schema, so {widget!r} has no widget position to address)"
         )
         #: The note's resolved address — for a top-level note, the exact id
@@ -242,6 +242,7 @@ class NoteTextNotWritable(ValueError):
                 f"to change a note's text, delete node {node_id} and insert a replacement — "
                 + note_insert_hint(class_type)
             )
+
 
 # The subset of UI_ONLY_NODE_TYPES that add_node CAN mint (op-vocabulary-v1 §18,
 # Amendment v1.9). Note/MarkdownNote are pure annotation: no sockets, one
@@ -3855,9 +3856,7 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, 
     return node
 
 
-def _build_note_node(
-    node_id: int, class_type: str, pos: list, size: list, text: str, title: str | None = None
-) -> dict:
+def _build_note_node(node_id: int, class_type: str, pos: list, size: list, text: str, title: str | None = None) -> dict:
     """Frontend shape of a `Note` / `MarkdownNote`: no sockets, one positional
     widget carrying the text. Mirrors what the frontend serialises for a note
     it created itself (noteNode.ts), so the multi-player applier stores the

@@ -558,7 +558,7 @@ class TestTrackCommandRedaction:
 
         add_node(class_type="Note", text="api key is sk-live-abc123")
 
-        _, _, properties = _last_track_call(tracking_module.provider)
+        _, _, properties = _first_track_call(tracking_module.provider)
         assert properties["class_type"] == "Note"
         assert properties["text"] == "<redacted>"
         assert "sk-live-abc123" not in str(properties)
