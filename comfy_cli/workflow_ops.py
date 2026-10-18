@@ -781,16 +781,39 @@ def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     candidate) stands. Consulted only after the literal id failed to resolve,
     so a real node ``57`` always wins.
     """
+    matches = inserted_candidates(workflow, node_id)
+    return matches[0] if len(matches) == 1 else None
+
+
+_INSERTED_TOP_ID_RE = re.compile(r"insert:[^:/]+:root:node:(-?\d+)")
+
+
+def inserted_candidates(workflow: dict, node_id: Any) -> list[str]:
+    """Every top-level ``insert:<op>:root:node:<id>`` node whose template id is
+    ``node_id`` — one per insert of the template that carried it."""
     s = str(node_id)
     if not s.lstrip("-").isdigit():
+        return []
+    out = []
+    for n in workflow.get("nodes") or []:
+        nid = n.get("id") if isinstance(n, dict) else None
+        m = _INSERTED_TOP_ID_RE.fullmatch(nid) if isinstance(nid, str) else None
+        if m is not None and m.group(1) == s:
+            out.append(nid)
+    return out
+
+
+def template_node_id(workflow: dict, node_id: Any) -> str | None:
+    """The bare template id that addresses the inserted node ``node_id``, or ``None``.
+
+    The inverse of :func:`_template_ids` for an ``insert:<op>:root:node:94``
+    node: ``"94"`` when the edit commands resolve ``94`` to exactly this node,
+    ``None`` when a literal node ``94`` exists or a second insert carries it.
+    """
+    m = _INSERTED_TOP_ID_RE.fullmatch(str(node_id))
+    if m is None or _template_id(workflow, m.group(1)) != node_id:
         return None
-    pattern = re.compile(rf"insert:[^:/]+:root:node:{re.escape(s)}")
-    matches = [
-        n["id"]
-        for n in workflow.get("nodes") or []
-        if isinstance(n, dict) and isinstance(n.get("id"), str) and pattern.fullmatch(n["id"])
-    ]
-    return matches[0] if len(matches) == 1 else None
+    return m.group(1)
 
 
 # A numeric node id or interior path (``57``, ``57/27``) is never a
