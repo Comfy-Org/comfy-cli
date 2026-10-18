@@ -3730,7 +3730,7 @@ def strip_internal(workflow: dict) -> dict:
 # primitive can drive. The frontend gives every non-socketless widget input a
 # socket and serializes it as ``{"name", "type", "widget": {"name"}}``; without
 # the entry the shared document has no slot for a link a human draws into that
-# socket, so the link never reaches the document (PM-1897). COMBO is left on
+# socket, so the link never reaches the document. COMBO is left on
 # the convert-on-connect path: the concrete type check would refuse the STRING
 # output that commonly drives it.
 _SOCKETED_WIDGET_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN"})

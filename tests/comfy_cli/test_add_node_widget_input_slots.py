@@ -1,6 +1,6 @@
 """Agent-built nodes carry a socket entry for every scalar widget input.
 
-PM-1897: the agent said ``frame_load_cap`` on an agent-built Load Video (VHS)
+Reported: the agent said ``frame_load_cap`` on an agent-built Load Video (VHS)
 and an agent-made custom node was a plain widget = 1000, while the user had
 wired a PrimitiveInt into both on the canvas. ``_build_node`` wrote only LINK
 inputs, so the shared document had no ``frame_load_cap`` slot. The frontend
