@@ -3726,8 +3726,28 @@ def strip_internal(workflow: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Widget inputs a fresh node gets a socket entry for: the scalar types a
+# primitive can drive. The frontend gives every non-socketless widget input a
+# socket and serializes it as ``{"name", "type", "widget": {"name"}}``; without
+# the entry the shared document has no slot for a link a human draws into that
+# socket, so the link never reaches the document (PM-1897). COMBO is left on
+# the convert-on-connect path: the concrete type check would refuse the STRING
+# output that commonly drives it.
+_SOCKETED_WIDGET_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN"})
+
+
+def _widget_input_entries(m) -> list[dict]:
+    return [
+        {"name": p.name, "type": p.type, "widget": {"name": p.name}, "link": None}
+        for p in m.inputs
+        if not p.is_link and not p.is_socketless and p.type in _SOCKETED_WIDGET_TYPES
+    ]
+
+
 def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, title: str | None = None) -> dict:
+    # Link inputs first, so their indices are unchanged; widget sockets after.
     inputs = [{"name": p.name, "type": p.type, "link": None} for p in m.inputs if p.is_link]
+    inputs += _widget_input_entries(m)
     outputs = [{"name": p.name, "type": p.type, "links": []} for p in m.outputs]
     # Widget values in positional order, including dynamic-combo selectors and
     # their sub-widgets — sourced from the engine so add-node matches the converter.
