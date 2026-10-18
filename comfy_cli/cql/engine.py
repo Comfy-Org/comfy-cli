@@ -4963,7 +4963,12 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
-    if isinstance(raw_values, dict) and has_group:
+    # A node that declares its own ``widgets_values_form`` (schema A24) is laid
+    # out by that declaration, not by the class order: flattening it to the
+    # class's positional array would drop the keys only the declaration names
+    # (a frontend extension's own widget) and leave a form that no longer
+    # matches its values.
+    if isinstance(raw_values, dict) and (has_group or "widgets_values_form" in node):
         node["widgets_values"] = {**raw_values, input_name: value}
     else:
         node["widgets_values"] = widgets
