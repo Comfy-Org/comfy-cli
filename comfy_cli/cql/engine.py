@@ -622,6 +622,38 @@ class Port:
                 return f"{self.name}: expected BOOLEAN, got {type(value).__name__}"
         return None
 
+    def server_coercion(self, value: Any) -> Any | None:
+        """The typed value the server makes of a literal :meth:`validate_shape`
+        refuses, or ``None`` when the server's conversion fails or is not
+        mirrored here.
+
+        ``execution.validate_inputs`` runs ``int(val)`` on an INT input,
+        ``float(val)`` on a FLOAT one and ``str(val)`` on a STRING one before
+        any range check, and the node receives the result: a template that saved
+        ``"1536"`` for an INT runs with ``1536``. Only those three conversions
+        are mirrored, and none is relaxed further: ``"1536.0"`` is not
+        converted for INT (the server's ``int("1536.0")`` raises), nor is a
+        non-integral number on INT (``int(1536.9)`` truncates), a bool, a non-finite string (``"nan"``, ``"inf"``; stricter than the
+        server, which takes them) or a non-finite number on a STRING input, and
+        BOOLEAN is not mirrored at all because ``bool("false")`` is true.
+        """
+        if isinstance(value, bool):
+            return None
+        if self.type == "INT" and isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        if self.type == "FLOAT" and isinstance(value, str):
+            try:
+                number = float(value)
+            except ValueError:
+                return None
+            return number if math.isfinite(number) else None
+        if self.type == "STRING" and (isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))):
+            return str(value)
+        return None
+
     def validate_catalog(self, value: Any) -> list[dict]:
         """Catalog findings for ``value``. Returns a list of finding dicts.
 
@@ -2317,23 +2349,12 @@ class Graph:
                     }
                     (errors if node_id in reachable else warnings).append(finding)
                     continue
-                # Shape check (hard error)
-                shape_err = port.validate_shape(value)
-                if shape_err:
-                    errors.append(
-                        {
-                            "node_id": node_id,
-                            "field": input_name,
-                            "code": "shape_mismatch",
-                            "message": shape_err,
-                            "hint": f"expected {port.type}; check the value type",
-                        }
-                    )
-                    continue
-                # Catalog checks (enum membership, etc.). Range violations are a
-                # hard reject only on a node the server will actually run; on a
-                # pruned (output-unreachable) node they stay advisory warnings.
-                cat_errors, cat_warnings = _validate_catalog_value(
+                # Shape check (hard error, or a warning when the server converts
+                # the value), then catalog checks (enum membership, etc.). Range
+                # violations are a hard reject only on a node the server will
+                # actually run; on a pruned (output-unreachable) node they stay
+                # advisory warnings.
+                cat_errors, cat_warnings = _validate_literal_value(
                     node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
                 )
                 errors.extend(cat_errors)
@@ -2848,6 +2869,55 @@ def _validate_catalog_value(
             w["field"] = f"{node_id}.{class_type}.{w['field']}"
             warnings.append(w)
     return errors, warnings
+
+
+def _validate_literal_value(
+    node_id: str, class_type: str, input_name: str, port: Port, value: Any, *, range_is_error: bool = True
+) -> tuple[list[dict], list[dict]]:
+    """Shape and catalog checks for one literal input value. Returns (errors, warnings).
+
+    A wrong JSON type is a ``shape_mismatch`` error unless the server converts
+    it (:meth:`Port.server_coercion`): ``"1536"`` on an INT input
+    runs, so it is a ``coercible_type`` warning naming the typed value to
+    store, and the catalog checks judge the converted value, as the server's
+    range check does.
+    """
+    shape_err = port.validate_shape(value)
+    if shape_err is None:
+        return _validate_catalog_value(node_id, class_type, input_name, port, value, range_is_error=range_is_error)
+    coerced = port.server_coercion(value)
+    if coerced is None:
+        error = {
+            "node_id": node_id,
+            "field": input_name,
+            "code": "shape_mismatch",
+            "message": shape_err,
+            "hint": f"expected {port.type}; check the value type",
+        }
+        return [error], []
+    errors, warnings = _validate_catalog_value(
+        node_id, class_type, input_name, port, coerced, range_is_error=range_is_error
+    )
+    typed = json.dumps(coerced)
+    refused = bool(errors) or any(w.get("code") in FATAL_FINDING_CODES for w in warnings)
+    finding = {
+        "node_id": node_id,
+        "field": f"{node_id}.{class_type}.{input_name}",
+        "code": "coercible_type",
+        "severity": finding_severity("coercible_type"),
+        "message": f"{shape_err} — the server converts it to {coerced!r}",
+        "hint": (
+            f"the converted value is refused too: fix {input_name} per its other finding"
+            if refused
+            else f"store the typed value {typed} instead"
+            if port.is_link
+            else f"store the typed value {typed} instead: on a canvas, "
+            f"`comfy workflow set-widget <file> [options] {node_id}.{input_name} -- {typed}`"
+        ),
+        "value": value,
+        "coerced_value": coerced,
+    }
+    return errors, [finding, *warnings]
 
 
 def _check_dynamic_group(
@@ -3382,24 +3452,7 @@ def _check_dynamic_combo_sub(
         # output-index checks on this same key.
         return [], [], set(), set()
 
-    shape_err = port.validate_shape(value)
-    if shape_err:
-        return (
-            [
-                {
-                    "node_id": node_id,
-                    "field": dotted,
-                    "code": "shape_mismatch",
-                    "message": shape_err,
-                    "hint": f"expected {port.type}; check the value type",
-                }
-            ],
-            [],
-            set(),
-            set(),
-        )
-
-    errs, warns = _validate_catalog_value(node_id, class_type, dotted, port, value)
+    errs, warns = _validate_literal_value(node_id, class_type, dotted, port, value)
     return errs, warns, set(), set()
 
 

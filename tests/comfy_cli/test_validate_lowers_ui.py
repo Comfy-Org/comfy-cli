@@ -300,6 +300,20 @@ class TestValidateCLI:
         assert env["data"]["valid"] is True
         assert env["data"]["error_count"] == 0
 
+    def test_numeric_string_widget_is_a_warning_not_an_error(self, tmp_path):
+        # A template that saved an INT widget as the string "512" runs (the
+        # server converts it), so the canvas validates and names the fix.
+        wf = _sd15_ui()
+        next(n for n in wf["nodes"] if n["id"] == 5)["widgets_values"][0] = "512"
+
+        result = _run_validate(tmp_path, wf, _object_info())
+
+        assert result.exit_code == 0, result.stdout
+        data = _envelope(result)["data"]
+        assert data["valid"] is True
+        [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
+        assert (finding["node_id"], finding["value"], finding["coerced_value"]) == ("5", "512", 512)
+
     def test_already_api_format_is_validated_unchanged(self, tmp_path):
         # A pre-lowered (already-API) graph must still be validated, and must
         # NOT be double-converted. Feeding the lowered valid graph stays valid.

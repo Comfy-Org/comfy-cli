@@ -424,6 +424,156 @@ class TestNonFiniteNumbers:
         assert "shape_mismatch" in _codes(result)
 
 
+class TestServerConvertedLiterals:
+    """The server converts a literal before checking it: `int(val)` on an INT
+    input, `float(val)` on a FLOAT one, `str(val)` on a STRING one
+    (execution.py `validate_inputs`), and the node runs with the result. A
+    template saved with `"1536"` on an INT therefore runs, and the validator
+    rejected it as `shape_mismatch`. What the server cannot convert, or
+    converts into something else (`bool("false")` is true), is still an error.
+    """
+
+    @pytest.fixture
+    def tune_graph(self) -> Graph:
+        info = _object_info()
+        info["Tune"] = {
+            "input": {
+                "required": {
+                    "image": "IMAGE",
+                    "target_resolution": ["INT", {"default": 1024, "min": 64, "max": 2048}],
+                    "strength": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}],
+                    "label": ["STRING", {"default": ""}],
+                    "sharpen": ["BOOLEAN", {"default": False}],
+                    "method": [["lanczos", "bicubic"]],
+                }
+            },
+            "input_order": {"required": ["image", "target_resolution", "strength", "label", "sharpen", "method"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "output_node": False,
+            "python_module": "nodes",
+        }
+        return Graph.from_object_info(info)
+
+    @staticmethod
+    def _wf(*, reachable: bool = True, **values: Any) -> dict:
+        inputs = {
+            "image": ["1", 0],
+            "target_resolution": 1024,
+            "strength": 0.5,
+            "label": "",
+            "sharpen": False,
+            "method": "lanczos",
+            **values,
+        }
+        return {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "Tune", "inputs": inputs},
+            "3": {"class_type": "ShowImage", "inputs": {"images": ["2" if reachable else "1", 0]}},
+        }
+
+    @staticmethod
+    def _coercible(result: dict) -> list[dict]:
+        return [w for w in result["warnings"] if w["code"] == "coercible_type"]
+
+    def test_an_integer_string_on_an_int_input_is_a_warning(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(target_resolution="1536"))
+
+        assert result["valid"], result["errors"]
+        [finding] = self._coercible(result)
+        assert (finding["node_id"], finding["severity"]) == ("2", "warning")
+        assert (finding["value"], finding["coerced_value"]) == ("1536", 1536)
+        assert "comfy workflow set-widget <file> [options] 2.target_resolution -- 1536" in finding["hint"]
+
+    def test_a_converted_int_is_still_range_checked(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(target_resolution="4096"))
+
+        assert not result["valid"]
+        assert _codes(result) == ["above_max"]
+        [finding] = self._coercible(result)
+        assert finding["coerced_value"] == 4096
+        assert "set-widget" not in finding["hint"]
+
+    def test_a_converted_int_out_of_range_on_a_pruned_node_stays_advisory(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(reachable=False, target_resolution="4096"))
+
+        assert result["valid"], result["errors"]
+        assert "above_max" in [w["code"] for w in result["warnings"]]
+        assert "set-widget" not in self._coercible(result)[0]["hint"]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("target_resolution", "abc", id="int-word"),
+            pytest.param("target_resolution", "1536.0", id="int-decimal-string"),
+            pytest.param("target_resolution", True, id="int-bool"),
+            pytest.param("strength", "nan", id="float-nan-string"),
+            pytest.param("label", True, id="string-bool"),
+            pytest.param("sharpen", "false", id="boolean-false-string"),
+            pytest.param("method", True, id="combo-bool"),
+        ],
+    )
+    def test_a_value_the_server_cannot_convert_is_still_an_error(
+        self, tune_graph: Graph, field: str, value: Any
+    ) -> None:
+        result = tune_graph.validate_workflow(self._wf(**{field: value}))
+
+        assert not result["valid"]
+        assert _codes(result) == ["shape_mismatch"]
+        assert self._coercible(result) == []
+
+    @pytest.mark.parametrize(
+        ("field", "value", "coerced"),
+        [
+            pytest.param("target_resolution", " 1536 ", 1536, id="int-padded"),
+            pytest.param("target_resolution", "1_024", 1024, id="int-underscore"),
+            pytest.param("target_resolution", "+512", 512, id="int-signed"),
+            pytest.param("strength", "1e-1", 0.1, id="float-exponent"),
+            pytest.param("label", 1e20, "1e+20", id="string-from-float"),
+        ],
+    )
+    def test_the_conversion_is_the_servers_own(self, tune_graph: Graph, field: str, value: Any, coerced: Any) -> None:
+        result = tune_graph.validate_workflow(self._wf(**{field: value}))
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == [coerced]
+
+    @pytest.mark.parametrize("value", ["inf", "-inf", "1e400"])
+    def test_a_non_finite_float_string_is_still_an_error(self, tune_graph: Graph, value: str) -> None:
+        assert _codes(tune_graph.validate_workflow(self._wf(strength=value))) == ["shape_mismatch"]
+
+    def test_a_converted_float_is_still_range_checked(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(strength="1.5"))
+
+        assert _codes(result) == ["above_max"]
+
+    def test_a_numeric_string_on_a_float_input_is_a_warning(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(strength="0.5"))
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == [0.5]
+
+    def test_a_number_on_a_string_input_is_a_warning(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(label=1024))
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == ["1024"]
+
+    def test_a_numeric_string_on_a_dynamic_combo_sub_input_is_a_warning(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {
+                "class_type": "ResizeNode",
+                "inputs": {"image": ["1", 0], "resize_type": "scale dimensions", "resize_type.width": "512"},
+            },
+            "3": {"class_type": "ShowImage", "inputs": {"images": ["2", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == [512]
+
+
 class TestErrorPointsAtTheRealProblem:
     """Two messages sent the reader to the wrong place. Both were found by
     comparing against the server, which names the malformed node itself and

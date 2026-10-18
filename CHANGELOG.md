@@ -135,6 +135,17 @@ history.
 
 ### Fixed
 
+- `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
+  literal the server converts before checking it: an integer string on an INT
+  input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
+  input. ComfyUI runs these (it calls `int()`/`float()`/`str()` before
+  checking), but validate refused them as `shape_mismatch`. Each is now a
+  `coercible_type` warning carrying `value`, the converted `coerced_value`, and
+  a `set-widget` hint that stores the typed value; range checks judge the
+  converted value, so `"4096"` above a max of 2048 is still `above_max`. Nothing
+  else is relaxed: a BOOLEAN string (`bool("false")` is true), `"1536.0"` or
+  `1536.9` on an INT, a bool, and a non-finite string such as `"nan"` keep their
+  existing verdict.
 - `comfy run` no longer reports a failure to write its own job-state file as a
   lost connection to the ComfyUI server. The state file is a convenience
   record, written after the server has already accepted the prompt, so a
