@@ -2,7 +2,7 @@
 
 The frontend now declares a node's widget layout (comfy-multi-player schema
 A24) when a frontend extension adds a value widget the node definition does not
-describe (PM-2003). The canonical case is rgthree's ``Display Int``: its only
+describe. The canonical case is rgthree's ``Display Int``: its only
 input is a ``forceInput`` link, so the catalog lists no widgets, but the
 extension draws its result in an ``output`` text widget. The doc host stores
 such a node with its own layout and projects it back as a name-keyed
