@@ -183,8 +183,8 @@ def _typed_value_key(value: Any) -> tuple[type, str]:
 
 
 def _normalised_link_row(values: Any) -> tuple[Any, ...]:
-    """The five fields the renderer consumes, with ids keyed as its maps key them."""
-    fields = list(values)[:5]
+    """The six fields the renderer consumes, with ids keyed as its maps key them."""
+    fields = list(values)[:6]
     for index in (1, 3):
         if index < len(fields) and fields[index] is not None:
             fields[index] = str(fields[index])

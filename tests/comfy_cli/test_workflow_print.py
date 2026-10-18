@@ -1799,6 +1799,20 @@ def test_broken_last_duplicate_row_evicts_an_earlier_live_row():
     assert any(warning.startswith("BROKEN link 7") for warning in result.warnings)
 
 
+def test_link_rows_that_only_differ_by_type_are_conflicting_duplicates():
+    wf = _mini(
+        [
+            _node(1, "Source", outputs=[{"name": "out", "links": [7]}]),
+            _node(2, "Target", inputs=[{"name": "x", "link": 7}]),
+        ],
+        [[7, 1, 0, 2, 0, "LATENT"], [7, 1, 0, 2, 0, "IMAGE"]],
+    )
+
+    result = render_py(wf, None)
+
+    assert "duplicate link id 7; using the last row" in result.warnings
+
+
 def test_typed_duplicate_link_rows_use_the_last_row():
     wf = _mini([_node(1, "Source"), _node(2, "Target", inputs=[{"name": "x", "link": 7}])], [])
     wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
