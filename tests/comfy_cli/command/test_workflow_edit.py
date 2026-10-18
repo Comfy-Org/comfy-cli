@@ -2176,27 +2176,35 @@ class TestOpModel:
     def _autogrow_replace_canvas(n_sources: int = 3) -> dict:
         """A BatchImagesNode whose autogrow base carries ``n_sources`` wired
         connects (the CLI's repeated-edit path), ready to feed
-        ``replace_ops`` as ``new``."""
+        ``replace_ops`` as ``new``.
+
+        ``_autogrow_workflow()`` ships two IMAGE sources; one more is appended
+        per requested slot beyond that, so ``n_sources`` is honoured rather
+        than silently connecting from a node id that does not exist."""
         from comfy_cli import workflow_ops
 
         g = _graph()
         wf = _autogrow_workflow()
-        wf["nodes"].append(
-            {
-                "id": 22,
-                "type": "VAEDecode",
-                "pos": [0, 200],
-                "inputs": [
-                    {"name": "samples", "type": "LATENT", "link": None},
-                    {"name": "vae", "type": "VAE", "link": None},
-                ],
-                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
-                "widgets_values": [],
-            }
-        )
-        wf["last_node_id"] = 22
-        for src in range(n_sources):
-            wf, _ = workflow_ops.connect(wf, g, 20 + src, "IMAGE", 10, "images", actor="a")
+        source_ids = [node["id"] for node in wf["nodes"] if node["type"] == "VAEDecode"]
+        while len(source_ids) < n_sources:
+            node_id = max(source_ids) + 1
+            wf["nodes"].append(
+                {
+                    "id": node_id,
+                    "type": "VAEDecode",
+                    "pos": [0, 100 * len(source_ids)],
+                    "inputs": [
+                        {"name": "samples", "type": "LATENT", "link": None},
+                        {"name": "vae", "type": "VAE", "link": None},
+                    ],
+                    "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": []}],
+                    "widgets_values": [],
+                }
+            )
+            source_ids.append(node_id)
+        wf["last_node_id"] = max(node["id"] for node in wf["nodes"])
+        for src in source_ids[:n_sources]:
+            wf, _ = workflow_ops.connect(wf, g, src, "IMAGE", 10, "images", actor="a")
         return wf
 
     @staticmethod
@@ -2237,10 +2245,20 @@ class TestOpModel:
         return topology
 
     @staticmethod
-    def _replay_ops(batch: list[dict], graph) -> dict:
+    def _replay_ops(batch: list[dict], graph, base: dict | None = None) -> dict:
+        """Replay a ``replace_ops`` batch through the op path onto ``base``.
+
+        ``base`` must be the ``old`` the batch was computed against: the batch
+        opens with a ``delete_node`` for every node in ``old``, so replaying
+        onto anything else makes that half a silent no-op and never exercises
+        the delete-then-re-add ordering."""
         from comfy_cli import workflow_ops
 
-        doc = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        doc = (
+            copy.deepcopy(base)
+            if base is not None
+            else {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        )
         for op in batch:
             doc = workflow_ops.apply_op(doc, op, graph)
         return doc
@@ -2256,7 +2274,7 @@ class TestOpModel:
         new = self._autogrow_replace_canvas()
         old = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
         batch = workflow_ops.replace_ops(old, new)
-        doc = self._replay_ops(batch, g)
+        doc = self._replay_ops(batch, g, old)
         assert self._batchimages_slots(doc) == self._batchimages_slots(new)
         assert self._batchimages_topology(doc) == self._batchimages_topology(new)
         assert len(doc["links"]) == len(new["links"])
@@ -2315,7 +2333,7 @@ class TestOpModel:
         }
         old = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
         batch = workflow_ops.replace_ops(old, new)
-        doc = self._replay_ops(batch, g)
+        doc = self._replay_ops(batch, g, old)
         assert self._batchimages_slots(doc) == [
             ("images", False),
             ("images.image0", True),
@@ -2358,7 +2376,7 @@ class TestOpModel:
             ("images.image1", True),
             ("images.image2", True),
         ]
-        assert self._batchimages_slots(wf2) == self._batchimages_slots(self._replay_ops(batch, _graph()))
+        assert self._batchimages_slots(wf2) == self._batchimages_slots(self._replay_ops(batch, _graph(), old))
         assert self._batchimages_topology(wf2) == self._batchimages_topology(new)
         assert len(wf2["links"]) == len(new["links"])
 
