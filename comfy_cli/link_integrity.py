@@ -4,10 +4,9 @@ The UI→API lowering resolves every input through the node's own
 ``inputs[].link`` and never reads a link row's slot indexes, so a row that
 points at an input slot the node does not have, or at an output slot its
 source does not have, vanished silently: validate said "valid" while the value
-the row was meant to carry reached nothing. Production trace f8d27ae4: three
-interior links of a SAM3 subgraph targeted input slot 6 on nodes with inputs
-0-5, validate reported 0 errors, and the agent filled the empty prompts by hand
-instead of re-wiring them.
+the row was meant to carry reached nothing. For example, interior links of a
+subgraph that target input slot 6 on nodes with inputs 0-5 used to pass
+validate with 0 errors, leaving the inputs they fed empty.
 
 One finding per broken row, addressed the way the edit surface addresses
 nodes (``70/2011`` inside a subgraph), each carrying the ``connect`` that

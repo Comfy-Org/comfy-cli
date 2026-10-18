@@ -81,6 +81,11 @@ history.
   (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
   instance `path`. A link that crosses the subgraph boundary is still refused,
   and so is a link inside a definition shared by several instances.
+- `comfy workflow disconnect <file> <node>.<input>` removes an input link and
+  emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
+  autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
+  identity across replay order; boundary-crossing and shared-definition links
+  remain refused.
 - `comfy workflow validate` reports broken link rows of a canvas workflow as
   `link_slot_out_of_range` / `link_source_missing` errors, each with the
   `connect` that repairs it. The UI→API lowering used to drop such a row and
@@ -89,6 +94,15 @@ history.
   (also on `nodes search --expand-top`) list a long option list in full.
 
 ### Changed
+
+- Once every model byte is in, the progress line of `comfy deploy up`,
+  `comfy deploy status` (with or without `--watch`) and a watching
+  `comfy deploy promote` or `rollback` adds "finishing: putting the models in
+  place" while the deploy service sends `placingModels: true`, on every
+  provider, so a line at "7.0 GB of 7.0 GB" no longer reads as
+  stuck until the endpoint step starts. `placingModels` is documented in the
+  `progress` object of the `deploy status`, `deploy up` and `deploy_progress`
+  schemas. An older service's line is unchanged.
 
 - **Breaking:** a watching `comfy deploy up`, `promote` or `rollback` that
   another change overtook, onto a third release, now exits 1 with `deploy_update_replaced`
@@ -108,8 +122,8 @@ history.
 - An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
   closest options in `suggestions` (at most 5) with `option_count`, and carries
   `valid_options` only when the list has 12 options or fewer. It used to carry
-  the whole folder listing twice; one validate in production came to ~340K
-  tokens.
+  the whole folder listing twice, which made findings on large model folders
+  very large.
 - `comfy nodes show` and `nodes search --expand-top` cut a combo input's
   `choices` longer than 20 to the first 20, with `choices_total`,
   `choices_truncated` and a `choices_note` naming the `--select` that filters
@@ -123,7 +137,18 @@ history.
 
 - Preserve record-valued widgets such as `ImageCropV2.crop_region` during
   UI-to-API workflow conversion instead of replacing them with schema defaults.
-
+- `comfy run` no longer reports a failure to write its own job-state file as a
+  lost connection to the ComfyUI server. The state file is a convenience
+  record, written after the server has already accepted the prompt, so a
+  config directory the CLI cannot write — an unreachable or read-only home, a
+  sandboxed process, a full disk — used to surface as `ws_disconnected` with a
+  "check the server is still running; re-run the command" hint. Re-running on
+  that advice submits the same workflow a second time, and an automated caller
+  obeying the hint could queue several GPU jobs for one request. A submit the
+  server accepted now reports `queued` as usual, with `state_file: null` to say
+  no record was kept; follow the job by its `prompt_id` instead, and run with
+  `LOG_LEVEL=DEBUG` to see what the write failed on. Real transport failures
+  are reported exactly as before.
 - `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
   when the sign-in token it started with expires mid-run. The token lasts
   fifteen minutes, and the run sent the one it started with for every request
