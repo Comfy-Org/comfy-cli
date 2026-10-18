@@ -13,6 +13,8 @@ what the agent sees.
 
 from __future__ import annotations
 
+import pytest
+
 from comfy_cli.cql.engine import Graph
 from comfy_cli.workflow_print import render_py
 
@@ -105,18 +107,22 @@ STEPS_EXTENSION_OBJECT_INFO = {
 }
 
 
-def test_agent_printer_reads_a_declared_extension_widget_beside_a_catalogued_one():
+@pytest.mark.parametrize(
+    "widgets_values, order",
+    [
+        ({"steps": 7, "output": ""}, ["steps", "output"]),
+        ({"output": "", "steps": 7}, ["output", "steps"]),
+    ],
+    ids=["catalogued-first", "extension-first"],
+)
+def test_agent_printer_reads_a_declared_extension_widget_beside_a_catalogued_one(widgets_values, order):
     graph = Graph.from_object_info(STEPS_EXTENSION_OBJECT_INFO)
     workflow = _single_node_workflow(
-        {
-            "type": STEPS_EXTENSION,
-            "widgets_values": {"steps": 7, "output": ""},
-            "widgets_values_form": {"order": ["steps", "output"]},
-        }
+        {"type": STEPS_EXTENSION, "widgets_values": widgets_values, "widgets_values_form": {"order": order}}
     )
 
     result = render_py(workflow, graph)
 
     assert result.warnings == []
-    assert "steps=7" in result.source
-    assert "output" not in result.source
+    assert result.skipped == []
+    assert result.source == 'steps_with_extension_widget = Node["Steps With Extension Widget"](steps=7)  # 1\n'
