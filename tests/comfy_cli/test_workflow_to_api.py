@@ -3171,6 +3171,28 @@ class TestRecordWidgetValues:
         }
 
 
+class TestMixedWidgetLayouts:
+    @pytest.mark.parametrize("section", ["required", "optional"])
+    @pytest.mark.parametrize(
+        ("widgets", "expected"),
+        [
+            ([5, "hi", {"type": "Hdr"}], {"seed": 5, "text": "hi"}),
+            ([{"type": "Hdr"}, 5, "hi"], {"seed": {"type": "Hdr"}, "text": 5}),
+        ],
+    )
+    def test_declared_widgets_remain_positional_with_self_named_dicts(self, section, widgets, expected):
+        # Synthetic mixed layouts retain positional mapping, even when a dict precedes the declared values.
+        object_info = {
+            "MixedLayoutNode": {
+                "input": {section: {"seed": ["INT", {"default": 0}], "text": ["STRING", {"default": "default"}]}},
+                "input_order": {section: ["seed", "text"]},
+                "output": [],
+            }
+        }
+        ui = {"nodes": [_node(2, "MixedLayoutNode", widgets=widgets)], "links": []}
+        assert convert_ui_to_api(ui, object_info)["2"]["inputs"] == expected
+
+
 class TestLegacyLoraWidgetValues:
     @pytest.mark.parametrize("with_schema", [False, True])
     @pytest.mark.parametrize("linked", [False, True])

@@ -135,8 +135,9 @@ history.
 
 ### Fixed
 
-- Preserve record-valued widgets such as `ImageCropV2.crop_region` during
-  UI-to-API workflow conversion instead of replacing them with schema defaults.
+- Converting a UI workflow to API format keeps a record widget's saved value,
+  such as `ImageCropV2.crop_region`, instead of replacing it with the schema
+  default.
 - `comfy run` no longer reports a failure to write its own job-state file as a
   lost connection to the ComfyUI server. The state file is a convenience
   record, written after the server has already accepted the prompt, so a
