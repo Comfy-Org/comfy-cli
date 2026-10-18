@@ -983,7 +983,11 @@ def load_3d_button_slots(
     """
     if getattr(m, "id", "") == "Load3DAdvanced":
         expected = [value for _name, value in _LOAD_3D_BUTTON_SLOTS]
-        if not isinstance(widgets_values, list) or widgets_values[1:4] != expected:
+        # Two consecutive fixed markers are an unambiguous legacy prefix.
+        # Accepting a single marker could mistake current viewport state for
+        # the old upload button, while requiring all three makes a truncated
+        # legacy node unsafe to extend by name.
+        if not isinstance(widgets_values, list) or widgets_values[1:3] != expected[:2]:
             return ()
     if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
         return ()

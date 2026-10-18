@@ -358,6 +358,21 @@ class TestDomWidgetInputs:
             600,
         ]
 
+    def test_load3d_advanced_truncated_legacy_prefix_is_padded_before_edit(self, graph: Graph):
+        # The first two fixed markers are enough to distinguish a truncated
+        # legacy button layout from the current viewport/width positions.
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources"]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == [
+            "motor.fbx",
+            "upload3dmodel",
+            "uploadExtraResources",
+            "clear",
+            "",
+            512,
+        ]
+
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
         # model_3d LINK, so its viewport slot follows nothing.
