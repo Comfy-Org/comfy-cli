@@ -1032,23 +1032,31 @@ def test_health_markers_are_fields_the_agent_actually_sends():
 
 
 @pytest.mark.parametrize("body", [b"ok", b"ok\n", b'"ok"'])
-def test_probe_reads_the_agents_plain_ok_as_live(monkeypatch, body: bytes):
-    """The agent's own server answers `ok` until it has something to report.
+def test_probe_reads_a_bare_ok_as_unconfirmed_not_gone(monkeypatch, body: bytes):
+    """A bare `ok` refuses the write without claiming an agent is answering.
 
-    Reading that as "not the agent" was a silent-loss hole: `allow`/`deny`
-    wrote files the running agent then overwrote on its next save, and nothing
-    told the user the approval was gone.
+    Cloud's handler does end in `c.String(http.StatusOK, "ok")` while every
+    reporter is nil, so the body is two bytes of text/plain and not JSON. But
+    no agent can serve it *here*: `app.go` fills eight reporters (lines
+    233-255 on cloud main) before `net.Listen` (257) and before
+    `WriteDiscoveryWith` records the port (263), so nothing can connect to that
+    port, or even learn it, until the JSON payload is what the handler returns.
+    A bare `ok` on the port `agent.json` names is therefore some other program.
 
-    The bare form is the one on the wire: cloud's handler ends in
-    `c.String(http.StatusOK, "ok")`, so the body is two bytes of text/plain,
-    not JSON. Parsing before looking at it turned that into "unconfirmed",
-    which refused every write while the agent was early; the JSON-quoted form
-    is covered too so a later `c.JSON` would still be read as live.
+    Both of the certainties are wrong for it. `live` is the one the earlier
+    round shipped, and it tells a user with no agent to stop to go answer the
+    request in the agent panel. `gone` is the silent-loss hole: parsing this
+    body as JSON before looking at it raised ValueError and fell through to
+    "gone", so `allow`/`deny` wrote files a running agent would overwrite with
+    nothing to show the approval was lost. `unconfirmed` refuses the write and
+    offers the stale-`agent.json` way out, which is the only one of the three
+    that is true. The JSON-quoted form is covered so a later `c.JSON` does not
+    reopen it.
     """
     from comfy_cli.agent import command
 
     monkeypatch.setattr(command, "_open_health", lambda url: _Resp(body))
-    assert command._probe_agent(8190) == (command._AGENT_LIVE, None)
+    assert command._probe_agent(8190) == (command._AGENT_UNCONFIRMED, None)
     # Still nothing to display, which is what `_sandbox_status` reports.
     assert command._sandbox_status(8190) is None
 

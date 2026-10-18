@@ -241,8 +241,19 @@ _AGENT_LIVE = "live"
 _AGENT_GONE = "gone"
 _AGENT_UNCONFIRMED = "unconfirmed"
 
-# The agent's early answer, in both forms it could reach the probe in: the
-# server sends the bare two bytes, a JSON encoder would quote them.
+# The bare answer the agent's health handler falls through to while every
+# reporter is still nil, in both forms it could arrive in: the server sends the
+# two bytes as text/plain, a JSON encoder would quote them.
+#
+# No agent can serve it on the port this probe reaches. `app.go` calls
+# ReportSandbox/ReportCLI/ReportNodeTrees/ReportAssets/ReportMemory/
+# ReportPrompt/ReportSkills/ReportCRDT (lines 233-255 on cloud main) BEFORE
+# net.Listen (257) and before WriteDiscoveryWith puts the port in agent.json
+# (263), so by the time anything can connect, or even learn the port, eight
+# reporters are non-nil and the handler serves the JSON payload. The
+# fall-through is live code on a path nothing can observe from here.
+#
+# So this body means "something else holds the port", not "the agent, early".
 _AGENT_EARLY_OK = ("ok", '"ok"')
 
 
@@ -287,17 +298,21 @@ def _probe_agent(port: int | None) -> tuple[str, dict | None]:
         # Something is there; what it is is unsettled.
         return _AGENT_UNCONFIRMED, None
     if raw.strip() in _AGENT_EARLY_OK:
-        # The agent's own server answers the bare string "ok" until it has
-        # something to report, as text/plain and not as JSON (cloud services/
-        # agent/local/internal/server/server.go: `c.String(http.StatusOK,
-        # "ok")`, the fall-through taken while every reporter is still nil).
-        # So this is the agent, early — not a foreign service. Reading it as
-        # "gone" was how a write could still be made to files a running agent
-        # was about to overwrite; and parsing the body as JSON before looking
-        # at it made the bare answer "unsettled" instead, which refused every
-        # write for as long as the agent stayed early. The JSON-quoted form is
-        # accepted too, so a later switch to `c.JSON` does not reopen it.
-        return _AGENT_LIVE, None
+        # Unsettled, and deliberately not either certainty. It cannot be this
+        # agent answering early (see `_AGENT_EARLY_OK`: the port does not exist
+        # until eight reporters do), so "live" asserts something false and
+        # sends a user with no agent to stop to the agent panel. But it is not
+        # proof of absence either — something is listening on the port
+        # agent.json names, and if an agent is in fact running from another
+        # data dir, a write made here is lost without a trace. Refusing while
+        # naming the stale-agent.json way out is the only honest answer.
+        #
+        # What must not come back is `_AGENT_GONE`: parsing this body as JSON
+        # before looking at it raised ValueError and fell through to a "gone"
+        # verdict, which let the write through. That is the silent-loss hole,
+        # and it stays closed. The JSON-quoted form is matched too, so a later
+        # switch to `c.JSON` does not reopen it.
+        return _AGENT_UNCONFIRMED, None
     try:
         body = json.loads(raw)
     except ValueError:
