@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlsplit
 ADR_FILE_PATTERN = re.compile(r"^([A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)?-[0-9]{4})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$")
 ADR_LINK_PATTERN = re.compile(r"(?<![/A-Za-z0-9._-])docs/adr/[A-Za-z0-9._/-]+\.md")
 MARKDOWN_LINK_PATTERN = re.compile(r"\]\((?P<target><[^>]+>|[^)\s]+)(?:\s+[^)]*)?\)")
+MARKDOWN_REFERENCE_DEFINITION_PATTERN = re.compile(r"^[ \t]{0,3}\[[^]]+\]:[ \t]*(?P<target><[^>]+>|\S+)(?:[ \t]+.*)?$")
 LEGACY_REFERENCE_PATTERN = re.compile(
     r"ADR(?:[- ]?\d{4}(?!-\d{2})|(?:-[A-Z][A-Z0-9]*)?\s*(?:/\s*|\(\s*)\d{4}(?!-\d{2}))|(?:docs/)?adr/\d{4}-"
 )
@@ -125,14 +126,18 @@ def validate_references(repository_root: Path) -> None:
                 target = (repository_root / link).resolve()
                 if not _inside(target, adr_directory) or not target.is_file():
                     dangling_links.append(f"{relative_path}:{line_number}:{link}")
-            for match in MARKDOWN_LINK_PATTERN.finditer(line):
-                target = _resolved_local_target(path, match.group("target"))
+            markdown_targets = [match.group("target") for match in MARKDOWN_LINK_PATTERN.finditer(line)]
+            reference_definition = MARKDOWN_REFERENCE_DEFINITION_PATTERN.match(line)
+            if reference_definition is not None:
+                markdown_targets.append(reference_definition.group("target"))
+            for markdown_target in markdown_targets:
+                target = _resolved_local_target(path, markdown_target)
                 if target is None:
                     continue
                 if not (_inside(path.resolve(), adr_directory) or _inside(target, adr_directory)):
                     continue
                 if not _inside(target, repository_root) or not target.is_file():
-                    dangling_links.append(f"{relative_path}:{line_number}:{match.group('target')}")
+                    dangling_links.append(f"{relative_path}:{line_number}:{markdown_target}")
 
     messages: list[str] = []
     if legacy_matches:

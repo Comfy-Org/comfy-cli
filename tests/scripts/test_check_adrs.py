@@ -162,6 +162,18 @@ def test_validate_references_checks_relative_links_from_adrs(tmp_path: Path, mon
         validate_references(tmp_path)
 
 
+def test_validate_references_checks_reference_style_links_from_adrs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adr = tmp_path / "docs" / "adr" / ADR_FILENAME
+    adr.parent.mkdir(parents=True)
+    adr.write_text("See [decision][dep]\n\n[dep]: MISSING-0002-record.md\n", encoding="utf-8")
+    monkeypatch.setattr(check_adrs, "tracked_files", lambda _root: [adr])
+
+    with pytest.raises(ValueError, match="MISSING-0002-record.md"):
+        validate_references(tmp_path)
+
+
 def test_validate_references_rejects_adr_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "README.md"
     traversal = "docs/adr/" + "../../README.md"
