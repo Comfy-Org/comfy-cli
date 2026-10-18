@@ -1224,8 +1224,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     """
     input_def = _schema_input_def(schema)
     # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
-    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
-    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    # attached to Load3D and occur in legacy Load3DAdvanced saves, but the
+    # current Load3DAdvanced factory is buttonless. They are NOT attached to
+    # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
+    # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:

@@ -333,6 +333,31 @@ class TestDomWidgetInputs:
         # adds only the viewport component, not Load3D's three buttons.
         assert graph.widget_order("Load3DAdvanced") == ["model_file", "viewport_state", "width", "height"]
 
+    def test_load3d_advanced_legacy_button_shape_stays_value_aligned(self, graph: Graph):
+        # Workflows saved before the dedicated LOAD_3D_ADVANCED factory can
+        # still carry the LOAD_3D buttons.  The static catalog describes the
+        # current buttonless shape, while value-aware editing must preserve
+        # the legacy positions so width is not written into a button slot.
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        assert graph.widget_order_for_node("Load3DAdvanced", values) == [
+            "model_file",
+            *_LOAD_3D_BUTTONS,
+            "viewport_state",
+            "width",
+            "height",
+        ]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == [
+            "motor.fbx",
+            "upload3dmodel",
+            "uploadExtraResources",
+            "clear",
+            "",
+            512,
+            600,
+        ]
+
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
         # model_3d LINK, so its viewport slot follows nothing.

@@ -961,13 +961,17 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     return port.type == "INT" and port.name in ("seed", "noise_seed")
 
 
-def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
+def load_3d_button_slots(
+    m: Morphism, widgets_values: list[Any] | dict[str, Any] | None = None
+) -> tuple[tuple[str, str], ...]:
     """The button slots the LOAD_3D custom widget injects into ``m``, if any.
 
     ``Comfy.Load3DAdvanced`` rewrites that class's raw ``LOAD_3D`` input to
     ``LOAD_3D_ADVANCED`` before widget construction. Its dedicated factory
-    adds only the viewport component, so it must not inherit these slots from
-    the raw ``object_info`` shape.
+    adds only the viewport component, so the static catalog and fresh nodes
+    must not inherit these slots from the raw ``object_info`` shape. A saved
+    legacy node can still contain the three button values, however; the
+    value-aware walk retains those slots so edits stay positionally aligned.
 
     ``getCustomWidgets().LOAD_3D`` attaches them only when the node already
     carries a ``model_file`` WIDGET (``hasModelFileWidget``), so ``Load3D``
@@ -978,7 +982,9 @@ def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
     ``frontend_extra_widget_names``, which trails the declared inputs.
     """
     if getattr(m, "id", "") == "Load3DAdvanced":
-        return ()
+        expected = [value for _name, value in _LOAD_3D_BUTTON_SLOTS]
+        if not isinstance(widgets_values, list) or widgets_values[1:4] != expected:
+            return ()
     if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
         return ()
     return _LOAD_3D_BUTTON_SLOTS
@@ -4478,7 +4484,7 @@ def _expand_widget_entries(
         elif _has_control_after_generate_slot(port):
             entries.append(_WidgetEntry(name="control_after_generate", port=None, owner=owner))
 
-    buttons = load_3d_button_slots(m)
+    buttons = load_3d_button_slots(m, widgets_values)
     for p in m.inputs:
         if p.is_link:
             continue
@@ -4807,7 +4813,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     # node before the target exists and its value has validated.
     widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     if extend:
-        button_defaults = dict(load_3d_button_slots(m))
+        button_defaults = dict(load_3d_button_slots(m, widgets))
 
         def entry_default(entry: _WidgetEntry) -> Any:
             if entry.port is not None:
@@ -4900,7 +4906,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     if widget_idx >= len(widgets):
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
-        button_defaults = dict(load_3d_button_slots(m))
+        button_defaults = dict(load_3d_button_slots(m, widgets))
         # Leave a missing dynamic selector target absent so its writer sees a
         # real option change and materializes that option's complete roster.
         padding_stop = (
