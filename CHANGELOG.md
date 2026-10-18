@@ -198,6 +198,10 @@ history.
   Read-side resolution gives a literal node `94` precedence; without one, two
   inserts of the same template are refused with both ids. A validate issue on
   such a node carries `template_node_id` only while that id is unambiguous.
+  A declared input of a subgraph nested inside another subgraph is now listed
+  at its full path (`10/5.prompt_text`, `instance_id: "10/5"`). It used to be
+  listed at the bare interior id (`5.prompt_text`), which named a different
+  top-level node or no node.
 - `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
   `speech` is `audio`); with another option selected it names the value to set.
 - A number or JSON value written to a STRING widget is written as its text,
