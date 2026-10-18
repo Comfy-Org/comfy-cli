@@ -2,16 +2,14 @@
 
 rgthree's "Display Int (rgthree)" has one ``forceInput`` INT input, so its
 catalog ``widget_order`` is empty, but the extension mounts a client-only
-``output`` text widget that serializes a value. The frontend fix declares that
-layout as A24 ``widgets_values_form``, and the doc host projects the node back
-as ``widgets_values: [""]`` plus the form. These tests pin how the agent's own
+``output`` text widget that serializes a value. The frontend fix sends the
+node's name-keyed values plus A24 ``widgets_values_form``, and the doc host
+projects them back verbatim. These tests pin how the agent's own
 readers treat that projection, so the frontend change cannot silently break
 what the agent sees.
 """
 
 from __future__ import annotations
-
-import pytest
 
 from comfy_cli.cql.engine import Graph
 from comfy_cli.workflow_print import render_py
@@ -57,9 +55,9 @@ def test_catalog_widget_order_for_a_force_input_class_is_empty():
     assert graph.widget_order_default(DISPLAY_INT) == []
 
 
-def test_agent_printer_renders_a_self_described_extension_widget_node_like_a_saved_one():
+def test_agent_printer_renders_a_declared_extension_widget_node_like_a_saved_one():
     graph = Graph.from_object_info(OBJECT_INFO)
-    declared = _projected_workflow({"widgets_values": [""], "widgets_values_form": {"order": ["output"]}})
+    declared = _projected_workflow({"widgets_values": {"output": ""}, "widgets_values_form": {"order": ["output"]}})
     saved = _projected_workflow({"widgets_values": [""]})
 
     declared_result = render_py(declared, graph)
@@ -95,7 +93,7 @@ CONTROLLED_COMBO_OBJECT_INFO = {
 }
 
 
-def _controlled_combo_workflow(node_extra: dict) -> dict:
+def _single_node_workflow(node_extra: dict) -> dict:
     node = {
         "id": 1,
         "type": CONTROLLED_COMBO,
@@ -111,22 +109,24 @@ def _controlled_combo_workflow(node_extra: dict) -> dict:
     return {"last_node_id": 1, "last_link_id": 0, "nodes": [node], "links": [], "version": 0.4}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FE-3470: comfy-cli reads widgets_values by catalog position and ignores widgets_values_form, so the "
-    "frontend only declares a form for fixed-layout nodes whose undeclared widgets trail the declared ones",
-)
-def test_agent_printer_reads_a_declared_form_by_name_when_an_undeclared_widget_precedes_a_declared_one():
+def test_agent_printer_reads_a_declared_controlled_combo_by_name():
     graph = Graph.from_object_info(CONTROLLED_COMBO_OBJECT_INFO)
-    workflow = _controlled_combo_workflow(
+    workflow = _single_node_workflow(
         {
-            "widgets_values": ["a", "randomize", "", 20],
+            "widgets_values": {
+                "choice": "a",
+                "control_after_generate": "randomize",
+                "control_filter_list": "",
+                "steps": 20,
+            },
             "widgets_values_form": {"order": ["choice", "control_after_generate", "control_filter_list", "steps"]},
         }
     )
 
     result = render_py(workflow, graph)
 
+    assert result.warnings == []
+    assert 'choice="a"' in result.source
     assert "steps=20" in result.source
 
 
@@ -149,10 +149,14 @@ STEPS_EXTENSION_OBJECT_INFO = {
 }
 
 
-def test_agent_printer_reads_the_catalog_prefix_of_a_declared_trailing_extension_widget():
+def test_agent_printer_reads_a_declared_extension_widget_beside_a_catalogued_one():
     graph = Graph.from_object_info(STEPS_EXTENSION_OBJECT_INFO)
-    workflow = _controlled_combo_workflow(
-        {"type": STEPS_EXTENSION, "widgets_values": [7, ""], "widgets_values_form": {"order": ["steps", "output"]}}
+    workflow = _single_node_workflow(
+        {
+            "type": STEPS_EXTENSION,
+            "widgets_values": {"steps": 7, "output": ""},
+            "widgets_values_form": {"order": ["steps", "output"]},
+        }
     )
 
     result = render_py(workflow, graph)
