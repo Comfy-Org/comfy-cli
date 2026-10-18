@@ -1729,3 +1729,48 @@ def test_resolve_origin_url_decodes_git_output_as_utf8_under_a_non_utf8_locale(t
 
     assert "error" not in result, result["error"]
     assert result["origin"] == origin
+
+
+def test_initialize_project_config_ignores_an_env_injected_origin_url(tmp_path, monkeypatch):
+    """Command-scope config is deliberately inherited, and this pins why that is safe.
+
+    `GIT_CONFIG_COUNT` with its `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`
+    pairs does override config files and can carry `remote.origin.url`, but it is
+    *protected* configuration in git's own terms — which is why granting
+    `safe.directory` through it is the standard container recipe. Dropping it from
+    the child environment would turn an ownership refusal back into a hard error
+    for those users, so it stays.
+
+    What makes that safe is that `git remote get-url` requires the remote to be
+    configured in the REPOSITORY. An injected `remote.origin.url` is visible to
+    `git config --get` and still leaves `get-url` exiting 2, so a repository with
+    no origin takes the folder fallback rather than somebody else's URL.
+
+    Measured on git 2.43.0, the only version this was checked against. If a later
+    git lets command-scope config satisfy `get-url`, this goes red and the
+    decision above gets revisited instead of rediscovered.
+    """
+    from comfy_cli.registry import config_parser
+
+    injected = "https://github.com/someoneelse/NotThisPack.git"
+    target = tmp_path / "ComfyUI-EnvConfig"
+    target.mkdir()
+    subprocess.run(["git", "init"], cwd=target, check=True, capture_output=True)
+    monkeypatch.chdir(target)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", injected)
+
+    # Not vacuous: the injection really is in force for the git this spawns.
+    seen = config_parser._run_git(config_parser.resolve_required_binary("git"), "config", "--get", "remote.origin.url")
+    assert seen.returncode == 0, seen.stderr
+    assert seen.stdout.strip() == injected
+
+    initialize_project_config()
+
+    written = (target / "pyproject.toml").read_text()
+    data = tomlkit.parse(written)
+    assert data["project"]["urls"]["Repository"] == ""
+    assert "Documentation" not in data["project"]["urls"]
+    assert data["project"]["name"] == "envconfig"
+    assert "someoneelse" not in written

@@ -298,8 +298,20 @@ _GIT_ABSENT_REPOSITORY_STDERR = "not a git repository"
 # The two discovery variables are stripped for the same reason rather than a
 # different one: ``GIT_CEILING_DIRECTORIES`` can hide a repository that really is
 # rooted here, and ``GIT_DISCOVERY_ACROSS_FILESYSTEM`` changes how far the search
-# walks. Nothing here is a config override — the repository's own
-# ``.git/config`` is still what names the remote.
+# walks.
+#
+# Command-scope config — ``GIT_CONFIG_COUNT`` with its ``GIT_CONFIG_KEY_<n>`` /
+# ``GIT_CONFIG_VALUE_<n>`` pairs — is deliberately NOT stripped, even though it
+# does override config files and can carry ``remote.origin.url``. It is
+# *protected* configuration in git's own terms, which is why granting
+# ``safe.directory`` through it is the standard container recipe, and dropping it
+# would turn an ownership refusal back into the hard error above for those users.
+# What makes keeping it safe is that ``git remote get-url`` requires the remote to
+# be configured in the REPOSITORY, so an injected ``remote.origin.url`` is visible
+# to ``git config --get`` and still leaves ``get-url`` exiting 2 — the folder
+# fallback, not somebody else's URL. Pinned by
+# ``test_initialize_project_config_ignores_an_env_injected_origin_url``, measured
+# on git 2.43.0.
 _GIT_LOCATION_ENV_VARS = frozenset(
     {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -340,8 +352,8 @@ def _run_git(git_bin: str, *args: str) -> subprocess.CompletedProcess[str]:
     git writes paths and config values as UTF-8 — so a pack whose path or origin
     URL contains non-ASCII characters either decoded to different characters,
     silently failing the repository-root comparison in
-    :func:`_resolve_origin_url` and dropping
-    valid URLs, or hit an unmapped byte and crashed ``comfy node init`` with a
+    :func:`_resolve_origin_url` and dropping valid URLs, or hit an unmapped byte
+    and crashed ``comfy node init`` with a
     ``UnicodeDecodeError``. ``errors="replace"`` keeps a genuinely undecodable
     diagnostic from doing the same: a garbled message the user can still read
     beats a traceback.
