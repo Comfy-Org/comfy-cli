@@ -1,6 +1,8 @@
+import json
 import os
 import re
 import subprocess
+import sys
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -9,6 +11,7 @@ from typer.testing import CliRunner
 
 from comfy_cli._safe_exec import BinaryNotFoundError, BinaryRefusal
 from comfy_cli.registry.config_parser import (
+    _GIT_LOCATION_ENV_VARS,
     FALLBACK_PROJECT_NAME,
     _strip_url_credentials,
     create_comfynode_config,
@@ -25,6 +28,21 @@ from comfy_cli.registry.types import (
     PyProjectConfig,
     URLs,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_inherited_git_environment(monkeypatch):
+    """Keep the caller's repository out of every test in this module.
+
+    These tests spawn real git, and git decides which repository it is talking
+    about from the environment. Run under a git hook — `pre-commit` is the
+    everyday case, and it exports `GIT_DIR` without `GIT_WORK_TREE` — the
+    no-repository and parent-origin assertions below would be answered about
+    comfy-cli's own checkout rather than about `tmp_path`, so they would fail or,
+    worse, pass while checking the wrong repository.
+    """
+    for name in _GIT_LOCATION_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -1537,3 +1555,177 @@ def test_initialize_project_config_forces_the_c_locale_for_git(tmp_path, monkeyp
     data = tomlkit.parse((target / "pyproject.toml").read_text())
     assert data["project"]["name"] == "localized"
     assert data["project"]["urls"]["Repository"] == ""
+
+
+def test_initialize_project_config_ignores_an_inherited_git_dir(tmp_path, monkeypatch):
+    """An inherited `GIT_DIR` must not redirect the lookup at another repository.
+
+    `GIT_DIR` without `GIT_WORK_TREE` — which is exactly how git invokes a hook,
+    so how `pre-commit` invokes anything, and a shell can export it too — makes
+    git treat the CURRENT directory as the top of the work tree. So
+    `rev-parse --show-toplevel` answers with the pack folder, the rooted-here
+    guard passes, and `remote get-url origin` reads the origin of the repository
+    `GIT_DIR` points at. That reaches the same outcome the rooted-here guard
+    exists to prevent: a pack scaffolded, and publishable, with somebody else's
+    Repository, Docs and Bug Tracker.
+    """
+    comfyui = tmp_path / "ComfyUI"
+    comfyui.mkdir()
+    subprocess.run(["git", "init"], cwd=comfyui, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/comfyanonymous/ComfyUI.git"],
+        cwd=comfyui,
+        check=True,
+        capture_output=True,
+    )
+    target = comfyui / "custom_nodes" / "ComfyUI-MyPack"
+    target.mkdir(parents=True)
+    monkeypatch.chdir(target)
+    monkeypatch.setenv("GIT_DIR", str(comfyui / ".git"))
+
+    initialize_project_config()
+
+    written = (target / "pyproject.toml").read_text()
+    data = tomlkit.parse(written)
+    assert data["project"]["urls"]["Repository"] == ""
+    assert "Documentation" not in data["project"]["urls"]
+    assert "Bug Tracker" not in data["project"]["urls"]
+    assert data["project"]["name"] == "mypack"
+    assert "comfyanonymous" not in written
+
+
+def test_run_git_strips_inherited_git_location_variables(tmp_path, monkeypatch):
+    """The child environment, pinned directly.
+
+    Whatever git-location variables the caller exports, the spawned git sees
+    none of them — and the locale overrides and the explicit UTF-8 decode are
+    still there alongside that filtering, since both are built in the same
+    place.
+    """
+    from comfy_cli.registry import config_parser
+
+    for name in sorted(_GIT_LOCATION_ENV_VARS):
+        monkeypatch.setenv(name, f"/nonexistent/{name}")
+
+    calls = []
+    real_run = subprocess.run
+
+    def _spy(argv, **kwargs):
+        calls.append(kwargs)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(config_parser.subprocess, "run", _spy)
+
+    target = tmp_path / "ComfyUI-EnvPin"
+    target.mkdir()
+    monkeypatch.chdir(target)
+
+    initialize_project_config()
+
+    assert calls, "git was never spawned"
+    for kwargs in calls:
+        env = kwargs["env"]
+        assert not (_GIT_LOCATION_ENV_VARS & env.keys()), "an inherited git location variable reached git"
+        assert env["LC_ALL"] == "C"
+        assert env["LANGUAGE"] == ""
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+    # And the ambient environment is left alone for everything else.
+    assert os.environ["GIT_DIR"] == "/nonexistent/GIT_DIR"
+
+
+def test_run_git_tolerates_undecodable_git_output():
+    """A byte that is not valid UTF-8 anywhere in git's output must not crash.
+
+    `text=True` with the default strict error handler turns a single unmappable
+    byte in a diagnostic into a `UnicodeDecodeError` out of `subprocess.run`,
+    which surfaces as a traceback from `comfy node init` rather than as the
+    message git was trying to deliver. `sys.executable` stands in for git here so
+    the stream contents are exact; the decoding path is the one real git goes
+    through.
+    """
+    from comfy_cli.registry import config_parser
+
+    completed = config_parser._run_git(
+        sys.executable,
+        "-c",
+        r"import sys; sys.stdout.buffer.write(b'/pack\n'); sys.stderr.buffer.write(b'\xff')",
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "/pack"
+    # Replaced, not raised, and not silently reinterpreted under some other codec.
+    assert completed.stderr == "\ufffd"
+
+
+_NON_UTF8_LOCALE_PROBE = """
+import json, locale, os, sys
+
+os.chdir(sys.argv[1])
+result = {"encoding": locale.getpreferredencoding(False)}
+try:
+    from comfy_cli.registry import config_parser
+
+    result["origin"] = config_parser._resolve_origin_url()
+except Exception as e:  # noqa: BLE001 - reported back to the parent, not handled
+    result["error"] = f"{type(e).__name__}: {e}"
+# json.dumps escapes non-ASCII, so this survives an ASCII stdout.
+print(json.dumps(result))
+"""
+
+
+def test_resolve_origin_url_decodes_git_output_as_utf8_under_a_non_utf8_locale(tmp_path):
+    """git's output is UTF-8; the parent must not decode it with the locale.
+
+    This is the shape a Windows user is in by default — git writes paths and
+    config values as UTF-8 while the process decodes with a legacy code page —
+    and `LC_ALL=C` does not help, because it changes git's *messages* and not
+    how the parent decodes the bytes. The non-ASCII character is in the origin
+    URL rather than in the path so that the probe's own `chdir` is not what
+    fails.
+
+    A non-UTF-8 locale cannot be simulated in-process: on Python 3.10 the
+    default is resolved in C and no `locale` attribute is consulted. So the
+    probe runs in a child interpreter with the C locale forced, and skips if
+    that interpreter still comes up UTF-8.
+    """
+    target = tmp_path / "pack"
+    target.mkdir()
+    subprocess.run(["git", "init"], cwd=target, check=True, capture_output=True)
+    # Escaped rather than written literally: this test is about how bytes are
+    # decoded, so the character must not depend on this file's own encoding.
+    origin = "https://example.com/caf\u00e9/pack.git"
+    subprocess.run(
+        ["git", "remote", "add", "origin", origin],
+        cwd=target,
+        check=True,
+        capture_output=True,
+    )
+
+    env = {
+        **os.environ,
+        "LC_ALL": "C",
+        "LANG": "C",
+        "LANGUAGE": "",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+        "PYTHONIOENCODING": "ascii",
+    }
+    probe = subprocess.run(
+        [sys.executable, "-c", _NON_UTF8_LOCALE_PROBE, str(target)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        env=env,
+    )
+    assert probe.returncode == 0, probe.stderr
+    result = json.loads(probe.stdout)
+
+    import codecs
+
+    if codecs.lookup(result["encoding"]).name == "utf-8":
+        pytest.skip(f"interpreter locale is still UTF-8 ({result['encoding']}); nothing to prove here")
+
+    assert "error" not in result, result["error"]
+    assert result["origin"] == origin

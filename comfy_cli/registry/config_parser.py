@@ -284,6 +284,37 @@ _GIT_NO_SUCH_REMOTE_EXIT_CODE = 2
 # message rather than being guessed at.
 _GIT_ABSENT_REPOSITORY_STDERR = "not a git repository"
 
+# git reads these from the environment to decide WHICH repository it is talking
+# about, so inheriting them makes the lookups in :func:`_resolve_origin_url`
+# answer about a different one. ``GIT_DIR`` is the load-bearing case: set
+# without ``GIT_WORK_TREE`` — which is exactly how git invokes a hook, and so
+# how pre-commit invokes pytest — git treats the CURRENT directory as the top of
+# the work tree, so ``rev-parse --show-toplevel`` answers with this folder, the
+# rooted-here guard below passes, and ``remote get-url origin`` then returns the
+# origin of the repository ``GIT_DIR`` points at. That is the same
+# somebody-else's-URLs leak the guard exists to prevent, arriving by another
+# route.
+#
+# The two discovery variables are stripped for the same reason rather than a
+# different one: ``GIT_CEILING_DIRECTORIES`` can hide a repository that really is
+# rooted here, and ``GIT_DISCOVERY_ACROSS_FILESYSTEM`` changes how far the search
+# walks. Nothing here is a config override — the repository's own
+# ``.git/config`` is still what names the remote.
+_GIT_LOCATION_ENV_VARS = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_WORK_TREE",
+    }
+)
+
 
 def _run_git(git_bin: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Run git, capturing both streams. Never raises on a non-zero exit.
@@ -299,9 +330,33 @@ def _run_git(git_bin: str, *args: str) -> subprocess.CompletedProcess[str]:
     allowlist and the fallback this function exists to enable would turn into a
     hard error. ``LANGUAGE`` is cleared as well: it takes precedence over
     ``LC_ALL`` in gettext's lookup.
+
+    Inherited repository-location variables are dropped — see
+    :data:`_GIT_LOCATION_ENV_VARS` — so the answer describes the current
+    directory and not whatever repository the caller happened to be inside.
+
+    The output is decoded as UTF-8 explicitly. ``text=True`` alone decodes with
+    the parent's locale encoding, which on Windows is a legacy code page while
+    git writes paths and config values as UTF-8 — so a pack whose path or origin
+    URL contains non-ASCII characters either decoded to different characters,
+    silently failing the repository-root comparison in
+    :func:`_resolve_origin_url` and dropping
+    valid URLs, or hit an unmapped byte and crashed ``comfy node init`` with a
+    ``UnicodeDecodeError``. ``errors="replace"`` keeps a genuinely undecodable
+    diagnostic from doing the same: a garbled message the user can still read
+    beats a traceback.
     """
-    env = {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
-    return subprocess.run([git_bin, *args], capture_output=True, text=True, check=False, env=env)
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV_VARS}
+    env.update({"LC_ALL": "C", "LANGUAGE": ""})
+    return subprocess.run(
+        [git_bin, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        env=env,
+    )
 
 
 def _git_failure(invocation: str, completed: subprocess.CompletedProcess[str]) -> Exception:
