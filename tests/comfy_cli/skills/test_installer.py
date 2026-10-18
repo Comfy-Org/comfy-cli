@@ -222,6 +222,17 @@ def test_custom_node_skill_snapshot_keeps_runtime_contract():
         assert needle in corpus
 
 
+def test_custom_node_validation_names_what_to_refresh():
+    """A bare "restart ComfyUI and refresh" reads as "reload the browser tab"
+    or "run `comfy nodes refresh`"; neither re-reads `/object_info`."""
+    text = " ".join(skill_content("comfy-custom-nodes-validation").split())
+    assert not re.search(r"(?i)restart(ed)?,? (comfyui )?(and )?refresh\b", text)
+    assert not re.search(r"(?i)(refresh|reload)(ing)? (the |your )?(comfyui )?(browser|page|tab)\b", text)
+    assert "restart ComfyUI and re-run that command" in text
+    assert "`comfy nodes refresh` re-pulls annotations, not `/object_info`" in text
+    assert "browser reload changes neither" in text
+
+
 def test_custom_node_search_routes_have_positive_and_negative_controls():
     """A search cue without an avoid control teaches indiscriminate search."""
     text = skill_content("comfy-custom-nodes-search")
