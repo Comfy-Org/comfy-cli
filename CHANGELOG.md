@@ -189,6 +189,19 @@ history.
 - `connect`, `delete-node` and `set-node-field` accept a template node id
   (`24`) on a canvas whose ids were remapped by `insert_workflow`
   (`insert:…:root:node:24`), as `set-widget` already did.
+- `comfy workflow slots` and `validate` speak the template node id on a canvas
+  `get_template` built (`insert:…:root:node:94`), as the edit commands do.
+  Such a node's own slot rows (not its subgraph interior's) carry
+  `template_node_id: "94"`, so `--select 'slots.#(template_node_id=="94")#'`
+  finds it (no bare-id query could, since every row id is the remapped one).
+  `slots --node 94` lists one node's slots, its subgraph interior included.
+  Read-side resolution gives a literal node `94` precedence; without one, two
+  inserts of the same template are refused with both ids. A validate issue on
+  such a node carries `template_node_id` only while that id is unambiguous.
+  A declared input of a subgraph nested inside another subgraph is now listed
+  at its full path (`10/5.prompt_text`, `instance_id: "10/5"`). It used to be
+  listed at the bare interior id (`5.prompt_text`), which named a different
+  top-level node or no node.
 - `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
   `speech` is `audio`); with another option selected it names the value to set.
 - A number or JSON value written to a STRING widget is written as its text,

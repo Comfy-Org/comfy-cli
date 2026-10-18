@@ -632,6 +632,12 @@ lacks `api_node` flags the list is simply empty (fail-open). When
 `spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
 `⚠ uses partner-API (paid) nodes …` line after the verdict.
 
+On a canvas whose ids `get_template` remapped (`insert:<op>:root:node:94`), an
+issue on such a node also carries `template_node_id` (`"94"`), the id the
+template showed; `workflow slots --node`, `set-widget` and the other edit
+commands accept it. It is absent when a literal node `94` exists or two
+inserts carry that id.
+
 Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
 a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
 exit code `1`. Structural failures (missing file, non-object JSON, an

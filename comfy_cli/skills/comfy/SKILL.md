@@ -1004,6 +1004,9 @@ comfy --json workflow slots path.json
 # → lists every slot as <node_id>.<input_name> with current values
 #   subgraph interiors: <instance_id>/<inner_id>.<input>
 #   copy addresses verbatim from this output
+#   --node <id> lists one node's slots, subgraph interior included (a
+#   template id like 94 works on an inserted canvas; that node's own rows
+#   carry template_node_id)
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"
