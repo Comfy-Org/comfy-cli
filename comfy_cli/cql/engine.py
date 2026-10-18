@@ -2063,7 +2063,9 @@ class Graph:
             group_errors: list[dict] = []
             group_warnings: list[dict] = []
             for group in (p for p in m.inputs if p.is_dynamic_group):
-                e, w, _ = _check_dynamic_group(node_id, class_type, group, node_inputs)
+                e, w, _ = _check_dynamic_group(
+                    node_id, class_type, group, node_inputs, range_is_error=node_id in reachable
+                )
                 group_errors.extend(e)
                 group_warnings.extend(w)
             for input_name, value in node_inputs.items():
@@ -2923,7 +2925,7 @@ def _validate_literal_value(
 
 
 def _check_dynamic_group(
-    node_id: str, class_type: str, port: Port, present: dict
+    node_id: str, class_type: str, port: Port, present: dict, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict], set[str]]:
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -2979,7 +2981,15 @@ def _check_dynamic_group(
         for field in fields:
             name = f"{port.name}.{row}.{field.name}"
             e, w, _, _ = _check_dynamic_combo_sub(
-                node_id, class_type, name, field.raw_spec, field.required, present, {}, 0
+                node_id,
+                class_type,
+                name,
+                field.raw_spec,
+                field.required,
+                present,
+                {},
+                0,
+                range_is_error=range_is_error,
             )
             errors.extend(e)
             warnings.extend(w)
@@ -3393,7 +3403,7 @@ def _check_dynamic_combo_sub(
         )
 
     if port.is_dynamic_group:
-        errors, warnings, keys = _check_dynamic_group(node_id, class_type, port, present)
+        errors, warnings, keys = _check_dynamic_group(node_id, class_type, port, present, range_is_error=range_is_error)
         return errors, warnings, keys, set()
 
     if port.is_autogrow:

@@ -298,6 +298,19 @@ class TestValidateSubgraphIdTranslation:
         assert "57/3.filename_prefix" in finding["hint"]
         assert "57:3.filename_prefix" not in finding["hint"]
 
+    def test_coercible_hint_translates_a_dotted_class_name(self, tmp_path):
+        wf = _subgraph_ui_workflow()
+        wf["definitions"]["subgraphs"][0]["nodes"][0]["type"] = "Save.Image"
+        wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] = [123]
+        object_info = _object_info()
+        object_info["Save.Image"] = object_info.pop("SaveImage")
+
+        data = _envelope(_run_validate(tmp_path, wf, object_info))["data"]
+
+        [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
+        assert "57/3.filename_prefix" in finding["hint"]
+        assert "57:3.filename_prefix" not in finding["hint"]
+
     def test_every_companion_field_uses_the_editable_address(self, tmp_path, monkeypatch):
         def validate_with_companion(_graph, _workflow):
             return {

@@ -1892,9 +1892,13 @@ def validate_api_workflow(
                     # The actionable command must speak the canvas edit
                     # surface and keep the entire address shell-quoted.
                     hint = issue.get("hint")
-                    field_tail = field[len(nid) + 1 :] if isinstance(field, str) and field.startswith(f"{nid}.") else ""
-                    _, separator, input_name = field_tail.partition(".")
-                    if isinstance(hint, str) and separator and "set-widget" in hint:
+                    node_data = wf_data.get(nid)
+                    class_type = node_data.get("class_type") if isinstance(node_data, dict) else None
+                    field_prefix = f"{nid}.{class_type}." if isinstance(class_type, str) else ""
+                    input_name = (
+                        field[len(field_prefix) :] if isinstance(field, str) and field.startswith(field_prefix) else ""
+                    )
+                    if isinstance(hint, str) and input_name and "set-widget" in hint:
                         old_arg = shlex.quote(f"{nid}.{input_name}")
                         new_arg = shlex.quote(f"{editable}.{input_name}")
                         issue["hint"] = hint.replace(f" {old_arg} --", f" {new_arg} --")
