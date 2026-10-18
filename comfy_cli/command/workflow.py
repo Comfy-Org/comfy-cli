@@ -297,9 +297,15 @@ def _with_template_node_ids(workflow: dict, slots: list) -> list:
 
 
 def _node_slots_or_exit(renderer, workflow: dict, graph, slots: list, node: str) -> list:
-    """The slots ``--node`` names, resolved like an edit command's node id: the
+    """The slots ``--node`` names, with read-side node-address precedence: a
     literal id wins, else the one inserted node it is the template id of, else
-    a ``print`` binding name (``workflow_ops._template_id``)."""
+    a ``print`` binding name (``workflow_ops._template_id``).
+
+    This deliberately resolves a node before considering its widgets.  It is
+    narrower than ``set-widget``'s widget-sensitive fallback: when a literal
+    node exists but lacks the requested widget, that writer can still try the
+    unique inserted node carrying the same template id.
+    """
     from comfy_cli import workflow_ops
     from comfy_cli.cql.engine import split_node_path
 

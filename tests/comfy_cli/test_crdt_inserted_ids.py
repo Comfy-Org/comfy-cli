@@ -283,6 +283,20 @@ def test_a_literal_node_id_wins_over_the_template_id_in_slots(tmp_path):
     assert not [r for r in full if r.get("template_node_id") == "5"]
 
 
+def test_a_literal_node_with_no_widgets_still_wins_in_slots(tmp_path):
+    wf = _load(SD15["cmp_inserted"])
+    literal = copy.deepcopy(next(n for n in wf["nodes"] if n["id"] == f"insert:{OP_ID}:root:node:8"))
+    literal["id"] = 5
+    wf["nodes"].append(literal)
+
+    env = _run_slots(tmp_path, wf, "--node", "5")
+
+    assert env["ok"] is True, env
+    assert (env["data"]["count"], env["data"]["slots"]) == (0, [])
+    full = _run_slots(tmp_path, wf)["data"]["slots"]
+    assert not [r for r in full if r.get("template_node_id") == "5"]
+
+
 def test_slots_node_names_every_insert_when_two_carry_the_id(tmp_path):
     wf = _load(SD15["cmp_inserted"])
     twin = copy.deepcopy(next(n for n in wf["nodes"] if n["id"] == INSERTED_5))
@@ -360,3 +374,24 @@ def test_validate_issue_carries_the_template_id(tmp_path):
 
     [hit] = [e for e in _errors(env) if e.get("field") == "model"]
     assert (hit["node_id"], hit["template_node_id"]) == (sampler["id"], "3")
+
+
+@pytest.mark.parametrize("collision", ["literal", "second-insert"])
+def test_validate_omits_a_template_id_that_cannot_address_the_node(tmp_path, collision):
+    wf = _load(SD15["cmp_inserted"])
+    sampler = next(n for n in wf["nodes"] if n["type"] == "KSampler")
+    model_in = next(i for i in sampler["inputs"] if i["name"] == "model")
+    wf["links"] = [ln for ln in wf["links"] if ln[0] != model_in["link"]]
+    model_in["link"] = None
+    if collision == "literal":
+        other = copy.deepcopy(sampler)
+        other["id"] = 3
+    else:
+        other = copy.deepcopy(sampler)
+        other["id"] = "insert:ffffffffffffffffffffffffffffffff:root:node:3"
+    wf["nodes"].append(other)
+
+    env = _run_validate(tmp_path, wf, _load("sd15_object_info.json"))
+
+    [hit] = [e for e in _errors(env) if e.get("field") == "model" and e.get("node_id") == sampler["id"]]
+    assert "template_node_id" not in hit

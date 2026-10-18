@@ -194,10 +194,10 @@ history.
   Such a node's own slot rows (not its subgraph interior's) carry
   `template_node_id: "94"`, so `--select 'slots.#(template_node_id=="94")#'`
   finds it (no bare-id query could, since every row id is the remapped one).
-  `slots --node 94` lists one node's slots, its subgraph interior included,
-  resolving the id as `set-widget` does: a literal node `94` wins, and two
+  `slots --node 94` lists one node's slots, its subgraph interior included.
+  Read-side resolution gives a literal node `94` precedence; without one, two
   inserts of the same template are refused with both ids. A validate issue on
-  such a node carries `template_node_id`.
+  such a node carries `template_node_id` only while that id is unambiguous.
 - `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
   `speech` is `audio`); with another option selected it names the value to set.
 - A number or JSON value written to a STRING widget is written as its text,
