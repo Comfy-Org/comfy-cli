@@ -65,7 +65,7 @@ MAX_AUTHORING_METADATA_BYTES = 2048
 # playbook. A class absent from this tuple makes `_index_custom_node_authoring`
 # skip the slice that declares it, so the producer's content stays unreachable
 # until the class is added here. Last reconciled against comfy-knowledge
-# `3055e9dcc86d5dae416251374f97bce466999cb8`, where the last three were added.
+# `7a3574e3deeae860f46901c39e3606f7a3acfc96`, which added `execution-caching`.
 AUTHORING_CLASSES = (
     "invocation",
     "ecosystem-reference",
@@ -76,6 +76,7 @@ AUTHORING_CLASSES = (
     "packaging-publishing",
     "frontend-extension",
     "v1-to-v3-migration",
+    "execution-caching",
 )
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"

@@ -34,6 +34,7 @@ _AUTHORING_FALLBACKS = {
     "packaging-publishing": "comfy-custom-nodes-packaging",
     "frontend-extension": "comfy-custom-nodes-frontend",
     "v1-to-v3-migration": "comfy-custom-nodes-migration",
+    "execution-caching": "comfy-custom-nodes-caching",
 }
 assert set(_AUTHORING_FALLBACKS) == set(knowledge.AUTHORING_CLASSES)
 
@@ -48,6 +49,7 @@ class AuthoringClass(str, Enum):
     packaging_publishing = "packaging-publishing"
     frontend_extension = "frontend-extension"
     v1_to_v3_migration = "v1-to-v3-migration"
+    execution_caching = "execution-caching"
 
 
 def _env_context() -> dict[str, Any]:
