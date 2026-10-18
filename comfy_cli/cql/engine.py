@@ -4425,7 +4425,11 @@ def _expand_widget_entries(
 
 
 def _carries_legacy_buttons(widgets_values: list[Any] | dict[str, Any], at: int) -> bool:
-    """Whether positional ``widgets_values`` hold the LOAD_3D button constants at ``at``."""
+    """Whether positional ``widgets_values`` hold the LOAD_3D button constants at ``at``.
+
+    All three, deliberately: that is the only shape any writer produced, and a
+    looser match could claim a real value of a node saved without buttons.
+    """
     if not isinstance(widgets_values, list):
         return False
     return widgets_values[at : at + len(_LOAD_3D_BUTTON_SLOTS)] == [v for _n, v in _LOAD_3D_BUTTON_SLOTS]
