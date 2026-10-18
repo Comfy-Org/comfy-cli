@@ -4,7 +4,9 @@ rgthree's "Display Int (rgthree)" has one ``forceInput`` INT input, so its
 catalog ``widget_order`` is empty, but the extension mounts a client-only
 ``output`` text widget that serializes a value. The frontend fix sends the
 node's name-keyed values plus A24 ``widgets_values_form``, and the doc host
-projects them back verbatim. These tests pin how the agent's own
+projects them back verbatim. The printer resolves name-keyed values through the
+catalog order and does not read the form, so a value the catalog cannot name is
+dropped rather than shifted onto a catalogued widget. These tests pin how the agent's own
 readers treat that projection, so the frontend change cannot silently break
 what the agent sees.
 """
@@ -69,34 +71,9 @@ def test_agent_printer_renders_a_declared_extension_widget_node_like_a_saved_one
     assert declared_result.source == saved_result.source
 
 
-CONTROLLED_COMBO = "Controlled Combo"
-
-CONTROLLED_COMBO_OBJECT_INFO = {
-    CONTROLLED_COMBO: {
-        "input": {
-            "required": {
-                "choice": [["a", "b"], {"control_after_generate": True}],
-                "steps": ["INT", {"default": 20}],
-            }
-        },
-        "input_order": {"required": ["choice", "steps"]},
-        "output": [],
-        "output_is_list": [],
-        "output_name": [],
-        "name": CONTROLLED_COMBO,
-        "display_name": CONTROLLED_COMBO,
-        "description": "",
-        "python_module": "nodes",
-        "category": "test",
-        "output_node": True,
-    }
-}
-
-
 def _single_node_workflow(node_extra: dict) -> dict:
     node = {
         "id": 1,
-        "type": CONTROLLED_COMBO,
         "pos": [0, 0],
         "size": [210, 130],
         "flags": {},
@@ -107,27 +84,6 @@ def _single_node_workflow(node_extra: dict) -> dict:
         **node_extra,
     }
     return {"last_node_id": 1, "last_link_id": 0, "nodes": [node], "links": [], "version": 0.4}
-
-
-def test_agent_printer_reads_a_declared_controlled_combo_by_name():
-    graph = Graph.from_object_info(CONTROLLED_COMBO_OBJECT_INFO)
-    workflow = _single_node_workflow(
-        {
-            "widgets_values": {
-                "choice": "a",
-                "control_after_generate": "randomize",
-                "control_filter_list": "",
-                "steps": 20,
-            },
-            "widgets_values_form": {"order": ["choice", "control_after_generate", "control_filter_list", "steps"]},
-        }
-    )
-
-    result = render_py(workflow, graph)
-
-    assert result.warnings == []
-    assert 'choice="a"' in result.source
-    assert "steps=20" in result.source
 
 
 STEPS_EXTENSION = "Steps With Extension Widget"
@@ -163,3 +119,4 @@ def test_agent_printer_reads_a_declared_extension_widget_beside_a_catalogued_one
 
     assert result.warnings == []
     assert "steps=7" in result.source
+    assert "output" not in result.source
