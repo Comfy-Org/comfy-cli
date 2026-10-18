@@ -4405,16 +4405,30 @@ def _expand_widget_entries(
             entries.append(_WidgetEntry(name="control_after_generate", port=None, owner=owner))
 
     buttons = load_3d_button_slots(m)
+    has_model_file = any(p.name == "model_file" and not p.is_link for p in m.inputs)
     for p in m.inputs:
         if p.is_link:
             continue
         if buttons and frontend_input_type(m, p) == "LOAD_3D":
             for name, _value in buttons:
                 entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
+        elif has_model_file and p.type == "LOAD_3D" and _carries_legacy_buttons(widgets_values, len(entries)):
+            # A retyped slot (Load3DAdvanced) on a node saved through a catalog
+            # that still listed the buttons: keep that node's own layout so an
+            # edit lands in the slot its value is actually in (PM-1932).
+            for name, _value in _LOAD_3D_BUTTON_SLOTS:
+                entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
         emit(p.name, p, None, 0)
     for name in frontend_extra_widget_names(m):
         entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
     return entries
+
+
+def _carries_legacy_buttons(widgets_values: list[Any] | dict[str, Any], at: int) -> bool:
+    """Whether positional ``widgets_values`` hold the LOAD_3D button constants at ``at``."""
+    if not isinstance(widgets_values, list):
+        return False
+    return widgets_values[at : at + len(_LOAD_3D_BUTTON_SLOTS)] == [v for _n, v in _LOAD_3D_BUTTON_SLOTS]
 
 
 def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:

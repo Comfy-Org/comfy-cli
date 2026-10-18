@@ -372,6 +372,23 @@ class TestLoad3DAdvancedHasNoButtons:
         wf, _ = workflow_ops.set_widget(wf, graph, nid, "width", 640)
         assert wf["nodes"][0]["widgets_values"] == ["none", "", 640]
 
+    def test_a_file_written_by_an_older_cli_keeps_its_button_layout(self, graph: Graph):
+        # The shape add_node wrote before PM-1932: editing it by the
+        # button-less order would put width into the second button slot.
+        legacy = ["m.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 1024]
+        assert graph.widget_order_for_node("Load3DAdvanced", legacy) == [
+            "model_file",
+            *_LOAD_3D_BUTTONS,
+            "viewport_state",
+            "width",
+        ]
+        wf = _empty_workflow()
+        wf["nodes"].append({"id": 1, "type": "Load3DAdvanced", "inputs": [], "outputs": [], "widgets_values": legacy})
+        wf, _ = workflow_ops.set_widget(wf, graph, 1, "width", 640)
+        assert wf["nodes"][0]["widgets_values"] == [*legacy[:5], 640]
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "", "width": 640}
+
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
         # model_3d LINK, so its viewport slot follows nothing.
