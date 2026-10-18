@@ -309,11 +309,21 @@ def _node_slots_or_exit(renderer, workflow: dict, graph, slots: list, node: str)
     from comfy_cli import workflow_ops
     from comfy_cli.cql.engine import split_node_path
 
-    want = split_node_path(workflow, str(workflow_ops._template_id(workflow, node, graph)))
+    if not node:
+        renderer.error(
+            code="workflow_slot_invalid",
+            message="--node must not be empty",
+            hint="pass a node id from `comfy workflow ls-nodes`, or drop --node to list every slot",
+            details={"node": node, "candidates": []},
+        )
+        raise typer.Exit(code=1)
+    node_ref = int(node) if node.lstrip("-").isdigit() else node
+    want = split_node_path(workflow, str(workflow_ops._template_id(workflow, node_ref, graph)))
+    resolution_error = None
     try:
         workflow_ops._navigate_subgraph_path(workflow, want)
-    except ValueError:
-        pass
+    except ValueError as e:
+        resolution_error = e
     else:
         # Compared by path segment: an interior id can itself contain `/`.
         paths: dict[str, list[str]] = {}
@@ -327,14 +337,14 @@ def _node_slots_or_exit(renderer, workflow: dict, graph, slots: list, node: str)
             if paths[iid][: len(want)] == want:
                 rows.append(s)
         return rows
-    candidates = workflow_ops.inserted_candidates(workflow, node)
+    candidates = workflow_ops.inserted_candidates(workflow, node_ref)
     if len(candidates) > 1:
         message = (
             f"node {node} is ambiguous: {len(candidates)} inserted templates carry it — "
             f"pass one of: {', '.join(candidates)}"
         )
     else:
-        message = f"node {node} not found. Nodes in this workflow: {workflow_ops._available_nodes_hint(workflow)}"
+        message = f"{resolution_error}. Nodes in this workflow: {workflow_ops._available_nodes_hint(workflow)}"
     renderer.error(
         code="workflow_slot_invalid",
         message=message,

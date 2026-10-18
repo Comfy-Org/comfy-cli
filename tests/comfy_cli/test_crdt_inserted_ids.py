@@ -269,6 +269,13 @@ def test_slots_node_resolves_a_template_id_like_set_widget(tmp_path):
     assert env["data"]["count"] == 3
 
 
+def test_slots_node_normalizes_a_numeric_id_like_edit_commands(tmp_path):
+    env = _run_slots(tmp_path, _load(SD15["cmp_inserted"]), "--node", "05")
+
+    assert env["ok"] is True, env
+    assert {r["instance_id"] for r in env["data"]["slots"]} == {INSERTED_5}
+
+
 def test_a_literal_node_id_wins_over_the_template_id_in_slots(tmp_path):
     wf = _load(SD15["cmp_inserted"])
     literal = copy.deepcopy(next(n for n in wf["nodes"] if n["id"] == f"insert:{OP_ID}:root:node:9"))
@@ -351,6 +358,15 @@ def test_slots_node_refuses_a_truncated_interior_id(tmp_path):
 
     assert env["ok"] is False
     assert env["error"]["code"] == "workflow_slot_invalid"
+    assert "interior node" in env["error"]["message"] or "is not a subgraph" in env["error"]["message"]
+
+
+def test_slots_node_refuses_an_empty_id(tmp_path):
+    env = _run_slots(tmp_path, _load(SD15["cmp_inserted"]), "--node", "   ")
+
+    assert env["ok"] is False
+    assert env["error"]["code"] == "workflow_slot_invalid"
+    assert env["error"]["message"] == "--node must not be empty"
 
 
 def test_slots_node_on_an_inserted_subgraph_includes_its_interior(tmp_path):
@@ -361,6 +377,59 @@ def test_slots_node_on_an_inserted_subgraph_includes_its_interior(tmp_path):
     rows = env["data"]["slots"]
     assert {r["instance_id"] for r in rows if "template_node_id" in r} == {INSERTED_57}
     assert any(r["instance_id"].startswith(f"{INSERTED_57}/") and "template_node_id" not in r for r in rows)
+
+
+def test_slots_node_keeps_a_nested_subgraph_declared_slot_on_its_full_path(tmp_path):
+    outer = "00000000-0000-0000-0000-000000000001"
+    inner = "00000000-0000-0000-0000-000000000002"
+    wf = {
+        "nodes": [{"id": 10, "type": outer, "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": outer,
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [{"id": 5, "type": inner, "inputs": [], "outputs": [], "widgets_values": []}],
+                    "links": [],
+                },
+                {
+                    "id": inner,
+                    "inputs": [{"id": "i1", "name": "prompt_text", "type": "STRING", "linkIds": [1]}],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 27,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["nested prompt"],
+                        }
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 27,
+                            "target_slot": 1,
+                            "type": "STRING",
+                        }
+                    ],
+                },
+            ]
+        },
+    }
+
+    env = _run_slots(tmp_path, wf, "--node", "10", object_info="object_info_subgraph_promoted.json")
+
+    rows = env["data"]["slots"]
+    assert [r["address"] for r in rows] == ["10/5.prompt_text"]
+    assert [r["instance_id"] for r in rows] == ["10/5"]
 
 
 def test_validate_issue_carries_the_template_id(tmp_path):

@@ -4497,7 +4497,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             # (recursing for nested instances). A legacy template whose
             # curated surface comes entirely from ``proxyWidgets`` (nothing
             # linked) keeps its hand-picked view without recursion.
-            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph, workflow, scope)
+            declared, fully_curated = _declared_subgraph_slots(node, sg, node_path, graph, workflow, scope)
             for slot in declared:
                 if (node_id, slot["name"]) not in exclude:
                     add(slot)
