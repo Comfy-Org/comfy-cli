@@ -643,7 +643,8 @@ server converts it the way ComfyUI does (a lossless subset of its conversions) â
 an integer string on an INT input, a numeric string on a FLOAT input, a number
 on a STRING input. That one is a `coercible_type` warning: `value` is the stored
 literal, `coerced_value` the typed value the server runs with, and `hint` the
-`set-widget` that stores it. Range checks judge `coerced_value`.
+`set-widget` command for non-link inputs when no catalog error or fatal finding
+refuses the converted value. Range checks judge `coerced_value`.
 
 Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
 a populated `errors` array, `partner_nodes`/`spends_credits` still present) and

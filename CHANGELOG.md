@@ -141,7 +141,8 @@ history.
   input. ComfyUI runs these (it calls `int()`/`float()`/`str()` before
   checking), but validate refused them as `shape_mismatch`. Each is now a
   `coercible_type` warning carrying `value`, the converted `coerced_value`, and
-  a `set-widget` hint that stores the typed value; range checks judge the
+  a `set-widget` hint for non-link inputs when no catalog error or fatal finding
+  refuses the converted value; range checks judge the
   converted value, so `"4096"` above a max of 2048 is still `above_max`. Nothing
   else is relaxed: a BOOLEAN string (`bool("false")` is true), `"1536.0"` or
   `1536.9` on an INT, a bool, and a non-finite string such as `"nan"` keep their

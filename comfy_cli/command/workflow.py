@@ -21,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import shlex
 import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
@@ -1882,16 +1883,21 @@ def validate_api_workflow(
             if editable != nid:
                 issue["api_node_id"] = nid
                 issue["node_id"] = editable
+                # Every fully-qualified field on the same input must use the
+                # same canvas address, so companion findings can be paired.
+                field = issue.get("field")
+                if isinstance(field, str) and field.startswith(f"{nid}."):
+                    issue["field"] = f"{editable}.{field[len(nid) + 1 :]}"
                 if issue.get("code") == "coercible_type":
-                    # This warning is actionable: both its fully-qualified
-                    # field and set-widget command must speak the canvas edit
-                    # surface, not the flattened API id lowering minted.
-                    field = issue.get("field")
-                    if isinstance(field, str) and field.startswith(f"{nid}."):
-                        issue["field"] = f"{editable}.{field[len(nid) + 1 :]}"
+                    # The actionable command must speak the canvas edit
+                    # surface and keep the entire address shell-quoted.
                     hint = issue.get("hint")
-                    if isinstance(hint, str):
-                        issue["hint"] = hint.replace(f" {nid}.", f" {editable}.")
+                    field_tail = field[len(nid) + 1 :] if isinstance(field, str) and field.startswith(f"{nid}.") else ""
+                    _, separator, input_name = field_tail.partition(".")
+                    if isinstance(hint, str) and separator and "set-widget" in hint:
+                        old_arg = shlex.quote(f"{nid}.{input_name}")
+                        new_arg = shlex.quote(f"{editable}.{input_name}")
+                        issue["hint"] = hint.replace(f" {old_arg} --", f" {new_arg} --")
     if link_errors or link_warnings:
         result["errors"].extend(link_errors)
         result["warnings"].extend(link_warnings)

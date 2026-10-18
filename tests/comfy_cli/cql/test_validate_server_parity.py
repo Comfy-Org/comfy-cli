@@ -10,6 +10,7 @@ costs a submit; a crash is worse, because `--json` then emits nothing at all.
 from __future__ import annotations
 
 import math
+import shlex
 from typing import Any
 
 import pytest
@@ -158,7 +159,7 @@ def _object_info() -> dict[str, Any]:
                                 },
                                 {
                                     "key": "scale dimensions",
-                                    "inputs": {"required": {"width": ["INT", {"default": 512}]}},
+                                    "inputs": {"required": {"width": ["INT", {"default": 512, "max": 2048}]}},
                                 },
                             ]
                         },
@@ -485,6 +486,17 @@ class TestServerConvertedLiterals:
         assert (finding["value"], finding["coerced_value"]) == ("1536", 1536)
         assert "comfy workflow set-widget <file> [options] 2.target_resolution -- 1536" in finding["hint"]
 
+    def test_set_widget_hint_quotes_the_complete_address(self, tune_graph: Graph) -> None:
+        hostile_id = "x; echo pwned"
+        wf = self._wf(target_resolution="1536")
+        wf[hostile_id] = wf.pop("2")
+        wf["3"]["inputs"]["images"][0] = hostile_id
+
+        [finding] = self._coercible(tune_graph.validate_workflow(wf))
+        command = finding["hint"].split("`", 2)[1]
+
+        assert shlex.split(command)[5] == f"{hostile_id}.target_resolution"
+
     def test_a_converted_int_is_still_range_checked(self, tune_graph: Graph) -> None:
         result = tune_graph.validate_workflow(self._wf(target_resolution="4096"))
 
@@ -576,6 +588,23 @@ class TestServerConvertedLiterals:
 
         assert result["valid"], result["errors"]
         assert [w["coerced_value"] for w in self._coercible(result)] == [512]
+
+    def test_an_out_of_range_dynamic_sub_input_on_a_pruned_node_stays_advisory(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {
+                "class_type": "ResizeNode",
+                "inputs": {"image": ["1", 0], "resize_type": "scale dimensions", "resize_type.width": "4096"},
+            },
+            "3": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+
+        result = graph.validate_workflow(wf)
+
+        assert result["valid"], result["errors"]
+        findings = {w["code"]: w for w in result["warnings"]}
+        assert findings["above_max"]["field"] == "2.ResizeNode.resize_type.width"
+        assert "set-widget" not in findings["coercible_type"]["hint"]
 
 
 class TestErrorPointsAtTheRealProblem:

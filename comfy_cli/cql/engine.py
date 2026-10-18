@@ -2058,7 +2058,7 @@ class Graph:
             # unresolved selection keep the old generic checks.
             dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
             dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combos(
-                node_id, class_type, m, node_inputs
+                node_id, class_type, m, node_inputs, range_is_error=node_id in reachable
             )
             group_errors: list[dict] = []
             group_warnings: list[dict] = []
@@ -2899,6 +2899,7 @@ def _validate_literal_value(
         node_id, class_type, input_name, port, coerced, range_is_error=range_is_error
     )
     typed = json.dumps(coerced)
+    address_arg = shlex.quote(f"{node_id}.{input_name}")
     typed_arg = shlex.quote(typed)
     refused = bool(errors) or any(w.get("code") in FATAL_FINDING_CODES for w in warnings)
     finding = {
@@ -2913,7 +2914,7 @@ def _validate_literal_value(
             else f"store the typed value {typed} instead"
             if port.is_link
             else f"store the typed value {typed} instead: on a canvas, "
-            f"`comfy workflow set-widget <file> [options] {node_id}.{input_name} -- {typed_arg}`"
+            f"`comfy workflow set-widget <file> [options] {address_arg} -- {typed_arg}`"
         ),
         "value": value,
         "coerced_value": coerced,
@@ -3056,7 +3057,7 @@ def _dynamic_combo_options(spec: Any) -> list[dict]:
 
 
 def _check_dynamic_combos(
-    node_id: str, class_type: str, m: Morphism, node_inputs: dict
+    node_id: str, class_type: str, m: Morphism, node_inputs: dict, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Validate every dynamic-combo input against the option its selector names.
 
@@ -3093,7 +3094,14 @@ def _check_dynamic_combos(
     resolved: dict[str, Any] = {}
     for port in dynamic_ports:
         e, w, v, u = _check_dynamic_combo_input(
-            node_id, class_type, port.name, port.raw_spec, port.required, present, resolved
+            node_id,
+            class_type,
+            port.name,
+            port.raw_spec,
+            port.required,
+            present,
+            resolved,
+            range_is_error=range_is_error,
         )
         errors.extend(e)
         warnings.extend(w)
@@ -3190,6 +3198,8 @@ def _check_dynamic_combo_input(
     present: dict,
     resolved: dict[str, Any],
     depth: int = 0,
+    *,
+    range_is_error: bool = True,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """One dynamic-combo input: resolve its selected option, check its sub-inputs.
 
@@ -3331,7 +3341,15 @@ def _check_dynamic_combo_input(
             dotted = f"{name}.{sub_name}"
             valid_keys.add(dotted)
             e, w, v, u = _check_dynamic_combo_sub(
-                node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth
+                node_id,
+                class_type,
+                dotted,
+                sub_spec,
+                sub_required,
+                present,
+                resolved,
+                depth,
+                range_is_error=range_is_error,
             )
             errors.extend(e)
             warnings.extend(w)
@@ -3349,6 +3367,8 @@ def _check_dynamic_combo_sub(
     present: dict,
     resolved: dict[str, Any],
     depth: int,
+    *,
+    range_is_error: bool = True,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Presence + shape + catalog checks for one expanded sub-input.
 
@@ -3361,7 +3381,15 @@ def _check_dynamic_combo_sub(
     if port.is_dynamic_combo:
         # Nested dynamic combo: its own selector/presence rules apply one level down.
         return _check_dynamic_combo_input(
-            node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth + 1
+            node_id,
+            class_type,
+            dotted,
+            sub_spec,
+            sub_required,
+            present,
+            resolved,
+            depth + 1,
+            range_is_error=range_is_error,
         )
 
     if port.is_dynamic_group:
@@ -3453,7 +3481,7 @@ def _check_dynamic_combo_sub(
         # output-index checks on this same key.
         return [], [], set(), set()
 
-    errs, warns = _validate_literal_value(node_id, class_type, dotted, port, value)
+    errs, warns = _validate_literal_value(node_id, class_type, dotted, port, value, range_is_error=range_is_error)
     return errs, warns, set(), set()
 
 

@@ -298,6 +298,30 @@ class TestValidateSubgraphIdTranslation:
         assert "57/3.filename_prefix" in finding["hint"]
         assert "57:3.filename_prefix" not in finding["hint"]
 
+    def test_every_companion_field_uses_the_editable_address(self, tmp_path, monkeypatch):
+        def validate_with_companion(_graph, _workflow):
+            return {
+                "valid": False,
+                "errors": [
+                    {
+                        "node_id": "57:3",
+                        "field": "57:3.SaveImage.filename_prefix",
+                        "code": "above_max",
+                        "message": "outside the catalog range",
+                    }
+                ],
+                "warnings": [],
+            }
+
+        monkeypatch.setattr(Graph, "validate_workflow", validate_with_companion)
+
+        data = _envelope(_run_validate(tmp_path, _subgraph_ui_workflow(), _object_info()))["data"]
+
+        [finding] = data["errors"]
+        assert finding["node_id"] == "57/3"
+        assert finding["api_node_id"] == "57:3"
+        assert finding["field"] == "57/3.SaveImage.filename_prefix"
+
 
 class TestValidateCLI:
     def test_broken_frontend_graph_is_flagged(self, tmp_path):
