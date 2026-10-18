@@ -128,3 +128,34 @@ def test_agent_printer_reads_a_declared_form_by_name_when_an_undeclared_widget_p
     result = render_py(workflow, graph)
 
     assert "steps=20" in result.source
+
+
+STEPS_EXTENSION = "Steps With Extension Widget"
+
+STEPS_EXTENSION_OBJECT_INFO = {
+    STEPS_EXTENSION: {
+        "input": {"required": {"steps": ["INT", {"default": 20}]}},
+        "input_order": {"required": ["steps"]},
+        "output": [],
+        "output_is_list": [],
+        "output_name": [],
+        "name": STEPS_EXTENSION,
+        "display_name": STEPS_EXTENSION,
+        "description": "",
+        "python_module": "nodes",
+        "category": "test",
+        "output_node": True,
+    }
+}
+
+
+def test_agent_printer_reads_the_catalog_prefix_of_a_declared_trailing_extension_widget():
+    graph = Graph.from_object_info(STEPS_EXTENSION_OBJECT_INFO)
+    workflow = _controlled_combo_workflow(
+        {"type": STEPS_EXTENSION, "widgets_values": [7, ""], "widgets_values_form": {"order": ["steps", "output"]}}
+    )
+
+    result = render_py(workflow, graph)
+
+    assert result.warnings == []
+    assert "steps=7" in result.source
