@@ -1,4 +1,4 @@
-"""PM-2003: a node whose frontend extension adds a widget object_info never declares.
+"""A node whose frontend extension adds a widget object_info never declares.
 
 rgthree's "Display Int (rgthree)" has one ``forceInput`` INT input, so its
 catalog ``widget_order`` is empty, but the extension mounts a client-only
