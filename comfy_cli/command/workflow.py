@@ -21,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import shlex
 import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
@@ -207,6 +208,15 @@ def slots_cmd(
             help="Project the payload: dot path (slots.0.address), wildcard (slots.#.address), comma multi-select.",
         ),
     ] = None,
+    node: Annotated[
+        str | None,
+        typer.Option(
+            "--node",
+            show_default=False,
+            help="Only this node's slots: a node id, a subgraph instance id (with every <id>/<inner> inside it), "
+            "or the template id of a node `get_template` inserted (57 for insert:<op>:root:node:57).",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
@@ -222,11 +232,14 @@ def slots_cmd(
         renderer.error(code="workflow_slot_invalid", message=f"Could not extract slots: {e}")
         raise typer.Exit(code=1) from e
 
+    slots = _with_template_node_ids(workflow, schema.get("slots") or [])
+    if node is not None:
+        slots = _node_slots_or_exit(renderer, workflow, graph, slots, node.strip())
     payload = {
         "workflow": str(p),
         "id": schema.get("id"),
-        "count": len(schema.get("slots") or []),
-        "slots": schema.get("slots") or [],
+        "count": len(slots),
+        "slots": slots,
     }
 
     if _stale:
@@ -241,11 +254,13 @@ def slots_cmd(
         return emit_selected(renderer, payload, select, command="workflow slots")
 
     if renderer.is_pretty():
+        from rich.markup import escape
         from rich.table import Table
 
         slots = payload["slots"]
         if not slots:
-            rprint("[dim]No tweakable slots in this workflow.[/dim]")
+            where = "in this workflow" if node is None else f"on node {escape(node)}"
+            rprint(f"[dim]No tweakable slots {where}.[/dim]")
         else:
             tbl = Table(show_header=True, header_style="bold")
             tbl.add_column("address", no_wrap=True)
@@ -261,6 +276,83 @@ def slots_cmd(
             renderer.console().print(tbl)
             rprint(f"[dim]{len(slots)} slot(s) · run `comfy workflow set-slot {p} <addr>=<value>`[/dim]")
     renderer.emit(payload, command="workflow slots")
+
+
+def _with_template_node_ids(workflow: dict, slots: list) -> list:
+    """Stamp ``template_node_id`` on the slots of a node ``get_template``
+    inserted, so ``--select 'slots.#(template_node_id=="57")#'`` finds the node
+    by the id the template showed — the row's own ids are the remapped
+    ``insert:<op>:root:node:57``, which no bare-id query matches."""
+    from comfy_cli.workflow_ops import template_node_id
+
+    by_instance: dict[str, str | None] = {}
+    for slot in slots:
+        if not isinstance(slot, dict) or not isinstance(slot.get("instance_id"), str):
+            continue
+        iid = slot["instance_id"]
+        if iid not in by_instance:
+            by_instance[iid] = template_node_id(workflow, iid)
+        if by_instance[iid] is not None:
+            slot["template_node_id"] = by_instance[iid]
+    return slots
+
+
+def _node_slots_or_exit(renderer, workflow: dict, graph, slots: list, node: str) -> list:
+    """The slots ``--node`` names, with read-side node-address precedence: a
+    literal id wins, else the one inserted node it is the template id of, else
+    a ``print`` binding name (``workflow_ops._template_id``).
+
+    This deliberately resolves a node before considering its widgets.  It is
+    narrower than ``set-widget``'s widget-sensitive fallback: when a literal
+    node exists but lacks the requested widget, that writer can still try the
+    unique inserted node carrying the same template id.
+    """
+    from comfy_cli import workflow_ops
+    from comfy_cli.cql.engine import split_node_path
+
+    if not node:
+        renderer.error(
+            code="workflow_slot_invalid",
+            message="--node must not be empty",
+            hint="pass a node id from `comfy workflow ls-nodes`, or drop --node to list every slot",
+            details={"node": node, "candidates": []},
+        )
+        raise typer.Exit(code=1)
+    node_ref = int(node) if node.lstrip("-").isdigit() else node
+    want = split_node_path(workflow, str(workflow_ops._template_id(workflow, node_ref, graph)))
+    resolution_error = None
+    try:
+        workflow_ops._navigate_subgraph_path(workflow, want)
+    except ValueError as e:
+        resolution_error = e
+    else:
+        # Compared by path segment: an interior id can itself contain `/`.
+        paths: dict[str, list[str]] = {}
+        rows = []
+        for s in slots:
+            iid = s.get("instance_id") if isinstance(s, dict) else None
+            if not isinstance(iid, str):
+                continue
+            if iid not in paths:
+                paths[iid] = split_node_path(workflow, iid)
+            if paths[iid][: len(want)] == want:
+                rows.append(s)
+        return rows
+    candidates = workflow_ops.inserted_candidates(workflow, node_ref)
+    if len(candidates) > 1:
+        message = (
+            f"node {node} is ambiguous: {len(candidates)} inserted templates carry it — "
+            f"pass one of: {', '.join(candidates)}"
+        )
+    else:
+        message = f"{resolution_error}. Nodes in this workflow: {workflow_ops._available_nodes_hint(workflow)}"
+    renderer.error(
+        code="workflow_slot_invalid",
+        message=message,
+        hint="pass a node id from `comfy workflow ls-nodes`, or drop --node to list every slot",
+        details={"node": node, "candidates": candidates},
+    )
+    raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------
@@ -1769,6 +1861,7 @@ def validate_api_workflow(
         # The lowering reads each input's own `link` and never a row's slots,
         # so a broken row disappears in it; judge the canvas before it does.
         link_errors, link_warnings = broken_link_findings(wf_data)
+        ui_workflow = wf_data
         wf_data = converted
         converted_from_ui = True
 
@@ -1790,11 +1883,39 @@ def validate_api_workflow(
             if editable != nid:
                 issue["api_node_id"] = nid
                 issue["node_id"] = editable
+                # Every fully-qualified field on the same input must use the
+                # same canvas address, so companion findings can be paired.
+                field = issue.get("field")
+                if isinstance(field, str) and field.startswith(f"{nid}."):
+                    issue["field"] = f"{editable}.{field[len(nid) + 1 :]}"
+                if issue.get("code") == "coercible_type":
+                    # The actionable command must speak the canvas edit
+                    # surface and keep the entire address shell-quoted.
+                    hint = issue.get("hint")
+                    node_data = wf_data.get(nid)
+                    class_type = node_data.get("class_type") if isinstance(node_data, dict) else None
+                    field_prefix = f"{nid}.{class_type}." if isinstance(class_type, str) else ""
+                    input_name = (
+                        field[len(field_prefix) :] if isinstance(field, str) and field.startswith(field_prefix) else ""
+                    )
+                    if isinstance(hint, str) and input_name and "set-widget" in hint:
+                        old_arg = shlex.quote(f"{nid}.{input_name}")
+                        new_arg = shlex.quote(f"{editable}.{input_name}")
+                        issue["hint"] = hint.replace(f" {old_arg} --", f" {new_arg} --")
     if link_errors or link_warnings:
         result["errors"].extend(link_errors)
         result["warnings"].extend(link_warnings)
         if link_errors:
             result["valid"] = False
+    if converted_from_ui:
+        # A canvas built by get_template holds `insert:<op>:root:node:94`; the
+        # agent saw `94`, which slots --node / set-widget also accept.
+        from comfy_cli.workflow_ops import template_node_id
+
+        for issue in (*result["errors"], *result["warnings"]):
+            tid = template_node_id(ui_workflow, issue.get("node_id"))
+            if tid is not None:
+                issue["template_node_id"] = tid
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative

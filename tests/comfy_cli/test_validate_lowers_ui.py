@@ -281,6 +281,60 @@ class TestValidateSubgraphIdTranslation:
             assert e["node_id"] == "57:3", e
             assert "api_node_id" not in e, e
 
+    def test_coercible_widget_hint_uses_editable_address(self, tmp_path):
+        wf = _subgraph_ui_workflow()
+        wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] = [123]
+
+        result = _run_validate(tmp_path, wf, _object_info())
+
+        # The unwired SaveImage remains invalid, but its independently useful
+        # coercion warning must name the canvas address accepted by set-widget.
+        assert result.exit_code == 1
+        data = _envelope(result)["data"]
+        [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
+        assert finding["node_id"] == "57/3"
+        assert finding["api_node_id"] == "57:3"
+        assert finding["field"] == "57/3.SaveImage.filename_prefix"
+        assert "57/3.filename_prefix" in finding["hint"]
+        assert "57:3.filename_prefix" not in finding["hint"]
+
+    def test_coercible_hint_translates_a_dotted_class_name(self, tmp_path):
+        wf = _subgraph_ui_workflow()
+        wf["definitions"]["subgraphs"][0]["nodes"][0]["type"] = "Save.Image"
+        wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] = [123]
+        object_info = _object_info()
+        object_info["Save.Image"] = object_info.pop("SaveImage")
+
+        data = _envelope(_run_validate(tmp_path, wf, object_info))["data"]
+
+        [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
+        assert "57/3.filename_prefix" in finding["hint"]
+        assert "57:3.filename_prefix" not in finding["hint"]
+
+    def test_every_companion_field_uses_the_editable_address(self, tmp_path, monkeypatch):
+        def validate_with_companion(_graph, _workflow):
+            return {
+                "valid": False,
+                "errors": [
+                    {
+                        "node_id": "57:3",
+                        "field": "57:3.SaveImage.filename_prefix",
+                        "code": "above_max",
+                        "message": "outside the catalog range",
+                    }
+                ],
+                "warnings": [],
+            }
+
+        monkeypatch.setattr(Graph, "validate_workflow", validate_with_companion)
+
+        data = _envelope(_run_validate(tmp_path, _subgraph_ui_workflow(), _object_info()))["data"]
+
+        [finding] = data["errors"]
+        assert finding["node_id"] == "57/3"
+        assert finding["api_node_id"] == "57:3"
+        assert finding["field"] == "57/3.SaveImage.filename_prefix"
+
 
 class TestValidateCLI:
     def test_broken_frontend_graph_is_flagged(self, tmp_path):
@@ -299,6 +353,23 @@ class TestValidateCLI:
         assert env["ok"] is True
         assert env["data"]["valid"] is True
         assert env["data"]["error_count"] == 0
+
+    def test_numeric_string_widget_is_a_warning_not_an_error(self, tmp_path):
+        # A template that saved an INT widget as the string "512" runs (the
+        # server converts it), so the canvas validates and names the fix.
+        wf = _sd15_ui()
+        next(n for n in wf["nodes"] if n["id"] == 5)["widgets_values"][0] = "512"
+
+        result = _run_validate(tmp_path, wf, _object_info())
+
+        assert result.exit_code == 0, result.stdout
+        data = _envelope(result)["data"]
+        assert data["valid"] is True
+        [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
+        assert (finding["node_id"], finding["value"], finding["coerced_value"]) == ("5", "512", 512)
+        assert finding["severity"] == "warning"
+        assert finding["field"] == "5.EmptyLatentImage.width"
+        assert "5.width -- 512" in finding["hint"]
 
     def test_already_api_format_is_validated_unchanged(self, tmp_path):
         # A pre-lowered (already-API) graph must still be validated, and must

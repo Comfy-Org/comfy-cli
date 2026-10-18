@@ -632,6 +632,20 @@ lacks `api_node` flags the list is simply empty (fail-open). When
 `spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
 `⚠ uses partner-API (paid) nodes …` line after the verdict.
 
+On a canvas whose ids `get_template` remapped (`insert:<op>:root:node:94`), an
+issue on such a node also carries `template_node_id` (`"94"`), the id the
+template showed; `workflow slots --node`, `set-widget` and the other edit
+commands accept it. It is absent when a literal node `94` exists or two
+inserts carry that id.
+
+A literal of the wrong JSON type is an error (`shape_mismatch`) unless the
+server converts it the way ComfyUI does (a lossless subset of its conversions) —
+an integer string on an INT input, a numeric string on a FLOAT input, a number
+on a STRING input. That one is a `coercible_type` warning: `value` is the stored
+literal, `coerced_value` the typed value the server runs with, and `hint` the
+`set-widget` command for non-link inputs when no catalog error or fatal finding
+refuses the converted value. Range checks judge `coerced_value`.
+
 Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
 a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
 exit code `1`. Structural failures (missing file, non-object JSON, an

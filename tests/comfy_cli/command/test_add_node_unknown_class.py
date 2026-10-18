@@ -55,10 +55,14 @@ def test_unknown_class_emits_node_not_found_with_close_matches(patched_graph, tm
 
 
 def test_ui_only_node_is_rejected_with_a_specific_reason(patched_graph, tmp_path, capsys):
-    """Note/MarkdownNote/Reroute/GetNode/SetNode/PrimitiveNode exist only in the
-    UI graph. difflib gives no useful match for them (and for GetNode returns
-    actively misleading ones), so they need their own message."""
-    for cls in ("Note", "MarkdownNote", "GetNode", "Reroute"):
+    """Reroute/GetNode/SetNode/PrimitiveNode exist only in the UI graph and carry
+    data flow, so they stay refused. difflib gives no useful match for them (and
+    for GetNode returns actively misleading ones), so they need their own message.
+
+    Note/MarkdownNote used to be in this list; they are now authorable (see
+    test_add_node_virtual_notes.py) — the two traces at the top of this file were
+    the agent asking for exactly that."""
+    for cls in ("GetNode", "Reroute", "SetNode", "PrimitiveNode"):
         env = _add(tmp_path, capsys, cls)
         assert env["ok"] is False, cls
         err = env["error"]
@@ -83,59 +87,6 @@ def test_uuid_class_type_is_named_as_a_subgraph_instance(patched_graph, tmp_path
 def test_known_class_still_adds(patched_graph, tmp_path, capsys):
     env = _add(tmp_path, capsys, "VAEDecode")
     assert env["ok"] is True, env
-
-
-@pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
-def test_note_refusal_hints_the_insert_workflow_route(patched_graph, tmp_path, capsys, cls):
-    """Asked to add a Note, an agent could call add_node {"class_type": "Note"},
-    read the hint "use a real node class; to annotate the graph, set a
-    title/widget on an existing node instead", and tell the user notes cannot
-    be added. They can: an insert_workflow carrying the note node (with an `id`
-    and its text in widgets_values) lands it. The hint must name that route,
-    and the example it gives must itself be accepted by
-    `workflow insert-workflow`."""
-    env = _add(tmp_path, capsys, cls)
-    assert env["ok"] is False
-    err = env["error"]
-    assert err["code"] == "node_not_found"
-    hint = err.get("hint") or ""
-    assert "insert-workflow" in hint, f"must name the route that adds a note: {err}"
-    assert "set a title/widget on an existing node instead" not in hint, err
-
-    example = json.loads(hint[hint.index("{") : hint.rindex("}") + 1])
-    node = example["nodes"][0]
-    assert node["type"] == cls and "id" in node and node["widgets_values"], example
-
-    tpl = _write(tmp_path, example, name="note.json")
-    ins = _run(["insert-workflow", str(_write(tmp_path, _base_workflow())), str(tpl)], capsys)
-    assert ins["ok"] is True, ins
-    assert ins["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
-
-
-@pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
-def test_note_hint_is_a_runnable_invocation_whose_op_must_be_applied(patched_graph, tmp_path, capsys, cls):
-    """`insert-workflow` takes the template as a FILE PATH or `-` (stdin), never
-    inline JSON, and it only EMITS an op. A hint reading "insert {json}" is not
-    something a caller can run, and following it without applying the op
-    leaves no note on the canvas. The hint must spell a stdin invocation and
-    say the emitted op has to be applied to the source workflow."""
-    hint = _add(tmp_path, capsys, cls)["error"].get("hint") or ""
-    assert "comfy workflow insert-workflow <workflow.json> -" in hint, hint
-    assert "apply" in hint.lower(), hint
-
-    payload = hint[hint.index("echo '") + len("echo '") : hint.index("' | comfy workflow insert-workflow")]
-    from test_workflow_edit import _force_json_renderer  # type: ignore[import-not-found]
-    from typer.testing import CliRunner
-
-    from comfy_cli.command import workflow as workflow_cmd
-
-    _force_json_renderer()
-    src = _write(tmp_path, _base_workflow())
-    res = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", str(src), "-"], input=payload, standalone_mode=False)
-    out = capsys.readouterr().out or res.stdout
-    env = json.loads([ln for ln in out.splitlines() if ln.strip()][-1])
-    assert env["ok"] is True, env
-    assert env["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
 
 
 def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys):
