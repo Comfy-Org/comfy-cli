@@ -139,9 +139,10 @@ def _object_info() -> dict[str, Any]:
                     "model_file": ["COMBO", {"options": ["none"], "file_upload": True}],
                     "viewport_state": ["LOAD_3D", {}],
                     "width": ["INT", {"default": 1024}],
+                    "height": ["INT", {"default": 1024}],
                 }
             },
-            "input_order": {"required": ["model_file", "viewport_state", "width"]},
+            "input_order": {"required": ["model_file", "viewport_state", "width", "height"]},
             "output": ["IMAGE"],
             "output_name": ["image"],
             "display_name": "Load 3D Advanced",
@@ -326,8 +327,11 @@ class TestDomWidgetInputs:
         # slot — not trailing, the way upload/audioUI do.
         assert graph.widget_order("Load3D") == ["model_file", *_LOAD_3D_BUTTONS, "image", "width", "height"]
 
-    def test_load3d_advanced_server_declared_state_is_not_duplicated(self, graph: Graph):
-        assert graph.widget_order("Load3DAdvanced") == ["model_file", *_LOAD_3D_BUTTONS, "viewport_state", "width"]
+    def test_load3d_advanced_uses_its_dedicated_buttonless_widget(self, graph: Graph):
+        # Comfy.Load3DAdvanced rewrites the raw LOAD_3D input to
+        # LOAD_3D_ADVANCED before widget construction. Its dedicated factory
+        # adds only the viewport component, not Load3D's three buttons.
+        assert graph.widget_order("Load3DAdvanced") == ["model_file", "viewport_state", "width", "height"]
 
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a

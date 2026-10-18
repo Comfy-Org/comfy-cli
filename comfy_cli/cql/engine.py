@@ -964,14 +964,21 @@ def _has_control_after_generate_slot(port: Port) -> bool:
 def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
     """The button slots the LOAD_3D custom widget injects into ``m``, if any.
 
+    ``Comfy.Load3DAdvanced`` rewrites that class's raw ``LOAD_3D`` input to
+    ``LOAD_3D_ADVANCED`` before widget construction. Its dedicated factory
+    adds only the viewport component, so it must not inherit these slots from
+    the raw ``object_info`` shape.
+
     ``getCustomWidgets().LOAD_3D`` attaches them only when the node already
-    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so the loaders
-    (``Load3D``, ``Load3DAdvanced``) get them and the viewers fed by a
-    ``model_3d`` link (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
+    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so ``Load3D``
+    gets them and viewers fed by a ``model_3d`` link
+    (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
     They are constructed before the component widget, so the caller places them
     immediately BEFORE the ``LOAD_3D`` slot — unlike every entry in
     ``frontend_extra_widget_names``, which trails the declared inputs.
     """
+    if getattr(m, "id", "") == "Load3DAdvanced":
+        return ()
     if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
         return ()
     return _LOAD_3D_BUTTON_SLOTS
