@@ -2899,6 +2899,7 @@ def _validate_literal_value(
         node_id, class_type, input_name, port, coerced, range_is_error=range_is_error
     )
     typed = json.dumps(coerced)
+    typed_arg = shlex.quote(typed)
     refused = bool(errors) or any(w.get("code") in FATAL_FINDING_CODES for w in warnings)
     finding = {
         "node_id": node_id,
@@ -2912,7 +2913,7 @@ def _validate_literal_value(
             else f"store the typed value {typed} instead"
             if port.is_link
             else f"store the typed value {typed} instead: on a canvas, "
-            f"`comfy workflow set-widget <file> [options] {node_id}.{input_name} -- {typed}`"
+            f"`comfy workflow set-widget <file> [options] {node_id}.{input_name} -- {typed_arg}`"
         ),
         "value": value,
         "coerced_value": coerced,

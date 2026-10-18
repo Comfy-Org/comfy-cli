@@ -557,7 +557,11 @@ class TestServerConvertedLiterals:
         result = tune_graph.validate_workflow(self._wf(label=1024))
 
         assert result["valid"], result["errors"]
-        assert [w["coerced_value"] for w in self._coercible(result)] == ["1024"]
+        [finding] = self._coercible(result)
+        assert finding["coerced_value"] == "1024"
+        # Preserve the JSON quotes through shell parsing so set-widget receives
+        # a string rather than reparsing the argument as an integer.
+        assert "-- '\"1024\"'`" in finding["hint"]
 
     def test_a_numeric_string_on_a_dynamic_combo_sub_input_is_a_warning(self, graph: Graph) -> None:
         wf = {

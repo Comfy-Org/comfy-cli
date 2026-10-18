@@ -1882,6 +1882,16 @@ def validate_api_workflow(
             if editable != nid:
                 issue["api_node_id"] = nid
                 issue["node_id"] = editable
+                if issue.get("code") == "coercible_type":
+                    # This warning is actionable: both its fully-qualified
+                    # field and set-widget command must speak the canvas edit
+                    # surface, not the flattened API id lowering minted.
+                    field = issue.get("field")
+                    if isinstance(field, str) and field.startswith(f"{nid}."):
+                        issue["field"] = f"{editable}.{field[len(nid) + 1 :]}"
+                    hint = issue.get("hint")
+                    if isinstance(hint, str):
+                        issue["hint"] = hint.replace(f" {nid}.", f" {editable}.")
     if link_errors or link_warnings:
         result["errors"].extend(link_errors)
         result["warnings"].extend(link_warnings)

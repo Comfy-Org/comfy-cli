@@ -281,6 +281,23 @@ class TestValidateSubgraphIdTranslation:
             assert e["node_id"] == "57:3", e
             assert "api_node_id" not in e, e
 
+    def test_coercible_widget_hint_uses_editable_address(self, tmp_path):
+        wf = _subgraph_ui_workflow()
+        wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] = [123]
+
+        result = _run_validate(tmp_path, wf, _object_info())
+
+        # The unwired SaveImage remains invalid, but its independently useful
+        # coercion warning must name the canvas address accepted by set-widget.
+        assert result.exit_code == 1
+        data = _envelope(result)["data"]
+        [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
+        assert finding["node_id"] == "57/3"
+        assert finding["api_node_id"] == "57:3"
+        assert finding["field"] == "57/3.SaveImage.filename_prefix"
+        assert "57/3.filename_prefix" in finding["hint"]
+        assert "57:3.filename_prefix" not in finding["hint"]
+
 
 class TestValidateCLI:
     def test_broken_frontend_graph_is_flagged(self, tmp_path):
@@ -313,6 +330,9 @@ class TestValidateCLI:
         assert data["valid"] is True
         [finding] = [w for w in data["warnings"] if w["code"] == "coercible_type"]
         assert (finding["node_id"], finding["value"], finding["coerced_value"]) == ("5", "512", 512)
+        assert finding["severity"] == "warning"
+        assert finding["field"] == "5.EmptyLatentImage.width"
+        assert "5.width -- 512" in finding["hint"]
 
     def test_already_api_format_is_validated_unchanged(self, tmp_path):
         # A pre-lowered (already-API) graph must still be validated, and must
