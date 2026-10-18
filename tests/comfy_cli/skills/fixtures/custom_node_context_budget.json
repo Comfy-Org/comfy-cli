@@ -1,0 +1,19 @@
+{
+  "method": "UTF-8 bytes and whitespace-delimited token proxy over SKILL.md content",
+  "parent": "2b93a06179a11a65507e1f0c36d0c2da4a9448f5",
+  "initial_context": {
+    "before": { "bytes": 12971, "tokens": 1627 },
+    "after": { "bytes": 2509, "tokens": 304 }
+  },
+  "jit_added": {
+    "invocation": { "bytes": 1016, "tokens": 145 },
+    "ecosystem-reference": { "bytes": 807, "tokens": 102 },
+    "api-schema": { "bytes": 1143, "tokens": 137 },
+    "validation": { "bytes": 987, "tokens": 135 },
+    "dependencies-capabilities": { "bytes": 830, "tokens": 102 },
+    "troubleshooting": { "bytes": 651, "tokens": 82 },
+    "packaging-publishing": { "bytes": 1566, "tokens": 202 },
+    "frontend-extension": { "bytes": 1543, "tokens": 223 },
+    "v1-to-v3-migration": { "bytes": 1699, "tokens": 245 }
+  }
+}

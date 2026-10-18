@@ -3,7 +3,7 @@
 Every op in a batch carries the same stamp ``[base_version, actor]``, so the
 ``op_id`` tiebreak in ``_stamp_key`` decides between them. With uuid4 op_ids the
 earlier write won about half the time and the later one became a silent no-op
-(#1006). Amendment v1.8 mints increasing op_ids, so spec order decides.
+(#1006). Amendment v1.10 mints increasing op_ids, so spec order decides.
 """
 
 from __future__ import annotations

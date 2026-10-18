@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from comfy_cli.cql.engine import _validate_dynamic_group_layout
+
 #: Precision tags: a token that, on its own, names a numeric format.
 _PRECISION_CORE = frozenset({"int4", "int8", "fp4", "fp8", "fp16", "fp32", "bf16", "nvfp4", "mxfp4"})
 
@@ -161,10 +163,15 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     """
     subs: list[dict] = []
     unavailable: list[dict] = []
+    nodes = _workflow_nodes(workflow)
+    for node, _sg_id in nodes:
+        m = graph.node(str(node.get("type", "")))
+        if m is not None:
+            _validate_dynamic_group_layout(node, m)
     # Per subgraph definition: (interior node id, widget) -> (old, new). An
     # instance of that definition may carry the value as a promoted widget.
     renamed: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
-    for node, sg_id in _workflow_nodes(workflow):
+    for node, sg_id in nodes:
         for key, port, field, value in _model_widgets(node, graph):
             if value in {str(o) for o in port.enum_values}:
                 continue

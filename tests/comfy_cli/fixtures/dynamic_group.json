@@ -1,0 +1,518 @@
+{
+  "object_info": {
+    "DevToolsNodeWithDynamicGroup": {
+      "input": {
+        "required": {
+          "before": [
+            "STRING",
+            {
+              "default": "first",
+              "multiline": false
+            }
+          ],
+          "loras": [
+            "COMFY_DYNAMICGROUP_V3",
+            {
+              "template": {
+                "required": {
+                  "lora_name": [
+                    "COMBO",
+                    {
+                      "multiselect": false,
+                      "options": [
+                        "A.safetensors",
+                        "B.safetensors",
+                        "C.safetensors"
+                      ]
+                    }
+                  ],
+                  "strength": [
+                    "FLOAT",
+                    {
+                      "default": 1.0,
+                      "min": -2.0,
+                      "max": 2.0,
+                      "step": 0.1
+                    }
+                  ]
+                },
+                "optional": {
+                  "enabled": [
+                    "BOOLEAN",
+                    {
+                      "default": true
+                    }
+                  ]
+                }
+              },
+              "min": 0,
+              "max": 3,
+              "group_name": "LoRA"
+            }
+          ],
+          "after": [
+            "STRING",
+            {
+              "default": "last",
+              "multiline": false
+            }
+          ]
+        }
+      },
+      "input_order": {
+        "required": [
+          "before",
+          "loras",
+          "after"
+        ]
+      },
+      "is_input_list": false,
+      "output": [
+        "STRING"
+      ],
+      "output_is_list": [
+        false
+      ],
+      "output_name": [
+        "rows"
+      ],
+      "output_tooltips": [
+        null
+      ],
+      "output_matchtypes": null,
+      "name": "DevToolsNodeWithDynamicGroup",
+      "display_name": "Node With Dynamic Group",
+      "description": "Echoes repeated widget rows without loading models.",
+      "python_module": "custom_nodes.ComfyUI_devtools",
+      "category": "DevTools",
+      "output_node": false,
+      "deprecated": false,
+      "experimental": false,
+      "dev_only": false,
+      "api_node": false,
+      "price_badge": null,
+      "search_aliases": null,
+      "essentials_category": null,
+      "has_intermediate_output": false
+    },
+    "CompositeDynamicGroup": {
+      "input": {
+        "required": {
+          "before": [
+            "STRING",
+            {
+              "default": "first",
+              "multiline": false
+            }
+          ],
+          "loras": [
+            "COMFY_DYNAMICGROUP_V3",
+            {
+              "template": {
+                "required": {
+                  "lora_name": [
+                    "COMBO",
+                    {
+                      "multiselect": false,
+                      "options": [
+                        "A.safetensors",
+                        "B.safetensors",
+                        "C.safetensors"
+                      ]
+                    }
+                  ],
+                  "strength": [
+                    "FLOAT",
+                    {
+                      "default": 1.0,
+                      "min": -2.0,
+                      "max": 2.0,
+                      "step": 0.1
+                    }
+                  ]
+                },
+                "optional": {
+                  "enabled": [
+                    "BOOLEAN",
+                    {
+                      "default": true
+                    }
+                  ]
+                }
+              },
+              "min": 0,
+              "max": 3,
+              "group_name": "LoRA"
+            }
+          ],
+          "mode": [
+            "COMFY_DYNAMICCOMBO_V3",
+            {
+              "options": [
+                {
+                  "key": "basic",
+                  "inputs": {
+                    "required": {}
+                  }
+                },
+                {
+                  "key": "advanced",
+                  "inputs": {
+                    "required": {
+                      "steps": [
+                        "INT",
+                        {
+                          "default": 4
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          ],
+          "weights": [
+            "COMFY_DYNAMICGROUP_V3",
+            {
+              "min": 0,
+              "max": 3,
+              "template": {
+                "required": {
+                  "seed": [
+                    "INT",
+                    {
+                      "default": 5,
+                      "control_after_generate": true
+                    }
+                  ],
+                  "weight": [
+                    "FLOAT",
+                    {
+                      "default": 1
+                    }
+                  ]
+                }
+              }
+            }
+          ],
+          "after": [
+            "STRING",
+            {
+              "default": "last",
+              "multiline": false
+            }
+          ]
+        }
+      },
+      "input_order": {
+        "required": [
+          "before",
+          "loras",
+          "mode",
+          "weights",
+          "after"
+        ]
+      },
+      "is_input_list": false,
+      "output": [
+        "STRING"
+      ],
+      "output_is_list": [
+        false
+      ],
+      "output_name": [
+        "rows"
+      ],
+      "output_tooltips": [
+        null
+      ],
+      "output_matchtypes": null,
+      "name": "CompositeDynamicGroup",
+      "display_name": "Node With Dynamic Group",
+      "description": "Echoes repeated widget rows without loading models.",
+      "python_module": "custom_nodes.ComfyUI_devtools",
+      "category": "DevTools",
+      "output_node": false,
+      "deprecated": false,
+      "experimental": false,
+      "dev_only": false,
+      "api_node": false,
+      "price_badge": null,
+      "search_aliases": null,
+      "essentials_category": null,
+      "has_intermediate_output": false
+    }
+  },
+  "cases": {
+    "empty": {
+      "workflow": {
+        "nodes": [
+          {
+            "id": 1,
+            "type": "DevToolsNodeWithDynamicGroup",
+            "pos": [
+              100,
+              150
+            ],
+            "size": [
+              350,
+              140
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "rows",
+                "type": "STRING",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DevToolsNodeWithDynamicGroup"
+            },
+            "widgets_values": [
+              "first",
+              0,
+              "last"
+            ]
+          }
+        ],
+        "links": []
+      },
+      "expected_inputs": {
+        "before": "first",
+        "after": "last"
+      }
+    },
+    "populated": {
+      "workflow": {
+        "nodes": [
+          {
+            "id": 1,
+            "type": "DevToolsNodeWithDynamicGroup",
+            "pos": [
+              100,
+              150
+            ],
+            "size": [
+              350,
+              106
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "LoRA #1 lora_name",
+                "localized_name": "LoRA #1 lora_name",
+                "name": "loras.0.lora_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "loras.0.lora_name"
+                },
+                "link": null
+              },
+              {
+                "label": "LoRA #1 strength",
+                "localized_name": "LoRA #1 strength",
+                "name": "loras.0.strength",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "loras.0.strength"
+                },
+                "link": null
+              },
+              {
+                "label": "LoRA #1 enabled",
+                "localized_name": "LoRA #1 enabled",
+                "name": "loras.0.enabled",
+                "shape": 7,
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "loras.0.enabled"
+                },
+                "link": null
+              },
+              {
+                "label": "LoRA #2 lora_name",
+                "localized_name": "LoRA #2 lora_name",
+                "name": "loras.1.lora_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "loras.1.lora_name"
+                },
+                "link": null
+              },
+              {
+                "label": "LoRA #2 strength",
+                "localized_name": "LoRA #2 strength",
+                "name": "loras.1.strength",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "loras.1.strength"
+                },
+                "link": null
+              },
+              {
+                "label": "LoRA #2 enabled",
+                "localized_name": "LoRA #2 enabled",
+                "name": "loras.1.enabled",
+                "shape": 7,
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "loras.1.enabled"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "rows",
+                "name": "rows",
+                "type": "STRING",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DevToolsNodeWithDynamicGroup"
+            },
+            "widgets_values": [
+              "head",
+              2,
+              "A.safetensors",
+              1,
+              true,
+              "C.safetensors",
+              0.5,
+              false,
+              "tail"
+            ],
+            "widgets_values_named": {
+              "before": "head",
+              "loras": 2,
+              "loras.0.lora_name": "A.safetensors",
+              "loras.0.strength": 1,
+              "loras.0.enabled": true,
+              "loras.1.lora_name": "C.safetensors",
+              "loras.1.strength": 0.5,
+              "loras.1.enabled": false,
+              "after": "tail"
+            }
+          }
+        ],
+        "links": []
+      },
+      "expected_inputs": {
+        "before": "head",
+        "loras.0.lora_name": "A.safetensors",
+        "loras.0.strength": 1,
+        "loras.0.enabled": true,
+        "loras.1.lora_name": "C.safetensors",
+        "loras.1.strength": 0.5,
+        "loras.1.enabled": false,
+        "after": "tail"
+      }
+    },
+    "composite": {
+      "workflow": {
+        "nodes": [
+          {
+            "id": 1,
+            "type": "CompositeDynamicGroup",
+            "pos": [
+              100,
+              150
+            ],
+            "size": [
+              350,
+              106
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "localized_name": "rows",
+                "name": "rows",
+                "type": "STRING",
+                "links": []
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CompositeDynamicGroup"
+            },
+            "widgets_values": [
+              "head",
+              2,
+              "A.safetensors",
+              1,
+              true,
+              "C.safetensors",
+              0.5,
+              false,
+              "advanced",
+              7,
+              1,
+              5,
+              "fixed",
+              0.25,
+              "tail"
+            ],
+            "widgets_values_named": {
+              "before": "head",
+              "loras": 2,
+              "loras.0.lora_name": "A.safetensors",
+              "loras.0.strength": 1,
+              "loras.0.enabled": true,
+              "loras.1.lora_name": "C.safetensors",
+              "loras.1.strength": 0.5,
+              "loras.1.enabled": false,
+              "mode": "advanced",
+              "mode.steps": 7,
+              "weights": 1,
+              "weights.0.seed": 5,
+              "weights.0.seed.0": "fixed",
+              "weights.0.weight": 0.25,
+              "after": "tail"
+            }
+          }
+        ],
+        "links": []
+      },
+      "widget_order": [
+        "before",
+        "loras",
+        "loras.0.lora_name",
+        "loras.0.strength",
+        "loras.0.enabled",
+        "loras.1.lora_name",
+        "loras.1.strength",
+        "loras.1.enabled",
+        "mode",
+        "mode.steps",
+        "weights",
+        "weights.0.seed",
+        "weights.0.seed.0",
+        "weights.0.weight",
+        "after"
+      ],
+      "expected_inputs": {
+        "before": "head",
+        "loras.0.lora_name": "A.safetensors",
+        "loras.0.strength": 1,
+        "loras.0.enabled": true,
+        "loras.1.lora_name": "C.safetensors",
+        "loras.1.strength": 0.5,
+        "loras.1.enabled": false,
+        "mode": "advanced",
+        "mode.steps": 7,
+        "weights.0.seed": 5,
+        "weights.0.weight": 0.25,
+        "after": "tail"
+      }
+    }
+  }
+}
