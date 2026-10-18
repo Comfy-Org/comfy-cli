@@ -218,6 +218,7 @@ def test_custom_node_skill_snapshot_keeps_runtime_contract():
         "node_replacement",
         "Never put credentials in widget values",
         "object_info_stale",
+        "never compares equal to itself",
     ):
         assert needle in corpus
 
@@ -242,6 +243,23 @@ def test_custom_node_search_routes_have_positive_and_negative_controls():
     assert "untrusted" in text
 
 
+def test_custom_node_caching_fallback_states_the_silent_failure_mode():
+    """The two facts an author cannot read off their own node's source.
+
+    A signature that raises is swallowed into a NaN, so the symptom is endless
+    recomputation and never a crash — saying "crash" sends the author looking
+    for a traceback that is never emitted. And `rawLink` is the one input mode
+    where a linked input is not `None`, so a flat "every linked input is None"
+    is the wrong contract for it.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "never compares equal to itself" in text
+    assert "recomputes every run" in text
+    assert not re.search(r"(?i)\bis (therefore )?a crash\b", text)
+    assert "rawLink" in text
+    assert "every ancestor's signature" in text
+
+
 def test_custom_node_initial_context_and_jit_budget_fixture():
     """Measured fixture: unrelated turns pay only for the small router."""
     fixture = json.loads((Path(__file__).parent / "fixtures/custom_node_context_budget.json").read_text())
@@ -263,6 +281,7 @@ def test_custom_node_initial_context_and_jit_budget_fixture():
         "packaging-publishing",
         "frontend-extension",
         "v1-to-v3-migration",
+        "execution-caching",
     )
     assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
     assert initial_bytes < before_body // 3
