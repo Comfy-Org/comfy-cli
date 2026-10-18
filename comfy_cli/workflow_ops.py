@@ -682,6 +682,8 @@ def add_node(
     than a silently dropped field — catalog widgets are addressed by name through
     ``set_widget``.
     """
+    if not isinstance(class_type, str) or not class_type:
+        raise ValueError(f"node class_type must be a non-empty string, got {class_type!r}")
     # Annotation classes are decided by NAME, before the catalog is consulted:
     # the frontend treats "Note"/"MarkdownNote" as editor-only regardless of
     # what a backend registers, so a custom pack that happens to register a

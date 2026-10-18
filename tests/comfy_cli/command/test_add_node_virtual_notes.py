@@ -122,6 +122,18 @@ class TestAddNoteNode:
 
 
 class TestApplySpecsNotes:
+    @pytest.mark.parametrize("bad_type", [["Note"], {"type": "Note"}, 7, ""])
+    def test_non_string_or_empty_class_type_is_a_structured_spec_error(self, bad_type):
+        with pytest.raises(ValueError, match="class_type must be a non-empty string") as ei:
+            workflow_ops.apply_specs(
+                _base_workflow(),
+                _graph(),
+                [{"op": "add_node", "class_type": bad_type}],
+            )
+        assert getattr(ei.value, "spec_index", None) == 0
+        assert getattr(ei.value, "spec_op", None) == "add_node"
+        assert getattr(ei.value, "applied_count", None) == 0
+
     def test_two_notes_each_keep_their_own_text(self):
         specs = [
             {"op": "add_node", "class_type": "Note", "text": "注 line1\nline2", "as": "n"},
