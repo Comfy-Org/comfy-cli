@@ -4731,8 +4731,9 @@ def _declared_subgraph_slots(
                 "instance_id": instance_id,
                 "node_type": instance.get("type", ""),
             }
-            # A primitive bypass holds its own value and fans out to interior
-            # widgets, so it has no one interior source to name.
+            # A primitive bypass's value lives on an interior PrimitiveNode
+            # that may feed several widgets; source_address names one concrete
+            # widget, so these rows omit it (documented in SKILL.md).
             if entry.plan == _promoted.PLAN_CREATE:
                 source_address = _promoted_source_address(instance_id, sg, entry.as_promoted_input(sg), defs, graph)
                 if source_address is not None:
@@ -4780,7 +4781,7 @@ def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph)
     current_sg = sg
     node: dict | None = None
     for seg in path:
-        node = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == seg), None)
+        node = _promoted._inner_node(current_sg, seg)
         if node is None:
             return "", None
         nxt = defs.get(str(node.get("type", "")))

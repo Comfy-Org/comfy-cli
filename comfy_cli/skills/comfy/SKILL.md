@@ -1010,8 +1010,10 @@ comfy --json workflow slots path.json
 #   a promoted subgraph widget row (<instance_id>.<name>) carries
 #   source_address when its interior widget resolves — the interior widget
 #   it stands for, e.g. 57/28.unet_name (the real widget name, even when
-#   the promotion is renamed). Optional: a row whose source does not
-#   resolve omits it. Read-only context: edit at the row's own address
+#   the promotion is renamed). Optional: a row omits it when its source
+#   does not resolve, when the value comes from an interior PrimitiveNode,
+#   or when the input is only a legacy proxyWidgets entry. Read-only
+#   context: edit at the row's own address
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"
