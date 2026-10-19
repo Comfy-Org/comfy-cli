@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- `comfy workflow slots` rows for a subgraph's promoted widgets carry
+  `source_address`, the interior node and widget the row stands for
+  (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
+  The row's `address` is unchanged and stays the one to edit.
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.

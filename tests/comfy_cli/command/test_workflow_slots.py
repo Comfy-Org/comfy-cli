@@ -1101,3 +1101,78 @@ class TestSlotsCorruptDefinitions:
         env = _run(["set-slot", str(path), "3.seed=1"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_slot_invalid"
+
+
+# ---------------------------------------------------------------------------
+# slots — source_address on promoted subgraph widget rows
+# ---------------------------------------------------------------------------
+#
+# A promoted widget is advertised at ``<instance>.<name>`` and its interior
+# widget is hidden, so the row names the interior node + widget it stands for
+# in ``source_address`` — the only way a consumer recovers the real widget
+# behind a renamed promotion or tells two same-class loaders apart.
+
+
+def _gallery_workflow(name: str) -> dict:
+    return json.loads((_FIXTURES / "gallery" / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def patched_promoted_graph(monkeypatch):
+    oi = json.loads((_FIXTURES / "object_info_subgraph_promoted.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: Graph.from_object_info(oi))
+
+
+class TestSlotsSourceAddress:
+    def test_promoted_row_names_its_interior_widget(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("image_z_image_turbo.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        row = by_addr["57.unet_name"]
+        assert row["source_address"] == "57/28.unet_name"
+        # Additive only: the editable address and the UUID node_type stay.
+        assert row["node_type"] == "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
+        assert "57/28.unet_name" not in by_addr
+        # A labelled promotion still names the interior widget.
+        assert by_addr["57.text"]["source_address"] == "57/27.text"
+
+    def test_minimax_promoted_loader(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("audio_minimax_music_3.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert by_addr["37.unet_name"]["source_address"] == "37/6.unet_name"
+
+    def test_renamed_promotion_carries_the_real_widget_name(self, patched_promoted_graph, tmp_path, capsys):
+        wf = _gallery_workflow("image_z_image_turbo.json")
+        sg = wf["definitions"]["subgraphs"][0]
+        next(i for i in sg["inputs"] if i["name"] == "unet_name")["name"] = "diffusion_model"
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "57.unet_name" not in by_addr
+        assert by_addr["57.diffusion_model"]["source_address"] == "57/28.unet_name"
+
+    def test_top_level_row_has_no_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("image_z_image_turbo.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "source_address" not in by_addr["9.filename_prefix"]
+
+    def test_nested_promotion_resolves_to_the_deepest_widget(self, patched_subgraph_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _subgraph_workflow())
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        # 10.value -> inner instance 3's promoted value -> node 7's widget.
+        assert by_addr["10.value"]["source_address"] == "10/3/7.value"
+        # A legacy proxyWidgets promotion the frontend repairs on load.
+        assert by_addr["10.seed"]["source_address"] == "10/9.seed"
+        # Interior rows are not promotions.
+        assert "source_address" not in by_addr["10/9.prompt"]
+
+    def test_select_projects_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("audio_minimax_music_3.json"))
+        env = _run(["slots", str(path), "--select", "slots.#.source_address"], capsys)
+        assert env["ok"] is True
+        # Rows without the key (plain top-level widgets) are dropped, not null.
+        assert "37/6.unet_name" in env["data"]
+        assert all(isinstance(a, str) for a in env["data"])
