@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- `comfy workflow slots` rows for a subgraph's promoted widgets carry
+  `source_address`, the interior node and widget the row stands for
+  (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
+  The row's `address` is unchanged and stays the one to edit.
 - `comfy build init`, `update` and `validate` carry `data.warnings[]` as
   `{code, message}` under `--json`. `build_comfy_version_missing` means the
   spec has no `baseComfyVersion`; `build_snapshot_empty` means a
