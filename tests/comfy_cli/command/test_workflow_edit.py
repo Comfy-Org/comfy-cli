@@ -2267,7 +2267,13 @@ class TestOpModel:
         """replace_ops + apply_op reproduces a contiguous autogrow canvas
         exactly: every grown slot keeps its name and its link, no slot is
         re-grown, and no link is dropped (the FE-compacted repeated-edit
-        shape)."""
+        shape).
+
+        "Verbatim" here is scoped to slot names, wiring, source topology and
+        link count. It deliberately excludes ``inputs[].grow_id``, which
+        ``replace_ops`` does NOT re-mint — that divergence is real and is pinned
+        separately by ``test_replace_ops_does_not_remint_grow_id`` rather than
+        left for this oracle to miss (Comfy-Org/comfy-cli#1035)."""
         from comfy_cli import workflow_ops
 
         g = _graph()
@@ -2279,18 +2285,15 @@ class TestOpModel:
         assert self._batchimages_topology(doc) == self._batchimages_topology(new)
         assert len(doc["links"]) == len(new["links"])
 
-    def test_replace_ops_replays_a_holed_autogrow_canvas_verbatim(self):
-        """The CLI's repeated-edit numbering is sparse where the FE compacts:
-        a canvas carrying images.image0 + images.image2 with NO image1 must
-        survive a replace_ops replay byte-for-byte in its slot names — the
-        replay must neither renumber the grown slots (silent compaction the
-        CLI never performed) nor mint a gap-filled duplicate for the hole."""
-        from comfy_cli import workflow_ops
+    @staticmethod
+    def _holed_autogrow_canvas() -> dict:
+        """A faithful holed canvas: sparse NAMES, dense slot array.
 
-        g = _graph()
-        # A faithful holed canvas: sparse NAMES, dense slot array (the FE
-        # keeps the inputs array packed; only the element numbering gaps).
-        new = {
+        ``images.image0`` + ``images.image2``, no ``image1`` — the shape the
+        CLI's repeated-edit path leaves where the frontend compacts. The FE
+        keeps the inputs array packed, so only the element numbering gaps.
+        """
+        return {
             "last_node_id": 22,
             "last_link_id": 2,
             "nodes": [
@@ -2331,6 +2334,17 @@ class TestOpModel:
             ],
             "links": [[1, 20, 0, 10, 1, "IMAGE"], [2, 22, 0, 10, 2, "IMAGE"]],
         }
+
+    def test_replace_ops_replays_a_holed_autogrow_canvas_verbatim(self):
+        """The CLI's repeated-edit numbering is sparse where the FE compacts:
+        a canvas carrying images.image0 + images.image2 with NO image1 must
+        survive a replace_ops replay byte-for-byte in its slot names — the
+        replay must neither renumber the grown slots (silent compaction the
+        CLI never performed) nor mint a gap-filled duplicate for the hole."""
+        from comfy_cli import workflow_ops
+
+        g = _graph()
+        new = self._holed_autogrow_canvas()
         old = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
         batch = workflow_ops.replace_ops(old, new)
         doc = self._replay_ops(batch, g, old)
@@ -2341,6 +2355,89 @@ class TestOpModel:
         ]
         assert self._batchimages_topology(doc) == self._batchimages_topology(new)
         assert len(doc["links"]) == len(new["links"])
+
+    def test_replace_ops_holed_batch_is_refused_by_apply_specs(self):
+        """The dual-consumer half of the HOLED canvas, pinned at the refusal.
+
+        The same batch the op path replays verbatim above is rejected in full by
+        the spec path, and for a different reason than the dotted-name bug this
+        PR fixes: ``apply_specs`` re-mints the node from the catalog, so at the
+        second connect it holds only ``images.image0`` and
+        ``_resolve_schema_autogrow`` refuses the gap by deliberate policy — one
+        sequential slot per connection, with an explicit diagnostic.
+
+        So the §8.8 "one artifact, both consumers" contract is now true for
+        CONTIGUOUS autogrow canvases and still false for holed ones. Closing
+        that means ruling on whether the spec path compacts the hole (making the
+        two consumers disagree about slot identity) or mints a gapped key
+        (weakening the sequential-slot invariant, and needing a rule for a later
+        connect that targets the skipped index). That is the same slot-identity
+        question the CLI-vs-frontend numbering difference raises, so it is an
+        owner call and is NOT decided here — tracked as
+        Comfy-Org/comfy-cli#1036, which carries both candidate resolutions.
+
+        This is a real assertion on today's behaviour, not an xfail: the gap is
+        executable rather than only prose, the diagnostic is pinned so an
+        unrelated ``ValueError`` cannot pass as this one, and whichever way #1036
+        is ruled this test is the thing that has to change.
+        """
+        from comfy_cli import workflow_ops
+
+        new = self._holed_autogrow_canvas()
+        old = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        batch = workflow_ops.replace_ops(old, new)
+
+        # The refs themselves are correct — by name, holes preserved. It is the
+        # applier's sequential-slot rule that refuses them, not the mint.
+        connects = [op for op in batch if op.get("op") == "connect"]
+        assert [op["to"] for op in connects] == [
+            "$batchimagesnode.images.image0",
+            "$batchimagesnode.images.image2",
+        ]
+
+        with pytest.raises(ValueError, match=r"'images\.image2' is not a valid autogrow slot"):
+            workflow_ops.apply_specs(copy.deepcopy(old), _graph(), batch)
+
+    def test_replace_ops_does_not_remint_grow_id(self):
+        """Characterisation pin for Comfy-Org/comfy-cli#1035, so the "verbatim"
+        oracle above is not silently blind to it.
+
+        ``replace_ops`` re-mints ``inputs[].link`` but NOT ``inputs[].grow_id``,
+        so an op-path replay leaves each grown slot's convergence identity
+        pointing at the SOURCE document's link id. The spec path re-mints each
+        node from the catalog and wires it with real ``connect`` ops, so it comes
+        out consistent (``grow_id == link``, asserted in
+        ``test_replace_ops_batch_is_replayable_through_apply_specs``). The two
+        consumers of the one artifact therefore differ in kind on this field.
+
+        This asserts today's MEASURED behaviour, not desired behaviour. §8.8
+        enumerates what gets remapped and omits ``grow_id`` without comment, so
+        whether that is a bug or an intended carve-out is an owner call on frozen
+        mint semantics (§1.5 / §8.6) — #1035 carries both candidate resolutions.
+        Either ruling flips this test, which is the point: the divergence cannot
+        drift in either direction unnoticed while it is pending.
+        """
+        from comfy_cli import workflow_ops
+
+        g = _graph()
+        new = self._autogrow_replace_canvas()
+        old = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        batch = workflow_ops.replace_ops(old, new)
+        doc = self._replay_ops(batch, g, old)
+
+        def grown(workflow: dict) -> list[tuple[str, Any, Any]]:
+            node = next(n for n in workflow["nodes"] if n["type"] == "BatchImagesNode")
+            return [(i["name"], i.get("link"), i.get("grow_id")) for i in node["inputs"] if i["name"] != "images"]
+
+        source = grown(new)
+        replayed = grown(doc)
+        assert [name for name, _, _ in replayed] == [name for name, _, _ in source]
+        # In the source document the invariant _apply_connect establishes holds.
+        assert all(gid == link for _, link, gid in source), source
+        # After an op-path replay it does not: the link is fresh, the grow_id is
+        # the source's. Both halves are asserted so neither can change silently.
+        assert all(gid != link for _, link, gid in replayed), replayed
+        assert [gid for _, _, gid in replayed] == [gid for _, _, gid in source], (replayed, source)
 
     def test_replace_ops_batch_is_replayable_through_apply_specs(self):
         """The other half of §8.8: the same array must be accepted verbatim by
@@ -2380,18 +2477,21 @@ class TestOpModel:
         assert self._batchimages_topology(wf2) == self._batchimages_topology(new)
         assert len(wf2["links"]) == len(new["links"])
 
-        # Every grown slot carries its own convergence identity (`grow_id`);
-        # without this the batch could "replay" into slots the engine will not
-        # later recognise as the same ones. Deliberately NOT asserted here: that
-        # the two paths agree on the VALUE. The op path inherits the source
-        # document's grow_id while the spec path mints a fresh one, which is a
-        # separate open defect in the mint (Comfy-Org/comfy-cli#1035) and an
-        # owner call on frozen semantics — pinning either value here would
-        # freeze an undecided question.
+        # Every grown slot carries its own convergence identity (`grow_id`),
+        # equal to the link that grew it — the invariant `_apply_connect`
+        # establishes. Without this the batch could "replay" into slots the
+        # engine will not later recognise as the same ones.
         node = next(n for n in wf2["nodes"] if n["type"] == "BatchImagesNode")
-        grow_ids = [slot.get("grow_id") for slot in node["inputs"] if slot["name"] != "images"]
-        assert all(isinstance(gid, int) for gid in grow_ids), grow_ids
-        assert len(set(grow_ids)) == len(grow_ids), grow_ids
+        grown = [(s["name"], s.get("link"), s.get("grow_id")) for s in node["inputs"] if s["name"] != "images"]
+        assert all(isinstance(gid, int) for _, _, gid in grown), grown
+        assert all(gid == link for _, link, gid in grown), grown
+        assert len({gid for _, _, gid in grown}) == len(grown), grown
+        # Deliberately NOT asserted here: that the two paths agree on this
+        # value. They do not — the op path inherits the source document's
+        # grow_id while this path mints a fresh one, which is a separate open
+        # defect in the mint (Comfy-Org/comfy-cli#1035) and an owner call on
+        # frozen semantics. `test_replace_ops_does_not_remint_grow_id` pins the
+        # divergence as measured rather than freezing a preferred answer.
 
     def test_p9_autogrow_grow_id_survives_api_conversion(self):
         """The ``grow_id`` bookkeeping (persisted on grown slots as their
