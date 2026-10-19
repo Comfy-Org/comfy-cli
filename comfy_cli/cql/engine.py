@@ -4766,7 +4766,29 @@ def _promoted_source_address(instance_id: str, sg: dict, pi: Any, defs: dict[str
             head = widget.split(".", 1)[0]
             if head == widget or not any(p.name == head and p.is_dynamic_combo for p in m.inputs):
                 return None
+            # …and only the SELECTED option's sub-widgets exist on the node.
+            node = _promoted_source_node(sg, path, defs)
+            values = _widgets_as_positional(node.get("widgets_values") if node else None, graph, class_type)
+            if widget not in graph.widget_order_for_node(class_type, values):
+                return None
     return f"{_SUBGRAPH_PATH_SEP.join([instance_id, *path])}.{widget}"
+
+
+def _promoted_source_node(sg: dict, path: list[str], defs: dict[str, dict]) -> dict | None:
+    """The terminal interior node at the end of a promoted source ``path``,
+    descending into nested subgraph definitions; ``None`` if any hop is missing."""
+    from comfy_cli.cql import promoted as _promoted
+
+    current_sg = sg
+    node: dict | None = None
+    for seg in path:
+        node = _promoted._inner_node(current_sg, seg)
+        if node is None:
+            return None
+        nxt = defs.get(str(node.get("type", "")))
+        if nxt is not None:
+            current_sg = nxt
+    return node
 
 
 def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph) -> tuple[str, Port | None]:
@@ -4778,16 +4800,10 @@ def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph)
     if target is None:
         return "", None
     path, widget = target
-    current_sg = sg
-    node: dict | None = None
-    for seg in path:
-        node = _promoted._inner_node(current_sg, seg)
-        if node is None:
-            return "", None
-        nxt = defs.get(str(node.get("type", "")))
-        if nxt is not None:
-            current_sg = nxt
-    class_type = str(node.get("type", "")) if node else ""
+    node = _promoted_source_node(sg, path, defs)
+    if node is None:
+        return "", None
+    class_type = str(node.get("type", ""))
     m = graph.node(class_type)
     if m is None:
         return class_type, None

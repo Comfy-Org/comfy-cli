@@ -1223,3 +1223,29 @@ class TestSlotsSourceAddress:
         assert env["ok"] is True
         by_addr = {s["address"]: s for s in env["data"]["slots"]}
         assert by_addr["10.value"]["source_address"] == "10/3/7.value"
+
+    @pytest.mark.parametrize(
+        ("selection", "widget", "expected"),
+        [
+            ("seedream 5.0 pro", "model.size_preset", "50/1.model.size_preset"),
+            # max_images exists only on the lite option: the saved pro
+            # selection has no such widget, so no dangling address.
+            ("seedream 5.0 pro", "model.max_images", None),
+            ("seedream 5.0 lite", "model.max_images", "50/1.model.max_images"),
+            ("seedream 5.0 pro", "model.bogus", None),
+        ],
+    )
+    def test_dynamic_combo_sub_widget_follows_saved_selection(self, selection, widget, expected):
+        from comfy_cli.cql import engine as cql_engine
+        from comfy_cli.cql.promoted import PromotedInput
+
+        inner = _seedream_workflow()["nodes"][0]
+        if selection == "seedream 5.0 lite":
+            # lite inlines size_preset, width, height, max_images, fail_on_partial.
+            inner["widgets_values"] = ["p", selection, "(1K) 1024x1024 (1:1)", 2048, 2048, 3, False, 0, "fixed", False]
+        else:
+            assert inner["widgets_values"][1] == selection
+        pi = PromotedInput(
+            name=widget, type="INT", index=0, value_index=0, source_node="1", source_input=widget, source_widget=widget
+        )
+        assert cql_engine._promoted_source_address("50", {"nodes": [inner]}, pi, {}, _seedream_graph()) == expected
