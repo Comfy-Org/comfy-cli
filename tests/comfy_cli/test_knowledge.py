@@ -850,21 +850,23 @@ class TestCli:
         """A producer class absent from AUTHORING_CLASSES silently drops its slice.
 
         The slice metadata below is the `custom-node-authoring` frontmatter published by
-        comfy-knowledge `3055e9dcc86d5dae416251374f97bce466999cb8`. `_index_custom_node_authoring`
+        comfy-knowledge `7a3574e3deeae860f46901c39e3606f7a3acfc96`. `_index_custom_node_authoring`
         skips any slice declaring an unknown class, so a class the producer ships and this consumer
         has not adopted degrades to the packaged fallback with canonical content sitting unread in
-        the bundle. Red before packaging-publishing, frontend-extension and v1-to-v3-migration were
-        adopted; green after.
+        the bundle. Red before packaging-publishing, frontend-extension, v1-to-v3-migration and
+        execution-caching were adopted; green after.
         """
         producer_slices = (
             ("invocation-and-evidence", ["invocation", "ecosystem-reference"], ["v1", "v3"]),
             ("v3-registration-and-schema", ["api-schema"], ["v3"]),
             ("v1-registration-and-schema", ["api-schema"], ["v1"]),
             ("values-and-tensors", ["api-schema"], ["v1", "v3"]),
+            ("caching-and-recomputation", ["execution-caching"], ["v1", "v3"]),
             ("dependencies-and-capabilities", ["dependencies-capabilities"], ["v1", "v3"]),
             ("validation-and-repair", ["validation", "troubleshooting"], ["v1", "v3"]),
             ("packaging-and-publishing", ["packaging-publishing"], ["v1", "v3"]),
             ("frontend-extension-assets", ["frontend-extension"], ["v1", "v3"]),
+            ("agent-authored-packs", ["frontend-extension"], ["v1", "v3"]),
             ("v1-to-v3-migration", ["v1-to-v3-migration"], ["v1", "v3"]),
         )
         path = _env_bundle(tmp_path, monkeypatch, manifest=None)

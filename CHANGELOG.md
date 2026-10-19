@@ -138,6 +138,18 @@ history.
 - Converting a UI workflow to API format keeps a record widget's saved value,
   such as `ImageCropV2.crop_region`, instead of replacing it with the schema
   default.
+- `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
+  literal the server converts before checking it: an integer string on an INT
+  input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
+  input. ComfyUI runs these (it calls `int()`/`float()`/`str()` before
+  checking), but validate refused them as `shape_mismatch`. Each is now a
+  `coercible_type` warning carrying `value`, the converted `coerced_value`, and
+  a `set-widget` hint for non-link inputs when no catalog error or fatal finding
+  refuses the converted value; range checks judge the
+  converted value, so `"4096"` above a max of 2048 is still `above_max`. Nothing
+  else is relaxed: a BOOLEAN string (`bool("false")` is true), `"1536.0"` or
+  `1536.9` on an INT, a bool, and a non-finite string such as `"nan"` keep their
+  existing verdict.
 - `comfy run` no longer reports a failure to write its own job-state file as a
   lost connection to the ComfyUI server. The state file is a convenience
   record, written after the server has already accepted the prompt, so a
@@ -192,6 +204,19 @@ history.
 - `connect`, `delete-node` and `set-node-field` accept a template node id
   (`24`) on a canvas whose ids were remapped by `insert_workflow`
   (`insert:…:root:node:24`), as `set-widget` already did.
+- `comfy workflow slots` and `validate` speak the template node id on a canvas
+  `get_template` built (`insert:…:root:node:94`), as the edit commands do.
+  Such a node's own slot rows (not its subgraph interior's) carry
+  `template_node_id: "94"`, so `--select 'slots.#(template_node_id=="94")#'`
+  finds it (no bare-id query could, since every row id is the remapped one).
+  `slots --node 94` lists one node's slots, its subgraph interior included.
+  Read-side resolution gives a literal node `94` precedence; without one, two
+  inserts of the same template are refused with both ids. A validate issue on
+  such a node carries `template_node_id` only while that id is unambiguous.
+  A declared input of a subgraph nested inside another subgraph is now listed
+  at its full path (`10/5.prompt_text`, `instance_id: "10/5"`). It used to be
+  listed at the bare interior id (`5.prompt_text`), which named a different
+  top-level node or no node.
 - `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
   `speech` is `audio`); with another option selected it names the value to set.
 - A number or JSON value written to a STRING widget is written as its text,

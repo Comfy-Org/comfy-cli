@@ -1224,8 +1224,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     """
     input_def = _schema_input_def(schema)
     # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
-    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
-    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    # attached to Load3D and occur in legacy Load3DAdvanced saves, but the
+    # current Load3DAdvanced factory is buttonless. They are NOT attached to
+    # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
+    # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
@@ -1283,6 +1285,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             is_widget, is_dynamic = _is_widget_input(spec)
             if not is_widget:
                 return
+            legacy_buttons_consumed = False
             if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
                 # The LOAD_3D custom widget adds its three buttons before its own
                 # component widget, so their values sit between ``model_file`` and
@@ -1293,8 +1296,15 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                     and isinstance(widget_values[vidx], str)
                     and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
                 ):
+                    legacy_buttons_consumed = True
                     vidx += 1
             if vidx >= len(widget_values):
+                if legacy_buttons_consumed:
+                    # A save truncated after its button markers still names this
+                    # LOAD_3D slot; emit the component's empty state rather than
+                    # dropping a required input.
+                    pairs.append((name, ""))
+                    return
                 short = True
                 return
             value = widget_values[vidx]

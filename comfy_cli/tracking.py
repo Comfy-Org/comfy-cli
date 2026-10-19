@@ -117,6 +117,9 @@ _SENSITIVE_EXACT = frozenset(
         "repository",
         "commit",
         "file",
+        # `workflow add-node --text`: a note body is verbatim user content, like
+        # `--prompt` — analytics only learns that the option was supplied.
+        "text",
     }
 )
 
