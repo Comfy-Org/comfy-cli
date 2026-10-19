@@ -4703,7 +4703,7 @@ def _declared_subgraph_slots(
         if linked_from is not None:
             slot["linked_from"] = linked_from
         if pi is not None and pi.is_widget:
-            source_address = _promoted_source_address(instance_id, sg, pi, defs)
+            source_address = _promoted_source_address(instance_id, sg, pi, defs, graph)
             if source_address is not None:
                 slot["source_address"] = source_address
         declared.append(slot)
@@ -4734,24 +4734,37 @@ def _declared_subgraph_slots(
             # A primitive bypass holds its own value and fans out to interior
             # widgets, so it has no one interior source to name.
             if entry.plan == _promoted.PLAN_CREATE:
-                source_address = _promoted_source_address(instance_id, sg, entry.as_promoted_input(sg), defs)
+                source_address = _promoted_source_address(instance_id, sg, entry.as_promoted_input(sg), defs, graph)
                 if source_address is not None:
                     slot["source_address"] = source_address
             declared.append(slot)
     return declared, (any_declared and all_resolved)
 
 
-def _promoted_source_address(instance_id: str, sg: dict, pi: Any, defs: dict[str, dict]) -> str | None:
+def _promoted_source_address(instance_id: str, sg: dict, pi: Any, defs: dict[str, dict], graph: Graph) -> str | None:
     """``<instance>/<interior>[/<deeper>…].<widget>`` — the concrete interior
     widget a promoted row stands for, through any nested promotion chain.
     Informational only: the row is still edited at ``<instance>.<name>``.
-    ``None`` when the chain does not resolve."""
+    ``None`` when the chain does not resolve to a live interior widget: a
+    missing interior node, or a widget the catalog says that class lacks (a
+    class the catalog does not know is trusted as saved)."""
     from comfy_cli.cql import promoted as _promoted
 
     target = _promoted.deepest_source(sg, pi, defs)
     if target is None:
         return None
     path, widget = target
+    class_type, port = promoted_source_port(sg, pi, defs, graph)
+    if port is None:
+        if not class_type:
+            return None
+        m = graph.node(class_type)
+        if m is not None:
+            # A dynamic-combo sub-widget (``model.size_preset``) is not a
+            # top-level port; its selector is.
+            head = widget.split(".", 1)[0]
+            if head == widget or not any(p.name == head and p.is_dynamic_combo for p in m.inputs):
+                return None
     return f"{_SUBGRAPH_PATH_SEP.join([instance_id, *path])}.{widget}"
 
 

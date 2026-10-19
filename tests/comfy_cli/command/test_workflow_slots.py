@@ -1176,3 +1176,38 @@ class TestSlotsSourceAddress:
         # Rows without the key (plain top-level widgets) are dropped, not null.
         assert "37/6.unet_name" in env["data"]
         assert all(isinstance(a, str) for a in env["data"])
+
+    @staticmethod
+    def _materialized_loader(interior_type: str) -> dict:
+        # Host value materialized for every promotion, so the unet_name row is
+        # emitted even when the interior widget no longer resolves.
+        wf = _gallery_workflow("image_z_image_turbo.json")
+        next(n for n in wf["nodes"] if n["id"] == 57)["widgets_values"] = [
+            "a cat",
+            1024,
+            1024,
+            0,
+            8,
+            "z.safetensors",
+            "qwen.safetensors",
+            "ae.safetensors",
+        ]
+        sg = wf["definitions"]["subgraphs"][0]
+        next(n for n in sg["nodes"] if n["id"] == 28)["type"] = interior_type
+        return wf
+
+    def test_stale_interior_widget_omits_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        # The catalog's VAELoader has no unet_name: the row stays (the host
+        # value runs) but names no dangling interior widget.
+        path = _write_workflow(tmp_path, self._materialized_loader("VAELoader"))
+        env = _run(["slots", str(path)], capsys)
+        row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
+        assert row["current_value"] == "z.safetensors"
+        assert "source_address" not in row
+
+    def test_uncatalogued_interior_class_keeps_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        # A custom node the catalog does not know is trusted as saved.
+        path = _write_workflow(tmp_path, self._materialized_loader("SomeCustomUnetLoader"))
+        env = _run(["slots", str(path)], capsys)
+        row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
+        assert row["source_address"] == "57/28.unet_name"

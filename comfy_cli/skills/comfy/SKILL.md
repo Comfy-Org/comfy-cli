@@ -1008,9 +1008,10 @@ comfy --json workflow slots path.json
 #   template id like 94 works on an inserted canvas; that node's own rows
 #   carry template_node_id)
 #   a promoted subgraph widget row (<instance_id>.<name>) carries
-#   source_address — the interior widget it stands for, e.g.
-#   57/28.unet_name (the real widget name, even when the promotion is
-#   renamed). Read-only context: edit at the row's own address
+#   source_address when its interior widget resolves — the interior widget
+#   it stands for, e.g. 57/28.unet_name (the real widget name, even when
+#   the promotion is renamed). Optional: a row whose source does not
+#   resolve omits it. Read-only context: edit at the row's own address
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"
