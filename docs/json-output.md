@@ -204,6 +204,16 @@ run off as a clean success:
 The envelope is still `ok: true` (exit `0`) — the job did run. Agents that
 need all-or-nothing semantics should check `data.warnings` is empty.
 
+With `--output-node-ids`, only the targeted output nodes are counted: an
+untargeted output node that produced nothing is not a warning, and outputs
+from untargeted nodes do not count toward a target that produced nothing. The
+warning then also carries `missing_output_node_ids`, the targeted ids that
+returned no outputs:
+
+```json
+{"code": "partial_execution", "message": "submitted 1 output node(s) but the cloud returned outputs for only 0; 1 branch(es) were pruned server-side (likely failed validation) and produced nothing", "submitted_output_nodes": 1, "returned_output_nodes": 0, "missing_output_node_ids": ["12"]}
+```
+
 ## Event reference
 
 | `type`             | When                                                 |
@@ -676,6 +686,7 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `workflow_invalid_json`   | Workflow file is not valid JSON                                                 | —                                                  | 1 |
 | `workflow_read_error`     | Workflow file exists but isn't readable as text (`OSError`, `UnicodeDecodeError`) | —                                                | 1 |
 | `workflow_not_api_format` | File parses but is neither UI nor API format                                    | —                                                  | 1 |
+| `invalid_output_node_ids` | `--output-node-ids` named no ids, an id not in the submitted API-format workflow, or a node that is not an output node; nothing was submitted | `unknown_node_ids` (array of str), `non_output_node_ids` (array of str) | 1 |
 | `workflow_empty`          | Workflow has no executable nodes (UI conversion produced `{}`, or API workflow is `{}`) | —                                          | 1 |
 | `conversion_error`        | UI→API converter raised `WorkflowConversionError`                               | —                                                  | 1 |
 | `conversion_crash`        | UI→API converter raised an unexpected exception                                 | `exception_type` (str)                             | 1 |

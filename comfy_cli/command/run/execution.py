@@ -137,6 +137,7 @@ class WorkflowExecution:
         *,
         extra_data: dict | None = None,
         api_key: str | None = None,
+        output_node_ids: list[str] | None = None,
     ):
         self.workflow = workflow
         self.host = host
@@ -165,6 +166,9 @@ class WorkflowExecution:
         # mirrors what ``comfy_client.submit_prompt`` does for cloud.
         self.extra_data = dict(extra_data) if extra_data else None
         self.api_key = api_key
+        # `--output-node-ids`: run only these output nodes (and what they
+        # depend on). Sent as `partial_execution_targets`; absent → whole graph.
+        self.output_node_ids = list(output_node_ids) if output_node_ids else None
         self.renderer = get_renderer()
         # Aggregated node bookkeeping surfaced in the final envelope:
         # `cached_node_ids` — server said the node came from cache;
@@ -217,6 +221,8 @@ class WorkflowExecution:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:
             data["extra_data"]["api_key_comfy_org"] = self.api_key
+        if self.output_node_ids:
+            data["partial_execution_targets"] = self.output_node_ids
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:

@@ -872,6 +872,15 @@ without the flag and are byte-identical. (`comfy run-template` gates the same
 way with the same flag, and forwards consent to `comfy run` once its own gate
 has passed.)
 
+**Run only part of a graph — `--output-node-ids 9,12`.** Only the named
+output nodes and the nodes they depend on execute; the rest of the workflow is
+skipped, not deleted. Use it to test one new branch of a large workflow without
+running (or removing) every other branch. The ids are the API-format graph's
+node ids (`--print-prompt` shows them) and must be output nodes; anything else
+fails with `invalid_output_node_ids` before submit. On a `--where cloud --wait`
+run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
+when a targeted node returned nothing.
+
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
 has its own waiting model — see the next section.

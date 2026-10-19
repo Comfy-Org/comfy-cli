@@ -125,6 +125,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use ComfyUI's `File > Export (API)`",
     ),
     ErrorCode(
+        "invalid_output_node_ids",
+        "`comfy run --output-node-ids` named no ids, a node id that is not in the submitted "
+        "API-format workflow (`details.unknown_node_ids`), or a node that is not an output node "
+        "(`details.non_output_node_ids`). Nothing was submitted.",
+        "pass ids of output nodes (e.g. SaveImage) from `comfy run --print-prompt`'s graph",
+    ),
+    ErrorCode(
         "workflow_read_error",
         "Workflow file exists but isn't readable as UTF-8 text (OSError / UnicodeDecodeError).",
         "check file permissions and encoding",

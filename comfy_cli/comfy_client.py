@@ -347,6 +347,7 @@ class Client:
         timeout: float | None = None,
         extra_data: dict | None = None,
         workflow_id: str | None = None,
+        output_node_ids: list[str] | None = None,
     ) -> SubmitResult:
         """POST {prefix}/prompt — submit a workflow for execution.
 
@@ -355,6 +356,9 @@ class Client:
         forwarded as a top-level ``workflow_id`` field so the server can associate
         the job with an existing workflow and auto-promote a draft on run. Omitted
         from the body entirely when unset.
+        ``output_node_ids`` is sent as top-level ``partial_execution_targets`` so
+        the server runs only those output nodes and what they depend on; omitted
+        from the body entirely when unset, which queues the whole graph.
         For cloud submissions, the user's OAuth token is injected as
         ``auth_token_comfy_org`` so partner-API nodes (BFL Flux Pro, Gemini
         Nano Banana, etc.) can call out to comfy.org — matching what the web
@@ -385,6 +389,8 @@ class Client:
             # workflow (auto-promotes a draft on run). Only sent when provided.
             if workflow_id:
                 request_payload["workflow_id"] = workflow_id
+            if output_node_ids:
+                request_payload["partial_execution_targets"] = list(output_node_ids)
             return request_payload
 
         resp = self._request("POST", ("prompt",), body_factory=payload, timeout=timeout)

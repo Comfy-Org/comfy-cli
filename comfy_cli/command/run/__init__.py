@@ -218,6 +218,7 @@ def execute(
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
+    output_node_ids: list[str] | None = None,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -335,6 +336,9 @@ def execute(
             )
         return
 
+    if output_node_ids:
+        _validate_output_node_ids_or_exit(renderer, workflow, object_info, output_node_ids)
+
     partner_nodes = _detect_partner_nodes(workflow, object_info)
     # Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before resolving a credential or submitting. Fires
@@ -432,6 +436,7 @@ def execute(
         local_paths,
         timeout,
         extra_data=extra_data,
+        output_node_ids=output_node_ids,
     )
     # Wire SIGINT → close the WebSocket so the loop exits promptly.
     token = cancellation.get_token()
@@ -1001,6 +1006,53 @@ def _count_output_nodes(workflow: dict, object_info: dict) -> int | None:
     return count
 
 
+def parse_output_node_ids(raw: str) -> list[str]:
+    """Split a ``--output-node-ids`` value (``"9,12"``) into node ids, in order,
+    without blanks or repeats."""
+    ids: list[str] = []
+    for part in raw.split(","):
+        node_id = part.strip()
+        if node_id and node_id not in ids:
+            ids.append(node_id)
+    return ids
+
+
+def _validate_output_node_ids_or_exit(renderer, workflow: dict, object_info: dict, node_ids: list[str]) -> None:
+    """Reject ``--output-node-ids`` that name no node in the submitted graph, or
+    a node whose class is not an output node. ComfyUI quietly drops a target
+    that is not an output node, so without this a typo runs nothing (or the
+    wrong thing) instead of failing. The output-node check needs object_info;
+    with none (a cloud snapshot that failed to load) only existence is
+    checked, and a class object_info does not know is left to the preflight's
+    unknown-node error."""
+    unknown = [nid for nid in node_ids if not isinstance(workflow.get(nid), dict)]
+    if unknown:
+        renderer.error(
+            code="invalid_output_node_ids",
+            message=f"--output-node-ids names node(s) not in the workflow: {', '.join(unknown)}",
+            hint="pass ids of output nodes (e.g. SaveImage) from the submitted API-format graph; "
+            "`comfy run --print-prompt` shows it",
+            details={"unknown_node_ids": unknown, "non_output_node_ids": []},
+        )
+        raise typer.Exit(code=1)
+    if not object_info:
+        return
+    non_output = []
+    for nid in node_ids:
+        ct = workflow[nid].get("class_type")
+        spec = object_info.get(ct) if isinstance(ct, str) else None
+        if isinstance(spec, dict) and spec.get("output_node") is not True:
+            non_output.append(nid)
+    if non_output:
+        renderer.error(
+            code="invalid_output_node_ids",
+            message=f"--output-node-ids names node(s) that are not output nodes: {', '.join(non_output)}",
+            hint="target output nodes (e.g. SaveImage, PreviewImage); ComfyUI runs whatever they depend on",
+            details={"unknown_node_ids": [], "non_output_node_ids": non_output},
+        )
+        raise typer.Exit(code=1)
+
+
 def _returned_output_node_count(record: dict) -> int:
     """How many distinct nodes actually produced outputs in the cloud history
     record. The record's ``outputs`` map is keyed by node id."""
@@ -1008,6 +1060,15 @@ def _returned_output_node_count(record: dict) -> int:
     if not isinstance(outputs, dict):
         return 0
     return sum(1 for v in outputs.values() if isinstance(v, dict) and v)
+
+
+def _node_returned_outputs(record: dict, node_id: str) -> bool:
+    """Whether ``node_id`` produced outputs in the cloud history record."""
+    outputs = record.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return False
+    entry = outputs.get(node_id)
+    return isinstance(entry, dict) and bool(entry)
 
 
 def execute_cloud(
@@ -1021,6 +1082,7 @@ def execute_cloud(
     workflow_id: str | None = None,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
+    output_node_ids: list[str] | None = None,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -1154,6 +1216,9 @@ def execute_cloud(
     # Pre-submit validation via pure-Python CQL engine.
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud", where="cloud")
 
+    if output_node_ids:
+        _validate_output_node_ids_or_exit(renderer, parsed_workflow, cloud_object_info, output_node_ids)
+
     # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
@@ -1190,9 +1255,13 @@ def execute_cloud(
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
+                submit = client.submit_prompt(
+                    parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+                )
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
+            submit = client.submit_prompt(
+                parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+            )
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
@@ -1447,21 +1516,34 @@ def execute_cloud(
         # nodes we submitted against the ones that actually returned outputs so a
         # vanished branch surfaces instead of passing as a clean success.
         warnings: list[dict] = []
-        submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
-        returned_outputs = _returned_output_node_count(record)
+        missing: list[str] = []
+        if output_node_ids:
+            # A targeted run is judged on its targets alone: the rest of the
+            # graph was never meant to run, and outputs from untargeted nodes
+            # (a cloud executor that ran the whole graph anyway) must not stand
+            # in for a target that produced nothing. Skipped without object_info,
+            # like the untargeted count: the ids were then never checked to be
+            # output nodes, so a missing one may just not be an output node.
+            missing = [nid for nid in output_node_ids if not _node_returned_outputs(record, nid)]
+            submitted_outputs = len(output_node_ids) if cloud_object_info else None
+            returned_outputs = len(output_node_ids) - len(missing)
+        else:
+            submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
+            returned_outputs = _returned_output_node_count(record)
         if submitted_outputs is not None and returned_outputs < submitted_outputs:
-            warnings.append(
-                {
-                    "code": "partial_execution",
-                    "message": (
-                        f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
-                        f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
-                        "were pruned server-side (likely failed validation) and produced nothing"
-                    ),
-                    "submitted_output_nodes": submitted_outputs,
-                    "returned_output_nodes": returned_outputs,
-                }
-            )
+            warning = {
+                "code": "partial_execution",
+                "message": (
+                    f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
+                    f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
+                    "were pruned server-side (likely failed validation) and produced nothing"
+                ),
+                "submitted_output_nodes": submitted_outputs,
+                "returned_output_nodes": returned_outputs,
+            }
+            if output_node_ids:
+                warning["missing_output_node_ids"] = missing
+            warnings.append(warning)
 
         if renderer.is_pretty():
             if output_urls:
