@@ -876,10 +876,13 @@ has passed.)
 output nodes and the nodes they depend on execute; the rest of the workflow is
 skipped, not deleted. Use it to test one new branch of a large workflow without
 running (or removing) every other branch. The ids are the API-format graph's
-node ids (`--print-prompt` shows them) and must be output nodes; anything else
-fails with `invalid_output_node_ids` before submit. On a `--where cloud --wait`
-run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
-when a targeted node returned nothing.
+node ids (`--print-prompt` shows them) and must be output nodes; an unknown id
+fails with `invalid_output_node_ids` before submit, and so does a non-output
+node whenever the node catalog is available. Validation and `--allow-spend`
+apply only to the nodes that run. On a `--where cloud --wait` run,
+`data.warnings` reports `partial_execution` with `missing_output_node_ids`
+when a targeted node returned nothing, and `partial_execution_targets_ignored`
+when the server ran untargeted nodes anyway.
 
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)

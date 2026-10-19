@@ -2992,11 +2992,77 @@ class TestOutputNodeIdsCloud:
         _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
         lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"])
         assert exit_code == 0
-        [warning] = _envelope(lines)["data"]["warnings"]
+        warning, ignored = _envelope(lines)["data"]["warnings"]
         assert warning["code"] == "partial_execution"
         assert warning["submitted_output_nodes"] == 1
         assert warning["returned_output_nodes"] == 0
         assert warning["missing_output_node_ids"] == ["3"]
+        # Node 2 is outside target 3's subgraph, so the server ran more than asked.
+        assert ignored["code"] == "partial_execution_targets_ignored"
+        assert ignored["untargeted_output_node_ids"] == ["2"]
+
+    def test_empty_output_lists_count_as_missing(self, monkeypatch, two_output_workflow_file, capsys):
+        record = {"status": {"status_str": "success"}, "outputs": {"3": {"images": [], "animated": [False]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, _exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"]
+        )
+        [warning] = _envelope(lines)["data"]["warnings"]
+        assert warning["code"] == "partial_execution"
+        assert warning["missing_output_node_ids"] == ["3"]
+
+    def test_text_outputs_count_as_returned(self, monkeypatch, two_output_workflow_file, capsys):
+        record = {"status": {"status_str": "success"}, "outputs": {"3": {"text": ["hello"]}}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)
+        lines, _exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"]
+        )
+        assert _envelope(lines)["data"]["warnings"] == []
+
+    def test_missing_target_warns_without_object_info(self, monkeypatch, two_output_workflow_file, capsys):
+        """No catalog: the ids were only checked to exist, but a target that
+        produced nothing still must not pass as a clean success."""
+        record = {"status": {"status_str": "success"}, "outputs": {}}
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=None)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=True, timeout=5, output_node_ids=["3"])
+        assert exit_code == 0
+        [warning] = _envelope(lines)["data"]["warnings"]
+        assert warning["code"] == "partial_execution"
+        assert warning["missing_output_node_ids"] == ["3"]
+        assert "could not be checked" in warning["message"]
+
+    def test_preflight_and_spend_gate_see_only_the_targets_subgraph(
+        self, monkeypatch, two_output_workflow_file, capsys
+    ):
+        from comfy_cli.command import run as run_pkg
+
+        seen: dict = {}
+        monkeypatch.setattr(run_pkg, "_preflight_validate", lambda r, wf, *a, **k: seen.setdefault("preflight", wf))
+        monkeypatch.setattr(run_pkg, "_detect_partner_nodes", lambda wf, oi: seen.setdefault("partner", wf) and [])
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        _lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert sorted(seen["preflight"]) == ["1", "3"]
+        assert sorted(seen["partner"]) == ["1", "3"]
+        # The full graph is still what gets submitted.
+        assert sorted(client.submitted[-1][0]) == ["1", "2", "3"]
+
+    def test_print_prompt_shows_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, print_prompt=True, output_node_ids=["3"])
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["partial_execution_targets"] == ["3"]
+        preview = next(e for e in _events(lines) if e["type"] == "prompt_preview")
+        assert preview["partial_execution_targets"] == ["3"]
+
+    def test_print_prompt_validates_ids(self, monkeypatch, two_output_workflow_file, capsys):
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(capsys, two_output_workflow_file, print_prompt=True, output_node_ids=["99"])
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["code"] == "invalid_output_node_ids"
 
 
 class TestOutputNodeIdsLocal:
@@ -3031,6 +3097,40 @@ class TestOutputNodeIdsLocal:
         assert not MockExec.called
         assert _envelope(lines)["error"]["details"]["unknown_node_ids"] == ["99"]
 
+    def test_preflight_and_partner_check_see_only_the_targets_subgraph(self, two_output_workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate") as preflight,
+            patch("comfy_cli.command.run._detect_partner_nodes", return_value=[]) as partner,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            _run_execute_capture(two_output_workflow_file, capsys, wait=True, output_node_ids=["2"])
+        assert sorted(preflight.call_args.args[1]) == ["1", "2"]
+        assert sorted(partner.call_args.args[0]) == ["1", "2"]
+        assert sorted(MockExec.call_args.args[0]) == ["1", "2", "3"]
+
+    def test_print_prompt_shows_targets(self, two_output_workflow_file, capsys):
+        lines, exit_code = _run_execute_capture(
+            two_output_workflow_file, capsys, print_prompt=True, output_node_ids=["2"]
+        )
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["partial_execution_targets"] == ["2"]
+
+    def test_print_prompt_checks_ids(self, two_output_workflow_file, capsys):
+        lines, exit_code = _run_execute_capture(
+            two_output_workflow_file, capsys, print_prompt=True, output_node_ids=["99"]
+        )
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["details"]["unknown_node_ids"] == ["99"]
+
+    def test_progress_counts_only_the_targets_subgraph(self, two_output_workflow_file):
+        workflow = json.loads(open(two_output_workflow_file).read())
+        ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"])
+        assert ex.remaining_nodes == {"1", "2"}
+        assert ex.total_nodes == 2
+
     def test_queue_sends_partial_execution_targets(self, simple_workflow):
         ex = WorkflowExecution(
             workflow=simple_workflow,
@@ -3055,6 +3155,35 @@ class TestOutputNodeIdsFlag:
 
         assert parse_output_node_ids(" 9, 12,,9 ,5:3") == ["9", "12", "5:3"]
         assert parse_output_node_ids(" , ") == []
+        assert parse_output_node_ids(["9,12", "12", "5"]) == ["9", "12", "5"]
+
+    def test_target_subgraph_follows_input_links(self):
+        from comfy_cli.command.run import target_subgraph
+
+        wf = {
+            "1": {"class_type": "A", "inputs": {"x": 1}},
+            "2": {"class_type": "B", "inputs": {"a": ["1", 0], "pair": ["x", "y"]}},
+            "3": {"class_type": "Save", "inputs": {"b": ["2", 0], "dangling": ["77", 0]}},
+            "4": {"class_type": "Save", "inputs": {"a": ["1", 0]}},
+        }
+        assert sorted(target_subgraph(wf, ["3"])) == ["1", "2", "3"]
+        assert sorted(target_subgraph(wf, ["4"])) == ["1", "4"]
+
+    def test_repeated_flag_merges(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from comfy_cli.cmdline import app
+
+        wf = tmp_path / "wf.json"
+        wf.write_text('{"1": {"class_type": "X", "inputs": {}}}')
+        with patch("comfy_cli.command.run.execute") as mock_execute:
+            result = CliRunner().invoke(
+                app,
+                ["run", "--workflow", str(wf), "--output-node-ids", "9", "--output-node-ids", "12,9"],
+                env={"COMFY_WHERE": "local"},
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_execute.call_args.kwargs["output_node_ids"] == ["9", "12"]
 
     def test_flag_reaches_execute(self, tmp_path):
         from typer.testing import CliRunner

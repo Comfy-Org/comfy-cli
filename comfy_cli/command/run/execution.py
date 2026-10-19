@@ -107,6 +107,29 @@ def workflow_manifest(workflow: dict) -> list[dict]:
     return manifest
 
 
+def target_subgraph(workflow: dict, target_ids: list[str]) -> dict:
+    """The part of ``workflow`` that ``--output-node-ids`` actually runs: the
+    targets plus every node they depend on through input links. This is the
+    graph ComfyUI validates and executes for ``partial_execution_targets``, so
+    checks that should only cover what runs (preflight, partner-node detection,
+    progress) are scoped to it. Links to ids not in ``workflow`` are skipped."""
+    keep: dict = {}
+    stack = [str(t) for t in target_ids]
+    while stack:
+        nid = stack.pop()
+        if nid in keep or not isinstance(workflow.get(nid), dict):
+            continue
+        node = workflow[nid]
+        keep[nid] = node
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                stack.append(str(value[0]))
+    return keep
+
+
 class ExecutionProgress(Progress):
     def get_renderables(self):
         table_columns = (
@@ -151,7 +174,10 @@ class WorkflowExecution:
         # `run --wait` can group outputs by node / foreach item.
         self.output_entries: list[dict] = []
         self.progress = progress
-        self.remaining_nodes = set(self.workflow.keys())
+        # A targeted run only executes the targets' subgraph; the other nodes
+        # never report, so counting them would stall the bar short of 100%.
+        run_nodes = target_subgraph(self.workflow, output_node_ids) if output_node_ids else self.workflow
+        self.remaining_nodes = set(run_nodes.keys())
         self.total_nodes = len(self.remaining_nodes)
         if progress is not None:
             self.overall_task = self.progress.add_task("", total=self.total_nodes, progress_type="overall")
