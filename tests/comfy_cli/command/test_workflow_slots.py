@@ -1211,3 +1211,15 @@ class TestSlotsSourceAddress:
         env = _run(["slots", str(path)], capsys)
         row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
         assert row["source_address"] == "57/28.unet_name"
+
+    def test_null_interior_node_does_not_crash_the_chain(self, patched_subgraph_graph, tmp_path, capsys):
+        # Every other walk skips a non-dict ``nodes`` entry; the source chain
+        # must too rather than raising out of ``slots`` with no envelope.
+        wf = _subgraph_workflow()
+        for sg in wf["definitions"]["subgraphs"]:
+            sg["nodes"].insert(0, None)
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert by_addr["10.value"]["source_address"] == "10/3/7.value"
