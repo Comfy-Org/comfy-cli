@@ -129,7 +129,7 @@ Then `comfy build validate` and `comfy build push --dry-run`. The dry run skips 
 - Report the idle scale-down from the deployment's own `keepWarmSeconds`, not a remembered default. Outside a Build folder, read a deployment with `comfy --json deploy show --deployment <build>/<name>`; `deploy status` needs the spec folder.
 - **`ready` is not working.** Require both:
   - the ComfyUI log (`comfy --json deploy logs` → `data.comfyuiLog`) shows no `IMPORT FAILED` and no `ModuleNotFoundError` for any pack the workflow uses;
-  - one smoke run: `comfy deploy run --workflow <api.json> --asset-root <dir with the inputs>`.
+  - one smoke run: `comfy deploy run --workflow <api.json> --asset-root <dir with the inputs>`. Build that API file from node definitions that include the build's packs: `comfy run --workflow <file> --print-prompt --where local` against a running local ComfyUI that has them. Converting `--where cloud` drops every widget of a class stock Cloud lacks (the node comes out with empty `inputs`). With no such server, fill those nodes' inputs by name from the pack's `INPUT_TYPES`.
 - A smoke run on the build can fail validation where Cloud passed (a pack version requires an input Cloud's version lacks, e.g. USDU's `batch_size`). Add the input with the default that reproduces the saved behavior and re-run.
 
 **6. Save, then link.**
