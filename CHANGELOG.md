@@ -135,6 +135,9 @@ history.
 
 ### Fixed
 
+- Workflow conversion sends a promoted subgraph widget's value to every linked
+  input, including socket-only targets in direct and nested fan-outs.
+
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING

@@ -1533,7 +1533,7 @@ def flush_proxy_migration(
 
 
 def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
-    """Every concrete ``(interior node path, widget)`` a promoted input feeds —
+    """Every concrete ``(interior node path, input)`` a promoted widget feeds —
     all of its boundary links, through nested instances. A repaired primitive
     fan-out has several; :func:`deepest_source` reports only the first."""
     inputs = sg.get("inputs") or []
@@ -1579,7 +1579,8 @@ def _boundary_targets(
                 )
             continue
         marker = entry.get("widget")
-        if marker:
-            widget = marker.get("name") if isinstance(marker, dict) else None
-            out.append(([tid], str(widget or entry.get("name"))))
+        widget = marker.get("name") if isinstance(marker, dict) else None
+        name = widget or entry.get("name")
+        if name is not None:
+            out.append(([tid], str(name)))
     return out
