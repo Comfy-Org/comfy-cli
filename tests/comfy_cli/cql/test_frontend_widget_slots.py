@@ -440,6 +440,44 @@ class TestFrontendShapesFit:
 
 
 class TestConverter:
+    def test_webcam_capture_slot_is_consumed_before_its_controls(self):
+        info = _object_info()
+        info["WebcamCapture"] = {
+            "input": {
+                "required": {
+                    "image": ["WEBCAM", {}],
+                    "width": ["INT", {"default": 0}],
+                    "height": ["INT", {"default": 0}],
+                    "capture_on_queue": ["BOOLEAN", {"default": True}],
+                }
+            },
+            "input_order": {"required": ["image", "width", "height", "capture_on_queue"]},
+            "output": ["IMAGE"],
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "WebcamCapture",
+                    "inputs": [],
+                    "outputs": [],
+                    # Matches the frontend's saved WebcamCapture fixture.
+                    "widgets_values": ["webcam/capture.png [temp]", 640, 480, True],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+
+        result = convert_ui_to_api(workflow, info)
+
+        assert result["1"]["inputs"] == {
+            "image": "webcam/capture.png [temp]",
+            "width": 640,
+            "height": 480,
+            "capture_on_queue": True,
+        }
+
     def test_load3d_viewport_slot_is_consumed_in_place(self):
         workflow = {
             "nodes": [

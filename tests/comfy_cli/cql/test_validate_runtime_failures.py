@@ -480,3 +480,22 @@ class TestRecordAudioCapture:
 
         assert not result["valid"]
         assert ("frontend_capture_required", "audio") in _codes(result)
+
+
+class TestWebcamCapture:
+    """WebcamCapture requires the filename produced at browser queue time."""
+
+    @pytest.mark.parametrize("image", [None, ""])
+    def test_webcam_without_browser_capture_is_an_error(self, image):
+        wf = {
+            "1": {
+                "class_type": "WebcamCapture",
+                "inputs": {"image": image, "width": 640, "height": 480, "capture_on_queue": True},
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
+        }
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("frontend_capture_required", "image") in _codes(result)
