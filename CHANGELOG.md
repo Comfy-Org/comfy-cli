@@ -18,10 +18,13 @@ history.
 ### Added
 
 - A `comfy-run-on-cloud` skill, installed by default, takes one local workflow
-  onto Comfy Cloud: stock Cloud when it already has every node and model, an
-  existing workspace Build next, and a workflow-scoped custom build only for
-  what is left. It asks once per file before uploading anything from disk, and
-  asks before freeing a release, Build or deployment slot. Its reference skill
+  onto Comfy Cloud. Lossless conversions (the same file in another folder,
+  removing memory- or speed-only nodes, exact core equivalents) happen without
+  asking; a lossy one (a different model, LoRA, upscaler or implementation)
+  needs the user's yes, with a custom build offered as the exact alternative and
+  its costs stated. It pre-flights every converted copy on the server, asks once
+  per file before uploading models or inputs from disk, and asks before freeing a
+  release, Build or deployment slot. Its reference skill
   `comfy-run-on-cloud-local-install` covers finding the install behind a
   workflow, Comfy Desktop's split layout included.
 - `comfy build inventory <workflow>` (hidden while the skill above is its only
@@ -29,10 +32,13 @@ history.
   versions it recorded, model values with their subfolders, `embedding:`
   references, input files, muted and bypassed nodes, and loaders that pull
   weights no widget names. `--models-root` (repeatable), `--desktop` and
-  `--hash` find each model on disk; `--server` joins a running ComfyUI's
-  classes; `--cloud` reports whether stock Comfy Cloud runs it as-is, with
-  dropdown remaps (`set_widget`), or needs a build (`cloud.verdict`,
-  `cloud.blocking`).
+  `--hash` find each model on disk; `--input-root` hashes each input file to the
+  name Cloud stores an upload of it under; `--server` joins a running ComfyUI's
+  classes. `--cloud` reports `covered`, `covered_after_lossless_fixes` (folder
+  remaps with a ready `set_widget`, removable memory-only nodes),
+  `covered_needs_check` or `needs_build_or_lossy_conversion`, compares each
+  local model's size with Cloud's same-named file (`weights: different_size` is
+  a different model), and says whether each input is already on Cloud.
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0

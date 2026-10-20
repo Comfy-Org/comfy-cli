@@ -82,13 +82,14 @@ def test_inventory_cloud_uses_the_cloud_catalog(tmp_path: Path, monkeypatch: pyt
         return FakeGraph()
 
     monkeypatch.setattr("comfy_cli.command.nodes._get_graph", fake_get_graph)
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda where=None: object())
 
     result, envelope = _invoke(str(workflow), "--cloud")
 
     assert result.exit_code == 0, result.stdout
     assert seen["where"] == "cloud"
     cloud = envelope["data"]["cloud"]
-    assert cloud["verdict"] == "needs_build"
+    assert cloud["verdict"] == "needs_build_or_lossy_conversion"
     assert cloud["blocking"] == ["private_v1.safetensors"]
     assert cloud["models"][0]["set_widget"] == "1.ckpt_name"
     jsonschema.validate(envelope["data"], json.loads(SCHEMA.read_text(encoding="utf-8")))
@@ -125,3 +126,54 @@ def test_inventory_rejects_a_missing_or_malformed_workflow(tmp_path: Path):
     listed.write_text("[]", encoding="utf-8")
     result, envelope = _invoke(str(listed))
     assert envelope["error"]["code"] == "workflow_invalid_json"
+
+
+def test_inventory_cloud_compares_local_weights_and_hashes_inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workflow = tmp_path / "wf.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": 1, "type": "UpscaleModelLoader", "mode": 0, "widgets_values": ["4x-UltraSharp.pth"]},
+                    {"id": 2, "type": "LoadImage", "mode": 0, "widgets_values": ["face.png", "image"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    models = tmp_path / "models" / "upscale_models"
+    models.mkdir(parents=True)
+    (models / "4x-UltraSharp.pth").write_bytes(b"x" * 10)
+    inputs = tmp_path / "input"
+    inputs.mkdir()
+    (inputs / "face.png").write_bytes(b"PNG")
+    from comfy_cli.hashing import blake3_file
+
+    uploaded = blake3_file(inputs / "face.png").split(":", 1)[1] + ".png"
+    catalog = {
+        "UpscaleModelLoader": {"inputs": [{"name": "model_name", "choices": ["4x-UltraSharp.pth"]}]},
+        "LoadImage": {"inputs": [{"name": "image", "choices": [uploaded]}]},
+    }
+
+    class FakeGraph:
+        def node(self, name):
+            return name if name in catalog else None
+
+        def morphism_to_dict(self, node):
+            return catalog[node]
+
+    monkeypatch.setattr("comfy_cli.command.nodes._get_graph", lambda *args, **kwargs: FakeGraph())
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda where=None: object())
+    monkeypatch.setattr("comfy_cli.command.build._inventory_cloud_model_size", lambda target, name: 66_961_958)
+
+    result, envelope = _invoke(
+        str(workflow), "--cloud", "--models-root", str(tmp_path / "models"), "--input-root", str(inputs)
+    )
+
+    assert result.exit_code == 0, result.stdout
+    data = envelope["data"]
+    assert data["cloud"]["models"][0]["weights"] == "different_size"
+    assert data["cloud"]["verdict"] == "needs_build_or_lossy_conversion"
+    assert data["inputs"][0]["cloud_name"] == uploaded
+    assert data["inputs"][0]["on_cloud"] is True
+    jsonschema.validate(data, json.loads(SCHEMA.read_text(encoding="utf-8")))

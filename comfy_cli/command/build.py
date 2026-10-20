@@ -3449,6 +3449,25 @@ def _inventory_local_server(report: dict[str, Any], server: str) -> dict[str, An
     return section
 
 
+def _inventory_cloud_model_size(target: Any, name: str) -> int | None:
+    """Byte size of Cloud's model file with exactly this name, or None when it can't be read."""
+    import urllib.parse
+
+    from comfy_cli.command.models.search import _http_get_json
+
+    query = urllib.parse.urlencode({"include_tags": "models", "name_contains": name, "limit": 200})
+    try:
+        body = _http_get_json(target.url("assets") + "?" + query, target)
+    except (OSError, ValueError):
+        return None
+    assets = body.get("assets") if isinstance(body, dict) else None
+    for asset in assets or []:
+        if isinstance(asset, dict) and name in (asset.get("name"), asset.get("display_name")):
+            size = asset.get("size")
+            return size if isinstance(size, int) else None
+    return None
+
+
 def _check_server_option(value: str | None) -> str | None:
     """Reject a malformed ``--server`` at parse time, so nothing runs on a typo."""
     from comfy_cli.local_address import parse_local_url
@@ -3511,8 +3530,17 @@ def inventory_cmd(
         bool,
         typer.Option("--hash", help="sha256 every local match, to compare against public sources. Slow on big files."),
     ] = False,
+    input_root: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--input-root",
+            show_default=False,
+            help="A ComfyUI input folder. Repeatable. Each input file found is hashed to the name Cloud stores it under.",
+        ),
+    ] = None,
 ):
-    from comfy_cli.workflow_inventory import inventory, join_cloud, join_local
+    from comfy_cli.hashing import blake3_file
+    from comfy_cli.workflow_inventory import inventory, join_cloud, join_inputs, join_local
 
     renderer = get_renderer()
     path = Path(workflow).expanduser()
@@ -3551,21 +3579,32 @@ def inventory_cmd(
         roots += [r for r in desktop_roots if r not in roots]
         if warning:
             report["warnings"].append(warning)
+    # Local files first: the Cloud join compares their sizes with Cloud's same-named files.
+    if roots:
+        report["models_roots"] = roots
+        join_local(report, roots, hash_files=hash_files)
+    if input_root:
+        join_inputs(report, input_root, lambda path: blake3_file(Path(path)))
     if cloud:
         from comfy_cli.command.nodes import _get_graph
+        from comfy_cli.target import resolve_target
 
         graph = _get_graph(None, None, None, where="cloud")
+        target = resolve_target(where="cloud")
+        sizes: dict[str, int | None] = {}
 
         def lookup(class_type: str) -> Mapping[str, Any] | None:
             node = graph.node(class_type)
             return graph.morphism_to_dict(node) if node is not None else None
 
-        report["cloud"] = join_cloud(report, lookup)
+        def size_of(name: str) -> int | None:
+            if name not in sizes:
+                sizes[name] = _inventory_cloud_model_size(target, name)
+            return sizes[name]
+
+        report["cloud"] = join_cloud(report, lookup, size_of if roots else None)
     if server:
         report["local_server"] = _inventory_local_server(report, server)
-    if roots:
-        report["models_roots"] = roots
-        join_local(report, roots, hash_files=hash_files)
 
     if renderer.is_pretty():
         renderer.print(

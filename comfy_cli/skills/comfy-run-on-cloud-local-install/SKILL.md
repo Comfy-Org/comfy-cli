@@ -37,7 +37,7 @@ Desktop splits one install across up to three places:
 | Extra or shared model roots | `~/Library/Application Support/Comfy Desktop/settings.json` → `modelsDirs` (a list, e.g. a shared models folder plus `<data>/models`), and `…/Comfy Desktop/instance-model-paths/<inst>.yaml`. The startup log `user/comfyui_<port>.log` prints every model search path. OSS installs use `extra_model_paths.yaml` beside ComfyUI. |
 | ComfyUI version | `installations.json` → `comfyVersion.baseTag`. `git -C <code dir> describe --tags` works too. |
 
-`build inventory --desktop` reads `modelsDirs` for you.
+`build inventory --desktop` reads `modelsDirs` for you. The input folder is `<data dir>/input`; pass it as `--input-root`.
 
 If several installs are listed and their versions or data dirs differ, ask which one runs
 the workflow; the newest is not necessarily the one. If they agree, use it without asking.

@@ -60,6 +60,16 @@ IMPLICIT_LOADERS = {
     "UltralyticsDetectorProvider": "needs the Impact Subpack companion pack",
 }
 
+# Nodes whose only effect is memory or speed. Cloud lacking one is a lossless fix: remove it
+# and pass its model input straight to its consumer. Add a class only when the pack documents
+# it as memory- or speed-only; anything that can change pixels does not belong here.
+PERF_ONLY_NODES = {
+    "WanVideoBlockSwap": "block-swap args for the model loader (VRAM only)",
+    "WanVideoSetBlockSwap": "passes the model through with block swap set (VRAM only)",
+    "WanVideoVRAMManagement": "VRAM management args (memory only)",
+    "WanVideoTorchCompileSettings": "torch.compile settings (speed only)",
+}
+
 _EMBEDDING_RE = re.compile(r"embedding:([^\s,()\[\]]+)", re.IGNORECASE)
 
 # Where Comfy Desktop keeps its settings, including `modelsDirs`. Only the macOS
@@ -298,6 +308,38 @@ def join_server(
     }
 
 
+def join_inputs(report: dict[str, Any], roots: Iterable[str], hash_file: Callable[[str], str]) -> None:
+    """Find each run-time input file under ``roots`` and the name Cloud would store it under.
+
+    Cloud names an uploaded input by the blake3 of its bytes, so ``cloud_name`` is the name an
+    existing upload of the same file already has. ``join_cloud`` then says whether it is listed.
+    """
+    index: dict[str, str] = {}
+    for root in roots:
+        for dirpath, _dirs, files in os.walk(os.path.expanduser(root)):
+            for filename in files:
+                index.setdefault(filename, os.path.join(dirpath, filename))
+    for item in report["inputs"]:
+        path = index.get(os.path.basename(_posix(item["file"])))
+        item["local_path"] = path
+        if path:
+            digest = hash_file(path).split(":", 1)[-1]
+            item["cloud_name"] = digest + os.path.splitext(path)[1].lower()
+
+
+def _weights(model: Mapping[str, Any], cloud_name: str, size_of: Callable[[str], int | None] | None) -> str:
+    """Same name is not same weights: compare the local copy's size with Cloud's file."""
+    local = model.get("local")
+    if local is None:
+        return "not_checked"
+    if not local:
+        return "no_local_copy"
+    size = size_of(cloud_name) if size_of else None
+    if size is None:
+        return "unknown"
+    return "same_size" if any(match["bytes"] == size for match in local) else "different_size"
+
+
 def _combo_choices(node: Mapping[str, Any]) -> dict[str, str]:
     """Every string choice a node's inputs accept, mapped to the input that accepts it."""
     choices: dict[str, str] = {}
@@ -308,26 +350,46 @@ def _combo_choices(node: Mapping[str, Any]) -> dict[str, str]:
     return choices
 
 
-def join_cloud(report: Mapping[str, Any], lookup: Callable[[str], Mapping[str, Any] | None]) -> dict[str, Any]:
-    """Can stock Comfy Cloud run this workflow as-is, with dropdown remaps, or does it need a build?
+def join_cloud(
+    report: Mapping[str, Any],
+    lookup: Callable[[str], Mapping[str, Any] | None],
+    size_of: Callable[[str], int | None] | None = None,
+) -> dict[str, Any]:
+    """Can stock Comfy Cloud run this workflow as-is, after lossless fixes, or not at all?
 
     ``lookup(class_type)`` returns the Cloud catalog's ``nodes show`` payload for a class
     (``inputs[].choices``, ``cloud_disabled``), or ``None`` when Cloud lacks the class.
+    ``size_of(name)`` returns the byte size of Cloud's model file with that exact name.
 
     A model is ``present`` when Cloud's dropdown lists the saved value, ``remap`` when
     exactly one Cloud choice has the same file name under a different folder (the
-    saved value must be rewritten with ``set_widget``), and ``absent`` otherwise.
+    saved value must be rewritten with ``set_widget``), and ``absent`` otherwise. Its
+    ``weights`` compares sizes with the local copy: ``different_size`` means Cloud's file
+    is a different model under the same name, so using it is a lossy change.
+    A missing class in ``PERF_ONLY_NODES`` is ``lossless_removable`` rather than blocking.
     Embeddings and implicit loaders stay ``unverified``: no dropdown lists them.
     """
-    result: dict[str, Any] = {"missing_classes": [], "cloud_disabled": [], "models": [], "unverified": []}
+    result: dict[str, Any] = {
+        "missing_classes": [],
+        "cloud_disabled": [],
+        "lossless_removable": [],
+        "models": [],
+        "unverified": [],
+    }
     choices_by_class: dict[str, dict[str, str]] = {}
     for class_type in report["classes"]:
         node = lookup(class_type)
         if node is None:
-            result["missing_classes"].append(class_type)
+            if class_type in PERF_ONLY_NODES:
+                result["lossless_removable"].append({"class": class_type, "why": PERF_ONLY_NODES[class_type]})
+            else:
+                result["missing_classes"].append(class_type)
             continue
         if node.get("cloud_disabled"):
             result["cloud_disabled"].append(class_type)
+        for item in node.get("inputs") or []:
+            if item.get("choices_truncated"):
+                result["unverified"].append(f"{class_type}.{item.get('name')}: Cloud's choice list was truncated")
         choices_by_class[class_type] = _combo_choices(node)
 
     for model in report["models"]:
@@ -336,7 +398,8 @@ def join_cloud(report: Mapping[str, Any], lookup: Callable[[str], Mapping[str, A
             result["models"].append({"path": model["path"], "status": "node_missing"})
             continue
         if model["value"] in choices:
-            result["models"].append({"path": model["path"], "status": "present"})
+            weights = _weights(model, model["value"], size_of)
+            result["models"].append({"path": model["path"], "status": "present", "weights": weights})
             continue
         same_name = sorted(c for c in choices if os.path.basename(_posix(c)) == model["basename"])
         if len(same_name) == 1:
@@ -350,6 +413,7 @@ def join_cloud(report: Mapping[str, Any], lookup: Callable[[str], Mapping[str, A
                     "from": model["value"],
                     "to": same_name[0],
                     "set_widget": f"{model['node_id']}.{widget}",
+                    "weights": _weights(model, same_name[0], size_of),
                 }
             )
         else:
@@ -362,17 +426,26 @@ def join_cloud(report: Mapping[str, Any], lookup: Callable[[str], Mapping[str, A
     for implicit in report["implicit"]:
         result["unverified"].append(f"{implicit['class']}: {implicit['note']}")
 
+    for item in report["inputs"]:
+        if item.get("cloud_name"):
+            item["on_cloud"] = item["cloud_name"] in choices_by_class.get(item["node"], {})
+
     blocking = (
         result["missing_classes"]
         + result["cloud_disabled"]
         + [m["path"] for m in result["models"] if m["status"] in ("absent", "node_missing")]
+        + [
+            f"{m['path']} (Cloud's file differs in size from yours)"
+            for m in result["models"]
+            if m.get("weights") == "different_size"
+        ]
     )
     if blocking:
-        verdict = "needs_build"
+        verdict = "needs_build_or_lossy_conversion"
     elif result["unverified"]:
         verdict = "covered_needs_check"
-    elif any(m["status"] == "remap" for m in result["models"]):
-        verdict = "covered_with_remaps"
+    elif result["lossless_removable"] or any(m["status"] == "remap" for m in result["models"]):
+        verdict = "covered_after_lossless_fixes"
     else:
         verdict = "covered"
     result["verdict"] = verdict

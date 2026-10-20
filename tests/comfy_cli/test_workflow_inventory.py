@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from comfy_cli.workflow_inventory import inventory, join_cloud, join_local, join_server
+from comfy_cli.workflow_inventory import inventory, join_cloud, join_inputs, join_local, join_server
 
 
 def _node(node_id, class_type, widgets=(), *, mode=0, **properties):
@@ -152,7 +152,7 @@ def test_join_cloud_finds_remaps_and_blockers():
     assert statuses["studio/hero_v5.safetensors"]["status"] == "absent"
     assert statuses["sdxl_vae.safetensors"]["status"] == "present"
     assert cloud["cloud_disabled"] == ["IPAdapterUnifiedLoader"]
-    assert cloud["verdict"] == "needs_build"
+    assert cloud["verdict"] == "needs_build_or_lossy_conversion"
     assert cloud["blocking"] == ["IPAdapterUnifiedLoader", "studio/hero_v5.safetensors"]
     assert any(u.startswith("embedding:EasyNegative") for u in cloud["unverified"])
 
@@ -163,5 +163,50 @@ def test_join_cloud_verdicts_without_blockers():
     lookup = _catalog(CheckpointLoaderSimple=_combo("ckpt_name", "base.safetensors"))
 
     assert join_cloud(plain, lookup)["verdict"] == "covered"
-    assert join_cloud(nested, lookup)["verdict"] == "covered_with_remaps"
+    assert join_cloud(nested, lookup)["verdict"] == "covered_after_lossless_fixes"
     assert join_cloud(plain, _catalog())["missing_classes"] == ["CheckpointLoaderSimple"]
+
+
+def test_join_cloud_treats_missing_perf_only_nodes_as_lossless():
+    workflow = {
+        "nodes": [
+            _node(1, "WanVideoModelLoader", ["wan.safetensors"]),
+            _node(2, "WanVideoBlockSwap", [10, False]),
+            _node(3, "WanVideoSetBlockSwap"),
+        ]
+    }
+    cloud = join_cloud(inventory(workflow), _catalog(WanVideoModelLoader=_combo("model", "wan.safetensors")))
+
+    assert cloud["missing_classes"] == []
+    assert [x["class"] for x in cloud["lossless_removable"]] == ["WanVideoBlockSwap", "WanVideoSetBlockSwap"]
+    assert cloud["verdict"] == "covered_after_lossless_fixes"
+
+
+def test_join_cloud_flags_a_same_named_file_with_different_weights(tmp_path: Path):
+    (tmp_path / "upscale_models").mkdir()
+    (tmp_path / "upscale_models" / "4x-UltraSharp.pth").write_bytes(b"x" * 10)
+    report = inventory({"nodes": [_node(1, "UpscaleModelLoader", ["4x-UltraSharp.pth"])]})
+    join_local(report, [str(tmp_path)])
+    lookup = _catalog(UpscaleModelLoader=_combo("model_name", "4x-UltraSharp.pth"))
+
+    differs = join_cloud(report, lookup, size_of=lambda name: 66_961_958)
+    same = join_cloud(report, lookup, size_of=lambda name: 10)
+
+    assert differs["models"][0]["weights"] == "different_size"
+    assert differs["verdict"] == "needs_build_or_lossy_conversion"
+    assert same["models"][0]["weights"] == "same_size"
+    assert same["verdict"] == "covered"
+
+
+def test_join_inputs_names_the_cloud_upload_and_finds_it(tmp_path: Path):
+    (tmp_path / "face.png").write_bytes(b"PNG")
+    report = inventory({"nodes": [_node(4, "LoadImage", ["face.png", "image"])]})
+
+    join_inputs(report, [str(tmp_path)], lambda path: "blake3:abc123")
+    cloud = join_cloud(report, _catalog(LoadImage=_combo("image", "abc123.png")))
+
+    item = report["inputs"][0]
+    assert item["local_path"] == str(tmp_path / "face.png")
+    assert item["cloud_name"] == "abc123.png"
+    assert item["on_cloud"] is True
+    assert cloud["verdict"] == "covered"
