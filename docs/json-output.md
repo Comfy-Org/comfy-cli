@@ -557,7 +557,7 @@ On `--wait` success, `data` carries:
 | `elapsed_seconds`   | float \| null   | Wall-clock duration (null when not waiting)            |
 | `host` / `port`     | str / int       | **Local only.** Target server                          |
 | `base_url`          | str             | **Cloud only.** Target cloud endpoint                  |
-| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`) |
+| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`); null when no record could be written — see [below](#known-limit-a-state-file-failure-is-never-a-run-failure) |
 
 `cached_node_ids` and `executed_node_ids` may overlap: a cached
 output-bearing node emits both `execution_cached` and `executed`. Agents
@@ -573,6 +573,39 @@ watcher keeps the state file updated; follow up with
 the same on both targets, `watcher_spawned` included (add `--where cloud` to
 the follow-up commands for a cloud job). The async envelope carries no
 `outputs_by_node` / `outputs_by_item` / `warnings` — nothing has run yet.
+
+### Known limit: a state-file failure is never a run failure
+
+Writing the job's state file is best-effort on an **async submit** (the default,
+no `--wait`, local or cloud) and on **local `--wait`**. If the state directory
+can't be written — a config root that resolved somewhere unreachable, a
+read-only or sandboxed home, a full disk — the run still reports `ok: true`,
+because by then the server has already accepted the prompt. What the envelope
+says depends on the path, and `data.state_file` is `null` on both:
+
+- **async submit** — `data.status: "queued"`, exactly as it would be with the
+  record written.
+- **local `--wait`** — the run goes on to completion in the foreground and
+  finishes `data.status: "completed"` with its outputs, so a failed state write
+  costs you only the on-disk record, not the result.
+
+**`state_file: null` is not a failed run**, and in particular it is not a
+transport error: there is nothing to retry, and re-submitting queues a second
+job for a prompt that is already running. Follow an async job by `prompt_id`
+(`comfy jobs status <prompt_id>`) and treat a missing record as "unknown", not
+"did not run".
+
+With no record there is also nothing for a background watcher to update, so the
+spawn is skipped and `data.watcher_spawned` is `false` — poll
+`comfy jobs status` yourself, as that field already instructs.
+
+Run with `LOG_LEVEL=DEBUG` to see the swallowed cause.
+
+**Cloud `--wait` is not yet covered.** That path still writes its state record
+directly, including inside its own error handlers, so an unwritable state
+directory there can surface as a traceback after the job was accepted rather
+than as a clean envelope. Treat the guarantee above as scoped to the paths
+named in the first paragraph.
 
 ### Known limit: `--wait` has no background watcher
 
@@ -651,6 +684,20 @@ the loaded `object_info`; in offline `--input` mode where the `object_info`
 lacks `api_node` flags the list is simply empty (fail-open). When
 `spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
 `⚠ uses partner-API (paid) nodes …` line after the verdict.
+
+On a canvas whose ids `get_template` remapped (`insert:<op>:root:node:94`), an
+issue on such a node also carries `template_node_id` (`"94"`), the id the
+template showed; `workflow slots --node`, `set-widget` and the other edit
+commands accept it. It is absent when a literal node `94` exists or two
+inserts carry that id.
+
+A literal of the wrong JSON type is an error (`shape_mismatch`) unless the
+server converts it the way ComfyUI does (a lossless subset of its conversions) —
+an integer string on an INT input, a numeric string on a FLOAT input, a number
+on a STRING input. That one is a `coercible_type` warning: `value` is the stored
+literal, `coerced_value` the typed value the server runs with, and `hint` the
+`set-widget` command for non-link inputs when no catalog error or fatal finding
+refuses the converted value. Range checks judge `coerced_value`.
 
 Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
 a populated `errors` array, `partner_nodes`/`spends_credits` still present) and

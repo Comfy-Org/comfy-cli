@@ -52,7 +52,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from comfy_cli.cql import promoted as _promoted
-from comfy_cli.cql.engine import _UNRESOLVED, _expand_widget_entries, _resolve_proxy_value, _widgets_as_positional
+from comfy_cli.cql.engine import (
+    _UNRESOLVED,
+    DynamicGroupBindingError,
+    _expand_widget_entries,
+    _resolve_proxy_value,
+    _validate_dynamic_group_layout,
+    _widgets_as_positional,
+)
 from comfy_cli.workflow_to_api import is_subgraph_uuid
 
 if TYPE_CHECKING:
@@ -817,6 +824,11 @@ def _build_args(
         positional = widgets_values if isinstance(widgets_values, list) else []
         groups: list = []
     else:
+        try:
+            validated_entries = _validate_dynamic_group_layout(node, m)
+        except DynamicGroupBindingError as e:
+            raise PrintUnsupported([f"node {ctx.qualify(nid)}: {e}"]) from e
+        dynamic_group_names = {p.name for p in m.inputs if p.is_dynamic_group}
         positional = _widgets_as_positional(widgets_values, ctx.graph, class_type)
         # The auto-grow groups this node exposes for its CURRENT selection —
         # a group nested under a dynamic combo disappears when the selector
@@ -907,7 +919,7 @@ def _build_args(
             args.append(f"widgets={py_literal(positional)}")
         warnings.append(f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally")
     else:
-        entries = _expand_widget_entries(m, positional)
+        entries = validated_entries if validated_entries is not None else _expand_widget_entries(m, positional)
         for idx, entry in enumerate(entries):
             if entry.frontend_injected:
                 # ``upload`` / ``audioUI`` / PREVIEW_3D ``image``: a frontend
@@ -920,6 +932,12 @@ def _build_args(
                 continue  # already printed in the link pass above
             if arg_name in widget_overrides:
                 _place_arg(arg_name, widget_overrides[arg_name], args, extra)
+                continue
+            if (
+                entry.owner in dynamic_group_names
+                and isinstance(widgets_values, dict)
+                and arg_name not in widgets_values
+            ):
                 continue
             # R11 (amending D4): a dynamic combo's sub-widget the frontend never
             # serialized a value for prints the catalog's own default, not a
@@ -1501,7 +1519,14 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         # cql.promoted indexes the same block; hand it the sanitized view.
         promoted_workflow = {**workflow, "definitions": None}
     subgraphs = definitions.get("subgraphs") if definitions else None
-    defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
+    if subgraphs is not None and not isinstance(subgraphs, list):
+        warnings.append("workflow: ignoring non-list definitions.subgraphs block")
+        subgraphs = None
+    defs_by_id = {
+        sg.get("id"): sg
+        for sg in (subgraphs or [])
+        if isinstance(sg, dict) and sg.get("id") and isinstance(sg.get("nodes") or [], list)
+    }
 
     reasons = _validate(nodes, links)
     if reasons:
