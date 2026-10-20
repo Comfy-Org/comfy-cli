@@ -145,6 +145,9 @@ class Bundle:
     # :func:`_resolve_tokens`.
     capability_tokens: tuple[tuple[tuple[tuple[str, int], ...], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Lowercase lookup keys whose raw spelling is eligible for suggestions.
+    # Kept separate because lower() can hide non-ASCII alphanumerics (e.g. K).
+    candidate_aliases: dict[str, str] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -361,7 +364,7 @@ def model_candidates(bundle: Bundle, query: str) -> list[str]:
     if not parts or not parts[0].isalpha() or not numbers:
         return []
     candidates: set[str] = set()
-    for alias, model_id in bundle.aliases.items():
+    for alias, model_id in bundle.candidate_aliases.items():
         if model_id not in bundle.models:
             continue
         words = _candidate_tokens(alias)
@@ -684,16 +687,26 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     # Exact ids first so no alias can shadow a model's own id; then the compiled
     # alias map, which wins over row-level aliases.
     aliases: dict[str, str] = {}
+    candidate_aliases: dict[str, str] = {}
+
+    def index_alias(alias: str, mid: str) -> None:
+        key = alias.lower()
+        owner = aliases.setdefault(key, mid)
+        # Check before casing loses information, and retain resolution precedence.
+        # A valid ASCII spelling may still support the same winning target.
+        if owner == mid and _candidate_tokens(alias):
+            candidate_aliases.setdefault(key, mid)
+
     for mid in models:
-        aliases.setdefault(mid.lower(), mid)
+        index_alias(mid, mid)
     compiled = data.get("aliases")
     if isinstance(compiled, dict):
         for alias, mid in compiled.items():
             if isinstance(alias, str) and isinstance(mid, str):
-                aliases.setdefault(alias.lower(), mid)
+                index_alias(alias, mid)
     for mid, row in models.items():
         for alias in _str_list(row.get("aliases")):
-            aliases.setdefault(alias.lower(), mid)
+            index_alias(alias, mid)
 
     caps_raw = data.get("capabilities")
     capabilities = (
@@ -773,6 +786,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         capabilities=capabilities,
         deprecations=deprecations,
         aliases=aliases,
+        candidate_aliases=candidate_aliases,
         templates=templates,
         nodes=nodes,
         model_capabilities=model_capabilities,

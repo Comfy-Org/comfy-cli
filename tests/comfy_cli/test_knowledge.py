@@ -1574,6 +1574,9 @@ class TestNamedModelDisambiguation:
             "Qwen 文本 2.1",
             "Qwen 2.1β",
             "Qwen 2.1２",
+            "Qwen 2.1K",
+            "Qwen 2.1İ",
+            "Qwеn 2.1",  # Cyrillic e
         ],
     )
     def test_unknown_or_different_family_version_stays_unknown(self, named_bundle, query, capsys):
@@ -1583,7 +1586,18 @@ class TestNamedModelDisambiguation:
         assert env["error"]["details"].get("candidate_ids", []) == []
         assert "ask which model" not in env["error"]["hint"]
 
-    @pytest.mark.parametrize("alias", ["Qwen Image 文本 2.1", "Qwen Image 2.1β", "Qwen Image 2.1２", "Qwen Image 2.1²"])
+    @pytest.mark.parametrize(
+        "alias",
+        [
+            "Qwen Image 文本 2.1",
+            "Qwen Image 2.1β",
+            "Qwen Image 2.1２",
+            "Qwen Image 2.1²",
+            "Qwen Image 2.1K",
+            "Qwen Image 2.1İ",
+            "Qwеn Image 2.1",
+        ],
+    )
     @pytest.mark.parametrize("top_level", [False, True])
     def test_unicode_aliases_cannot_offer_ascii_candidates(self, monkeypatch, capsys, alias, top_level):
         data = {"models": {"opaque-model": {"aliases": [] if top_level else [alias]}}}
@@ -1595,6 +1609,67 @@ class TestNamedModelDisambiguation:
         assert rc == 1
         assert env["error"]["code"] == "knowledge_unknown_model"
         assert env["error"]["details"].get("candidate_ids", []) == []
+        assert "ask which model" not in env["error"]["hint"]
+        # Suggestion eligibility must not change declared alias resolution.
+        for spelling in (alias, alias.lower(), alias.upper()):
+            assert knowledge.resolve_id(bundle, spelling) == "opaque-model"
+            rc, env = _run(["resolve", spelling], capsys)
+            assert rc == 0
+            assert env["data"]["id"] == "opaque-model"
+
+    @pytest.mark.parametrize("top_level", [False, True])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_candidate_alias_collisions_preserve_resolution_precedence(self, top_level, reverse):
+        pairs = [("Qwen Image 2.1K", "opaque-unicode"), ("Qwen Image 2.1k", "opaque-ascii")]
+        if reverse:
+            pairs.reverse()
+        data = {"models": {mid: {"aliases": [] if top_level else [alias]} for alias, mid in pairs}}
+        if top_level:
+            data["aliases"] = dict(pairs)
+        b = knowledge._index(data, None, source="env", stale=False, path="fixture", mtime=0)
+        assert knowledge.resolve_id(b, "Qwen Image 2.1k") == pairs[0][1]
+        assert knowledge.model_candidates(b, "Qwen 2.1") == (["opaque-ascii"] if reverse else [])
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_eligible_spelling_for_same_target_still_offers_candidate(self, reverse):
+        aliases = ["Qwen Image 2.1K", "Qwen Image 2.1k"]
+        if reverse:
+            aliases.reverse()
+        b = knowledge._index(
+            {"models": {"opaque-model": {"aliases": aliases}}},
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0,
+        )
+        assert knowledge.model_candidates(b, "Qwen 2.1") == ["opaque-model"]
+        assert knowledge.resolve_id(b, aliases[0]) == "opaque-model"
+
+    def test_canonical_and_top_level_aliases_keep_precedence(self):
+        b = knowledge._index(
+            {
+                "models": {
+                    "qwen-image-2-1": {},
+                    "opaque-model": {"aliases": ["qwen-image-2-1", "Qwen Text 2.1"]},
+                },
+                "aliases": {"qwen-image-2-1": "opaque-model", "Qwen Text 2.1": "qwen-image-2-1"},
+            },
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0,
+        )
+        assert knowledge.resolve_id(b, "qwen-image-2-1") == "qwen-image-2-1"
+        assert knowledge.resolve_id(b, "Qwen Text 2.1") == "qwen-image-2-1"
+        assert knowledge.model_candidates(b, "Qwen 2.1") == ["qwen-image-2-1"]
+
+    def test_raw_unicode_model_id_cannot_offer_ascii_candidates(self):
+        mid = "Qwen Image 2.1K"
+        b = knowledge._index({"models": {mid: {}}}, None, source="env", stale=False, path="fixture", mtime=0)
+        assert knowledge.resolve_id(b, mid) == mid
+        assert knowledge.model_candidates(b, "Qwen 2.1") == []
 
     def test_future_image_vl_and_text_models_remain_an_explicit_choice(self, monkeypatch, capsys):
         # Synthetic future catalog: no preference for Image, VL, or text.
