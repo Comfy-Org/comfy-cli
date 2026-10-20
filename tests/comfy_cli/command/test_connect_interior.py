@@ -193,6 +193,53 @@ def test_interior_disconnect_op_replays_to_the_same_document():
     assert workflow_ops._write_target(op) == ("input", ("70",), "2011", 1)
 
 
+def test_delete_interior_node_removes_it_and_its_definition_links(tmp_path, capsys):
+    import json
+
+    base = _workflow()
+    base["definitions"]["subgraphs"][0]["links"].append(
+        {"id": 9002, "origin_id": 2012, "origin_slot": 1, "target_id": 2011, "target_slot": 0, "type": "CLIP"}
+    )
+    _node(base, 2012)["outputs"][1]["links"] = [9002]
+    _node(base, 2011)["inputs"][0]["link"] = 9002
+    path = _write(tmp_path, base)
+
+    env = _run(["delete-node", str(path), "70/2012"], capsys)
+
+    assert env["ok"] is True, env
+    op = env["data"]["op"]
+    assert op["path"] == ["70"]
+    assert op["node_id"] == 2012
+    assert op["removed_links"] == [9002]
+    result = json.loads(path.read_text())
+    assert [node["id"] for node in _sg(result)["nodes"]] == [2005, 2011]
+    assert [link["id"] for link in _sg(result)["links"]] == [9001]
+    assert _node(result, 2011)["inputs"][0]["link"] is None
+    assert result["nodes"][0]["id"] == 70
+
+
+def test_interior_delete_op_replays_to_the_same_document():
+    base = _workflow()
+    graph = _graph()
+    out, op = workflow_ops.delete_node(copy.deepcopy(base), graph, "70/2012", actor="agent", base_version=4)
+
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), copy.deepcopy(op), graph)
+
+    assert replayed["definitions"] == out["definitions"]
+    assert workflow_ops._write_target(op) == ("node", ("70",), "2012")
+
+
+def test_delete_interior_node_refuses_a_shared_definition_without_writing(tmp_path, capsys):
+    path = _write(tmp_path, _workflow(instances=2))
+    before = path.read_bytes()
+
+    env = _run(["delete-node", str(path), "70/2012"], capsys)
+
+    assert env["ok"] is False
+    assert "shares its definition" in env["error"]["message"]
+    assert path.read_bytes() == before
+
+
 def test_interior_grown_reconnect_and_disconnect_share_path_register():
     base = _workflow()
     _node(base, 2011)["inputs"][1]["grow_id"] = 7001

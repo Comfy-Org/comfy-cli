@@ -181,9 +181,11 @@ Spec form:
 ```
 
 Minted op fields: `node_id`, `removed_links` (ids of every link incident to the
-node at mint time). Replay removes the node, drops incident links (both the
-recorded ones and any link whose endpoint is the node), and scrubs dangling
-input/output references.
+node at mint time). An interior address such as `70/22` additionally carries
+the owner-instance `path` (`["70"]`); it is refused when the definition is
+shared by multiple live instances. Replay removes the node, drops incident
+links (both the recorded ones and any link whose endpoint is the node), and
+scrubs dangling input/output references in that same graph scope.
 
 * Idempotency: `op_id` no-op; replaying a delete of an already-absent node is a
   no-op.
@@ -556,8 +558,12 @@ Current contract, pinned:
   a promoted-widget target is still rejected with "promoted widget (a value),
   not a link input". Both operations refuse a shared definition rather than
   silently rewiring every instance that uses it.
-* **`add_node` and `delete_node` cannot address interior nodes** at all; an
-  interior id fails as node-not-found against the top-level inventory.
+* **`delete_node` permits an interior node in one supported, single-instance
+  definition.** Its op carries the owner-instance `path`; its node-presence
+  identity is scoped by that path, and replay removes incident definition
+  links plus their endpoint references. It refuses a shared definition rather
+  than deleting from every instance. `add_node` still cannot address an
+  interior location from the CLI authoring surface.
 * An interior **widget** write to a shared definition forks the definition at
   apply time (`engine._isolate_shared_subgraph`): the definition is deep-copied
   under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
