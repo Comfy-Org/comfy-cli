@@ -1343,6 +1343,27 @@ def _navigate_subgraph_path(workflow: dict, segments: list[str]) -> dict:
     return node
 
 
+def _interior_path_deleted(workflow: dict, segments: list[str]) -> bool:
+    """True when ``segments`` stops at an interior node that is absent from an
+    existing definition — the shape an interior ``delete_node`` leaves behind,
+    as opposed to a path that was never valid."""
+    from comfy_cli.cql import engine as _engine
+
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    node = _find_by_str(workflow, segments[0])
+    for seg in segments[1:]:
+        sg = defs_by_id.get(str((node or {}).get("type", ""))) if isinstance(node, dict) else None
+        if sg is None:
+            return False
+        node = next(
+            (n for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("id", "")) == str(seg)),
+            None,
+        )
+        if node is None:
+            return True
+    return False
+
+
 def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
     """Explain a connect endpoint that addresses a subgraph interior.
 
@@ -1810,6 +1831,29 @@ def _interior_delete_scope(workflow: dict, node_id: Any) -> dict | None:
             f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
             f"{instances} instances, so deleting a node inside it would mutate all {instances} at once — "
             "delete-node refuses that; edit a single-instance copy (unpack or duplicate the subgraph in the editor)"
+        )
+    # A promoted widget's value lives positionally in the host's
+    # widgets_values (or, for a legacy promotion, in proxyWidgets order).
+    # Deleting its source would shift every later value onto the wrong input,
+    # and neither this CLI nor the shared applier realigns the host, so refuse.
+    from comfy_cli.cql import promoted as _promoted
+
+    target_id = str(target.get("id"))
+    backed = [
+        p.name
+        for p in _promoted.promoted_inputs(definition, _engine._subgraph_defs_by_id(workflow))
+        if p.is_widget and str(p.source_node) == target_id
+    ]
+    backed += [
+        str(entry[1])
+        for entry in (host.get("properties") or {}).get("proxyWidgets") or []
+        if isinstance(entry, list) and len(entry) >= 2 and str(entry[0]) == target_id
+    ]
+    if backed:
+        raise ValueError(
+            f"node {'/'.join([*path, target_id])} backs the promoted widget(s) {sorted(set(backed))} of subgraph "
+            f"{'/'.join(path)}; deleting it would shift the subgraph's remaining widget values onto the wrong "
+            "inputs — delete-node refuses that; remove the promotion in the editor first"
         )
     return {
         "path": [str(seg) for seg in path],
@@ -3121,7 +3165,12 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         # Validate against the current definition before the mutating resolver
         # forks shared ancestors. Imported/replayed malformed ops must be
         # atomic: a rejected widget cannot leave an unreachable fork behind.
-        preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        try:
+            preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        except ValueError:
+            if _interior_path_deleted(workflow, [str(s) for s in path]):
+                return  # interior node concurrently deleted => no-op (delete wins)
+            raise
         preflight_warnings = _engine._write_widget(
             copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False
         )
@@ -3663,7 +3712,11 @@ def _apply_interior_delete_node(workflow: dict, op: dict) -> None:
     if definition is None or _definition_instance_count(workflow, str(host.get("type", ""))) > 1:
         return
     node_id = str(op["node_id"])
-    definition["nodes"] = [node for node in definition.get("nodes") or [] if str(node.get("id")) != node_id]
+    definition["nodes"] = [
+        node
+        for node in definition.get("nodes") or []
+        if not (isinstance(node, dict) and str(node.get("id")) == node_id)
+    ]
     removed = {str(link_id) for link_id in op.get("removed_links") or []}
     kept = []
     for link in definition.get("links") or []:
@@ -3681,11 +3734,14 @@ def _apply_interior_delete_node(workflow: dict, op: dict) -> None:
         if isinstance(boundary, dict) and isinstance(boundary.get("linkIds"), list):
             boundary["linkIds"] = [link_id for link_id in boundary["linkIds"] if str(link_id) not in removed]
     for node in definition.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
         for inp in node.get("inputs") or []:
-            if inp.get("link") is not None and str(inp["link"]) not in kept_ids:
+            if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) not in kept_ids:
                 inp["link"] = None
         for out in node.get("outputs") or []:
-            out["links"] = [link_id for link_id in out.get("links") or [] if str(link_id) in kept_ids]
+            if isinstance(out, dict) and isinstance(out.get("links"), list):
+                out["links"] = [link_id for link_id in out["links"] if str(link_id) in kept_ids]
     if isinstance(definition.get("node_order"), list):
         definition["node_order"] = [value for value in definition["node_order"] if str(value) != node_id]
     if isinstance(definition.get("link_order"), list):

@@ -248,6 +248,45 @@ def test_delete_interior_node_scrubs_its_links_from_the_boundary_slots(tmp_path,
     assert _sg(replayed)["outputs"] == result["outputs"]
 
 
+def test_delete_interior_node_refuses_a_promoted_widget_source_without_writing(tmp_path, capsys):
+    base = _workflow()
+    sg = _sg(base)
+    sg["inputs"] = [{"id": "in-text", "name": "prompt", "type": "STRING", "linkIds": [9101]}]
+    sg["links"].append(
+        {"id": 9101, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(base, 2011)["inputs"][1]["link"] = 9101
+    legacy = copy.deepcopy(_workflow())
+    legacy["nodes"][0]["properties"] = {"proxyWidgets": [["2012", "ckpt_name"]]}
+
+    for workflow, target in ((base, "70/2011"), (legacy, "70/2012")):
+        path = _write(tmp_path, workflow)
+        before = path.read_bytes()
+
+        env = _run(["delete-node", str(path), target], capsys)
+
+        assert env["ok"] is False, env
+        assert "backs the promoted widget" in env["error"]["message"]
+        assert path.read_bytes() == before
+
+
+def test_interior_set_widget_after_interior_delete_is_a_no_op_in_either_order():
+    base = _workflow()
+    graph = _graph()
+    _, delete = workflow_ops.delete_node(copy.deepcopy(base), graph, "70/2012", actor="a", base_version=1)
+    _, write = workflow_ops.set_widget(copy.deepcopy(base), graph, "70/2012", "ckpt_name", "b.safetensors", actor="b")
+
+    results = []
+    for ops in ((delete, write), (write, delete)):
+        doc = copy.deepcopy(base)
+        for op in ops:
+            workflow_ops.apply_op(doc, copy.deepcopy(op), graph)
+        results.append(doc["definitions"])
+
+    assert results[0] == results[1]
+    assert [node["id"] for node in _sg({"definitions": results[0]})["nodes"]] == [2005, 2011]
+
+
 def test_interior_delete_op_replays_to_the_same_document():
     base = _workflow()
     graph = _graph()
