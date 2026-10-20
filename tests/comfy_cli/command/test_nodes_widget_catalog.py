@@ -87,6 +87,17 @@ def _object_info() -> dict[str, Any]:
             "display_name": "CLIP Text Encode",
             "python_module": "nodes",
         },
+        # AUDIO_RECORD is a frontend-built DOM widget. Although its uppercase
+        # custom type looks link-shaped in object_info, it serializes one slot.
+        "RecordAudio": {
+            "input": {"required": {"audio": ["AUDIO_RECORD", {}]}},
+            "input_order": {"required": ["audio"]},
+            "output": ["AUDIO"],
+            "output_name": ["AUDIO"],
+            "category": "audio",
+            "display_name": "Record Audio",
+            "python_module": "comfy_extras.nodes_audio",
+        },
         # Zero widgets — a real, load-bearing state. The applier must be able to
         # tell "this class has no widgets" from "this class is unknown".
         "VAEDecode": {
@@ -226,6 +237,10 @@ class TestWidgetOrder:
         types = _run(["widget-catalog"], capsys)["data"]["types"]
         assert types["VAEDecode"]["widget_order"] == []
         assert "VAEDecode" in types, "a widget-less class must still be present, not dropped"
+
+    def test_record_audio_names_its_frontend_built_widget(self, patched_loader, capsys):
+        types = _run(["widget-catalog"], capsys)["data"]["types"]
+        assert types["RecordAudio"]["widget_order"] == ["audio"]
 
     def test_dynamic_combo_sub_widgets_expand(self, patched_loader, capsys):
         types = _run(["widget-catalog"], capsys)["data"]["types"]

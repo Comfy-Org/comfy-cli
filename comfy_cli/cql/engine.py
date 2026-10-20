@@ -41,10 +41,11 @@ _IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN
 # type is a link. Kept to types verified against saved workflows:
 # ``Load3D.image`` / ``Load3DAdvanced.viewport_state`` (``LOAD_3D``),
 # ``SaveGLB``/``Preview3D``'s injected ``image`` (``PREVIEW_3D``),
-# ``LoadAudioUI.audioUI`` (``AUDIO_UI``). ``LOAD3D_CAMERA`` is deliberately
+# ``LoadAudioUI.audioUI`` (``AUDIO_UI``), ``RecordAudio.audio``
+# (``AUDIO_RECORD``). ``LOAD3D_CAMERA`` is deliberately
 # absent: ``camera_info`` is ``serialize: false`` and writes no slot.
 _FRONTEND_DOM_WIDGET_TYPES = frozenset(
-    {"LOAD_3D", "LOAD_3D_ADVANCED", "PREVIEW_3D", "AUDIO_UI", "IMAGEUPLOAD", "AUDIOUPLOAD"}
+    {"LOAD_3D", "LOAD_3D_ADVANCED", "PREVIEW_3D", "AUDIO_UI", "AUDIO_RECORD", "IMAGEUPLOAD", "AUDIOUPLOAD"}
 )
 
 # What a fresh node serializes in a DOM-widget slot. ``add_node`` must emit
