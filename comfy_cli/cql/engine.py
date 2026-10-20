@@ -886,12 +886,14 @@ def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
     return _is_valid_connection(src_type, dst_type)
 
 
-#: ``(class_type, input)`` pairs whose value is a viewport capture the frontend
-#: serializes at queue time, read unconditionally by the node
-#: (``Load3D.execute``: ``image['image']``). A headless submit carries the
-#: add-node default ``""`` and crashes with "string indices must be integers".
-#: The ``viewport_state`` siblings tolerate a non-dict, so they are not listed.
-_FRONTEND_CAPTURE_INPUTS = frozenset({("Load3D", "image")})
+#: ``(class_type, input)`` pairs whose value the frontend captures at queue
+#: time, with the shape the server-side node requires. A headless ``add_node``
+#: carries only the DOM-widget placeholder and otherwise crashes in the node.
+#: ``Load3D.viewport_state`` tolerates a non-dict, so it is not listed.
+_FRONTEND_CAPTURE_INPUTS = {
+    ("Load3D", "image"): "image_bundle",
+    ("RecordAudio", "audio"): "filename",
+}
 
 
 #: Types the frontend registers a widget constructor for (``ComfyWidgets`` in
@@ -2350,15 +2352,22 @@ class Graph:
                     continue
                 if port is None:
                     continue
-                if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and (
-                    not isinstance(value, dict) or "image" not in value
-                ):
+                capture_kind = _FRONTEND_CAPTURE_INPUTS.get((class_type, input_name))
+                capture_missing = (
+                    capture_kind == "image_bundle" and (not isinstance(value, dict) or "image" not in value)
+                ) or (capture_kind == "filename" and (not isinstance(value, str) or not value.strip()))
+                if capture_missing:
+                    capture_description = (
+                        "browser viewport capture ({image, mask, normal, …})"
+                        if capture_kind == "image_bundle"
+                        else "filename uploaded by the browser capture widget"
+                    )
                     finding = {
                         "node_id": node_id,
                         "field": input_name,
                         "code": "frontend_capture_required",
                         "message": (
-                            f"{class_type}.{input_name} is the browser viewport capture ({{image, mask, normal, …}}) "
+                            f"{class_type}.{input_name} is the {capture_description} "
                             f"that only the ComfyUI frontend produces at queue time; {value!r} makes the node crash "
                             f"on the server"
                         ),
