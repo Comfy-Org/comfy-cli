@@ -1506,3 +1506,98 @@ class TestVerbQueryLog:
         _env_bundle(tmp_path, monkeypatch)
         _run(["pick"], capsys)
         assert queries == []
+
+
+class TestNamedModelDisambiguation:
+    """PM-2214: missing family words warrant a choice, never an inferred model."""
+
+    @pytest.fixture
+    def named_bundle(self, monkeypatch):
+        # Identity/aliases from comfy-knowledge v0.2.2 (7ee63b21a59b),
+        # canon/models/image/qwen-image-2-1.yaml. Cloud's compiled bundle is
+        # sha256 53a70dd644dbca30ad7c20b7f8bd8c00d154609ae1edf22e63aa834954f11d48.
+        data = {
+            "models": {
+                "qwen-image-2-1": {
+                    "id": "qwen-image-2-1",
+                    "aliases": [
+                        "Qwen Image 2.1",
+                        "Qwen-Image-2.1",
+                        "Qwen Image 2.1 T2I",
+                        "Qwen Image 2.1 Edit",
+                        "Qwen Image 2.1 Remove Background",
+                        "Qwen Image 2.1 Turbo",
+                        "Qwen-Image-2.1-Turbo",
+                    ],
+                },
+                "qwen-image-2512": {"id": "qwen-image-2512"},
+                "qwen-image-edit": {"id": "qwen-image-edit"},
+            }
+        }
+        bundle = knowledge._index(data, None, source="env", stale=False, path="fixture", mtime=0.0)
+        monkeypatch.setattr(knowledge, "load_bundle", lambda **kw: bundle)
+        return bundle
+
+    @pytest.mark.parametrize("query", ["Qwen 2.1", "QWEN-2-1", "qwen2.1"])
+    def test_short_name_offers_canonical_id_without_resolving(self, named_bundle, query, capsys):
+        assert knowledge.resolve_id(named_bundle, query) is None
+        rc, env = _run(["resolve", query], capsys)
+        assert rc == 1
+        assert env["ok"] is False
+        assert env["data"] is None
+        assert env["error"]["code"] == "knowledge_unknown_model"
+        assert env["error"]["details"]["candidate_ids"] == ["qwen-image-2-1"]
+        assert "ask which model" in env["error"]["hint"]
+        assert "qwen-image-2-1" in env["error"]["hint"]
+
+    @pytest.mark.parametrize("query", ["Qwen Image 2.1", "qwen-image-2-1", "QWEN IMAGE 2.1 TURBO"])
+    def test_full_name_still_resolves(self, named_bundle, query, capsys):
+        rc, env = _run(["resolve", query], capsys)
+        assert rc == 0
+        assert env["data"]["id"] == "qwen-image-2-1"
+        _validate(env["data"])
+
+    @pytest.mark.parametrize(
+        "query", ["Qwen VL 2.1", "Qwen 21", "Qwen 1.2", "Qwen 2", "Qwen", "other 2.1", "unknown-pm2214"]
+    )
+    def test_unknown_or_different_family_version_stays_unknown(self, named_bundle, query, capsys):
+        rc, env = _run(["resolve", query], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unknown_model"
+        assert env["error"]["details"].get("candidate_ids", []) == []
+        assert "ask which model" not in env["error"]["hint"]
+
+    def test_future_image_vl_and_text_models_remain_an_explicit_choice(self, monkeypatch, capsys):
+        # Synthetic future catalog: no preference for Image, VL, or text.
+        ids = ["qwen-image-2-1", "qwen-vl-2-1", "qwen-text-2-1"]
+        b = knowledge._index(
+            {"models": {mid: {"id": mid} for mid in ids}},
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0.0,
+        )
+        monkeypatch.setattr(knowledge, "load_bundle", lambda **kw: b)
+        rc, env = _run(["resolve", "Qwen 2.1"], capsys)
+        assert rc == 1
+        assert env["error"]["details"]["candidate_ids"] == sorted(ids)
+        assert "ask which model" in env["error"]["hint"]
+        assert knowledge.resolve_id(b, "Qwen 2.1") is None
+        assert knowledge.model_candidates(b, "Qwen VL 2.1") == ["qwen-vl-2-1"]
+
+    def test_candidates_are_general_sorted_bounded_and_deduplicated(self):
+        ids = [f"acme-variant{letter}-2-1" for letter in "hgfedcba"]
+        b = knowledge._index(
+            {
+                "models": {mid: {"id": mid, "aliases": [mid.upper()]} for mid in ids},
+                "aliases": {"Acme Missing 2.1": "missing-row"},
+            },
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0.0,
+        )
+        assert knowledge.model_candidates(b, "Acme 2.1") == sorted(ids)[:5]
+        assert knowledge.model_candidates(b, "Acme " + "2" * knowledge.MAX_QUERY_CHARS) == []

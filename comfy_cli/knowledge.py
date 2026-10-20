@@ -339,6 +339,32 @@ def resolve(bundle: Bundle, query: str) -> dict | None:
     return bundle.models[model_id] if model_id is not None else None
 
 
+def model_candidates(bundle: Bundle, query: str) -> list[str]:
+    """At most five canonical ids for an incomplete family/version name.
+
+    Suggestions only: even one candidate requires the caller to confirm the
+    model. Match the family word exactly, preserve every numeric component,
+    and allow omitted words, not substituted words or reordered tokens.
+    """
+    if len(query) > MAX_QUERY_CHARS:
+        return []
+    parts = re.findall(r"[a-z]+|[0-9]+", query.lower())
+    numbers = [part for part in parts if part.isdigit()]
+    if not parts or not parts[0].isalpha() or not numbers:
+        return []
+    candidates: set[str] = set()
+    for alias, model_id in bundle.aliases.items():
+        if model_id not in bundle.models:
+            continue
+        words = re.findall(r"[a-z]+|[0-9]+", alias.lower())
+        if not words or words[0] != parts[0] or [word for word in words if word.isdigit()] != numbers:
+            continue
+        remaining = iter(words[1:])
+        if all(part in remaining for part in parts[1:]):
+            candidates.add(model_id)
+    return sorted(candidates)[:5]
+
+
 def pick(bundle: Bundle, capability: str) -> dict | None:
     """Ranked picks for a capability, keyed exactly, then by spelling, then by wording.
 
