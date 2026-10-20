@@ -185,7 +185,9 @@ node at mint time). An interior address such as `70/22` additionally carries
 the owner-instance `path` (`["70"]`); it is refused when the definition is
 shared by multiple live instances. Replay removes the node, drops incident
 links (both the recorded ones and any link whose endpoint is the node), and
-scrubs dangling input/output references in that same graph scope.
+scrubs dangling input/output references in that same graph scope — for an
+interior delete, including the definition's boundary `inputs[].linkIds` and
+`outputs[].linkIds`.
 
 * Idempotency: `op_id` no-op; replaying a delete of an already-absent node is a
   no-op.

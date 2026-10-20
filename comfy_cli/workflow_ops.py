@@ -231,11 +231,11 @@ class NoteTextNotWritable(ValueError):
         #: delete_node accepts (not the spelling the caller typed).
         self.node_id = node_id
         if interior:
-            # delete_node only removes top-level nodes, and insert_workflow only
-            # adds at the root, so there is no command route to replace it.
+            # insert_workflow only adds at the root, so even where delete_node
+            # can remove an interior note there is no command route to replace it.
             self.hint = (
-                f"{node_id} is a note inside a subgraph definition: delete-node only removes top-level nodes, "
-                "so its text can only be changed in the ComfyUI editor"
+                f"{node_id} is a note inside a subgraph definition: no command can insert a replacement inside "
+                "a subgraph, so its text can only be changed in the ComfyUI editor"
             )
         else:
             self.hint = (
@@ -3669,10 +3669,17 @@ def _apply_interior_delete_node(workflow: dict, op: dict) -> None:
     for link in definition.get("links") or []:
         origin_id, target_id, _ = _interior_link_endpoints(link)
         if str(_interior_link_id(link)) in removed or str(origin_id) == node_id or str(target_id) == node_id:
+            removed.add(str(_interior_link_id(link)))
             continue
         kept.append(link)
     definition["links"] = kept
     kept_ids = {str(_interior_link_id(link)) for link in kept}
+    # Links from the input proxy / into the output proxy are also listed on the
+    # definition's boundary slots; a stale id there leaves the slot "connected"
+    # to a link that no longer exists.
+    for boundary in [*(definition.get("inputs") or []), *(definition.get("outputs") or [])]:
+        if isinstance(boundary, dict) and isinstance(boundary.get("linkIds"), list):
+            boundary["linkIds"] = [link_id for link_id in boundary["linkIds"] if str(link_id) not in removed]
     for node in definition.get("nodes") or []:
         for inp in node.get("inputs") or []:
             if inp.get("link") is not None and str(inp["link"]) not in kept_ids:

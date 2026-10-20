@@ -218,6 +218,36 @@ def test_delete_interior_node_removes_it_and_its_definition_links(tmp_path, caps
     assert result["nodes"][0]["id"] == 70
 
 
+def test_delete_interior_node_scrubs_its_links_from_the_boundary_slots(tmp_path, capsys):
+    import json
+
+    base = _workflow()
+    sg = _sg(base)
+    sg["inputs"] = [{"id": "in-clip", "name": "clip", "type": "CLIP", "linkIds": [9101, 9103]}]
+    sg["outputs"] = [{"id": "out-cond", "name": "CONDITIONING", "type": "CONDITIONING", "linkIds": [9102]}]
+    sg["links"] += [
+        {"id": 9101, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 0, "type": "CLIP"},
+        {"id": 9102, "origin_id": 2011, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "CONDITIONING"},
+        # The same boundary input also feeds a surviving node; that id must stay.
+        {"id": 9103, "origin_id": -10, "origin_slot": 0, "target_id": 2005, "target_slot": 0, "type": "CLIP"},
+    ]
+    _node(base, 2011)["inputs"][0]["link"] = 9101
+    _node(base, 2011)["outputs"][0]["links"] = [9102]
+    _node(base, 2005)["inputs"][0]["link"] = 9103
+    path = _write(tmp_path, base)
+
+    env = _run(["delete-node", str(path), "70/2011"], capsys)
+
+    assert env["ok"] is True, env
+    result = _sg(json.loads(path.read_text()))
+    assert result["inputs"][0]["linkIds"] == [9103]
+    assert result["outputs"][0]["linkIds"] == []
+    assert [link["id"] for link in result["links"]] == [9103]
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), env["data"]["op"], _graph())
+    assert _sg(replayed)["inputs"] == result["inputs"]
+    assert _sg(replayed)["outputs"] == result["outputs"]
+
+
 def test_interior_delete_op_replays_to_the_same_document():
     base = _workflow()
     graph = _graph()
