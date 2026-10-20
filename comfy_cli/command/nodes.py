@@ -1384,7 +1384,8 @@ def widget_catalog_cmd(
             {
                 "code": "object_info_stale",
                 "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
-            }
+            },
+            *payload.get("warnings", []),
         ]
 
     if select is not None:

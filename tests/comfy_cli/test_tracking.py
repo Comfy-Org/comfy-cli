@@ -530,6 +530,39 @@ class TestTrackCommandRedaction:
         assert properties["count"] == 20
         assert "private" not in str(properties)
 
+    def test_code_search_context_identity_is_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("code-search-context")
+        def context(repository, commit, file):
+            return None
+
+        context(repository="private/repository", commit="a-secret-sha", file="private/path.py")
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["repository"] == "<redacted>"
+        assert properties["commit"] == "<redacted>"
+        assert properties["file"] == "<redacted>"
+        assert "private" not in str(properties)
+        assert "a-secret-sha" not in str(properties)
+
+    def test_add_node_text_is_redacted(self, tracking_module):
+        # `comfy workflow add-node <file> Note --text "..."` carries a note body
+        # the user wrote: free-form prose that can hold anything (paths, prompts,
+        # credentials pasted into a scratch note). Ship only that it was supplied.
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("workflow")
+        def add_node(class_type, text=None):
+            return None
+
+        add_node(class_type="Note", text="api key is sk-live-abc123")
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["class_type"] == "Note"
+        assert properties["text"] == "<redacted>"
+        assert "sk-live-abc123" not in str(properties)
+
     def test_set_civitai_api_token_is_redacted(self, tracking_module):
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
@@ -726,6 +759,7 @@ class TestSensitiveNameMatcher:
             "admin_password",
             "API_KEY",
             "Set_HF_Api_Token",
+            "text",
         ],
     )
     def test_matches(self, name):
