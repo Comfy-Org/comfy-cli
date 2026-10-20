@@ -339,6 +339,14 @@ def resolve(bundle: Bundle, query: str) -> dict | None:
     return bundle.models[model_id] if model_id is not None else None
 
 
+def _candidate_tokens(value: str) -> list[str]:
+    # Suggestions support ASCII names only. Never discard a Unicode qualifier
+    # or digit, or normalize it into a different family/version spelling.
+    if any(char.isalnum() and not char.isascii() for char in value):
+        return []
+    return re.findall(r"[a-z]+|[0-9]+", value.lower())
+
+
 def model_candidates(bundle: Bundle, query: str) -> list[str]:
     """At most five canonical ids for an incomplete family/version name.
 
@@ -348,7 +356,7 @@ def model_candidates(bundle: Bundle, query: str) -> list[str]:
     """
     if len(query) > MAX_QUERY_CHARS:
         return []
-    parts = re.findall(r"[a-z]+|[0-9]+", query.lower())
+    parts = _candidate_tokens(query)
     numbers = [part for part in parts if part.isdigit()]
     if not parts or not parts[0].isalpha() or not numbers:
         return []
@@ -356,7 +364,7 @@ def model_candidates(bundle: Bundle, query: str) -> list[str]:
     for alias, model_id in bundle.aliases.items():
         if model_id not in bundle.models:
             continue
-        words = re.findall(r"[a-z]+|[0-9]+", alias.lower())
+        words = _candidate_tokens(alias)
         if not words or words[0] != parts[0] or [word for word in words if word.isdigit()] != numbers:
             continue
         remaining = iter(words[1:])

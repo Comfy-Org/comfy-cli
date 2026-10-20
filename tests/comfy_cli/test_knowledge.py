@@ -1558,7 +1558,23 @@ class TestNamedModelDisambiguation:
         _validate(env["data"])
 
     @pytest.mark.parametrize(
-        "query", ["Qwen VL 2.1", "Qwen 21", "Qwen 1.2", "Qwen 2", "Qwen", "other 2.1", "unknown-pm2214"]
+        "query",
+        [
+            "Qwen VL 2.1",
+            "Qwen text 2.1",
+            "Qwen 2.10",
+            "Qwen 21",
+            "Qwen 1.2",
+            "Qwen 2",
+            "Qwen",
+            "other 2.1",
+            "unknown-pm2214",
+            "",
+            "Qwen " + "x" * knowledge.MAX_QUERY_CHARS + "2.1",
+            "Qwen 文本 2.1",
+            "Qwen 2.1β",
+            "Qwen 2.1２",
+        ],
     )
     def test_unknown_or_different_family_version_stays_unknown(self, named_bundle, query, capsys):
         rc, env = _run(["resolve", query], capsys)
@@ -1566,6 +1582,19 @@ class TestNamedModelDisambiguation:
         assert env["error"]["code"] == "knowledge_unknown_model"
         assert env["error"]["details"].get("candidate_ids", []) == []
         assert "ask which model" not in env["error"]["hint"]
+
+    @pytest.mark.parametrize("alias", ["Qwen Image 文本 2.1", "Qwen Image 2.1β", "Qwen Image 2.1２", "Qwen Image 2.1²"])
+    @pytest.mark.parametrize("top_level", [False, True])
+    def test_unicode_aliases_cannot_offer_ascii_candidates(self, monkeypatch, capsys, alias, top_level):
+        data = {"models": {"opaque-model": {"aliases": [] if top_level else [alias]}}}
+        if top_level:
+            data["aliases"] = {alias: "opaque-model"}
+        bundle = knowledge._index(data, None, source="env", stale=False, path="fixture", mtime=0.0)
+        monkeypatch.setattr(knowledge, "load_bundle", lambda **kw: bundle)
+        rc, env = _run(["resolve", "Qwen 2.1"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unknown_model"
+        assert env["error"]["details"].get("candidate_ids", []) == []
 
     def test_future_image_vl_and_text_models_remain_an_explicit_choice(self, monkeypatch, capsys):
         # Synthetic future catalog: no preference for Image, VL, or text.
