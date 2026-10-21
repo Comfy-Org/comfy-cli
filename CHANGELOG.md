@@ -81,6 +81,13 @@ history.
   (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
   instance `path`. A link that crosses the subgraph boundary is still refused,
   and so is a link inside a definition shared by several instances.
+- `comfy workflow delete-node` and `delete-nodes` accept the interior paths
+  `workflow print` shows (`delete-node 70/2012`). They delete the node from its
+  subgraph definition with its interior links, and emit a `delete_node` op
+  carrying the instance `path`. A definition shared by several instances, or a
+  node that backs a promoted widget, is refused without writing. Replaying the
+  op needs a doc host on comfy-multi-player 0.3.12 or later: older appliers
+  ignore `path` and delete the top-level node with the same id.
 - `comfy workflow disconnect <file> <node>.<input>` removes an input link and
   emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
   autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
