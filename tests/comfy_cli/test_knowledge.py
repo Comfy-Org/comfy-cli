@@ -1509,7 +1509,7 @@ class TestVerbQueryLog:
 
 
 class TestNamedModelDisambiguation:
-    """PM-2214: missing family words warrant a choice, never an inferred model."""
+    """Missing family words warrant a choice, never an inferred model."""
 
     @pytest.fixture
     def named_bundle(self, monkeypatch):
