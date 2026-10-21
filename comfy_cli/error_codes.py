@@ -65,6 +65,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
     ),
+    ErrorCode(
+        "workspace_not_found",
+        "The workspace reported by `comfy which` does not exist on disk; details.path names the missing directory.",
+        "run `comfy install`, or pass `--workspace /path/to/ComfyUI`",
+    ),
+    ErrorCode(
+        "desktop_config_unreadable",
+        "Comfy Desktop installation records or settings could not be read; discovery may be incomplete.",
+        "check the Desktop configuration file named in the warning",
+    ),
     # --- launch / stop lifecycle ---------------------------------------------
     ErrorCode(
         "server_already_running",
