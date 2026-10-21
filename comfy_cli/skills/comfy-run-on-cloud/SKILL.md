@@ -1,6 +1,6 @@
 ---
 name: comfy-run-on-cloud
-description: Use when a developer clicked "Run on Cloud" in local ComfyUI or Comfy Desktop, pasted a Run-on-Cloud prompt, or wants a local workflow (or the whole install behind it) running on Comfy Cloud with a link to open it. Also use for "Update existing build" from the same modal, and for a pasted repair prompt after such a build or deployment failed.
+description: Use when a developer clicked "Run on Cloud" in local ComfyUI or Comfy Desktop, pasted a Run-on-Cloud prompt, or wants a local workflow (or the whole install behind it) running on Comfy Cloud with a link to open it. Also use for a requested update to an existing build, or a pasted repair prompt after such a build or deployment failed.
 ---
 
 # comfy-run-on-cloud
@@ -25,17 +25,21 @@ For a custom build, this skill sequences two others. Read them when a step point
 
 ## What the click authorizes, and what it does not
 
-The modal, or the prompt it generated, names the build name, GPU, workspace, workflow, and whether to create a new Build or update one. Sending it **is** the user's yes to:
+The local modal is deliberately simple: **Run on Comfy Cloud**, “We’ll start your local agent to get this workflow running on Comfy Cloud. You’ll approve any local file uploads along the way.”, **Let’s go**. The handoff supplies the saved workflow path, running server and available distribution/version/workspace context. Build name, GPU, new versus update and workflow versus whole-instance scope are not required modal fields.
+
+Sending it **is** the user's yes to:
 
 - run that workflow on Cloud, including **lossless** conversions;
-- if a build is needed, build and deploy it on that GPU with **`--min 0 --max 1`**.
+- inspect and prepare that workflow, checking stock Cloud and existing workspace Builds before proposing a custom build.
+
+If a custom build is needed, collect only the choices not already supplied: workspace, scope, new versus specifically named update, name, GPU and region. Disclose current costs/timing or unknowns and **`--min 0 --max 1`**, then obtain approval for that plan before building/deploying. Honor an explicit plan already approved in the prompt or earlier conversation; do not ask again for the same target and terms. A bare **Let’s go** does not choose a GPU or authorize a new Build.
 
 It is **never** a yes to any of these, and each needs its own answer in chat:
 
 - a **lossy** conversion (step 3);
 - uploading any file from this machine: models, LoRAs, input images, video or audio (step 4);
 - replacing, stopping or deleting an existing Build, release or deployment, except the specific update named in the user's prompt;
-- a different GPU, or worker bounds other than 0/1.
+- a different GPU or region from the approved plan, or worker bounds other than 0/1.
 
 Batch the decisions currently known into one short message. Honor answers already given for the named files and target; a newly discovered upload or changed target needs its own answer. A general "don't ask me anything" does not identify which files may be uploaded.
 
@@ -131,7 +135,7 @@ Then `comfy build validate` and `comfy build push --dry-run`. Newer CLI versions
 
 **5. Build, deploy, verify** (route C).
 - `comfy build push`, then `comfy build release create --target linux/nvidia --watch`. On failure read `comfy-build-failures`: one cause per cut, at most three cuts.
-- `comfy deploy up <spec> --gpu <gpuClass> --region <region> --min 0 --max 1 --watch`, with the prompt's GPU. For an update, select the approved deployment explicitly with `--deployment <id>`. Check its `revision`/update capability first: updates-enabled workspaces move it in place; older workspaces can create a second deployment and keep the first billing. Disclose and obtain that additional-deployment decision before proceeding. Read returned `supersedes` and verify target ids; stopping an older deployment still needs the user's approval. On a refusal, say so and ask; never switch GPUs on your own.
+- `comfy deploy up <spec> --gpu <gpuClass> --region <region> --min 0 --max 1 --watch`, with the GPU and region approved in the agent conversation or an explicit prior plan. For an update, select the approved deployment explicitly with `--deployment <id>`. Check its `revision`/update capability first: updates-enabled workspaces move it in place; older workspaces can create a second deployment and keep the first billing. Disclose and obtain that additional-deployment decision before proceeding. Read returned `supersedes` and verify target ids; stopping an older deployment still needs the user's approval. On a refusal, say so and ask; never switch GPUs on your own.
 - Report the idle scale-down from the deployment's own `keepWarmSeconds`, not a remembered default. Outside a Build folder, read a deployment with `comfy --json deploy show --deployment <build>/<name>`; `deploy status` needs the spec folder.
 - **`ready` is not working.** Require both:
   - the ComfyUI log (`comfy --json deploy logs` → `data.comfyuiLog`) shows no `IMPORT FAILED` and no `ModuleNotFoundError` for any pack the workflow uses;
