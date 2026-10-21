@@ -13,17 +13,137 @@ from typing import Any
 import pytest
 
 from comfy_cli.command.run.loader import _classify_api_workflow
+from comfy_cli.cql import engine as cql_engine
 from comfy_cli.cql.engine import (
+    _MAX_DYNAMIC_COMBO_DEPTH,
     Graph,
     Port,
     _apply_one_slot,
+    _count_instances,
     _extract_frontend_slots,
+    _subgraph_defs_by_id,
+    _SubgraphDefs,
     _write_widget,
 )
+
+
+def test_subgraph_definition_registration_uses_identity_refcounts():
+    definitions = _SubgraphDefs()
+    shared = {"id": "shared"}
+    replacement = {"id": "replacement"}
+    definitions["id"] = shared
+    definitions["alias"] = shared
+
+    definitions["id"] = replacement
+    assert id(shared) in definitions.registered_definition_ids
+    assert definitions._registered_definition_refcounts[id(shared)] == 1
+
+    del definitions["alias"]
+    assert id(shared) not in definitions.registered_definition_ids
+    assert id(replacement) in definitions.registered_definition_ids
+
+
+@pytest.mark.parametrize("mutation", ["overwrite", "delete", "pop", "popitem", "clear"])
+def test_subgraph_definition_membership_changes_invalidate_derived_caches(mutation):
+    definitions = _SubgraphDefs()
+    original = {"id": "original", "inputs": [], "nodes": [], "links": []}
+    definitions["id"] = original
+    definitions.promotion_visit_limits[id(original)] = 7
+    definitions.promotion_inputs[id(original)] = (original, ["stale"])
+    definitions.promotion_budget_roots["promotion_inputs_budget"] = {id(original)}
+    definitions.promotion_inputs_budget = [99]
+
+    if mutation == "overwrite":
+        definitions["id"] = {"id": "replacement"}
+    elif mutation == "delete":
+        del definitions["id"]
+    elif mutation == "pop":
+        definitions.pop("id")
+    elif mutation == "popitem":
+        definitions.popitem()
+    else:
+        definitions.clear()
+
+    assert definitions.promotion_visit_limits == {}
+    assert definitions.promotion_inputs == {}
+    assert definitions.promotion_budget_roots == {}
+    assert definitions.promotion_inputs_budget is None
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a small but realistic object_info
 # ---------------------------------------------------------------------------
+
+
+def test_subgraph_name_alias_checks_preserve_every_deep_acyclic_definition():
+    definitions = [
+        {
+            "id": f"id-{index}",
+            "name": f"Alias{index}",
+            "nodes": ([{"id": index, "type": f"id-{index + 1}"}] if index < 31 else []),
+        }
+        for index in range(32)
+    ]
+    workflow = {
+        "nodes": [{"id": index, "type": f"Alias{index}"} for index in range(32)],
+        "definitions": {"subgraphs": definitions},
+    }
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert all(f"Alias{index}" in resolved for index in range(32))
+
+
+def test_subgraph_alias_bit_matrix_fails_closed_above_cap(monkeypatch):
+    definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
+    workflow = {
+        "nodes": [{"id": index, "type": f"Alias{index}"} for index in range(3)],
+        "definitions": {"subgraphs": definitions},
+    }
+    monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert set(resolved) == {"id-0", "id-1", "id-2"}
+
+
+def test_subgraph_alias_bit_matrix_still_publishes_unused_definition_names(monkeypatch):
+    definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
+    workflow = {"nodes": [{"id": 1, "type": "Alias0"}], "definitions": {"subgraphs": definitions}}
+    monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert resolved["Alias0"] is definitions[0]
+    assert resolved["Alias1"] is definitions[1]
+    assert resolved["Alias2"] is definitions[2]
+
+
+def test_subgraph_alias_conflicts_follow_name_typed_definition_edges():
+    leaf = {"id": "leaf-id", "name": "LeafAlias", "nodes": [{"id": 3, "type": "OuterAlias"}]}
+    outer = {"id": "outer-id", "name": "OuterAlias", "nodes": [{"id": 2, "type": "LeafAlias"}]}
+    resolved = _subgraph_defs_by_id(
+        {"nodes": [{"id": 1, "type": "OuterAlias"}], "definitions": {"subgraphs": [outer, leaf]}}
+    )
+
+    assert "OuterAlias" not in resolved
+    assert "LeafAlias" not in resolved
+
+
+def test_rejected_name_alias_does_not_hide_an_unrelated_valid_alias():
+    outer = {"id": "outer-id", "name": "Outer", "nodes": [{"id": 1, "type": "KSampler"}]}
+    conflicting = {
+        "id": "sampler-id",
+        "name": "KSampler",
+        "nodes": [{"id": 2, "type": "KSampler"}, {"id": 3, "type": "Outer"}],
+    }
+
+    resolved = _subgraph_defs_by_id(
+        {"nodes": [{"id": 4, "type": "Outer"}], "definitions": {"subgraphs": [outer, conflicting]}}
+    )
+
+    assert resolved["Outer"] is outer
+    assert "KSampler" not in resolved
 
 
 def _object_info() -> dict[str, Any]:
@@ -389,6 +509,53 @@ class TestWidgetOrderForNode:
         g = self._dyn_graph()
         assert g.widget_order_default("DynNode") == ["model", "model.res", "seed", "control_after_generate"]
 
+    def test_invalid_declared_default_falls_back_to_first_key(self):
+        info = {
+            "DynNode": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "missing",
+                                "options": [
+                                    {
+                                        "key": "a",
+                                        "inputs": {
+                                            "required": {"res": ["COMBO", {"options": ["x", "y"], "default": "x"}]}
+                                        },
+                                    },
+                                    {"key": "b", "inputs": {"required": {}}},
+                                ],
+                            },
+                        ],
+                        "seed": ["INT", {"default": 0}],
+                    }
+                },
+                "input_order": {"required": ["model", "seed"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "category": "test",
+                "display_name": "Dyn",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+
+        assert g.widget_default_for_node("DynNode", "model") == "a"
+        assert g.widget_order_default("DynNode") == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
+        assert g.widget_order_for_node("DynNode", []) == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
+
     def test_node_order_expands_selected_key(self):
         g = self._dyn_graph()
         # Selecting "b" adds model.quality, pushing seed to index 3. The trailing
@@ -548,6 +715,21 @@ class TestWidgetOrderDynamicCombo:
         # alpha's defaults (size first-enum, width default).
         assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
 
+    def test_outer_selector_change_normalizes_nested_numeric_default(self):
+        info = _dynamic_combo_object_info()
+        model_options = info["DynNode"]["input"]["required"]["model"][1]["options"]
+        mode = model_options[1]["inputs"]["required"]["mode"][1]
+        mode["default"] = 2.0
+        mode["options"][0]["key"] = 1
+        mode["options"][1]["key"] = 2
+        graph = Graph.from_object_info(info)
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "alpha", "S", 512, 7, "fixed"]}]}
+
+        out, warnings = graph.apply_slots(wf, {"1.model": "beta"})
+
+        assert [warning["code"] for warning in warnings] == ["dynamic_combo_roster_rebuilt"]
+        assert out["nodes"][0]["widgets_values"] == ["p", "beta", 2, 50, True, 7, "fixed"]
+
 
 def _dynamic_combo_implicit_seed_object_info() -> dict:
     """A COMFY_DYNAMICCOMBO_V3 option whose sub-input is an implicit
@@ -614,6 +796,210 @@ class TestDynamicComboImplicitControlAfterGenerate:
         node = {"id": 1, "type": "PrefixedDynNode", "widgets_values": []}
         with pytest.raises(ValueError, match="out of range"):
             _write_widget(node, "mode", "a", graph, extend=False)
+
+    def test_selector_write_pads_earlier_widgets_with_frontend_defaults(self):
+        info = {
+            "PaddedSelector": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "cfg": ["FLOAT", {"default": 8.0}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "a",
+                                "options": [
+                                    {"key": "a", "inputs": {"required": {}}},
+                                    {"key": "b", "inputs": {"required": {"size": ["INT", {"default": 512}]}}},
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "cfg", "model"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "PaddedSelector", "widgets_values": []}
+
+        _write_widget(node, "model", "b", graph, extend=True)
+
+        assert node["widgets_values"] == [0, "fixed", 8.0, "b", 512]
+
+    def test_writing_subwidget_materializes_a_missing_selector_default(self):
+        info = _dynamic_combo_implicit_seed_object_info()
+        info["SeedComboNode"]["input"]["required"]["mode"][1]["default"] = "a"
+        seed_graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "SeedComboNode", "widgets_values": []}
+
+        _write_widget(node, "mode.seed", 42, seed_graph, extend=True)
+
+        assert node["widgets_values"] == ["a", 42]
+        assert seed_graph.widget_order_for_node("SeedComboNode", node["widgets_values"]) == ["mode", "mode.seed"]
+
+    def test_writing_nested_subwidget_materializes_every_missing_selector(self):
+        info = _dynamic_combo_object_info()
+        beta_inputs = info["DynNode"]["input"]["required"]["model"][1]["options"][1]["inputs"]["required"]
+        beta_inputs["mode"][1]["default"] = "fast"
+        dyn_graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "DynNode", "widgets_values": ["prompt", "beta"]}
+
+        _write_widget(node, "model.mode.steps", 77, dyn_graph, extend=True)
+
+        assert node["widgets_values"][:4] == ["prompt", "beta", "fast", 77]
+
+    def test_padding_keeps_an_earlier_no_default_selector_absent(self):
+        info = {
+            "TwoDynNode": {
+                "input": {
+                    "required": {
+                        "a": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {
+                                        "key": "a1",
+                                        "inputs": {"required": {"p": ["INT", {"default": 1}]}},
+                                    }
+                                ]
+                            },
+                        ],
+                        "b": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "b1",
+                                "options": [
+                                    {
+                                        "key": "b1",
+                                        "inputs": {"required": {"q": ["INT", {"default": 2}]}},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["a", "b"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "TwoDynNode", "widgets_values": []}
+
+        _write_widget(node, "b.q", 7, graph, extend=True)
+
+        assert node["widgets_values"] == [None, "b1", 7]
+        assert graph.widget_order_for_node("TwoDynNode", node["widgets_values"]) == ["a", "b", "b.q"]
+
+    def test_padding_materializes_control_markers_and_plain_defaults(self):
+        info = {
+            "Node": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "cfg": ["FLOAT", {"default": 8.0}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "a",
+                                "options": [
+                                    {
+                                        "key": "a",
+                                        "inputs": {"required": {"x": ["INT", {"default": 1}]}},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "cfg", "model"]},
+                "output": [],
+                "output_name": [],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "Node", "widgets_values": []}
+
+        _write_widget(node, "model.x", 9, graph, extend=True)
+
+        assert node["widgets_values"] == [0, "fixed", 8.0, "a", 9]
+
+    def test_final_padding_materializes_truncated_dynamic_subwidget_defaults(self):
+        graph = Graph.from_object_info(_dynamic_combo_object_info())
+        node = {"id": 1, "type": "DynNode", "widgets_values": ["prompt", "alpha"]}
+
+        _write_widget(node, "model.width", 9, graph, extend=True)
+
+        assert node["widgets_values"][:4] == ["prompt", "alpha", "S", 9]
+
+    def test_many_missing_sibling_selectors_are_not_limited_by_nesting_cap(self):
+        inputs = {
+            f"selector_{index}": [
+                "COMFY_DYNAMICCOMBO_V3",
+                {
+                    "default": "a",
+                    "options": [
+                        {
+                            "key": "a",
+                            "inputs": {"required": {"x": ["INT", {"default": index}]}},
+                        }
+                    ],
+                },
+            ]
+            for index in range(_MAX_DYNAMIC_COMBO_DEPTH + 2)
+        }
+        info = {
+            "ManySelectors": {
+                "input": {"required": inputs},
+                "input_order": {"required": list(inputs)},
+                "output": [],
+                "output_name": [],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "ManySelectors", "widgets_values": []}
+        target = f"selector_{_MAX_DYNAMIC_COMBO_DEPTH + 1}.x"
+
+        _write_widget(node, target, 99, graph, extend=True)
+
+        assert node["widgets_values"][-2:] == ["a", 99]
+
+    def test_layout_and_server_validation_share_python_key_equality(self):
+        info = {
+            "BoolKeys": {
+                "input": {
+                    "required": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {"default": 1}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {"default": 2}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["mode"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+
+        assert graph.widget_order_for_node("BoolKeys", [True, 2]) == ["mode", "mode.number"]
+        result = graph.validate_workflow({"1": {"class_type": "BoolKeys", "inputs": {"mode": True, "mode.number": 2}}})
+        assert result["valid"] is True, result["errors"]
+        assert not [warning for warning in result["warnings"] if warning["code"] == "unknown_input"]
 
 
 # ===========================================================================
@@ -2773,6 +3159,38 @@ class TestSubgraphIsolation:
         inst12_def = defs[inst12["type"]]
         assert inst12_def["nodes"][0]["widgets_values"][0] == "orig"
 
+    def test_rejected_replay_does_not_leave_a_shared_definition_fork(self, graph: Graph):
+        from comfy_cli import workflow_ops
+
+        wf = {
+            "nodes": [{"id": 10, "type": "uuid-def-1"}, {"id": 12, "type": "uuid-def-1"}],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [{"id": 9, "type": "CLIPTextEncode", "widgets_values": ["orig"]}],
+                    }
+                ]
+            },
+        }
+        before = copy.deepcopy(wf)
+        op = workflow_ops._new_op(
+            "set_widget",
+            "agent",
+            1,
+            node_id="10/9",
+            widget="missing",
+            value="x",
+            path=["10", "9"],
+            inner_widget="missing",
+        )
+
+        with pytest.raises(ValueError, match="not found"):
+            workflow_ops.apply_op(wf, op, graph)
+
+        assert wf == before
+
     def test_single_instance_no_fork(self, graph: Graph):
         """When only one instance of a def exists, no fork is created."""
         from comfy_cli.cql.engine import _apply_one_slot
@@ -4385,3 +4803,108 @@ class TestUnreachableNodeIsVisible:
         assert any(e["code"] == "prompt_no_outputs" for e in result["errors"])
         warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
         assert warns == [], "prompt_no_outputs already says it; don't pile on"
+
+
+# ---------------------------------------------------------------------------
+# _subgraph_defs_by_id / _count_instances — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+class TestSubgraphDefsByIdShapeChecks:
+    """A hand-edited or truncated save can put anything under ``definitions``.
+
+    The old ``(workflow.get("definitions") or {}).get("subgraphs") or []`` only
+    replaced FALSY values, so a truthy wrong-typed one survived and crashed the
+    caller (``comfy workflow slots`` exited on a traceback with no envelope).
+    The agreed degradation is an empty index: a document with no readable
+    definitions has no subgraph instances to resolve, and every caller already
+    handles ``{}``.
+    """
+
+    @pytest.mark.parametrize(
+        "definitions",
+        [5, "definitions", ["x"], 0.0, True],
+        ids=["int", "str", "list", "float", "bool"],
+    )
+    def test_non_dict_definitions_reads_as_no_definitions(self, definitions):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": definitions}) == {}
+
+    @pytest.mark.parametrize(
+        "subgraphs",
+        [5, {"a": 1}, 3.5, True],
+        ids=["int", "dict", "float", "bool"],
+    )
+    def test_non_list_subgraphs_reads_as_no_definitions(self, subgraphs):
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": subgraphs}}) == {}
+
+    def test_string_subgraphs_is_not_walked_per_character(self):
+        """A string is iterable, so a naive guard silently walks it character by
+        character. It happens to yield ``{}`` too (single chars aren't dicts),
+        so this case documents INTENT: the isinstance branch must reject the
+        string outright rather than arrive at ``{}`` by accident."""
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": "abc"}}) == {}
+
+    def test_missing_containers_still_read_as_empty(self):
+        assert _subgraph_defs_by_id({"nodes": []}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": None}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {}}) == {}
+        assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": []}}) == {}
+        # A top-level ``subgraphs`` with no ``definitions`` wrapper is not the
+        # block this helper reads; it must not be picked up by accident.
+        assert _subgraph_defs_by_id({"subgraphs": {"a": 1}}) == {}
+        assert _subgraph_defs_by_id({"subgraphs": [{"id": "u1"}]}) == {}
+
+    def test_well_formed_definitions_still_index_by_id_and_name(self):
+        """Positive control: the shape checks must not cost the happy path."""
+        wf = {"definitions": {"subgraphs": [{"id": "u1", "name": "A", "nodes": []}]}}
+        by_id = _subgraph_defs_by_id(wf)
+        assert by_id["u1"] is wf["definitions"]["subgraphs"][0]
+        assert by_id["A"] is wf["definitions"]["subgraphs"][0], "unambiguous name stays a fallback key"
+
+    def test_non_dict_entries_are_still_skipped(self):
+        """The per-entry guard is unchanged: junk beside a real def is dropped,
+        the real def is kept."""
+        wf = {"definitions": {"subgraphs": ["junk", None, 7, {"id": "u1", "name": "A", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "A"}
+
+
+class TestCountInstancesShapeChecks:
+    def test_non_dict_definitions_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": 5}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_non_list_subgraphs_counts_top_level_only(self):
+        wf = {"nodes": [{"id": 1, "type": "u1"}], "definitions": {"subgraphs": "abc"}}
+        assert _count_instances(wf, "u1") == 1
+
+    def test_well_formed_definitions_still_count_interior_instances(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2
+
+
+class TestSubgraphDefNodesShapeChecks:
+    """One level deeper: a def whose ``nodes`` is truthy but not a list.
+
+    Every caller walks ``sg.get("nodes") or []``, which only replaces a falsy
+    value, so ``{"nodes": 5}`` raised ``TypeError`` once an instance resolved
+    to it (``slots``) or once a sibling def was scanned (``_count_instances``).
+    """
+
+    @pytest.mark.parametrize("nodes", [5, True, "abc", {"a": 1}], ids=["int", "bool", "str", "dict"])
+    def test_def_with_non_list_nodes_is_not_indexed(self, nodes):
+        wf = {"definitions": {"subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1"}
+
+    def test_def_with_missing_or_null_nodes_is_still_indexed(self):
+        wf = {"definitions": {"subgraphs": [{"id": "u1"}, {"id": "u2", "nodes": None}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "u2"}
+
+    def test_count_instances_skips_a_sibling_def_with_non_list_nodes(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "bad", "nodes": 5}, {"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2

@@ -231,6 +231,40 @@ class TestWidgetOrder:
         types = _run(["widget-catalog"], capsys)["data"]["types"]
         assert types["DynNode"]["widget_order"] == ["model", "model.resolution", "seed", "control_after_generate"]
 
+    def test_unsupported_dynamic_group_class_is_left_out_with_a_warning(self, monkeypatch, capsys):
+        """One custom node with a DynamicGroup schema the CLI refuses must not
+        take down the catalog for every other class."""
+        data = _object_info()
+        data["SockGroup"] = {
+            "input": {
+                "required": {
+                    "rows": [
+                        "COMFY_DYNAMICGROUP_V3",
+                        {
+                            "template": {"required": {"image": ["IMAGE", {}], "strength": ["FLOAT", {}]}},
+                            "min": 0,
+                            "max": 4,
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["rows"]},
+            "output": [],
+            "name": "SockGroup",
+            "python_module": "custom_nodes.sock",
+        }
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: _graph(data))
+
+        env = _run(["widget-catalog"], capsys)
+
+        assert env["ok"] is True
+        types = env["data"]["types"]
+        assert "SockGroup" not in types
+        assert set(types) == {m.id for m in _graph().all_nodes()}
+        assert env["data"]["class_count"] == len(types)
+        assert [w["code"] for w in env["data"]["warnings"]] == ["dynamic_group_unsupported"]
+        assert env["data"]["warnings"][0]["message"].startswith("SockGroup left out: DynamicGroup template")
+
 
 # ---------------------------------------------------------------------------
 # autogrow / inputcount families

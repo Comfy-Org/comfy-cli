@@ -24,7 +24,19 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES
+from comfy_cli.cql.engine import (
+    _FRONTEND_DOM_WIDGET_TYPES,
+    LOAD_3D_BUTTON_VALUES,
+    DynamicGroupBindingError,
+    _dynamic_combo_server_key_matches,
+    _dynamic_group_fields,
+    _dynamic_group_row_count,
+    _is_dynamic_combo_type,
+    _parse_morphism,
+    _SubgraphDefs,
+    _validate_dynamic_group_layout,
+    _validate_dynamic_group_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +63,10 @@ _SUBGRAPH_OUTPUT_NODE_ID = -20
 # in malformed inputs.
 _MAX_RESOLUTION_DEPTH = 100
 _MAX_SUBGRAPH_ITERATIONS = 10
+_MAX_SUBGRAPH_EXPANSION_RATIO = 128
+_MIN_SUBGRAPH_EXPANSION_BUDGET = 100_000
+_MAX_SUBGRAPH_EXPANSION_BUDGET = 1_000_000
+_MAX_RESOLVED_SUBGRAPH_INPUTS = 10_000
 
 # Strings that ComfyUI appends after seed-like INT widgets to control how the
 # value changes between runs. They're not real inputs and must be stripped from
@@ -103,6 +119,15 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
     Returns:
         API-format dict: ``{node_id_str: {class_type, inputs, _meta}}``.
     """
+    from comfy_cli.cql.promoted import PromotionTraversalLimitError
+
+    try:
+        return _convert_ui_to_api(workflow, object_info)
+    except PromotionTraversalLimitError as exc:
+        raise WorkflowConversionError(str(exc)) from exc
+
+
+def _convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
     if is_api_format(workflow):
         return workflow
     if not isinstance(workflow, dict):
@@ -172,6 +197,8 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
                 bypassed=bypassed,
                 nodes_to_exclude=nodes_to_exclude,
             )
+        except DynamicGroupBindingError as exc:
+            raise WorkflowConversionError(f"Node {node_id_str} ({node_type}): {exc}") from exc
         except Exception:
             # An individual malformed node should not torpedo the whole prompt.
             # The executor will fail loudly on missing nodes if this matters.
@@ -197,6 +224,27 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     """
     from comfy_cli.cql import promoted as _promoted
 
+    visit_budget = [_MAX_SUBGRAPH_EXPANSION_BUDGET]
+    definition_nodes: dict[int, tuple[dict, list[dict]]] = {}
+    scope_links: dict[int, tuple[dict, set[tuple[type, int | str]]]] = {}
+
+    def nodes_for(definition: dict) -> list[dict]:
+        cached = definition_nodes.get(id(definition))
+        if cached is not None and cached[0] is definition:
+            return cached[1]
+        raw_nodes = definition.get("nodes")
+        nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
+        definition_nodes[id(definition)] = (definition, nodes)
+        return nodes
+
+    def live_link_keys(scope: dict) -> set[tuple[type, int | str]]:
+        cached = scope_links.get(id(scope))
+        if cached is not None and cached[0] is scope:
+            return cached[1]
+        keys = _promoted._live_link_keys(scope)
+        scope_links[id(scope)] = (scope, keys)
+        return keys
+
     def visit(instance: dict, sg: dict, scope: dict, prefix: str, depth: int) -> None:
         # ``scope`` holds the links that can feed THIS instance's inputs: the
         # workflow for a top-level instance, the containing definition for a
@@ -205,21 +253,45 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         # runs, exactly as ``resolve_write`` and ``slots`` treat it.
         if depth > _MAX_SUBGRAPH_ITERATIONS or instance.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
             return
-        for inner in sg.get("nodes") or []:
-            if not isinstance(inner, dict):
-                continue
-            inner_def = subgraph_defs.get(str(inner.get("type", "")))
+        inner_nodes = nodes_for(sg)
+        raw_definition_inputs = sg.get("inputs")
+        definition_input_count = len(raw_definition_inputs) if isinstance(raw_definition_inputs, list) else 0
+        visit_cost = len(inner_nodes) + definition_input_count + 1
+        if visit_cost > visit_budget[0]:
+            raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
+        visit_budget[0] -= visit_cost
+        for inner in inner_nodes:
+            inner_type = inner.get("type")
+            inner_def = subgraph_defs.get(str(inner_type)) if is_subgraph_uuid(inner_type) else None
             if inner_def is not None:
                 visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
-        for pi in _promoted.promoted_inputs(sg, subgraph_defs):
-            if not pi.is_widget or _promoted.live_external_link(scope, instance, pi.name) is not None:
+        promoted_widgets = [pi for pi in _promoted.promoted_inputs(sg, subgraph_defs) if pi.is_widget]
+        if not promoted_widgets:
+            return
+        # Expansion, slots and write resolution share this exact name-first,
+        # positional-fallback mapping and live-entry collision preference.
+        # Cache the scope scan: many sibling instances share the same links.
+        live_links = live_link_keys(scope)
+        mapped_inputs = _promoted._mapped_instance_inputs(scope, instance, sg, live_links)
+
+        def is_live(link_id: Any) -> bool:
+            return _is_link_id(link_id) and (type(link_id), link_id) in live_links
+
+        external_links = {input_index: entry.get("link") for input_index, entry in mapped_inputs.items()}
+        for pi in promoted_widgets:
+            external_link = external_links.get(pi.index)
+            if not pi.is_widget or is_live(external_link):
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
                 continue
             # Every interior widget the input feeds — a repaired primitive
             # fan-out links one host value into several targets.
-            for path, widget in _promoted.boundary_widget_targets(sg, pi, subgraph_defs):
+            targets = _promoted.boundary_widget_targets(sg, pi, subgraph_defs)
+            if len(targets) > visit_budget[0]:
+                raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
+            visit_budget[0] -= len(targets)
+            for path, widget in targets:
                 entry = api_prompt.get(":".join([prefix, *path]))
                 if not isinstance(entry, dict):
                     continue
@@ -234,7 +306,8 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     for node in workflow.get("nodes") or []:
         if not isinstance(node, dict):
             continue
-        sg = subgraph_defs.get(str(node.get("type", "")))
+        node_type = node.get("type")
+        sg = subgraph_defs.get(str(node_type)) if is_subgraph_uuid(node_type) else None
         if sg is not None:
             visit(node, sg, workflow, str(node.get("id")), 0)
 
@@ -281,10 +354,17 @@ class _SubgraphCtx:
     def __init__(self) -> None:
         # subgraph_node_id_str -> {subgraph_input_idx: [(internal_node_id, internal_slot), ...]}
         self.input_targets: dict[str, dict[int, list[tuple[Any, int]]]] = {}
-        # subgraph_node_id_str -> {(internal_node_id, internal_slot): output_slot_idx}
-        self.output_sources: dict[str, dict[tuple[Any, int], int]] = {}
+        # subgraph_node_id_str -> {output_slot_idx: (internal_node_id, internal_slot)}
+        self.output_sources: dict[str, dict[int, tuple[Any, int]]] = {}
+        # subgraph_node_id_str -> {subgraph_input_idx: (upstream_node_id, upstream_slot)}
+        self.input_sources: dict[str, dict[int, tuple[Any, Any]]] = {}
         # subgraph_node_id_str -> {outer_slot: subgraph_input_idx} (when names differ in order)
         self.outer_to_input_idx: dict[str, dict[int, int]] = {}
+        # subgraph_node_id_str -> {raw held link id: every subgraph input idx}
+        self.held_input_idx: dict[str, dict[Any, tuple[int, ...]]] = {}
+        # raw link id -> every expanded instance/input that actually holds it.
+        # This recovers rows whose declared target drifted away from the holder.
+        self.input_holders: dict[Any, list[tuple[str, int]]] = {}
 
 
 def _collect_subgraph_defs(workflow: dict) -> dict[str, dict]:
@@ -294,7 +374,7 @@ def _collect_subgraph_defs(workflow: dict) -> dict[str, dict]:
     subgraphs = definitions.get("subgraphs")
     if not isinstance(subgraphs, list):
         return {}
-    defs: dict[str, dict] = {}
+    defs: dict[str, dict] = _SubgraphDefs()
     for sg in subgraphs:
         if not isinstance(sg, dict):
             continue
@@ -314,9 +394,44 @@ def _expand_subgraphs(
     if not subgraph_defs:
         return nodes, links, ctx
 
+    from comfy_cli.cql import promoted as _promoted
+
+    definition_cache: dict[int, tuple[Any, ...]] = {}
+    expansion_metrics: dict[int, tuple[dict, int, int, int]] = {}
+    # Interior rows minted during expansion must not collide with either a
+    # concrete outer row or a stale id that an outer input still holds. A
+    # single allocator also avoids rescanning the growing link list once per
+    # instance.
+    max_link_id = 0
+    for link in links:
+        if isinstance(link, (list, tuple)) and link and _is_slot_index(link[0]):
+            max_link_id = max(max_link_id, link[0])
+    for node in nodes:
+        raw_inputs = node.get("inputs")
+        for entry in raw_inputs if isinstance(raw_inputs, list) else []:
+            if isinstance(entry, dict) and _is_slot_index(entry.get("link")):
+                max_link_id = max(max_link_id, entry["link"])
+    link_id_counter = [max_link_id + 1]
+    serialized_size = len(links) + 1 + sum(_node_expansion_cost(node) for node in nodes)
+    seen_definitions: set[int] = set()
+    for definition in subgraph_defs.values():
+        if not isinstance(definition, dict) or id(definition) in seen_definitions:
+            continue
+        seen_definitions.add(id(definition))
+        cost, node_count, link_count = _definition_expansion_metrics(definition)
+        expansion_metrics[id(definition)] = (definition, cost, node_count, link_count)
+        serialized_size += 1 + cost
+    expansion_budget = [
+        min(
+            _MAX_SUBGRAPH_EXPANSION_BUDGET,
+            max(_MIN_SUBGRAPH_EXPANSION_BUDGET, serialized_size * _MAX_SUBGRAPH_EXPANSION_RATIO),
+        )
+    ]
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
+        iteration_scope = {"links": links}
+        iteration_live_keys = _promoted._live_link_keys(iteration_scope)
         for node in nodes:
             node_type = node.get("type")
             if is_subgraph_uuid(node_type) and node_type in subgraph_defs:
@@ -331,33 +446,216 @@ def _expand_subgraphs(
                     expanded.append(node)
                     continue
                 found_any = True
-                sg_nodes, sg_links, input_map, output_map = _expand_one_subgraph(node, subgraph_defs[node_type], links)
+                generated = _instance_expansion_cost(
+                    subgraph_defs[node_type],
+                    node.get("id"),
+                    _metrics=expansion_metrics,
+                )
+                if generated > expansion_budget[0]:
+                    raise WorkflowConversionError("subgraph expansion exceeded its proportional safe limit")
+                expansion_budget[0] -= generated
+                sg_nodes, sg_links, input_map, output_map = _expand_one_subgraph(
+                    node,
+                    subgraph_defs[node_type],
+                    links,
+                    _definition_cache=definition_cache,
+                    _link_id_counter=link_id_counter,
+                )
                 expanded.extend(sg_nodes)
                 links.extend(sg_links)
                 ctx.input_targets[str(node.get("id"))] = input_map
                 ctx.output_sources[str(node.get("id"))] = output_map
-                ctx.outer_to_input_idx[str(node.get("id"))] = _outer_slot_to_input_idx(node, subgraph_defs[node_type])
+                node_id = str(node.get("id"))
+                outer_map = _outer_slot_to_input_idx(
+                    node,
+                    subgraph_defs[node_type],
+                    _definition_cache=definition_cache,
+                )
+                ctx.outer_to_input_idx[node_id] = outer_map
+                held_slots: dict[Any, set[int]] = {}
+                mapped_inputs = _promoted._mapped_instance_inputs(
+                    iteration_scope, node, subgraph_defs[node_type], iteration_live_keys
+                )
+                for input_index, entry in mapped_inputs.items():
+                    if not _is_link_id(entry.get("link")):
+                        continue
+                    held_slots.setdefault(entry["link"], set()).add(input_index)
+                ctx.held_input_idx[node_id] = {link_id: tuple(sorted(slots)) for link_id, slots in held_slots.items()}
+                for link_id, slots in ctx.held_input_idx[node_id].items():
+                    ctx.input_holders.setdefault(link_id, []).extend((node_id, slot) for slot in slots)
             else:
                 expanded.append(node)
         nodes = expanded
         if not found_any:
             return nodes, links, ctx
 
-    logger.warning("Subgraph expansion hit iteration cap — possible cyclic reference")
+    if any(
+        node.get("mode") not in (_MODE_MUTED, _MODE_BYPASS)
+        and isinstance(node.get("type"), str)
+        and is_subgraph_uuid(node.get("type"))
+        and node.get("type") in subgraph_defs
+        for node in nodes
+    ):
+        raise WorkflowConversionError("subgraph expansion exceeded its iteration safe limit")
     return nodes, links, ctx
 
 
-def _outer_slot_to_input_idx(outer_node: dict, sg_def: dict) -> dict[int, int]:
+def _node_expansion_cost(node: dict) -> int:
+    """Work/memory copied for one node during expansion."""
+    raw_inputs = node.get("inputs")
+    raw_outputs = node.get("outputs")
+    input_entries = raw_inputs if isinstance(raw_inputs, list) else []
+    return (
+        len(node)
+        + len(str(node.get("id", "")))
+        + len(input_entries)
+        + sum(len(entry) for entry in input_entries if isinstance(entry, dict))
+        + (len(raw_outputs) if isinstance(raw_outputs, list) else 0)
+    )
+
+
+def _definition_expansion_metrics(definition: dict) -> tuple[int, int, int]:
+    """Cached-worthy copied work plus real node/link counts for one definition."""
+    raw_nodes = definition.get("nodes")
+    raw_links = definition.get("links")
+    raw_inputs = definition.get("inputs")
+    nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
+    links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
+    raw_scan_cost = (len(raw_nodes) if isinstance(raw_nodes, list) else 0) + (
+        len(raw_links) if isinstance(raw_links, list) else 0
+    )
+    if isinstance(raw_inputs, list):
+        raw_scan_cost += len(raw_inputs)
+        raw_scan_cost += sum(
+            len(entry) + (len(entry.get("linkIds")) if isinstance(entry.get("linkIds"), list) else 0)
+            for entry in raw_inputs
+            if isinstance(entry, dict)
+        )
+    copied_cost = sum(_node_expansion_cost(node) for node in nodes) + sum(
+        1 + len(link) + len(str(link.get("origin_id", ""))) + len(str(link.get("target_id", ""))) for link in links
+    )
+    return raw_scan_cost + copied_cost, len(nodes), len(links)
+
+
+def _definition_expansion_cost(definition: dict) -> int:
+    return _definition_expansion_metrics(definition)[0]
+
+
+def _instance_expansion_cost(
+    definition: dict,
+    outer_id: Any,
+    *,
+    _metrics: dict[int, tuple[dict, int, int, int]] | None = None,
+) -> int:
+    """Copied work for one instance, including its repeated id prefix."""
+    cached = _metrics.get(id(definition)) if _metrics is not None else None
+    if cached is not None and cached[0] is definition:
+        _definition, definition_cost, node_count, link_count = cached
+    else:
+        definition_cost, node_count, link_count = _definition_expansion_metrics(definition)
+        if _metrics is not None:
+            _metrics[id(definition)] = (definition, definition_cost, node_count, link_count)
+    prefix_size = len(str(outer_id)) + 1
+    return definition_cost + prefix_size * (node_count + 2 * link_count)
+
+
+def _last_wins_interior_links(internal_links: list[dict], link_map: dict[Any, dict]) -> list[dict]:
+    """Interior rows that own their id after last-row-wins normalization."""
+    return [
+        link
+        for link in internal_links
+        if _is_link_id(link.get("id"))
+        and link_map.get(link.get("id")) is link
+        and str(link.get("origin_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+        and str(link.get("target_id")) not in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+    ]
+
+
+def _output_boundary_holder_edges(
+    sg_def: dict,
+    internal_links: list[dict],
+    link_map: dict[Any, dict],
+    holders: dict[Any, list[tuple[dict, int, dict]]],
+    outer_id: Any,
+    link_id_counter: list[int],
+) -> tuple[dict[tuple[int, int], int], list[list[Any]]]:
+    """Mint interior edges for real inputs holding an output-boundary row."""
+    from comfy_cli.cql.promoted import held_link_targets
+
+    holder_ids: dict[tuple[int, int], int] = {}
+    edges: list[list[Any]] = []
+    for link in internal_links:
+        old_id = link.get("id")
+        if (
+            not _is_link_id(old_id)
+            or link_map.get(old_id) is not link
+            or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID)
+            or str(link.get("origin_id")) in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID))
+        ):
+            continue
+        for target, target_slot, _entry in held_link_targets(sg_def, old_id, link, holders):
+            new_id = link_id_counter[0]
+            link_id_counter[0] += 1
+            holder_ids[(id(target), target_slot)] = new_id
+            edges.append(
+                [
+                    new_id,
+                    f"{outer_id}:{link.get('origin_id')}",
+                    link.get("origin_slot"),
+                    f"{outer_id}:{target.get('id')}",
+                    target_slot,
+                    link.get("type"),
+                ]
+            )
+    return holder_ids, edges
+
+
+def _expanded_node_inputs(
+    inner: dict,
+    internal_link_map: dict[Any, dict],
+    link_id_remap: dict[Any, int],
+    boundary_holder_ids: dict[tuple[int, int], int],
+) -> list[Any]:
+    """Rewrite one expanded node's inputs, including boundary-holder edges."""
+    raw_inputs = inner.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    expanded: list[Any] = []
+    for slot, entry in enumerate(inputs):
+        if not isinstance(entry, dict):
+            expanded.append(entry)
+            continue
+        rewritten = _rewrite_internal_input(entry, internal_link_map, link_id_remap)
+        holder_id = boundary_holder_ids.get((id(inner), slot))
+        if holder_id is not None:
+            rewritten["link"] = holder_id
+        expanded.append(rewritten)
+    return expanded
+
+
+def _outer_slot_to_input_idx(
+    outer_node: dict,
+    sg_def: dict,
+    *,
+    _definition_cache: dict[int, tuple[Any, ...]] | None = None,
+) -> dict[int, int]:
     """Map the outer node's input slots to subgraph-definition input indices."""
-    sg_input_names: dict[Any, int] = {}
-    for idx, inp in enumerate(sg_def.get("inputs") or []):
-        if isinstance(inp, dict):
-            sg_input_names[inp.get("name")] = idx
+    cached = _definition_cache.get(id(sg_def)) if _definition_cache is not None else None
+    if cached is not None and cached[0] is sg_def and len(cached) >= 11:
+        sg_input_names = cached[10]
+    else:
+        sg_input_names = {}
+        raw_definition_inputs = sg_def.get("inputs")
+        definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
+        for idx, inp in enumerate(definition_inputs):
+            if isinstance(inp, dict):
+                sg_input_names.setdefault(_input_name(inp.get("name")), idx)
     mapping: dict[int, int] = {}
-    for outer_idx, outer_input in enumerate(outer_node.get("inputs") or []):
+    raw_outer_inputs = outer_node.get("inputs")
+    outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
+    for outer_idx, outer_input in enumerate(outer_inputs):
         if not isinstance(outer_input, dict):
             continue
-        name = outer_input.get("name")
+        name = _input_name(outer_input.get("name"))
         if name in sg_input_names:
             mapping[outer_idx] = sg_input_names[name]
     return mapping
@@ -371,28 +669,95 @@ def _is_link_id(value: Any) -> bool:
     return isinstance(value, (int, str)) and not isinstance(value, bool)
 
 
+def _is_slot_index(value: Any) -> bool:
+    """Whether ``value`` is a serialized input/output slot index."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _input_name(value: Any) -> str:
+    """Hashable boundary name with the same coercion on both sides."""
+    return "" if value is None else str(value)
+
+
 def _expand_one_subgraph(
-    outer_node: dict, sg_def: dict, existing_links: list
-) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[tuple[Any, int], int]]:
+    outer_node: dict,
+    sg_def: dict,
+    existing_links: list,
+    *,
+    _definition_cache: dict[int, tuple[Any, ...]] | None = None,
+    _link_id_counter: list[int] | None = None,
+) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[int, tuple[Any, int]]]:
+    from comfy_cli.cql.promoted import _link_holders, _listed_link_ids, held_link_targets
+
     outer_id = outer_node.get("id")
-    internal_nodes = [n for n in (sg_def.get("nodes") or []) if isinstance(n, dict)]
-    internal_links = sg_def.get("links") or []
+    internal_link_map: dict[Any, dict] | None = None
+    interior_links: list[dict] | None = None
+    cached = _definition_cache.get(id(sg_def)) if _definition_cache is not None else None
+    if cached is None or cached[0] is not sg_def:
+        raw_nodes = sg_def.get("nodes")
+        internal_nodes = [n for n in raw_nodes if isinstance(n, dict)] if isinstance(raw_nodes, list) else []
+        raw_links = sg_def.get("links")
+        internal_links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
+        raw_inputs = sg_def.get("inputs")
+        definition_inputs = raw_inputs if isinstance(raw_inputs, list) else []
+        holders = _link_holders({"nodes": internal_nodes})
+        input_slots_by_link: dict[Any, set[int]] = {}
+        serialized_boundary_links = 0
+        for idx, entry in enumerate(definition_inputs):
+            if not isinstance(entry, dict):
+                continue
+            listed = _listed_link_ids(entry)
+            serialized_boundary_links += len(listed)
+            for link_id in listed:
+                if _is_link_id(link_id):
+                    input_slots_by_link.setdefault(link_id, set()).add(idx)
+        interior_by_id = {str(node.get("id")): node for node in internal_nodes}
+        internal_link_map = {link.get("id"): link for link in internal_links if _is_link_id(link.get("id"))}
+        interior_links = _last_wins_interior_links(internal_links, internal_link_map)
+        cached = (
+            sg_def,
+            internal_nodes,
+            internal_links,
+            definition_inputs,
+            holders,
+            input_slots_by_link,
+            serialized_boundary_links,
+            interior_by_id,
+        )
+        if _definition_cache is not None:
+            _definition_cache[id(sg_def)] = cached
+    (
+        _definition,
+        internal_nodes,
+        internal_links,
+        definition_inputs,
+        holders,
+        input_slots_by_link,
+        serialized_boundary_links,
+        interior_by_id,
+    ) = cached[:8]
+    if len(cached) >= 13:
+        internal_link_map, interior_links = cached[11:13]
+    elif internal_link_map is None or interior_links is None:
+        internal_link_map = {link.get("id"): link for link in internal_links if _is_link_id(link.get("id"))}
+        interior_links = _last_wins_interior_links(internal_links, internal_link_map)
+    assert internal_link_map is not None and interior_links is not None
 
-    # Subgraph internal link IDs may collide with the outer workflow's IDs.
-    # Allocate fresh IDs starting above the current maximum.
-    max_link_id = 0
-    for link in existing_links:
-        if isinstance(link, (list, tuple)) and link:
-            lid = link[0]
-            if isinstance(lid, int) and lid > max_link_id:
-                max_link_id = lid
-    next_id = max_link_id + 1
+    # Direct callers that do not share the expansion allocator still get an id
+    # above concrete rows and every integer id held by this instance.
+    if _link_id_counter is None:
+        max_link_id = 0
+        for link in existing_links:
+            if isinstance(link, (list, tuple)) and link and _is_slot_index(link[0]):
+                max_link_id = max(max_link_id, link[0])
+        raw_outer_inputs = outer_node.get("inputs")
+        for entry in raw_outer_inputs if isinstance(raw_outer_inputs, list) else []:
+            if isinstance(entry, dict) and _is_slot_index(entry.get("link")):
+                max_link_id = max(max_link_id, entry["link"])
+        _link_id_counter = [max_link_id + 1]
 
-    link_id_remap: dict[int, int] = {}
-    internal_link_map: dict[int, dict] = {}
-    for link in internal_links:
-        if not isinstance(link, dict):
-            continue
+    link_id_remap: dict[Any, int] = {}
+    for link in interior_links:
         old_id = link.get("id")
         # link_id_remap[old_id] / internal_link_map[old_id] need a hashable key
         # (see _is_link_id). Skip the entry entirely on a missing/unhashable/
@@ -400,53 +765,120 @@ def _expand_one_subgraph(
         # before the per-node try/except wrapper).
         if not _is_link_id(old_id):
             continue
-        link_id_remap[old_id] = next_id
-        next_id += 1
-        internal_link_map[old_id] = link
+        link_id_remap[old_id] = _link_id_counter[0]
+        _link_id_counter[0] += 1
 
-    input_targets: dict[int, list[tuple[Any, int]]] = {}
-    for idx, in_def in enumerate(sg_def.get("inputs") or []):
-        if not isinstance(in_def, dict):
-            continue
-        targets = []
-        for lid in in_def.get("linkIds") or []:
-            if not _is_link_id(lid):
-                continue
-            link = internal_link_map.get(lid)
-            if isinstance(link, dict):
-                targets.append((link.get("target_id"), link.get("target_slot")))
-        if targets:
-            input_targets[idx] = targets
+    # A row routed to the output proxy can also be held by a real interior
+    # input in malformed-but-recoverable saves. The renderer treats every
+    # real holder as fed by the row's source; preserve those dependencies in
+    # the API graph with one fresh edge per holder while still publishing the
+    # same row as the definition output.
+    boundary_holder_ids, boundary_holder_edges = _output_boundary_holder_edges(
+        sg_def, internal_links, internal_link_map, holders, outer_id, _link_id_counter
+    )
 
-    output_sources: dict[tuple[Any, int], int] = {}
-    for idx, out_def in enumerate(sg_def.get("outputs") or []):
-        if not isinstance(out_def, dict):
-            continue
-        for lid in out_def.get("linkIds") or []:
-            if not _is_link_id(lid):
+    if len(cached) >= 11:
+        input_targets, output_sources, _definition_input_names = cached[8:11]
+    else:
+        input_targets = {}
+        target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
+        target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 3 * serialized_boundary_links]
+        for idx, in_def in enumerate(definition_inputs):
+            if not isinstance(in_def, dict):
                 continue
-            link = internal_link_map.get(lid)
-            if isinstance(link, dict):
-                output_sources[(link.get("origin_id"), link.get("origin_slot"))] = idx
+            targets = []
+            seen_targets: set[tuple[str, int]] = set()
+            for lid in _listed_link_ids(in_def):
+                if target_budget[0] <= 0:
+                    raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
+                target_budget[0] -= 1
+                if not _is_link_id(lid) or input_slots_by_link.get(lid) != {idx}:
+                    continue
+                link = internal_link_map.get(lid)
+                if isinstance(link, dict) and str(link.get("origin_id")) == str(_SUBGRAPH_INPUT_NODE_ID):
+                    for target, target_slot, _entry in held_link_targets(
+                        sg_def,
+                        lid,
+                        link,
+                        holders,
+                        target_cache,
+                        target_budget,
+                        "subgraph input expansion exceeded its safe limit",
+                    ):
+                        target_key = (str(target.get("id")), target_slot)
+                        if target_key in seen_targets:
+                            continue
+                        if target_budget[0] <= 0:
+                            raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
+                        target_budget[0] -= 1
+                        seen_targets.add(target_key)
+                        targets.append((target.get("id"), target_slot))
+            if targets:
+                input_targets[idx] = targets
+
+        output_sources = {}
+        raw_outputs = sg_def.get("outputs")
+        definition_outputs = raw_outputs if isinstance(raw_outputs, list) else []
+        output_slots_by_link: dict[Any, set[int]] = {}
+        for idx, out_def in enumerate(definition_outputs):
+            if not isinstance(out_def, dict):
+                continue
+            for lid in _listed_link_ids(out_def):
+                if _is_link_id(lid):
+                    output_slots_by_link.setdefault(lid, set()).add(idx)
+        resolved_output_link_ids: set[Any] = set()
+        for link in internal_links:
+            lid = link.get("id")
+            output_slots = output_slots_by_link.get(lid, set()) if _is_link_id(lid) else set()
+            if (
+                not output_slots
+                or internal_link_map.get(lid) is not link
+                or lid in resolved_output_link_ids
+                or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID)
+            ):
+                continue
+            origin_id = link.get("origin_id")
+            origin_slot = link.get("origin_slot")
+            if str(origin_id) == str(_SUBGRAPH_INPUT_NODE_ID):
+                listed_inputs = input_slots_by_link.get(lid, set())
+                if len(listed_inputs) == 1:
+                    source = (_SUBGRAPH_INPUT_NODE_ID, next(iter(listed_inputs)))
+                    for output_slot in output_slots:
+                        output_sources.setdefault(output_slot, source)
+                    resolved_output_link_ids.add(lid)
+                continue
+            source_node = interior_by_id.get(str(origin_id))
+            if not _is_link_id(origin_id) or not _is_slot_index(origin_slot) or origin_slot < 0 or source_node is None:
+                continue
+            outputs = source_node.get("outputs")
+            if isinstance(outputs, list) and origin_slot >= len(outputs):
+                continue
+            for output_slot in output_slots:
+                output_sources.setdefault(output_slot, (origin_id, origin_slot))
+            resolved_output_link_ids.add(lid)
+
+        definition_input_names: dict[str, int] = {}
+        for idx, entry in enumerate(definition_inputs):
+            if isinstance(entry, dict):
+                definition_input_names.setdefault(_input_name(entry.get("name")), idx)
+        cached = (*cached, input_targets, output_sources, definition_input_names, internal_link_map, interior_links)
+        if _definition_cache is not None:
+            _definition_cache[id(sg_def)] = cached
 
     expanded_nodes: list[dict] = []
     for inner in internal_nodes:
         expanded = inner.copy()
         expanded["id"] = f"{outer_id}:{inner.get('id')}"
-        expanded["inputs"] = [
-            _rewrite_internal_input(inp, internal_link_map, link_id_remap) for inp in inner.get("inputs", []) or []
-        ]
+        expanded["inputs"] = _expanded_node_inputs(inner, internal_link_map, link_id_remap, boundary_holder_ids)
         expanded_nodes.append(expanded)
 
     expanded_links: list = []
-    for link in internal_links:
-        if not isinstance(link, dict):
-            continue
+    for link in interior_links:
         origin_id = link.get("origin_id")
         target_id = link.get("target_id")
-        if origin_id in (_SUBGRAPH_INPUT_NODE_ID, _SUBGRAPH_OUTPUT_NODE_ID):
+        if str(origin_id) in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID)):
             continue
-        if target_id in (_SUBGRAPH_INPUT_NODE_ID, _SUBGRAPH_OUTPUT_NODE_ID):
+        if str(target_id) in (str(_SUBGRAPH_INPUT_NODE_ID), str(_SUBGRAPH_OUTPUT_NODE_ID)):
             continue
         old_id = link.get("id")
         if not _is_link_id(old_id):
@@ -462,6 +894,7 @@ def _expand_one_subgraph(
                 link.get("type"),
             ]
         )
+    expanded_links.extend(boundary_holder_edges)
 
     return expanded_nodes, expanded_links, input_targets, output_sources
 
@@ -478,12 +911,18 @@ def _rewrite_internal_input(
         return input_copy
     link = internal_link_map.get(link_id)
     if not isinstance(link, dict):
-        return input_copy
-    if link.get("origin_id") == _SUBGRAPH_INPUT_NODE_ID:
-        # Will be reattached to an external link by _rewrite_links_for_subgraphs.
+        # An interior holder whose row is absent is dangling in this definition.
+        # Keeping its raw id would let it collide with an unrelated link in an
+        # outer scope after expansion.
         input_copy["link"] = None
-    elif link_id in link_id_remap:
+        return input_copy
+    if link_id in link_id_remap:
         input_copy["link"] = link_id_remap[link_id]
+    else:
+        # Boundary and malformed rows are not emitted. They may be reattached
+        # to an external link later; until then their definition-scope id must
+        # never collide with an outer row.
+        input_copy["link"] = None
     return input_copy
 
 
@@ -493,22 +932,204 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         return links
 
     node_input_updates: dict[str, dict[int, int]] = {}
+    expanded_node_ids = {str(node.get("id")) for node in nodes}
+    live_input_holders: dict[Any, list[tuple[str, int]]] = {}
+    for node in nodes:
+        raw_inputs = node.get("inputs")
+        inputs = raw_inputs if isinstance(raw_inputs, list) else []
+        for slot, entry in enumerate(inputs):
+            if isinstance(entry, dict) and _is_link_id(entry.get("link")):
+                live_input_holders.setdefault(entry["link"], []).append((str(node.get("id")), slot))
+    resolution_memo: dict[tuple[str, str, bool], list[tuple[Any, Any]]] = {}
+    # A one-to-one boundary row spends four fixed units (root visit, direct
+    # target, leaf visit, result append). Reserve that serialized baseline;
+    # the fixed cap remains available only for fan-out beyond it.
+    resolution_budget = [3 * _MAX_RESOLVED_SUBGRAPH_INPUTS + (3 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
+    source_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + (2 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
+    # Holder routing depends only on a typed link id, not on which duplicate
+    # row carried it. Materialize each fanout once so repeated rows cannot turn
+    # K serialized holders into K² work.
+    routed_holder_targets: dict[Any, tuple[list[tuple[Any, Any]], set[tuple[str, int]]]] = {}
+    routed_link_ids = {
+        link[0] for link in links if isinstance(link, (list, tuple)) and len(link) >= 6 and _is_link_id(link[0])
+    }
+    for routed_link_id in routed_link_ids:
+        holder_specs = ctx.input_holders.get(routed_link_id, [])
+        live_holder_specs = live_input_holders.get(routed_link_id, [])
+        if not holder_specs and not live_holder_specs:
+            continue
+        targets: list[tuple[Any, Any]] = []
+        update_targets: set[tuple[str, int]] = set()
+        for holder_id, held_idx in holder_specs:
+            resolved = _resolve_subgraph_input_all(
+                holder_id,
+                held_idx,
+                ctx,
+                _memo=resolution_memo,
+                _budget=resolution_budget,
+                _definition_slot=True,
+            )
+            if resolved != [(holder_id, held_idx)]:
+                targets.extend(resolved)
+                update_targets.update(
+                    (str(resolved_id), resolved_slot)
+                    for resolved_id, resolved_slot in resolved
+                    if _is_slot_index(resolved_slot)
+                )
+        targets.extend(live_holder_specs)
+        deduped: list[tuple[Any, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            key = (str(target[0]), repr(target[1]))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(target)
+        routed_holder_targets[routed_link_id] = (deduped, update_targets)
+    # Concrete link lookup is last-row-wins. Walk in reverse and process each
+    # typed id once so passthrough source recording uses that same row and
+    # duplicate rows cannot multiply boundary-fanout work.
+    source_link_ids: set[Any] = set()
+    for link in reversed(links):
+        if not isinstance(link, (list, tuple)) or len(link) < 6:
+            continue
+        link_id, src_id, src_slot, tgt_id, tgt_slot, _link_type = link[:6]
+        if not _is_link_id(link_id) or link_id in source_link_ids:
+            continue
+        source_link_ids.add(link_id)
+        tgt_id_str = str(tgt_id)
+        holder_specs = ctx.input_holders.get(link_id, [])
+        if holder_specs:
+            for holder_id, held_idx in holder_specs:
+                _record_subgraph_input_source(holder_id, held_idx, (src_id, src_slot), ctx, source_budget)
+            continue
+        if tgt_id_str not in ctx.output_sources and tgt_id_str not in ctx.input_targets:
+            continue
+        if tgt_id_str in ctx.held_input_idx:
+            held_slots = ctx.held_input_idx[tgt_id_str].get(link_id)
+            if not held_slots:
+                continue
+            for held_idx in held_slots:
+                _record_subgraph_input_source(tgt_id_str, held_idx, (src_id, src_slot), ctx, source_budget)
+            continue
+        else:
+            if not ((isinstance(tgt_slot, int) and not isinstance(tgt_slot, bool)) or isinstance(tgt_slot, str)):
+                continue
+            outer_map = ctx.outer_to_input_idx.get(tgt_id_str)
+            held_idx = outer_map.get(tgt_slot, tgt_slot) if outer_map else tgt_slot
+        if not isinstance(held_idx, int) or isinstance(held_idx, bool):
+            continue
+        _record_subgraph_input_source(
+            tgt_id_str,
+            held_idx,
+            (src_id, src_slot),
+            ctx,
+            source_budget,
+        )
+    # If the authoritative last row for an id resolves to an unwired
+    # passthrough, every duplicate row with that id is stale and must be
+    # removed. Otherwise an earlier duplicate becomes the effective row.
+    last_rows: dict[Any, tuple | list] = {}
+    for link in links:
+        if isinstance(link, (list, tuple)) and len(link) >= 6 and _is_link_id(link[0]):
+            last_rows[link[0]] = link
+    dropped_unwired_ids = {
+        link_id for link_id, link in last_rows.items() if _resolve_subgraph_output(str(link[1]), link[2], ctx) is None
+    }
     updated: list = []
+    applied_holder_updates: set[Any] = set()
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
             updated.append(link)
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot, link_type = link[:6]
+        if _is_link_id(link_id) and link_id in dropped_unwired_ids:
+            continue
 
         src_id_str = str(src_id)
-        src_id_out, src_slot_out = _resolve_subgraph_output(src_id_str, src_slot, ctx)
+        resolved_source = _resolve_subgraph_output(src_id_str, src_slot, ctx)
+        if resolved_source is None:
+            continue
+        src_id_out, src_slot_out = resolved_source
 
         tgt_id_str = str(tgt_id)
-        all_targets = _resolve_subgraph_input_all(tgt_id_str, tgt_slot, ctx)
+        effective_tgt_slot = tgt_slot
+        holder_specs = ctx.input_holders.get(link_id, []) if _is_link_id(link_id) else []
+        live_holder_specs = live_input_holders.get(link_id, []) if _is_link_id(link_id) else []
+        expanded_target = (
+            bool(holder_specs)
+            or tgt_id_str in ctx.held_input_idx
+            or tgt_id_str in ctx.input_targets
+            or tgt_id_str in ctx.output_sources
+        )
+        holder_route = routed_holder_targets.get(link_id) if _is_link_id(link_id) else None
+        if holder_route is not None:
+            all_targets = holder_route[0]
+            update_targets = holder_route[1]
+        else:
+            all_targets = []
+            update_targets = set()
+            if tgt_id_str in ctx.held_input_idx:
+                if not _is_link_id(link_id):
+                    continue
+                held_slots = ctx.held_input_idx[tgt_id_str].get(link_id)
+                if not held_slots:
+                    continue
+                for held_idx in held_slots:
+                    resolved = _resolve_subgraph_input_all(
+                        tgt_id_str,
+                        held_idx,
+                        ctx,
+                        _memo=resolution_memo,
+                        _budget=resolution_budget,
+                        _definition_slot=True,
+                    )
+                    all_targets.extend(resolved)
+                    update_targets.update(
+                        (str(resolved_id), resolved_slot)
+                        for resolved_id, resolved_slot in resolved
+                        if _is_slot_index(resolved_slot)
+                    )
+            else:
+                all_targets = _resolve_subgraph_input_all(
+                    tgt_id_str,
+                    effective_tgt_slot,
+                    ctx,
+                    _memo=resolution_memo,
+                    _budget=resolution_budget,
+                )
+                update_targets.update(
+                    (str(resolved_id), resolved_slot)
+                    for resolved_id, resolved_slot in all_targets
+                    if _is_slot_index(resolved_slot)
+                    and (str(resolved_id) != tgt_id_str or resolved_slot != effective_tgt_slot)
+                )
+        if holder_route is None:
+            deduped_targets: list[tuple[Any, Any]] = []
+            seen_targets: set[tuple[str, str]] = set()
+            for resolved_target in all_targets:
+                key = (str(resolved_target[0]), repr(resolved_target[1]))
+                if key not in seen_targets:
+                    seen_targets.add(key)
+                    deduped_targets.append(resolved_target)
+            all_targets = deduped_targets
+        if expanded_target and not all_targets:
+            # The expanded-away instance has no live interior holder for this
+            # input. Passthrough outputs already captured its upstream in the
+            # pre-pass; retaining this row would point at a nonexistent node.
+            continue
+        if not all_targets:
+            all_targets = [(tgt_id_str, effective_tgt_slot)]
         # Track input-slot rewrites for ALL targets (one outer input may fan out).
-        for resolved_tgt_id, resolved_tgt_slot in all_targets:
-            if resolved_tgt_id != tgt_id_str:
-                node_input_updates.setdefault(resolved_tgt_id, {})[resolved_tgt_slot] = link_id
+        if not _is_link_id(link_id) or link_id not in applied_holder_updates:
+            for resolved_tgt_id, resolved_tgt_slot in all_targets:
+                if (
+                    _is_slot_index(resolved_tgt_slot)
+                    and (str(resolved_tgt_id), resolved_tgt_slot) in update_targets
+                    and str(resolved_tgt_id) in expanded_node_ids
+                ):
+                    node_input_updates.setdefault(str(resolved_tgt_id), {})[resolved_tgt_slot] = link_id
+            if _is_link_id(link_id):
+                applied_holder_updates.add(link_id)
 
         first_tgt_id, first_tgt_slot = all_targets[0]
         updated.append([link_id, src_id_out, src_slot_out, first_tgt_id, first_tgt_slot, link_type])
@@ -519,38 +1140,111 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         if node_id_str not in node_input_updates:
             continue
         slot_to_link = node_input_updates[node_id_str]
-        for slot_idx, input_info in enumerate(node.get("inputs", []) or []):
-            if slot_idx in slot_to_link:
+        raw_inputs = node.get("inputs")
+        inputs = raw_inputs if isinstance(raw_inputs, list) else []
+        for slot_idx, input_info in enumerate(inputs):
+            if slot_idx in slot_to_link and isinstance(input_info, dict):
                 input_info["link"] = slot_to_link[slot_idx]
 
     return updated
 
 
-def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0) -> tuple[Any, Any]:
+def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0) -> tuple[Any, Any] | None:
     if depth > _MAX_RESOLUTION_DEPTH:
-        return node_id_str, slot
+        raise WorkflowConversionError("subgraph output resolution exceeded its safe limit")
     mapping = ctx.output_sources.get(node_id_str)
     if not mapping:
         return node_id_str, slot
-    for (internal_node, internal_slot), out_slot in mapping.items():
-        if out_slot == slot:
-            new_id = f"{node_id_str}:{internal_node}"
-            return _resolve_subgraph_output(new_id, internal_slot, ctx, depth + 1)
-    return node_id_str, slot
+    if not isinstance(slot, int) or isinstance(slot, bool):
+        return node_id_str, slot
+    source = mapping.get(slot)
+    if source is None:
+        return node_id_str, slot
+    internal_node, internal_slot = source
+    if str(internal_node) == str(_SUBGRAPH_INPUT_NODE_ID):
+        upstream = ctx.input_sources.get(node_id_str, {}).get(internal_slot)
+        if upstream is None:
+            return None
+        return _resolve_subgraph_output(str(upstream[0]), upstream[1], ctx, depth + 1)
+    new_id = f"{node_id_str}:{internal_node}"
+    return _resolve_subgraph_output(new_id, internal_slot, ctx, depth + 1)
+
+
+def _record_subgraph_input_source(
+    node_id_str: str,
+    input_idx: int,
+    source: tuple[Any, Any],
+    ctx: _SubgraphCtx,
+    budget: list[int],
+    depth: int = 0,
+    seen: set[tuple[str, int]] | None = None,
+) -> None:
+    """Record one external source on every nested instance boundary it feeds."""
+    if depth > _MAX_RESOLUTION_DEPTH:
+        return
+    if seen is None:
+        seen = set()
+    key = (node_id_str, input_idx)
+    if key in seen:
+        return
+    sources = ctx.input_sources.setdefault(node_id_str, {})
+    if input_idx in sources:
+        return
+    if budget[0] <= 0:
+        raise WorkflowConversionError("subgraph input-source resolution exceeded its safe limit")
+    budget[0] -= 1
+    seen.add(key)
+    sources[input_idx] = source
+    for internal_node, internal_slot in ctx.input_targets.get(node_id_str, {}).get(input_idx, []):
+        if budget[0] <= 0:
+            raise WorkflowConversionError("subgraph input-source resolution exceeded its safe limit")
+        budget[0] -= 1
+        nested_id = f"{node_id_str}:{internal_node}"
+        if nested_id not in ctx.input_targets and nested_id not in ctx.output_sources:
+            continue
+        nested_idx = internal_slot
+        outer_map = ctx.outer_to_input_idx.get(nested_id)
+        if outer_map:
+            nested_idx = outer_map.get(internal_slot, internal_slot)
+        if isinstance(nested_idx, int) and not isinstance(nested_idx, bool):
+            _record_subgraph_input_source(nested_id, nested_idx, source, ctx, budget, depth + 1, seen)
 
 
 def _resolve_subgraph_input_all(
-    node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0
+    node_id_str: str,
+    slot: Any,
+    ctx: _SubgraphCtx,
+    depth: int = 0,
+    _memo: dict[tuple[str, str, bool], list[tuple[Any, Any]]] | None = None,
+    _budget: list[int] | None = None,
+    _definition_slot: bool = False,
 ) -> list[tuple[Any, Any]]:
+    if _memo is None:
+        _memo = {}
+    if _budget is None:
+        _budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
+    memo_key = (node_id_str, repr(slot), _definition_slot)
+    if memo_key in _memo:
+        result = _memo[memo_key]
+        if len(result) > _budget[0]:
+            raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+        _budget[0] -= len(result)
+        return result
+    if _budget[0] <= 0:
+        raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+    _budget[0] -= 1
     if depth > _MAX_RESOLUTION_DEPTH:
         return [(node_id_str, slot)]
     mapping = ctx.input_targets.get(node_id_str)
     if not mapping:
         return [(node_id_str, slot)]
 
+    if not ((isinstance(slot, int) and not isinstance(slot, bool)) or isinstance(slot, str)):
+        return [(node_id_str, slot)]
+
     sg_input_idx = slot
     outer_map = ctx.outer_to_input_idx.get(node_id_str)
-    if outer_map and slot in outer_map:
+    if not _definition_slot and outer_map and slot in outer_map:
         sg_input_idx = outer_map[slot]
 
     targets = mapping.get(sg_input_idx)
@@ -558,10 +1252,31 @@ def _resolve_subgraph_input_all(
         return [(node_id_str, slot)]
 
     out: list[tuple[Any, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    seen_direct: set[tuple[str, str]] = set()
     for internal_node, internal_slot in targets:
+        direct_key = (str(internal_node), repr(internal_slot))
+        if direct_key in seen_direct:
+            continue
+        seen_direct.add(direct_key)
+        if _budget[0] <= 0:
+            raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+        _budget[0] -= 1
         new_id = f"{node_id_str}:{internal_node}"
-        out.extend(_resolve_subgraph_input_all(new_id, internal_slot, ctx, depth + 1))
-    return out or [(node_id_str, slot)]
+        for resolved_node, resolved_slot in _resolve_subgraph_input_all(
+            new_id, internal_slot, ctx, depth + 1, _memo, _budget
+        ):
+            resolved_key = (str(resolved_node), repr(resolved_slot))
+            if resolved_key in seen:
+                continue
+            if _budget[0] <= 0:
+                raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+            _budget[0] -= 1
+            seen.add(resolved_key)
+            out.append((resolved_node, resolved_slot))
+    result = out or [(node_id_str, slot)]
+    _memo[memo_key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -991,7 +1706,10 @@ def _build_api_node(
         actual_id, actual_slot = tracers.trace_get_set(actual_id, actual_slot)
         actual_id, actual_slot = tracers.trace_reroute(actual_id, actual_slot)
         # If we crossed a subgraph boundary while tracing, finalize to internal node.
-        actual_id, actual_slot = _resolve_subgraph_output(str(actual_id), actual_slot, tracers.subgraph_ctx)
+        resolved_source = _resolve_subgraph_output(str(actual_id), actual_slot, tracers.subgraph_ctx)
+        if resolved_source is None:
+            continue
+        actual_id, actual_slot = resolved_source
 
         actual_id_str = str(actual_id)
         if actual_id_str in primitive_values:
@@ -1117,7 +1835,7 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
         # ``widgets_values`` slot. A letter-case guess here once gave the
         # mixed-case link ``VHS_LoadVideo.meta_batch`` (``VHS_BatchManager``) a
         # slot, shifting the ``format`` value into it and crashing the node.
-        if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
+        if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO", "COMFY_DYNAMICGROUP_V3"}:
             return True, False
         if input_type in _FRONTEND_DOM_WIDGET_TYPES:
             # Uppercase DOM widgets that serialize a slot (Load3D.image);
@@ -1163,7 +1881,7 @@ def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any
     options_meta = input_spec[1] if isinstance(input_spec[1], dict) else {}
     options = options_meta.get("options") or []
     for option in options:
-        if not isinstance(option, dict) or option.get("key") != selected:
+        if not isinstance(option, dict) or not _dynamic_combo_server_key_matches(option.get("key"), selected):
             continue
         sub_def = option.get("inputs")
         if not isinstance(sub_def, dict):
@@ -1211,8 +1929,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     """
     input_def = _schema_input_def(schema)
     # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
-    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
-    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    # attached to Load3D and occur in legacy Load3DAdvanced saves, but the
+    # current Load3DAdvanced factory is buttonless. They are NOT attached to
+    # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
+    # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
@@ -1270,6 +1990,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             is_widget, is_dynamic = _is_widget_input(spec)
             if not is_widget:
                 return
+            legacy_buttons_consumed = False
             if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
                 # The LOAD_3D custom widget adds its three buttons before its own
                 # component widget, so their values sit between ``model_file`` and
@@ -1280,16 +2001,36 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                     and isinstance(widget_values[vidx], str)
                     and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
                 ):
+                    legacy_buttons_consumed = True
                     vidx += 1
             if vidx >= len(widget_values):
+                if legacy_buttons_consumed:
+                    # A save truncated after its button markers still names this
+                    # LOAD_3D slot; emit the component's empty state rather than
+                    # dropping a required input.
+                    pairs.append((name, ""))
+                    return
                 short = True
                 return
             value = widget_values[vidx]
-            pairs.append((name, value))
             vidx += 1
+            if spec[0] == "COMFY_DYNAMICGROUP_V3":
+                template = spec[1].get("template", {})
+                fields = [(n, s) for section in ("required", "optional") for n, s in template.get(section, {}).items()]
+                count = _dynamic_group_row_count(value, len(widget_values) - vidx, len(fields))
+                for row in range(count):
+                    for j, (field, field_spec) in enumerate(fields):
+                        field_next = next_widget_spec(fields, j + 1)
+                        if field_next is None:
+                            field_next = next_widget_spec(fields, 0) if row + 1 < count else next_spec
+                        consume(f"{name}.{row}.{field}", field_spec, depth + 1, field_next)
+                return
+            pairs.append((name, value))
             if is_dynamic:
                 subs = _dynamic_combo_selected_subs(name, spec, value)
-                if not subs and value not in _dynamic_combo_option_keys(spec):
+                if not subs and not any(
+                    _dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(spec)
+                ):
                     # The saved selector no longer names any option in the current
                     # schema (model renamed/removed server-side, or object_info /
                     # workflow version skew). Its sub-input value slots go
@@ -1578,7 +2319,7 @@ def _widget_rejects_control_value(input_spec: Any, value: str) -> bool:
     if type_field == "COMBO":
         return not _combo_lists_option(input_spec, value)
     if _is_widget_input(input_spec)[1]:
-        return value not in _dynamic_combo_option_keys(input_spec)
+        return not any(_dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(input_spec))
     return False
 
 
@@ -1586,8 +2327,6 @@ def _collect_widget_inputs(
     node: dict, node_type: str, object_info: dict, link_inputs: dict[str, list]
 ) -> dict[str, Any]:
     widget_values = node.get("widgets_values")
-    if widget_values is None:
-        return {}
     dynamic_prompt_names = _dynamic_prompt_input_names(node_type, node, object_info)
 
     def emit(name: str, value: Any) -> Any:
@@ -1596,9 +2335,48 @@ def _collect_widget_inputs(
         return _wrap_widget_value(value)
 
     out: dict[str, Any] = {}
+    schema = _schema_for(node_type, node, object_info)
+    input_specs = [
+        spec
+        for section in ("required", "optional")
+        for section_def in [_schema_input_def(schema).get(section)]
+        if isinstance(section_def, dict)
+        for spec in section_def.values()
+    ]
+    group_ui_names: set[str] = set()
+    group_prefixes: tuple[str, ...] = ()
+    group_entry_names: set[str] = set()
+    if schema and any(
+        isinstance(spec, (list, tuple))
+        and spec
+        and isinstance(spec[0], str)
+        and (spec[0].startswith("COMFY_DYNAMICGROUP") or _is_dynamic_combo_type(spec[0]))
+        for spec in input_specs
+    ):
+        morphism = _parse_morphism(node_type, schema)
+        _validate_dynamic_group_schema(morphism)
+        entries = _validate_dynamic_group_layout(node, morphism) or []
+        fields = {p.name: {f.name for f in _dynamic_group_fields(p)} for p in morphism.inputs if p.is_dynamic_group}
+        group_prefixes = tuple(f"{name}." for name in fields)
+        group_entry_names = {entry.name for entry in entries if entry.owner in fields}
+        group_ui_names.update(fields)
+        group_ui_names.update(
+            e.name
+            for e in entries
+            if e.owner in fields and e.name[len(e.owner) + 1 :].partition(".")[2] not in fields[e.owner]
+        )
+    if widget_values is None:
+        return {}
     if isinstance(widget_values, dict):
         # Already self-describing; drop UI-only keys and respect link overrides.
         for key, value in widget_values.items():
+            if key in group_ui_names:
+                continue
+            if group_prefixes and key.startswith(group_prefixes) and key not in group_entry_names:
+                continue
+            spec = _declared_input_spec(_schema_input_def(schema), key)
+            if isinstance(spec, (list, tuple)) and spec and spec[0] == "COMFY_DYNAMICGROUP_V3":
+                continue
             if key in ("videopreview", "preview"):
                 continue
             if key in link_inputs:
@@ -1620,7 +2398,8 @@ def _collect_widget_inputs(
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
     pairs = _schema_widget_pairs(schema, widget_values) if schema else []
-    if pairs:
+    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
+    if pairs or schema_widgets:
         for name, value in pairs:
             if not name or name in link_inputs:
                 continue

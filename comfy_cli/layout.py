@@ -20,6 +20,12 @@ PAD_H = 12.0
 MIN_H = 60.0
 ORIGIN = (40.0, 60.0)
 DEFAULT_SIZE = (210.0, 100.0)
+# The two UI-only node types add_node can mint without a catalog entry: pure
+# annotation nodes with no slots and one positional multiline `text` widget.
+# Defined here (the leaf module) so both the planner and workflow_ops read one
+# constant; workflow_ops re-exports it. The full UI-only set lives in
+# workflow_ops.UI_ONLY_NODE_TYPES — this is the authorable subset of it.
+AUTHORABLE_VIRTUAL_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
 _MARGIN = 10.0
 _GUARD = 1000  # bounded collision-shift loop
 _ORDER_SWEEPS = 4  # barycentre passes for crossing reduction; converges well before this
@@ -259,6 +265,18 @@ def estimate_size(
     return [w, max(h, MIN_H)]
 
 
+def note_size(class_type: str) -> list[float]:
+    """Persisted size for an authorable annotation node (`Note` / `MarkdownNote`).
+
+    These have no catalog entry, no slots, and one multiline text widget, so the
+    catalog-driven path in `estimate_size` cannot be fed from `graph.node`. Both
+    `workflow_ops.add_node` and `assign_positions` call this so the planner's
+    footprint and the size stamped onto the node agree — the same invariant the
+    catalog path keeps by calling `estimate_size` with identical arguments.
+    """
+    return estimate_size(0, 0, 1, n_multiline=1, title=class_type, widget_labels=("text",))
+
+
 def _pair(value) -> tuple[float, float] | None:
     """Read a geometry pair, tolerating both shapes litegraph serialises.
 
@@ -398,8 +416,16 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
     for i, spec in enumerate(out):
         if not (isinstance(spec, dict) and spec.get("op") == "add_node"):
             continue
-        m = graph.node(spec.get("class_type") or "")
-        if m is not None:
+        class_type = spec.get("class_type")
+        # Name decides before the catalog (mirrors workflow_ops.add_node): a
+        # backend class that happens to be called "Note" still sizes as a note.
+        # `isinstance` first — a malformed spec (`class_type: ["Note"]`) must
+        # fall to DEFAULT_SIZE and let apply_specs report it, not TypeError here.
+        is_note = isinstance(class_type, str) and class_type in AUTHORABLE_VIRTUAL_NODE_TYPES
+        m = None if is_note else graph.node(class_type or "")
+        if is_note:
+            size = note_size(class_type)
+        elif m is not None:
             widget_names = tuple(graph.widget_order(spec["class_type"]))
             # object_info already marks multiline inputs; the catalog parses it into
             # PortOptions.multiline. Match by name because widget_order is the render

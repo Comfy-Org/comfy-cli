@@ -116,7 +116,7 @@
         },
         "grant": {
           "type": "object",
-          "description": "The commands that grant more, approving a pending request first.",
+          "description": "The commands that grant more, approving a pending request first. Empty unless a write from the CLI would land: a running agent is the only writer of its permission files, and the same applies when the probe could not settle whether one runs. `answer_in` then says where the user answers instead.",
           "properties": {
             "approve": {
               "type": "string"
@@ -130,13 +130,11 @@
             "host": {
               "type": "string"
             }
-          },
-          "required": [
-            "approve",
-            "deny",
-            "path",
-            "host"
-          ]
+          }
+        },
+        "answer_in": {
+          "type": "string",
+          "description": "Present whenever `grant` is empty: where a waiting request is answered, since the CLI will not write the files then."
         }
       },
       "required": [

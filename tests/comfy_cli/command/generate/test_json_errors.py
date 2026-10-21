@@ -127,7 +127,7 @@ def test_json_unknown_model_envelope(runner, api_key):
 
 
 def test_json_missing_required_param_envelope(runner, api_key):
-    r = runner.invoke(cli_app, ["--json", "generate", "flux-pro", "--prompt", "x"])
+    r = runner.invoke(cli_app, ["--json", "generate", "flux-pro", "--width", "1", "--height", "1"])
     assert r.exit_code == 1
     env = _sole_envelope(r)
     assert env["error"]["code"] == "generate_bad_args"
@@ -211,7 +211,7 @@ def test_pretty_unknown_model_output_unchanged(runner, api_key):
 
 
 def test_pretty_missing_required_still_suggests_schema(runner, api_key):
-    r = runner.invoke(cli_app, ["--no-json", "generate", "flux-pro", "--prompt", "x"])
+    r = runner.invoke(cli_app, ["--no-json", "generate", "flux-pro", "--width", "1", "--height", "1"])
     assert r.exit_code == 1
     assert "Missing required" in r.stdout
     assert "comfy generate schema flux-pro" in r.stdout

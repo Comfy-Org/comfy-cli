@@ -20,8 +20,8 @@ know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
 `comfy-deploy` (run a build release as a serverless deployment, and stop it
-costing money), `comfy-custom-nodes` (write or fix a custom node pack — the V3 node API,
-layout, testing, publishing), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+costing money), `comfy-custom-nodes` (write or fix a custom node pack — preferred V3,
+compatible V1, reference routing, widgets, validation and restart/discovery), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
 (surface a workflow/result in chat, never leave it in /tmp). When a task spans
 several, load them up front instead of discovering the gap mid-render.
 
@@ -364,7 +364,7 @@ of a live graph, use the structured-edit primitives below — never raw `jq`/`se
 (This rule exists because that exact jq-on-`id==128` hand-edit is the anti-pattern
 `decompose` — and these primitives — were built to kill.)
 
-## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `set-widget` / `set-node-field` / `delete-node`
+## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `disconnect` / `set-widget` / `set-node-field` / `delete-node`
 
 The **sanctioned** way to mutate a graph's *structure* from code — the
 alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. `insert-workflow`
@@ -384,7 +384,7 @@ hard-checked; unknown COMBO values / out-of-range numbers come back as soft
   human editor) → the primitives here.
 
 > **Live co-editing / CRDT:** only the structured-edit primitives (`insert-workflow`/
-> `add-node`/`connect`/`set-widget`/`set-node-field`/`delete-node`/`apply`) emit a mergeable **op** in
+> `add-node`/`connect`/`disconnect`/`set-widget`/`set-node-field`/`delete-node`/`apply`) emit a mergeable **op** in
 > `data.op`/`data.ops` (`op_id` + `actor` + `base_version` + `stamp`). Fragments +
 > `compose` produce a **whole-document** graph — fine for authoring a *fresh*
 > draft (the base), but it does **not** emit ops and will clobber a concurrent
@@ -404,6 +404,7 @@ comfy --json workflow insert-workflow wf.json template.json                # emi
 cat template.json | comfy --json workflow insert-workflow wf.json -        # '-' reads the template from stdin
 comfy --json workflow add-node    wf.json KSampler --at 400,200 $CAT  # → data.op.node_id (minted)
 comfy --json workflow connect     wf.json 7.LATENT 3.samples $CAT     # source out-slot → target in-slot
+comfy --json workflow disconnect  wf.json 3.samples $CAT              # clears that INPUT's link (target only)
 comfy --json workflow set-widget  wf.json 3.steps 35 $CAT             # widget by NAME; op carries {old,value}
 comfy --json workflow set-node-field wf.json 3 title "My Sampler"    # rename a node; PROPOSED op, no catalog needed
 comfy --json workflow set-node-field wf.json 3 title --clear         # clear a field back to absent
@@ -1003,6 +1004,9 @@ comfy --json workflow slots path.json
 # → lists every slot as <node_id>.<input_name> with current values
 #   subgraph interiors: <instance_id>/<inner_id>.<input>
 #   copy addresses verbatim from this output
+#   --node <id> lists one node's slots, subgraph interior included (a
+#   template id like 94 works on an inserted canvas; that node's own rows
+#   carry template_node_id)
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"

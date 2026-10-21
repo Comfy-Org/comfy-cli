@@ -17,14 +17,17 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Eight kinds as of amendment v1.6 (§15, below) — `set_node_field` is the
-eighth and is **PROPOSED**, not yet ratified; see §1.8. `apply_op` rejects an
-unknown kind with `ValueError("unknown op ...")` — it never ignores one.
+Nine kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
+that amendment; see §1.2.1. `set_node_field` is the eighth and is **PROPOSED**,
+not yet ratified; see §1.8 and §15. No other kind is valid in v1: `apply_op`
+rejects an unknown kind with `ValueError("unknown op ...")` — it never ignores
+one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
+| `disconnect` | yes | `comfy workflow disconnect` | Remove the link from one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
 | `set_node_field` | yes | `comfy workflow set-node-field` | Set or clear one node's durable field — `title`, `mode`, `flags.collapsed`, `flags.pinned` (§1.8, PROPOSED) |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
@@ -107,6 +110,39 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
   both survive.
 * Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
+
+### 1.2.1 `disconnect` (amendment v1.8)
+
+Spec form: `{"op": "disconnect", "to": "$sampler.model"}`. The standalone
+command accepts the same `<node>.<input>` target. Minted fields are `link_id`
+(the occupant observed at mint time), `to_node`, and the resolved numeric
+`to_slot`. A dynamic destination additionally carries exactly one identity
+field:
+
+* `grow` is present for a promoted subgraph input and names the declaration;
+  it claims `("input", to_node, "grow", grow.name)`.
+* `grow_id` is present for an ordinary autogrow or widget-converted input and
+  preserves the creating connect's collision-free slot identity; it claims
+  `("input", to_node, "grow_id", grow_id)`. A reconnect to that existing input
+  carries the same `grow_id` and therefore shares the register. For an interior
+  input, the target is path-scoped as
+  `("input", tuple(path), to_node, "grow_id", grow_id)`.
+
+For either dynamic form, replay uses the identity field above rather than
+treating the observed numeric `to_slot` as a concrete-slot register.
+
+`disconnect` and concrete `connect` claim the same scalar LWW register,
+`("input", to_node, to_slot)`. A winning disconnect removes whichever link
+occupies the slot when it is replayed, including both endpoint references; a
+losing disconnect changes nothing. A missing node or drifted slot is a replay
+no-op. Minting against an existing empty input is rejected so callers cannot
+mistake an already-disconnected or incorrectly addressed slot for a mutation.
+
+When the destination is an interior node, the op also carries `path` (the
+subgraph instance path) and scopes the same numeric-slot register to that path.
+It removes only a link whose source and destination are both inside the same
+single-instance definition. A boundary-crossing link and a definition shared
+by multiple live instances are rejected at mint time.
 
 ### 1.3 `set_widget`
 
@@ -504,26 +540,30 @@ event; replication starts from that snapshot.
 
 Current contract, pinned:
 
-* **Only `set_widget` is subgraph-scoped.** Three address forms are accepted
-  and normalize to ONE write target: flat promoted (`57.text`, routed through
-  the instance's `proxyWidgets`), nested interior (`57/3.steps`), and the
-  flattened UI→API alias (`57:3.cfg`). The minted op carries the **resolved**
-  `path` (e.g. `["57", "27"]`) plus `inner_widget`, so replay needs no
-  proxyWidgets logic, and the LWW target is
-  `("widget", ("57", "27"), "text")` — a flat-form and a nested-form
-  concurrent write to the same interior widget converge under 8.1.
-* **`connect` refuses subgraph scope** with a structural explanation: an
-  interior endpoint is rejected with "a link cannot cross the subgraph
-  boundary"; a promoted-widget target is rejected with "promoted widget (a
-  value), not a link input".
+* **`set_widget`, `connect`, and `disconnect` have subgraph-scoped forms.** For
+  `set_widget`, three address forms are accepted and normalize to ONE write
+  target: flat promoted (`57.text`, routed through the instance's
+  `proxyWidgets`), nested interior (`57/3.steps`), and the flattened UI→API
+  alias (`57:3.cfg`). The minted op carries the **resolved** `path` (e.g.
+  `["57", "27"]`) plus `inner_widget`, so replay needs no proxyWidgets logic,
+  and the LWW target is `("widget", ("57", "27"), "text")` — a flat-form and
+  a nested-form concurrent write to the same interior widget converge under
+  8.1.
+* **`connect` and `disconnect` permit links wholly inside one supported,
+  single-instance definition.** Their ops carry the instance `path`, and their
+  LWW input identity is scoped by that path. A link that crosses the subgraph
+  boundary is still rejected with "a link cannot cross the subgraph boundary";
+  a promoted-widget target is still rejected with "promoted widget (a value),
+  not a link input". Both operations refuse a shared definition rather than
+  silently rewiring every instance that uses it.
 * **`add_node` and `delete_node` cannot address interior nodes** at all; an
   interior id fails as node-not-found against the top-level inventory.
-* An interior write to a **shared** definition forks the definition at apply
-  time (`engine._isolate_shared_subgraph`): the definition is deep-copied
+* An interior **widget** write to a shared definition forks the definition at
+  apply time (`engine._isolate_shared_subgraph`): the definition is deep-copied
   under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
-  are never aliased.
+  are never aliased. Interior connect/disconnect use the refusal above instead.
 * **Promoted widgets are HOST writes** (`cql.promoted`). A
   `set_widget` on a promoted input carries `promoted: {instance_path,
   value_index}` instead of `path`, and its LWW target is the host register
@@ -1053,3 +1093,120 @@ target it — and neither depends on the other landing.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 17. Amendment v1.8 — 2026-09-22 (`disconnect`)
+
+This amendment adds `disconnect` as the ninth frozen op kind so a caller can
+remove an input link without replacing the whole workflow or deleting either
+endpoint. It is batchable, has the standalone `comfy workflow disconnect`
+command, and shares each destination input's last-write-wins register with
+`connect`; §1.2.1 defines the wire shape and replay semantics.
+
+Dynamic inputs keep their logical identity instead of treating a shifted
+numeric slot as the register. Promoted inputs use `grow.name`; ordinary
+autogrow and widget-converted inputs use the creating connect's `grow_id`.
+Interior links wholly inside one eligible, single-instance definition carry
+the instance path in that identity. Links that cross a subgraph boundary, and
+links inside a shared definition, remain refused.
+
+The `grow_id` rule deliberately re-scopes a reconnect-shaped `connect` from
+the older concrete `("input", to_node, to_slot)` target to
+`("input", to_node, "grow_id", grow_id)`. It is therefore a coordinated
+applier upgrade: an older replica that does not recognize `connect.grow_id`
+must not participate in mixed-version replay with v1.8. Downstream appliers
+must add the same target before moving their pinned vocabulary SHA to this
+amendment.
+
+The replay path also retains a winning reconnect that arrives before the
+connect which materializes its grown input, then applies that pending write
+when the stable `grow_id` slot appears. Tests cover both replay orders for
+ordinary autogrow and widget-converted inputs, concrete and promoted inputs,
+and path-scoped interior links.
+
+`FROZEN_OPS` and `BATCHABLE_OPS`, the spec and replay dispatch tables, the
+standalone CLI, and this contract change together as required by §9.
+`DEFERRED_OPS` remains empty; no existing op kind is removed.
+
+## 18. Amendment v1.9 — 2026-09-22 (authorable annotation nodes: `Note` / `MarkdownNote` carry `text`)
+
+### 18.1 `add_node` mints `Note` and `MarkdownNote`
+
+§1.1 / §13.2 stated that `add_node` rejects every UI-only type. Production
+agent traces show the agent repeatedly asking for `Note` / `MarkdownNote` and
+being refused; every downstream replica (comfy-multi-player applier, frontend
+follower) already round-trips those nodes — the applier stores an uncatalogued
+positional `widgets_values` opaquely and the follower materializes a note with
+its text box — so the catalog refusal on this surface was the only thing
+between "add a note" and a note on the canvas.
+
+`add_node` now mints the two **annotation** UI-only types. The authorable set
+is `AUTHORABLE_VIRTUAL_NODE_TYPES = {"Note", "MarkdownNote"}` (a strict subset
+of `UI_ONLY_NODE_TYPES`). The spec gains one optional, spec-and-node key:
+
+```json
+{"op": "add_node", "class_type": "Note", "text": "trigger word: zxc", "as": "n"}
+```
+
+* `text` (string, default `""`) becomes the note's single positional widget:
+  `op.node.widgets_values == [text]`. The minted node has no sockets
+  (`inputs == outputs == []`), `mode`/`flags`/`properties` at their defaults,
+  and a layout-assigned `pos`/`size` unless `at` is given. `op.node` stays
+  authoritative for replay (§8.5), so a replica with no notion of `Note`
+  inserts it verbatim.
+* A non-string `text` is `ValueError` at mint time (batch: aborts atomically,
+  `applied_count == 0`, §4). An explicit `"text": null` in a spec counts as
+  non-string — omit the key for an empty note. `text` on a **catalog** class is likewise
+  `ValueError` — catalog widgets are addressed by name through `set_widget`;
+  a stray `text` is an error, not a dropped field.
+* CLI: `comfy workflow add-node <file> Note --text "..."`. Envelope unchanged.
+* The class is decided by **name, before the catalog**: `Note` / `MarkdownNote`
+  mint the annotation shape even if a backend happens to register a class with
+  that name (the frontend treats those names as editor-only regardless of the
+  backend, so the CLI must not turn an agent's note into an executable node).
+* Recipe `${param}` substitution (`apply --param`, `foreach`) does **not**
+  interpolate `text`: a note is prose for a human reader, so
+  `"text": "seed is ${seed}"` applies verbatim and does not require a declared
+  `seed` param. Every other add_node key still interpolates.
+* Execution: unchanged. `workflow_to_api` owns the exclusion of UI-only types
+  from the API prompt and keeps dropping these nodes; a test pins the exact
+  shape `add_node` mints against the converter.
+* Telemetry: `text` joins the redacted argument names (it is user prose, like
+  a prompt), so a `--text` value never reaches the tracking payload.
+
+`Reroute`, `PrimitiveNode`, `GetNode`, `SetNode` remain refused
+(`node_not_found`, `details.ui_only: true`): they carry data flow the converter
+resolves specially, and authoring them here would need link semantics this
+surface does not model.
+
+### 18.2 `capture` deliberately unchanged
+
+§13.2's capture behaviour stands: `capture` still skips UI-only nodes,
+including `Note` / `MarkdownNote`, and reports them as `ui_only_node_skipped`
+warnings — worded as "skipped by design", not "apply cannot mint them", since
+the latter is no longer true for the two annotation types. The recipe
+rebuilds the executable graph, not the canvas decoration. Capturing notes into
+recipes (now that `apply` would accept them) is a possible follow-up; it is not
+part of this amendment so a recipe captured before v1.9 and one captured after
+stay byte-identical.
+
+### 18.3 `replace_ops` carries `text` on the spec half
+
+`replace_ops` (behind `templates fetch --emit-ops` / `replace`) emits
+dual-shape `add_node` entries: the op half carries the full `node`, the spec
+half is what `apply_specs` replays. For a `Note` / `MarkdownNote` the spec
+half now includes `text` (= the source node's `widgets_values[0]` when it is a
+string, else `""`), so replaying the emitted batch through `apply` reproduces
+the note body instead of reminting every note as `""`.
+
+### 18.4 `set_widget` on a note
+
+A minted note has no named widgets, so `set_widget` on it is refused with a
+targeted message ("its body is `text`, set at add time; delete and re-add"),
+instead of the generic "(none — all inputs are links)". Editing an existing
+note's body in place is a follow-up (it needs a positional write path every
+replica agrees on, like the `legacy_primitive` one); it is out of scope for
+v1.9.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
+pinning this document by SHA move the SHA together with their comfy-cli pin.

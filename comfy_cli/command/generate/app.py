@@ -55,7 +55,7 @@ from comfy_cli.http import USAGE_SOURCE_HEADERS
 from comfy_cli.output.renderer import Renderer, get_renderer
 from comfy_cli.output.sanitize import sanitize_markup
 
-_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
+_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Reve, …)."
 
 _CONTEXT_SETTINGS = {
     "allow_extra_args": True,
