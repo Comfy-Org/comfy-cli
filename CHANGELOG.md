@@ -92,6 +92,29 @@ history.
   validate said the graph was valid.
 - `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
   (also on `nodes search --expand-top`) list a long option list in full.
+- `comfy run --client-id <id>` submits as an already-connected WebSocket client
+  instead of a freshly minted one, so ComfyUI addresses the run's execution
+  events — node highlights, progress, outputs — to that client. This is what
+  lets a tool run a workflow on a user's behalf and still have the user's open
+  canvas light up. Local only, and refused with `client_id_rejected` alongside
+  `--wait` or an effective `cloud` target (the flag, `COMFY_WHERE`, a project
+  `comfy.yaml` default, a saved default, or auto-detection from configured
+  cloud credentials): ComfyUI evicts whatever socket already holds an
+  incoming clientId, so this invocation must not attach as the borrowed one.
+  Such a run is marked both in its job state file and in the submitted
+  `extra_data`, so `comfy jobs watch` declines to re-attach to it — from any
+  machine, including one that cannot see the submitter's state file — and
+  polls status instead. An override is honoured only once one of those two
+  sources has positively vouched for the run: with no readable state file and
+  no readable server record for the prompt, `--client-id` is refused with
+  `reason: "indeterminate"` rather than risking the eviction, and the watch
+  polls. The refusal is keyed on the id too, so naming an id another queued run
+  borrowed is refused even when the prompt being watched is ordinary — and
+  refused as `indeterminate` when the `/queue` read that would show those ids
+  did not come back whole, rather than read as nobody borrowing. A blank
+  `--client-id` is refused (`reason: "empty"`) as it is on `comfy run`. The
+  watch envelope carries `poll_reason` (`borrowed`, `indeterminate` or null) so
+  a `--json` consumer can tell why no socket was opened.
 
 ### Changed
 
@@ -131,10 +154,26 @@ history.
 - `comfy workflow print` renders a graph with broken links instead of refusing
   it: the input prints `None`, the line is marked `BROKEN`, and a warning names
   the `connect` that repairs it. A stale row whose value already reaches the
-  node through another link is reported as a leftover.
+  node through another link is reported as a leftover. Recoverable stale
+  target slots and duplicate link rows now follow the same live-holder and
+  last-row-wins rules as workflow conversion, with warnings instead of losing
+  the graph; malformed and ambiguous promotion boundaries remain bounded and
+  fail closed.
 
 ### Fixed
 
+- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
+  accepts a connection and hangs up before answering (a restarting server, a
+  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
+  which `urllib` does not wrap, past the `RuntimeError` net every caller in
+  `jobs` catches.
+- A failed `comfy jobs watch` carries the node's failure under
+  `error.details.execution_error` on both of its exits — instead of
+  `error.details.details.error` on the live path, and instead of
+  `error.details.error` on the one that short-circuits because the prompt had
+  already finished. Neither old key is published any more. The second exit was
+  also skipping the trimming and redaction that key drives, so it emitted the
+  full traceback and a `current_inputs` that can hold an api_key.
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
