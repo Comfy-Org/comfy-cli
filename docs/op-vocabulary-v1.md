@@ -190,6 +190,11 @@ whose endpoint is the node), and scrubs dangling input/output references in
 that same graph scope — for an interior delete, including the definition's
 boundary `inputs[].linkIds` and `outputs[].linkIds`.
 
+An interior delete reuses the `delete_node` kind, so a consumer that predates
+`path` cannot reject it. comfy-multi-player 0.3.11 and earlier ignore `path`,
+remove the top-level node with the same id, and report the op `applied`. Send
+interior deletes only to a doc host on comfy-multi-player 0.3.12 or later.
+
 * Idempotency: `op_id` no-op; replaying a delete of an already-absent node is a
   no-op.
 * Conflict: delete wins over concurrent updates (section 3).
