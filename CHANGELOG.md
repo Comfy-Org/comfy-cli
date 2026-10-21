@@ -22,7 +22,9 @@ history.
   `/prompt` as `partial_execution_targets`). Ids that are not in the workflow,
   or (when the node catalog is available) are not output nodes, fail with
   `invalid_output_node_ids` before submit, `--print-prompt` included. Preflight
-  validation and the partner-node spend check cover only the nodes that run.
+  validation and the local partner-credential check cover only the nodes that
+  run. The `--allow-spend` gate still covers the whole submitted workflow,
+  because a server that ignores the targets runs every branch.
   The cloud `partial_execution` warning counts only the targeted nodes, and
   `partial_execution_targets_ignored` warns when the server ran untargeted
   nodes anyway. Without the flag the request is unchanged.

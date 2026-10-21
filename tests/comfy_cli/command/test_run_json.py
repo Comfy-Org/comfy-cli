@@ -2913,6 +2913,25 @@ def two_output_workflow_file(tmp_path):
     return str(path)
 
 
+_PARTNER_TARGET_OBJECT_INFO = {
+    **_TARGET_OBJECT_INFO,
+    "PaidImageNode": {"category": "partner/image", "output_node": True},
+}
+
+
+@pytest.fixture
+def partner_branch_workflow_file(tmp_path):
+    """Node 2 is a paid partner-API output node; target 3 does not depend on it."""
+    wf = {
+        "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+        "2": {"class_type": "PaidImageNode", "inputs": {"prompt": "x"}},
+        "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+    }
+    path = tmp_path / "partner_branch.json"
+    path.write_text(json.dumps(wf))
+    return str(path)
+
+
 def _recording_client(record=None):
     base = _fake_client(record=record)
 
@@ -3031,14 +3050,11 @@ class TestOutputNodeIdsCloud:
         assert warning["missing_output_node_ids"] == ["3"]
         assert "could not be checked" in warning["message"]
 
-    def test_preflight_and_spend_gate_see_only_the_targets_subgraph(
-        self, monkeypatch, two_output_workflow_file, capsys
-    ):
+    def test_preflight_sees_only_the_targets_subgraph(self, monkeypatch, two_output_workflow_file, capsys):
         from comfy_cli.command import run as run_pkg
 
         seen: dict = {}
         monkeypatch.setattr(run_pkg, "_preflight_validate", lambda r, wf, *a, **k: seen.setdefault("preflight", wf))
-        monkeypatch.setattr(run_pkg, "_detect_partner_nodes", lambda wf, oi: seen.setdefault("partner", wf) and [])
         client = _recording_client()
         _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
         _lines, exit_code = _cloud_capture(
@@ -3046,9 +3062,31 @@ class TestOutputNodeIdsCloud:
         )
         assert exit_code == 0
         assert sorted(seen["preflight"]) == ["1", "3"]
-        assert sorted(seen["partner"]) == ["1", "3"]
         # The full graph is still what gets submitted.
         assert sorted(client.submitted[-1][0]) == ["1", "2", "3"]
+
+    def test_spend_gate_covers_untargeted_partner_nodes(self, monkeypatch, partner_branch_workflow_file, capsys):
+        """The server may ignore the targets and run the paid branch, so
+        consent is asked for every partner node that gets submitted."""
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_PARTNER_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(
+            capsys, partner_branch_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 1
+        assert client.submitted == []
+        err = _envelope(lines)["error"]
+        assert err["code"] == "spend_consent_required"
+        assert err["details"]["partner_nodes"] == ["PaidImageNode"]
+
+    def test_allow_spend_submits_with_untargeted_partner_nodes(self, monkeypatch, partner_branch_workflow_file, capsys):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_PARTNER_TARGET_OBJECT_INFO)
+        _lines, exit_code = _cloud_capture(
+            capsys, partner_branch_workflow_file, wait=False, timeout=5, output_node_ids=["3"], allow_spend=True
+        )
+        assert exit_code == 0
+        assert len(client.submitted) == 1
 
     def test_print_prompt_shows_targets(self, monkeypatch, two_output_workflow_file, capsys):
         _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
@@ -3108,8 +3146,48 @@ class TestOutputNodeIdsLocal:
             MockExec.return_value.outputs = []
             _run_execute_capture(two_output_workflow_file, capsys, wait=True, output_node_ids=["2"])
         assert sorted(preflight.call_args.args[1]) == ["1", "2"]
-        assert sorted(partner.call_args.args[0]) == ["1", "2"]
+        # The credential check scans the subgraph; the spend gate, the whole
+        # submitted graph.
+        assert [sorted(c.args[0]) for c in partner.call_args_list] == [["1", "2"], ["1", "2", "3"]]
         assert sorted(MockExec.call_args.args[0]) == ["1", "2", "3"]
+
+    def test_spend_gate_covers_untargeted_partner_nodes(self, partner_branch_workflow_file, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_PARTNER_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run._resolve_partner_credential") as resolve,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            lines, exit_code = _run_execute_capture(
+                partner_branch_workflow_file, capsys, wait=True, output_node_ids=["3"], api_key="k"
+            )
+        assert exit_code == 1
+        assert not MockExec.called
+        assert not resolve.called
+        err = _envelope(lines)["error"]
+        assert err["code"] == "spend_consent_required"
+        assert err["details"]["partner_nodes"] == ["PaidImageNode"]
+
+    def test_allow_spend_needs_no_credential_for_an_untargeted_partner_node(self, partner_branch_workflow_file, capsys):
+        """Consent covers the whole graph, but the credential check stays on
+        the nodes that run: no credential is resolved for the skipped branch."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_PARTNER_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run._resolve_partner_credential", return_value=None) as resolve,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            MockExec.return_value.borrowed_client_id = False
+            _lines, exit_code = _run_execute_capture(
+                partner_branch_workflow_file, capsys, wait=True, output_node_ids=["3"], allow_spend=True
+            )
+        assert exit_code == 0
+        assert MockExec.called
+        assert not resolve.called
+        assert MockExec.call_args.kwargs["extra_data"] is None
 
     def test_print_prompt_shows_targets(self, two_output_workflow_file, capsys):
         lines, exit_code = _run_execute_capture(

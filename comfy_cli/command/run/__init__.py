@@ -163,6 +163,23 @@ def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, detail
         raise typer.Exit(code=1)
 
 
+def _consent_partner_nodes(
+    workflow: dict, object_info: dict, run_partner_nodes: list[str], output_node_ids
+) -> list[str]:
+    """Partner nodes the spend gate must ask about.
+
+    A targeted run still submits the whole graph, and
+    ``partial_execution_targets`` is advisory: a server that ignores it runs
+    every branch, paid ones included, with whatever credential was sent. So
+    consent covers the full submitted workflow, not just the targets'
+    subgraph. ``run_partner_nodes`` (the subgraph's) is reused when there are
+    no targets, since the two graphs are then the same.
+    """
+    if not output_node_ids:
+        return run_partner_nodes
+    return _detect_partner_nodes(workflow, object_info)
+
+
 # Mapping from the deleted legacy `comfy run --json` dialect (JsonEmitter,
 # `{"event": …, "error": {"kind": …}}`) to the renderer dialect
 # (`{"schema": "event/1", "type": …}` events + final `type: "envelope"` line).
@@ -337,7 +354,7 @@ def execute(
         return
 
     # What actually runs: a targeted run executes only the targets' subgraph,
-    # so a broken or paid node in a skipped branch must not fail or gate it.
+    # so a broken node in a skipped branch must not fail it.
     run_graph = target_subgraph(workflow, output_node_ids) if output_node_ids else workflow
 
     partner_nodes = _detect_partner_nodes(run_graph, object_info)
@@ -346,11 +363,12 @@ def execute(
     # BEFORE _resolve_partner_credential() below so a refusal never triggers a
     # network OAuth refresh. Detection stays fail-open (object_info == {} → no
     # partner_nodes → no gate), same posture as run-template.
+    consent_nodes = _consent_partner_nodes(workflow, object_info, partner_nodes, output_node_ids)
     _spend_gate(
         renderer,
-        partner_nodes,
+        consent_nodes,
         allow_spend,
-        details={"partner_nodes": partner_nodes, "host": host, "port": port},
+        details={"partner_nodes": consent_nodes, "host": host, "port": port},
     )
     extra_data: dict | None = None
     if api_key:
@@ -1328,7 +1346,9 @@ def execute_cloud(
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
     # Client() so a refusal never triggers cloud auth.
-    partner_nodes = _detect_partner_nodes(run_graph, cloud_object_info)
+    partner_nodes = _consent_partner_nodes(
+        parsed_workflow, cloud_object_info, _detect_partner_nodes(run_graph, cloud_object_info), output_node_ids
+    )
     _spend_gate(
         renderer,
         partner_nodes,
