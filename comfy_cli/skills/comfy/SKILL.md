@@ -483,10 +483,14 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   in place.
 - **`delete-node` ≠ `delete`:** `delete-node` removes a *node from the graph file*;
   `comfy workflow delete` deletes a *saved workflow from Comfy Cloud*. Do not confuse them.
-- `add-node`/`connect`/`delete-node` operate on **top-level** nodes only.
-  `set-widget` additionally resolves values **inside a subgraph** directly — use
-  the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
-  form (`57/27.text`); no decompose needed.
+- `add-node` operates on **top-level** nodes only. `connect` (between two
+  nodes of the same subgraph) and `delete-node`/`delete-nodes` also accept the
+  interior addresses `workflow print` shows (e.g. `70/22`), but only inside a
+  subgraph definition used by a single instance; a shared definition is
+  refused rather than edited in every instance. `set-widget` additionally
+  resolves values **inside a subgraph** directly — use the flat promoted
+  address `slots` advertises (e.g. `57.text`) or the nested form
+  (`57/27.text`); no decompose needed.
 - **`set-node-field` writes one durable, per-node scalar field** — `title`,
   `mode`, `flags.collapsed` or `flags.pinned` — (or `--clear`s it back to
   absent). It needs no catalog — none of those four is a widget — and is the
