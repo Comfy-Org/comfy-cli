@@ -1570,7 +1570,7 @@ class TestNamedModelDisambiguation:
             "other 2.1",
             "unknown-pm2214",
             "",
-            "Qwen " + "x" * knowledge.MAX_QUERY_CHARS + "2.1",
+            "Qwen" + " " * knowledge.MAX_QUERY_CHARS + "2.1",
             "Qwen 文本 2.1",
             "Qwen 2.1β",
             "Qwen 2.1２",
@@ -1694,7 +1694,7 @@ class TestNamedModelDisambiguation:
         ids = [f"acme-variant{letter}-2-1" for letter in "hgfedcba"]
         b = knowledge._index(
             {
-                "models": {mid: {"id": mid, "aliases": [mid.upper()]} for mid in ids},
+                "models": {mid: {"id": mid, "aliases": [mid.upper(), mid.replace("-", " ") + " turbo"]} for mid in ids},
                 "aliases": {"Acme Missing 2.1": "missing-row"},
             },
             None,
@@ -1704,4 +1704,7 @@ class TestNamedModelDisambiguation:
             mtime=0.0,
         )
         assert knowledge.model_candidates(b, "Acme 2.1") == sorted(ids)[:5]
-        assert knowledge.model_candidates(b, "Acme " + "2" * knowledge.MAX_QUERY_CHARS) == []
+        boundary_query = "Acme 2.1".ljust(knowledge.MAX_QUERY_CHARS)
+        assert len(boundary_query) == 200
+        assert knowledge.model_candidates(b, boundary_query) == sorted(ids)[:5]
+        assert knowledge.model_candidates(b, boundary_query + " ") == []
