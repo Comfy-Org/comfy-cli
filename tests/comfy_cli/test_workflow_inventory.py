@@ -195,7 +195,7 @@ def test_join_cloud_flags_a_same_named_file_with_different_weights(tmp_path: Pat
     assert differs["models"][0]["weights"] == "different_size"
     assert differs["verdict"] == "needs_build_or_lossy_conversion"
     assert same["models"][0]["weights"] == "same_size"
-    assert same["verdict"] == "covered"
+    assert same["verdict"] == "covered_needs_check"
 
 
 def test_join_inputs_names_the_cloud_upload_and_finds_it(tmp_path: Path):
@@ -210,3 +210,105 @@ def test_join_inputs_names_the_cloud_upload_and_finds_it(tmp_path: Path):
     assert item["cloud_name"] == "abc123.png"
     assert item["on_cloud"] is True
     assert cloud["verdict"] == "covered"
+
+
+def test_inventory_only_expands_active_subgraph_instances():
+    workflow = {
+        "nodes": [_node(1, "active"), _node(2, "muted", mode=2), _node(3, "bypassed", mode=4)],
+        "definitions": {
+            "subgraphs": [
+                {"id": "active", "nodes": [_node(10, "VAELoader", ["used.safetensors"])]},
+                {"id": "muted", "nodes": [_node(10, "LoraLoader", ["private.safetensors"])]},
+                {"id": "bypassed", "nodes": [_node(10, "LoraLoader", ["bypassed.safetensors"])]},
+                {"id": "unused", "nodes": [_node(10, "LoraLoader", ["unrelated.safetensors"])]},
+            ]
+        },
+    }
+
+    report = inventory(workflow)
+
+    assert list(report["classes"]) == ["VAELoader"]
+    assert [m["path"] for m in report["models"]] == ["used.safetensors"]
+    assert report["models"][0]["node_id"] == "1/10"
+
+
+def test_inventory_checks_each_use_of_a_model_on_cloud():
+    report = inventory(
+        {"nodes": [_node(1, "UNETLoader", ["same.safetensors"]), _node(2, "LoraLoader", ["same.safetensors"])]}
+    )
+
+    cloud = join_cloud(
+        report,
+        _catalog(
+            UNETLoader=_combo("unet_name", "same.safetensors"), LoraLoader=_combo("lora_name", "other.safetensors")
+        ),
+    )
+
+    assert cloud["verdict"] == "needs_build_or_lossy_conversion"
+    assert [m["status"] for m in cloud["models"]] == ["present", "absent"]
+
+
+def test_join_inputs_respects_subfolders_and_rejects_ambiguous_basenames(tmp_path: Path):
+    for directory, data in [("first", b"WRONG"), ("second", b"RIGHT")]:
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "face.png").write_bytes(data)
+    report = inventory({"nodes": [_node(1, "LoadImage", ["second/face.png", "image"])]})
+    join_inputs(report, [str(tmp_path)], lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest())
+    assert report["inputs"][0]["local_path"] == str(tmp_path / "second" / "face.png")
+
+    ambiguous = inventory({"nodes": [_node(1, "LoadImage", ["face.png", "image"])]})
+    join_inputs(ambiguous, [str(tmp_path)], lambda path: "should-not-hash-an-ambiguous-file")
+    assert ambiguous["inputs"][0]["local_path"] is None
+    assert "cloud_name" not in ambiguous["inputs"][0]
+    assert any("ambiguous" in warning for warning in ambiguous["warnings"])
+
+
+def test_same_size_is_not_proof_of_identical_weights(tmp_path: Path):
+    (tmp_path / "same.safetensors").write_bytes(b"SAME LENGTH")
+    report = inventory({"nodes": [_node(1, "UNETLoader", ["same.safetensors"])]})
+    join_local(report, [str(tmp_path)])
+    cloud = join_cloud(report, _catalog(UNETLoader=_combo("unet_name", "same.safetensors")), lambda name: 11)
+
+    assert cloud["models"][0]["weights"] == "same_size"
+    assert cloud["verdict"] == "covered_needs_check"
+    assert any("identity" in note for note in cloud["unverified"])
+
+
+def test_api_input_files_are_selected_by_input_name_not_dict_order():
+    report = inventory(
+        {"1": {"class_type": "LoadImageMask", "inputs": {"channel": "red", "image": "private-mask.png"}}}
+    )
+    assert report["inputs"][0]["file"] == "private-mask.png"
+
+
+def test_dynamic_ui_bindings_cannot_be_reported_as_covered():
+    workflow = {
+        "nodes": [_node(1, "PrimitiveNode", ["private.png"]), _node(2, "LoadImage")],
+        "links": [[1, 1, 0, 2, 0, "STRING"]],
+    }
+    cloud = join_cloud(inventory(workflow), _catalog(LoadImage=_combo("image", "public.png")))
+    assert cloud["verdict"] == "covered_needs_check"
+    assert any("API" in note for note in cloud["unverified"])
+
+
+def test_download_hints_do_not_add_unselected_template_models_to_scope():
+    report = inventory(
+        {
+            "nodes": [
+                _node(
+                    1,
+                    "CheckpointLoaderSimple",
+                    ["active.safetensors"],
+                    models=[
+                        {
+                            "name": "template-default.safetensors",
+                            "directory": "checkpoints",
+                            "url": "https://example.test/old",
+                        }
+                    ],
+                )
+            ]
+        }
+    )
+    assert [model["path"] for model in report["models"]] == ["active.safetensors"]
+    assert report["model_hints"][0]["path"] == "template-default.safetensors"

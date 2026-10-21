@@ -177,3 +177,35 @@ def test_inventory_cloud_compares_local_weights_and_hashes_inputs(tmp_path: Path
     assert data["inputs"][0]["cloud_name"] == uploaded
     assert data["inputs"][0]["on_cloud"] is True
     jsonschema.validate(data, json.loads(SCHEMA.read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize("payload", [{}, {"nodes": "not-a-list"}, {"nodes": [None]}, {"not": "a workflow"}])
+def test_inventory_rejects_objects_that_are_not_workflows(tmp_path: Path, payload):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result, envelope = _invoke(str(path))
+
+    assert result.exit_code == 1
+    assert envelope["error"]["code"] == "workflow_invalid_json"
+
+
+def test_api_inventory_lists_the_deployment_scanners_complete_upload_plan(tmp_path: Path, monkeypatch):
+    from comfy_cli.command.deploy_workflow import scan_workflow_inputs
+
+    private = tmp_path / "private-face.png"
+    private.write_bytes(b"PRIVATE")
+    graph = {"1": {"class_type": "FaceReference", "inputs": {"reference": private.name}}}
+    workflow = tmp_path / "api.json"
+    workflow.write_text(json.dumps(graph), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.command.deploy_workflow.resolve_asset_roots", lambda *a, **kw: (tmp_path,))
+
+    result, envelope = _invoke(str(workflow), "--input-root", str(tmp_path))
+
+    assert result.exit_code == 0
+    expected = scan_workflow_inputs(graph, asset_roots=(tmp_path,))
+    assert envelope["data"]["deployment_assets"] == [
+        {"local_path": str(asset.local_path), "file_path": asset.file_path, "bytes": asset.local_path.stat().st_size}
+        for asset in expected.assets
+    ]
+    assert envelope["data"]["deployment_asset_roots"] == [str(tmp_path)]

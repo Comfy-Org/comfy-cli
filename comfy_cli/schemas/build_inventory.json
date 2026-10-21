@@ -115,6 +115,11 @@
         }
       }
     },
+    "model_hints": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "Unselected template download hints. These are not required model references; verify against the runtime graph/source."
+    },
     "embeddings": {
       "type": "array",
       "items": {
@@ -176,6 +181,29 @@
       "items": {
         "type": "string"
       }
+    },
+    "unverified": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "UI bindings requiring a local API export before dependencies can be verified."
+    },
+    "deployment_assets": {
+      "type": "array",
+      "description": "API workflows only: exact local file plan from deploy run's scanner; no file is uploaded.",
+      "items": {
+        "type": "object",
+        "required": ["local_path", "file_path", "bytes"],
+        "properties": {
+          "local_path": {"type": "string"},
+          "file_path": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "deployment_asset_roots": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Resolved automatic and explicit roots used for deployment_assets. Use the same cwd and roots when running."
     },
     "node_versions": {
       "type": "object"
@@ -258,7 +286,7 @@
                   "unknown",
                   "not_checked"
                 ],
-                "description": "Local copy vs Cloud's same-named file. different_size means a different model, so using Cloud's is lossy."
+                "description": "Local copy vs Cloud's same-named file. different_size proves a mismatch; same_size is not proof of model identity and leaves the match unverified."
               }
             }
           }

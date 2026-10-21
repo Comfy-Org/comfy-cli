@@ -42,6 +42,16 @@ INPUT_LOADERS = frozenset(
         "VHS_LoadAudioUpload",
     }
 )
+INPUT_WIDGETS = {
+    "LoadImage": "image",
+    "LoadImageMask": "image",
+    "LoadImageOutput": "image",
+    "LoadVideo": "file",
+    "LoadAudio": "audio",
+    "VHS_LoadVideo": "video",
+    "VHS_LoadVideoPath": "video",
+    "VHS_LoadAudioUpload": "audio",
+}
 
 # Node modes the executor skips: these nodes load nothing, so nothing they name travels.
 SKIPPED_MODES = {2: "muted", 4: "bypassed"}
@@ -109,9 +119,22 @@ def is_api_format(workflow: Any) -> bool:
 
 
 def _ui_nodes(workflow: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
-    yield from workflow.get("nodes") or []
-    for subgraph in (workflow.get("definitions") or {}).get("subgraphs") or []:
-        yield from subgraph.get("nodes") or []
+    definitions = {sg["id"]: sg for sg in (workflow.get("definitions") or {}).get("subgraphs") or [] if sg.get("id")}
+
+    def visit(nodes, prefix="", ancestors=()):
+        for node in nodes:
+            node_id = f"{prefix}/{node.get('id')}" if prefix else node.get("id")
+            scoped = {**node, "id": node_id}
+            definition = definitions.get(node.get("type"))
+            if definition is None or node.get("mode") in SKIPPED_MODES:
+                yield scoped
+            elif node.get("type") not in ancestors:
+                yield scoped
+                yield from visit(definition.get("nodes") or [], str(node_id), (*ancestors, node.get("type")))
+            else:
+                raise ValueError(f"cyclic subgraph definition at node {node_id}")
+
+    yield from visit(workflow.get("nodes") or [])
 
 
 def _api_nodes(workflow: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
@@ -121,6 +144,7 @@ def _api_nodes(workflow: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
             "type": node.get("class_type"),
             "id": node_id,
             "mode": 0,
+            "named_inputs": inputs,
             # A list value is a link to another node's output, not a widget.
             "widgets_values": [v for v in inputs.values() if not isinstance(v, list)],
         }
@@ -133,16 +157,36 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
     have loaded, so a caller can say what was left out and why.
     """
     api = is_api_format(workflow)
+    if api:
+        if any(not isinstance(n.get("inputs", {}), dict) for n in workflow.values()):
+            raise ValueError("API workflow node inputs must be objects")
+    else:
+        if not isinstance(workflow.get("nodes"), list):
+            raise ValueError("UI workflow must contain a nodes list, or pass an API workflow export")
+        definitions = workflow.get("definitions") or {}
+        if not isinstance(definitions, dict) or not isinstance(definitions.get("subgraphs", []), list):
+            raise ValueError("workflow definitions.subgraphs must be a list")
+        groups = [workflow]
+        for definition in definitions.get("subgraphs", []):
+            if not isinstance(definition, dict) or not isinstance(definition.get("nodes", []), list):
+                raise ValueError("each subgraph definition must be an object with a nodes list")
+            groups.append(definition)
+        for group in groups:
+            for node in group.get("nodes", []):
+                if not isinstance(node, dict) or not isinstance(node.get("type"), str):
+                    raise ValueError("each UI workflow node must be an object with a string type")
     report: dict[str, Any] = {
         "format": "api" if api else "ui",
         "classes": {},
         "packs": {},
         "models": [],
+        "model_hints": [],
         "embeddings": [],
         "inputs": [],
         "skipped": [],
         "implicit": [],
         "warnings": [],
+        "unverified": [],
         # The pack versions the frontend recorded when the workflow was saved.
         "node_versions": {} if api else (workflow.get("extra") or {}).get("node_versions") or {},
     }
@@ -153,15 +197,27 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
     )
     classes: dict[str, dict[str, Any]] = {}
     packs: dict[str, set[str]] = {}
-    seen_paths: set[str] = set()
+    seen_paths: set[tuple[Any, str, str]] = set()
 
     def add_model(entry: dict[str, Any]) -> None:
-        if entry["path"] and entry["path"] not in seen_paths:
-            seen_paths.add(entry["path"])
+        # Catalog choices are per loader. The same filename used by two loaders
+        # must be checked twice, and every remap needs its own widget address.
+        key = (entry["node_id"], entry["node"], entry["path"])
+        if entry["path"] and key not in seen_paths:
+            seen_paths.add(key)
             report["models"].append(entry)
 
     for node in _api_nodes(workflow) if api else _ui_nodes(workflow):
         class_type = node.get("type")
+        if node.get("mode", 0) not in SKIPPED_MODES:
+            if class_type in {"PrimitiveNode", "GetNode", "SetNode"}:
+                report["unverified"].append(
+                    f"{class_type} #{node.get('id')}: linked widget values need a local API export before inventory"
+                )
+            elif class_type in subgraph_ids and node.get("widgets_values"):
+                report["unverified"].append(
+                    f"subgraph #{node.get('id')}: host widget overrides need a local API export before inventory"
+                )
         # A subgraph instance's type is its definition id; its interior nodes are walked separately.
         if not class_type or class_type in UI_ONLY_NODES or class_type in subgraph_ids:
             continue
@@ -213,20 +269,36 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(hint, dict):
                 continue
             path = _posix(str(hint.get("name") or ""))
-            add_model(
-                {
-                    "value": hint.get("name"),
-                    "path": path,
-                    "basename": os.path.basename(path),
-                    "subfolder": hint.get("directory"),
-                    "url_hint": hint.get("url"),
-                    "node": class_type,
-                    "node_id": node_id,
-                }
+            hint_entry = {
+                "value": hint.get("name"),
+                "path": path,
+                "basename": os.path.basename(path),
+                "subfolder": hint.get("directory"),
+                "url_hint": hint.get("url"),
+                "node": class_type,
+                "node_id": node_id,
+            }
+            selected = next(
+                (model for model in report["models"] if model["node_id"] == node_id and model["path"] == path), None
             )
+            if selected is not None:
+                selected["url_hint"] = hint.get("url")
+            elif path:
+                # Template download metadata can survive a model dropdown
+                # change. Keep it as evidence, never as a required upload.
+                report["model_hints"].append(hint_entry)
 
-        if class_type in INPUT_LOADERS and strings and strings[0] and not strings[0].startswith("http"):
-            report["inputs"].append({"file": strings[0], "node": class_type, "node_id": node_id})
+        if class_type in INPUT_LOADERS:
+            named = node.get("named_inputs")
+            saved_widgets = node.get("widgets_values")
+            if named is not None:
+                input_file = named.get(INPUT_WIDGETS[class_type])
+            elif isinstance(saved_widgets, dict):
+                input_file = saved_widgets.get(INPUT_WIDGETS[class_type])
+            else:
+                input_file = strings[0] if strings else None
+            if isinstance(input_file, str) and input_file and not input_file.startswith(("http://", "https://")):
+                report["inputs"].append({"file": input_file, "node": class_type, "node_id": node_id})
 
         if class_type in IMPLICIT_LOADERS:
             report["implicit"].append({"class": class_type, "note": IMPLICIT_LOADERS[class_type]})
@@ -314,14 +386,22 @@ def join_inputs(report: dict[str, Any], roots: Iterable[str], hash_file: Callabl
     Cloud names an uploaded input by the blake3 of its bytes, so ``cloud_name`` is the name an
     existing upload of the same file already has. ``join_cloud`` then says whether it is listed.
     """
-    index: dict[str, str] = {}
+    index: dict[str, set[str]] = {}
+    exact: dict[str, set[str]] = {}
     for root in roots:
-        for dirpath, _dirs, files in os.walk(os.path.expanduser(root)):
+        root = os.path.expanduser(root)
+        for dirpath, _dirs, files in os.walk(root):
             for filename in files:
-                index.setdefault(filename, os.path.join(dirpath, filename))
+                full = os.path.join(dirpath, filename)
+                index.setdefault(filename, set()).add(full)
+                exact.setdefault(_posix(os.path.relpath(full, root)), set()).add(full)
     for item in report["inputs"]:
-        path = index.get(os.path.basename(_posix(item["file"])))
+        requested = _posix(item["file"])
+        matches = exact.get(requested) or index.get(os.path.basename(requested), set())
+        path = next(iter(matches)) if len(matches) == 1 else None
         item["local_path"] = path
+        if len(matches) > 1:
+            report["warnings"].append(f"{item['file']}: ambiguous input file; choose the local path before uploading")
         if path:
             digest = hash_file(path).split(":", 1)[-1]
             item["cloud_name"] = digest + os.path.splitext(path)[1].lower()
@@ -374,7 +454,7 @@ def join_cloud(
         "cloud_disabled": [],
         "lossless_removable": [],
         "models": [],
-        "unverified": [],
+        "unverified": list(report.get("unverified", [])),
     }
     choices_by_class: dict[str, dict[str, str]] = {}
     for class_type in report["classes"]:
@@ -429,6 +509,12 @@ def join_cloud(
     for item in report["inputs"]:
         if item.get("cloud_name"):
             item["on_cloud"] = item["cloud_name"] in choices_by_class.get(item["node"], {})
+
+    for model in result["models"]:
+        if model.get("weights") in ("same_size", "unknown"):
+            result["unverified"].append(
+                f"{model['path']}: model identity is unverified; matching names and sizes do not prove identical bytes"
+            )
 
     blocking = (
         result["missing_classes"]

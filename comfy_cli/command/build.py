@@ -3571,7 +3571,16 @@ def inventory_cmd(
         )
         raise typer.Exit(code=1)
 
-    report = inventory(data)
+    try:
+        report = inventory(data)
+    except ValueError as error:
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"{path} is not a valid workflow: {error}",
+            hint="pass a workflow saved from ComfyUI (UI format) or an API export",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from error
     report["workflow"] = str(path)
     roots = list(models_root or [])
     if desktop:
@@ -3585,6 +3594,31 @@ def inventory_cmd(
         join_local(report, roots, hash_files=hash_files)
     if input_root:
         join_inputs(report, input_root, lambda path: blake3_file(Path(path)))
+    if report["format"] == "api":
+        from comfy_cli.command.deploy_workflow import (
+            DeployWorkflowAssetError,
+            resolve_asset_roots,
+            scan_workflow_inputs,
+        )
+
+        # Use the run command's scanner, not a loader allowlist: custom nodes
+        # can reference files too. Run from the same spec folder and pass the
+        # same --input-root directories as deploy run's --asset-root values.
+        asset_roots = resolve_asset_roots(extra_roots=tuple(Path(root) for root in input_root or []))
+        try:
+            plan = scan_workflow_inputs(data, asset_roots=asset_roots)
+            report["deployment_assets"] = [
+                {
+                    "local_path": str(asset.local_path),
+                    "file_path": asset.file_path,
+                    "bytes": asset.local_path.stat().st_size,
+                }
+                for asset in plan.assets
+            ]
+        except DeployWorkflowAssetError as error:
+            renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+            raise typer.Exit(code=1) from error
+        report["deployment_asset_roots"] = [str(root) for root in asset_roots]
     if cloud:
         from comfy_cli.command.nodes import _get_graph
         from comfy_cli.target import resolve_target

@@ -41,7 +41,12 @@ history.
   remaps with a ready `set_widget`, removable memory-only nodes),
   `covered_needs_check` or `needs_build_or_lossy_conversion`, compares each
   local model's size with Cloud's same-named file (`weights: different_size` is
-  a different model), and says whether each input is already on Cloud.
+  a different model; matching sizes still require identity verification), and
+  says whether each input is already on Cloud. Only active subgraph instances
+  contribute dependencies, each model use is checked against its loader, and
+  ambiguous input basenames are not guessed. API inventories include the exact
+  deployment asset-upload plan, including custom-node file inputs, so approvals
+  can cover every file before a smoke run.
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
