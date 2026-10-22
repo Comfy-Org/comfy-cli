@@ -15,7 +15,7 @@
     "next_offset": {
       "type": "integer",
       "minimum": 0,
-      "description": "list: the `--offset` for the next page; present only when `has_more` is true."
+      "description": "list: the `--offset` for the next page; present only when `has_more` is true and the source paged by the offset requested."
     },
     "slots": { "type": "array" },
     "notes": {

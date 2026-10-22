@@ -1127,7 +1127,9 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
 # ---------------------------------------------------------------------------
 
 
-def _page_fields(*, offset: int, emitted: int, total: int | None, has_more: bool | None) -> dict[str, Any]:
+def _page_fields(
+    *, offset: int, emitted: int, total: int | None, has_more: bool | None, offset_honored: bool = True
+) -> dict[str, Any]:
     """The paging half of a ``workflow list`` envelope.
 
     ``count`` is the rows on THIS page, which a reader asked "how many workflows
@@ -1135,14 +1137,16 @@ def _page_fields(*, offset: int, emitted: int, total: int | None, has_more: bool
     workflows was told "You have 20" (the default page). ``total`` is every
     match, ``has_more`` says the page stopped short of it, and ``next_offset``
     is what ``--offset`` takes for the next page. A field the source did not
-    supply is omitted rather than emitted as ``null``.
+    supply is omitted rather than emitted as ``null``. ``next_offset`` is
+    withheld when it would not advance (an empty page) or when the source did
+    not page by the offset asked for, so a reader paging on it cannot loop.
     """
     fields: dict[str, Any] = {}
     if total is not None:
         fields["total"] = total
     if has_more is not None:
         fields["has_more"] = has_more
-        if has_more:
+        if has_more and emitted and offset_honored:
             fields["next_offset"] = offset + emitted
     return fields
 
@@ -1171,10 +1175,11 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
 
     sort_key = _LOCAL_SORT_KEYS.get(sort, "created")
     reverse = order != "asc"
+    # `path` breaks ties so `--offset` pages slice the same order every call.
     if sort_key == "path":
-        rows.sort(key=lambda r: r["path"].lower(), reverse=reverse)
+        rows.sort(key=lambda r: (r["path"].lower(), r["path"]), reverse=reverse)
     else:
-        rows.sort(key=lambda r: r.get(sort_key) or 0, reverse=reverse)
+        rows.sort(key=lambda r: (r.get(sort_key) or 0, r["path"]), reverse=reverse)
     total = len(rows)
     rows = rows[offset : offset + min(max(limit, 1), 100)]
 
@@ -1501,12 +1506,19 @@ def list_cmd(
     ):
         total = None
     has_more = pagination.get("has_more")
+    if not isinstance(has_more, bool):
+        has_more = offset + len(rows) < total if total is not None else None
+    # `next_offset` only when the server echoed the offset we sent and gave a
+    # usable total: the cursor form may ignore `?offset=`, and following a
+    # `next_offset` there would return the same page forever.
+    echoed = pagination.get("offset")
     payload.update(
         _page_fields(
             offset=offset,
             emitted=len(rows),
             total=total,
-            has_more=has_more if isinstance(has_more, bool) else None,
+            has_more=has_more,
+            offset_honored=total is not None and echoed == offset and not isinstance(echoed, bool),
         )
     )
     if renderer.is_pretty():

@@ -241,6 +241,16 @@ class TestLocalList:
         assert "next_offset" not in last
         assert [r["id"] for r in last["workflows"]] == [f"t{i:02}.json" for i in range(9, -1, -1)]
 
+    def test_offset_pages_are_stable_when_sort_keys_tie(self, local_target, monkeypatch, capsys):
+        # Same timestamp on every row: page 2 must not depend on /userdata's order.
+        rows = [{"path": f"t{i}.json", "size": 1, "modified": 1, "created": 1} for i in range(4)]
+        pages = []
+        for listing in (rows, rows[::-1]):
+            _patch_urlopen(monkeypatch, {"/userdata": listing})
+            data = _run(["list", "--where", "local", "--limit", "2", "--offset", "2"], capsys)["data"]
+            pages.append([r["id"] for r in data["workflows"]])
+        assert pages[0] == pages[1] == ["t1.json", "t0.json"]
+
     def test_total_is_over_name_filter_matches(self, local_target, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
         env = _run(["list", "--where", "local", "--name", "wan"], capsys)
@@ -552,11 +562,35 @@ class TestList:
 
     def test_omits_a_total_that_cannot_be_true(self, cloud_target, monkeypatch, capsys):
         # Cursor-paged PaginationInfo may report total 0 beside a full page.
-        body = {"data": _WORKFLOW_LIST_RESPONSE["data"], "pagination": {"total": 0, "has_more": True}}
+        # That form may also ignore `?offset=`, so no `next_offset` is offered.
+        body = {"data": _WORKFLOW_LIST_RESPONSE["data"], "pagination": {"total": 0, "offset": 0, "has_more": True}}
         _patch_urlopen(monkeypatch, {"/api/workflows": body})
         env = _run(["list", "--where", "cloud"], capsys)["data"]
         assert "total" not in env
-        assert (env["has_more"], env["next_offset"]) == (True, 2)
+        assert env["has_more"] is True
+        assert "next_offset" not in env
+
+    def test_next_offset_only_when_paging_advances(self, cloud_target, monkeypatch, capsys):
+        rows = _WORKFLOW_LIST_RESPONSE["data"]
+        # The server answered offset 0 to a request for offset 20: it ignored it.
+        body = {"data": rows, "pagination": {"total": 30, "offset": 0, "has_more": True}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "20"], capsys)["data"]
+        assert env["has_more"] is True
+        assert "next_offset" not in env
+
+        # An empty page cannot advance, whatever `has_more` says.
+        body = {"data": [], "pagination": {"total": 30, "offset": 5, "has_more": True}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "5"], capsys)["data"]
+        assert "next_offset" not in env
+
+    def test_derives_has_more_from_total_when_server_omits_it(self, cloud_target, monkeypatch, capsys):
+        rows = _WORKFLOW_LIST_RESPONSE["data"]
+        body = {"data": rows, "pagination": {"total": 30, "offset": 0}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud"], capsys)["data"]
+        assert (env["total"], env["has_more"], env["next_offset"]) == (30, True, len(rows))
 
     def test_keeps_total_on_an_empty_page_past_the_end(self, cloud_target, monkeypatch, capsys):
         # An offset beyond the last row still learns how many exist; a zero
