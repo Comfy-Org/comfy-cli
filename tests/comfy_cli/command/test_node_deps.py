@@ -287,7 +287,7 @@ def test_pip_list_unparseable_output_degrades_to_unknown(workspace, monkeypatch)
     assert _packs_by_name(report)["Registry-Pack"]["requirements"][0]["status"] == "unknown"
 
 
-def test_interpreter_without_pip_still_reports_installed_versions(tmp_path):
+def test_interpreter_without_pip_still_reports_installed_versions(tmp_path, monkeypatch):
     """A uv-created venv has no pip; ComfyUI-Manager supports it, so must we.
 
     Uses a real pip-less venv (no mocks) with one hand-written dist-info, so
@@ -312,15 +312,18 @@ def test_interpreter_without_pip_still_reports_installed_versions(tmp_path):
     dist_info = Path(site) / "FakeDist-1.5.dist-info"
     dist_info.mkdir()
     (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: FakeDist\nVersion: 1.5\n")
-    # pip's leftover from an interrupted uninstall maps to the same name; it must not win.
-    leftover = Path(site) / "~akedist-0.1.dist-info"
-    leftover.mkdir()
+    # pip's leftover from an interrupted uninstall maps to the same name; it must not win,
+    # even from a path entry ahead of site-packages (where first-copy-wins would pick it).
+    leftover_site = tmp_path / "leftover-site"
+    leftover = leftover_site / "~akedist-0.1.dist-info"
+    leftover.mkdir(parents=True)
     (leftover / "METADATA").write_text("Metadata-Version: 2.1\nName: FakeDist\nVersion: 0.1\n")
     # One unreadable dist must not sink the whole listing.
     broken = Path(site) / "Broken-1.0.dist-info"
     broken.mkdir()
     (broken / "METADATA").write_bytes(b"Name: Broken\nVersion: 1.0\nSummary: \xff\xfe\n")
     assert subprocess.run([python, "-m", "pip", "--version"], capture_output=True).returncode != 0
+    monkeypatch.setenv("PYTHONPATH", str(leftover_site))
 
     report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
 
