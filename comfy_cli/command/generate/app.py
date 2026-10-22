@@ -1298,5 +1298,5 @@ def _print_top_help() -> None:
         "`comfy generate consent always`) to skip, required for --json / non-TTY runs.[/dim]"
     )
     rprint(
-        "[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
+        "[dim]Auth: run `comfy cloud login`, set COMFY_API_KEY (outranks the session), or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
     )

@@ -97,8 +97,16 @@ class TestPrecedence:
         assert cred is not None
         assert cred.source == f"env:{ENV_VAR[purpose]}"
 
-    def test_live_session_outranks_env_and_stored(self, purpose, clean_env):
+    def test_env_outranks_live_session_without_refreshing_it(self, purpose, clean_env):
+        refreshed = []
         clean_env.setenv(ENV_VAR[purpose], "env-key")
+        clean_env.setattr(auth_store, "get", _stored("stored-key"))
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw) or _session())
+        cred = resolve_cloud_credential(purpose=purpose)
+        assert cred == Credential(kind="api_key", value="env-key", source=f"env:{ENV_VAR[purpose]}")
+        assert refreshed == []
+
+    def test_live_session_outranks_stored_key(self, purpose, clean_env):
         clean_env.setattr(auth_store, "get", _stored("stored-key"))
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(token="live-token"))
         cred = resolve_cloud_credential(purpose=purpose)
@@ -475,11 +483,11 @@ class TestForwardedBearerToken:
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "   \n\t")
         assert resolve_cloud_credential(purpose="cloud") is None
 
-    def test_live_session_outranks_bearer_env(self, clean_env):
+    def test_bearer_env_outranks_live_session(self, clean_env):
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(token="live-token"))
         cred = resolve_cloud_credential(purpose="cloud")
-        assert cred == Credential(kind="oauth", value="live-token", source="session")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
 
     def test_expired_session_falls_through_to_bearer_env(self, clean_env):
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")

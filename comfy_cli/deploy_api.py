@@ -95,7 +95,15 @@ class DeployClient:
 
     @classmethod
     def from_credentials(cls, base_url: str | None = None) -> DeployClient:
-        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        """Build a client from a credential handed in by env when one is set, else from the sign-in.
+
+        ``COMFY_CLOUD_AUTH_TOKEN``, then ``COMFY_CLOUD_API_KEY``, outrank the
+        stored sign-in, which is then not refreshed; the saved set-key key comes
+        only after the sign-in.
+        """
+        token = credentials.platform_env_token()
+        if token:
+            return cls(base_url, token)
         key = credentials.platform_api_key()
         if key is None:
             try:
