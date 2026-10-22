@@ -25,6 +25,18 @@ DOWNLOAD_TIMEOUT = (10.0, 60.0)
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 
+class SessionRejectedAfterRetry(urllib.error.HTTPError):
+    """A 401 that survived the one retry with the re-read or refreshed sign-in.
+
+    The sign-in is usable, so this is not a request to log in again, and the
+    server refuses before acting, so work started earlier may still be running.
+    Still an ``HTTPError``, so every existing handler catches it.
+    """
+
+    def __init__(self, error: urllib.error.HTTPError) -> None:
+        super().__init__(error.filename, error.code, error.msg, error.hdrs, error.fp)
+
+
 def assert_safe_url(url: str) -> None:
     """Reject plaintext HTTP for non-loopback hosts.
 

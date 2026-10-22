@@ -45,11 +45,13 @@ class _Sessions:
         self.after = after
         self.forced = 0
 
-    def __call__(self, *, refresh=True, force=False, allow_clear=True):
+    def __call__(self, *, refresh=True, force=False, allow_clear=True, rejected=None):
         if force:
             self.forced += 1
             return SimpleNamespace(access_token=self.after, base_url="https://cloud.comfy.org") if self.after else None
-        return SimpleNamespace(access_token=self.first, base_url="https://cloud.comfy.org")
+        return SimpleNamespace(
+            access_token=self.first, base_url="https://cloud.comfy.org", is_expired=lambda **_: False
+        )
 
 
 def _install(monkeypatch, server: _Server, sessions: _Sessions) -> None:
@@ -260,3 +262,83 @@ def test_a_refused_injected_token_says_to_replace_it_not_to_sign_in(monkeypatch)
     assert "COMFY_BUILDER_TOKEN" in envelope["error"]["hint"]
     assert "comfy cloud login" not in envelope["error"]["hint"]
     assert server.tokens == ["injected"]
+
+
+def test_a_session_a_peer_already_refreshed_is_adopted_without_a_refresh(monkeypatch) -> None:
+    # Given a stored token that is no longer the one the client holds
+    server = _Server(valid={"peer-rotated"})
+    sessions = _Sessions(first="expired", after=None)
+    _install(monkeypatch, server, sessions)
+    client = BuilderClient.from_session(_BUILDER_URL)
+    sessions.first = "peer-rotated"
+
+    # When
+    client.get_release("r1")
+
+    # Then the retry carried the peer's token and no refresh was spent
+    assert server.tokens == ["expired", "peer-rotated"]
+    assert sessions.forced == 0
+
+
+def test_a_peer_token_near_expiry_is_refreshed_not_adopted(monkeypatch) -> None:
+    # Given
+    server = _Server(valid={"fresh"})
+    sessions = _Sessions(first="expired", after="fresh")
+    _install(monkeypatch, server, sessions)
+    client = BuilderClient.from_session(_BUILDER_URL)
+    sessions.first = "peer-nearly-expired"
+    original = sessions
+
+    def expiring(**kwargs):
+        session = original(**kwargs)
+        if session is not None and session.access_token == "peer-nearly-expired":
+            session.is_expired = lambda **_: True
+        return session
+
+    monkeypatch.setattr("comfy_cli.credentials.get_session", expiring)
+
+    # When
+    client.get_release("r1")
+
+    # Then
+    assert server.tokens == ["expired", "fresh"]
+    assert sessions.forced == 1
+
+
+def test_a_second_401_on_a_deploy_call_says_work_may_still_run_not_to_sign_in(monkeypatch) -> None:
+    # Given
+    server = _Server(valid=set())
+    _install(monkeypatch, server, _Sessions(first="expired", after="also-refused"))
+    client = DeployClient.from_session(_DEPLOY_URL)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        client.get_deployment("dep-1")
+
+    # Then
+    assert exc_info.value.code == "auth_transient"
+    assert "comfy deploy status" in exc_info.value.hint
+    assert "login" not in exc_info.value.hint
+    assert exc_info.value.details["status"] == 401
+
+
+def test_a_build_command_refused_again_after_the_retry_names_the_read_back_not_login(monkeypatch) -> None:
+    # Given
+    import json
+
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    server = _Server(valid=set())
+    _install(monkeypatch, server, _Sessions(first="expired", after="also-refused"))
+    monkeypatch.delenv("COMFY_BUILDER_TOKEN", raising=False)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "build", "ls"], env={"COMFY_BUILDER_URL": _BUILDER_URL})
+
+    # Then
+    envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    assert envelope["error"]["code"] == "auth_transient"
+    assert "build release show --id" in envelope["error"]["hint"]
+    assert "cloud login" not in envelope["error"]["hint"]

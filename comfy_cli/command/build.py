@@ -2639,7 +2639,7 @@ def _report_builder_error(
     which names a cause and a next step the call site does not know about."""
     import urllib.error
 
-    from comfy_cli.http import tls_trust_hint, tls_verification_failed
+    from comfy_cli.http import SessionRejectedAfterRetry, tls_trust_hint, tls_verification_failed
 
     # Ahead of the transport clause below, whose hint ("check the builder URL and
     # your access") points away from a failure that is neither: the endpoint and
@@ -2662,6 +2662,15 @@ def _report_builder_error(
         # A 401 means the credential itself was refused, and a client built from the
         # sign-in has already tried a refresh, so the credential has to change. The
         # client knows which credential it sent, so it names the one to replace.
+        if isinstance(e, SessionRejectedAfterRetry):
+            renderer.error(
+                code="auth_transient",
+                message="the builder refused the sign-in again after it was re-read; work already started may "
+                "still be running",
+                hint="read it back with `comfy build release show --id <id>` before retrying; "
+                "do not sign in again unless that is refused too",
+            )
+            return
         if e.code == 401:
             from comfy_cli.builder_api import BuilderCredentialRefused
 

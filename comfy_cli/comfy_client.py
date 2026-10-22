@@ -160,7 +160,8 @@ class Client:
         This is the *reactive* leg and it shares the single, cross-process
         locked + double-checked refresh in ``oauth.ensure_fresh_session`` (via
         ``get_session(force=True)``) — there is no second refresh/persist code
-        path here. Coalescing matters: in a parallel fan-out the first caller
+        path here. A session a peer already rotated is adopted first, with no
+        refresh at all. Coalescing matters: in a parallel fan-out the first caller
         refreshes and the rest pick up the rotated token from the store without
         a second network call, so a consumed refresh token is never replayed.
 
@@ -175,19 +176,28 @@ class Client:
         if self.target.api_key:
             return False
 
-        from comfy_cli.credentials import get_session
+        from comfy_cli.credentials import adopted_access_token, get_session
 
         old_token = self.target.auth_token
         # Was there a stored OAuth session backing this token? If not (e.g. a
         # bare token handed to the client directly), there's nothing to refresh
         # and a cleared store doesn't mean "revoked" — just let the 401 stand.
         had_session = get_session(refresh=False) is not None
+        # A peer process may already have rotated the session: adopt its token
+        # rather than spending the refresh token again, which would invalidate
+        # the access token the peer just installed.
+        adopted = adopted_access_token(old_token)
+        if adopted is not None:
+            object.__setattr__(self.target, "auth_token", adopted)
+            return True
         # force=True: a server 401 is authoritative even if our local clock
         # still thinks the access token is valid (skew / no recorded expiry).
         # allow_clear: foreground commands may clear on a fatal token failure;
         # the background watcher passes False so a transient/spurious
         # invalid_grant can't wipe the shared session.
-        session = get_session(refresh=True, force=True, allow_clear=self.clear_session_on_auth_failure)
+        session = get_session(
+            refresh=True, force=True, allow_clear=self.clear_session_on_auth_failure, rejected=old_token
+        )
         if session is not None and session.access_token and session.access_token != old_token:
             # Frozen dataclass — install the rotated token for the retry + any
             # subsequent requests (and the partner-API extra_data rebuild).

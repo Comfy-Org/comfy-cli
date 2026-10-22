@@ -237,6 +237,20 @@ def mapped_error(operation: str, error: urllib.error.HTTPError, url: str) -> Dep
     return DeployAPIError(rule["code"], message, status=status, details=details)
 
 
+DEPLOY_READ_BACK_HINT: Final = "read the deployment back with `comfy deploy status --deployment <id>`, then retry"
+
+
+def auth_transient_error(mapped: DeployAPIError, read_back: str) -> DeployAPIError:
+    """Re-code a 401 that survived the retry: the sign-in is usable and earlier work may still run."""
+    return DeployAPIError(
+        "auth_transient",
+        "the server refused the sign-in again after it was re-read; work already started may still be running",
+        status=mapped.status,
+        details=mapped.details,
+        hint=read_back,
+    )
+
+
 def bad_request(message: str) -> DeployAPIError:
     return DeployAPIError(_BAD_REQUEST["code"], message)
 

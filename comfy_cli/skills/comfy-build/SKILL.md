@@ -77,6 +77,9 @@ blob      ls                                    (hidden; workspace private blobs
   A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
   key wins over a stored sign-in, so when the hint says that key was refused,
   signing in cannot help: replace the key.
+  On `auth_transient` the sign-in is fine: a refresh by another process raced
+  this one, and the release may still be building. Read it back with
+  `release show --id` and retry; do not log in.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
