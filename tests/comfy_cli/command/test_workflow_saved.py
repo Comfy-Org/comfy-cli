@@ -226,7 +226,7 @@ class TestLocalList:
 
     def test_total_counts_every_match_and_pages_by_offset(self, local_target, monkeypatch, capsys):
         # A page smaller than the store must not read as the whole store:
-        # `count` is this page, `total` is every saved workflow (PM-2043).
+        # `count` is this page, `total` is every saved workflow.
         rows = [
             {"path": f"t{i:02}.json", "size": 1, "modified": 1700000000000 + i, "created": 1700000000000 + i}
             for i in range(30)
@@ -532,7 +532,7 @@ class TestList:
 
     def test_forwards_server_total_and_pages_by_offset(self, cloud_target, monkeypatch, capsys):
         # The server knows the user has 30; the default page is 20. Reporting
-        # only `count` is how the agent told a user "You have 20" (PM-2043).
+        # only `count` is how the agent told a user "You have 20".
         def page(start, n, has_more):
             return {
                 "data": [{"id": f"wf-{i}", "name": f"T{i:02}"} for i in range(start, start + n)],
