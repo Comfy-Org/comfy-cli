@@ -443,6 +443,8 @@ def test_whoami_does_not_report_a_session_for_another_base_url(
     assert data["signed_in"] is signed_in
     assert data["auth_method"] == auth_method
     assert data["credential_source"] == source
+    assert data["base_url"] == "https://testcloud.comfy.org"
+    assert data["session"]["base_url"] == BASE_URL
     target = resolve_target(where="cloud")
     assert target.auth_token is None
     assert target.api_key == (STORED_KEY if stored_key else None)

@@ -284,9 +284,10 @@ def whoami_cmd():
     payload: dict[str, object | None] = {
         "signed_in": signed_in,
         "auth_method": auth_method,
-        # The URL the credential in effect goes to: a handed-in credential goes
-        # to the configured URL, whatever environment the stored sign-in is for.
-        "base_url": session.base_url if session and handed_in is None else configured_base_url,
+        # The URL the credential in effect goes to. Cloud calls always go to the
+        # configured URL (a session minted for another one is not used), so
+        # this is the configured URL; the session's own URL is in `session`.
+        "base_url": configured_base_url,
         "configured_base_url": configured_base_url,
         "api_key_source": api_key_source,
         "credential_source": credential_source,
