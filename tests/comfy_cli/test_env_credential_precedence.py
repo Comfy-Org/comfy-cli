@@ -415,3 +415,34 @@ def test_whoami_names_the_credential_in_effect(store, monkeypatch, env, had_sess
     assert data["auth_method"] == auth_method
     assert data["credential_source"] == source
     _assert_session_effect(path, refreshes, env_wins=env_wins, had_session=had_session, before=before)
+
+
+@pytest.mark.parametrize(
+    ("stored_key", "signed_in", "auth_method", "source"),
+    [
+        pytest.param(True, True, "api_key", f"stored:{credentials.CLOUD_API_KEY_PROVIDER}", id="falls-to-stored-key"),
+        pytest.param(False, False, None, None, id="nothing-usable"),
+    ],
+)
+def test_whoami_does_not_report_a_session_for_another_base_url(
+    store, monkeypatch, stored_key, signed_in, auth_method, source
+):
+    """whoami reports what cloud calls send: resolve_target never sends a live
+    session minted for another base URL, so neither does whoami's report."""
+    from comfy_cli.target import resolve_target
+
+    _save_session(expired=False)
+    if stored_key:
+        auth_store.set(credentials.CLOUD_API_KEY_PROVIDER, STORED_KEY)
+    monkeypatch.setenv("COMFY_CLOUD_BASE_URL", "https://testcloud.comfy.org")
+
+    data = _whoami(monkeypatch)
+
+    assert data["stale_base_url"] is True
+    assert data["expired"] is False
+    assert data["signed_in"] is signed_in
+    assert data["auth_method"] == auth_method
+    assert data["credential_source"] == source
+    target = resolve_target(where="cloud")
+    assert target.auth_token is None
+    assert target.api_key == (STORED_KEY if stored_key else None)

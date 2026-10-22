@@ -210,7 +210,10 @@ def whoami_cmd():
     has_api_key = api_key_source is not None
     has_oauth = session is not None
     expired = session.is_expired() if session else None
-    oauth_usable = has_oauth and not expired
+    # A session minted for another base URL is never sent to the configured
+    # one (the replay-guard in resolve_target), so it is not usable here.
+    stale_base_url = (session.base_url != configured_base_url) if session else False
+    oauth_usable = has_oauth and not expired and not stale_base_url
     # `signed_in` must reflect whether we can actually authenticate right now:
     # a handed-in credential, a live (non-expired) OAuth session, or an API
     # key. An expired, unrefreshable OAuth session is NOT signed in on its own.
@@ -229,7 +232,6 @@ def whoami_cmd():
     else:
         auth_method = None
         credential_source = None
-    stale_base_url = (session.base_url != configured_base_url) if session else False
 
     if renderer.is_pretty():
         if handed_in is not None:
@@ -265,7 +267,8 @@ def whoami_cmd():
                         f"[dim]OAuth session is preferred; X-API-Key from {api_key_source} present but unused.[/dim]"
                     )
                 else:
-                    rprint(f"[dim]OAuth session expired — falling back to X-API-Key from {api_key_source}.[/dim]")
+                    reason = "is for another base URL" if stale_base_url else "expired"
+                    rprint(f"[dim]OAuth session {reason} — falling back to X-API-Key from {api_key_source}.[/dim]")
         else:
             from comfy_cli.output.branding import signed_out_banner
 
