@@ -104,22 +104,43 @@ MAX_REGISTRY_ERROR_CHARS = 300
 
 # Fallback probe for an interpreter without pip (a ``uv venv`` has none): the
 # same ``[{"name", "version"}]`` shape as ``pip list --format=json``, read with
-# the stdlib. ``sys.path`` order is kept so the first dist found wins, as it does
-# for pip and for ``import``; the ``-c`` cwd entry is dropped so a stray
-# ``*.dist-info`` (or a ``json.py`` shadowing the stdlib) in the caller's
-# directory can't leak in; it is dropped before anything but ``sys`` (built in)
-# is imported.
-_METADATA_LIST_SCRIPT = (
-    "import sys\n"
-    "sys.path[:] = [p for p in sys.path if p]\n"
-    "import json\n"
-    "from importlib import metadata\n"
-    "print(json.dumps([{'name': d.metadata.get('Name'), 'version': d.metadata.get('Version')}"
-    " for d in metadata.distributions()]))\n"
-)
+# the stdlib inside that interpreter.
+#
+# - Before anything that could be shadowed is imported, every ``sys.path`` entry
+#   naming the caller's directory is dropped (the ``-c`` ``''`` entry and e.g.
+#   ``PYTHONPATH=.``), so a stray ``json.py`` or ``*.dist-info`` there can't leak
+#   in. ``sys`` is built in and ``os`` is already loaded at startup, so neither
+#   import reads the path.
+# - A dist whose metadata can't be read is skipped, as ``pip list`` skips it,
+#   rather than failing the whole listing.
+# - ``~``-prefixed dist-info dirs (pip's leftovers from an interrupted
+#   uninstall) are skipped, and the first copy of a name in ``sys.path`` order
+#   wins, as it does for ``import``.
+_METADATA_LIST_SCRIPT = """\
+import os, sys
+cwd = os.path.realpath(os.getcwd())
+sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) != cwd]
+import json, re
+from importlib import metadata
+seen, rows = set(), []
+for d in metadata.distributions():
+    try:
+        if getattr(getattr(d, "_path", None), "name", "").startswith("~"):
+            continue
+        md = d.metadata
+        name, version = (md.get("Name"), md.get("Version")) if md else (None, None)
+    except Exception:
+        continue
+    key = re.sub(r"[-_.]+", "-", name).lower() if isinstance(name, str) else None
+    if key and key not in seen:
+        seen.add(key)
+        rows.append({"name": name, "version": version})
+print(json.dumps(rows))
+"""
 
 
-def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None]:
+def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None, bool]:
+    """Run one installed-packages probe; return ``(versions, error, exited_nonzero)``."""
     from packaging.utils import canonicalize_name
 
     try:
@@ -132,16 +153,16 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
         )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip().splitlines()
-        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else "")
+        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else ""), True
     except (subprocess.SubprocessError, OSError) as e:
-        return None, f"could not run {label}: {e}"
+        return None, f"could not run {label}: {e}", False
 
     try:
         rows = json.loads(proc.stdout)
     except ValueError as e:
-        return None, f"could not parse {label} output: {e}"
+        return None, f"could not parse {label} output: {e}", False
     if not isinstance(rows, list):
-        return None, f"{label} did not return a list"
+        return None, f"{label} did not return a list", False
 
     versions: dict[str, str] = {}
     for row in rows:
@@ -149,23 +170,25 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
             continue
         name, version = row.get("name"), row.get("version")
         if isinstance(name, str) and name:
-            versions.setdefault(canonicalize_name(name), str(version) if version is not None else "")
-    return versions, None
+            versions[canonicalize_name(name)] = str(version) if version is not None else ""
+    return versions, None, False
 
 
 def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
     """Return ``(canonical_name -> version, error)`` for the workspace venv.
 
     Runs ``<python> -m pip list --format=json`` once for the whole report. If
-    that fails — typically ``No module named pip`` in a uv-created venv — the
-    same interpreter is asked once more via ``importlib.metadata``. Only when
-    both fail is the map ``None``, with a human-readable reason naming both — a
-    report that can't see the venv is still a useful report.
+    that exits non-zero — typically ``No module named pip`` in a uv-created
+    venv — the same interpreter is asked once more via ``importlib.metadata``.
+    A timeout or an interpreter that can't be started is not retried: the
+    fallback would hit the same wall and only double the wait. On failure the
+    map is ``None`` with a human-readable reason — a report that can't see the
+    venv is still a useful report.
     """
-    versions, pip_error = _list_installed([python, "-m", "pip", "list", "--format=json"], "`pip list`")
-    if versions is not None:
-        return versions, None
-    versions, metadata_error = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
+    versions, pip_error, exited_nonzero = _list_installed([python, "-m", "pip", "list", "--format=json"], "`pip list`")
+    if versions is not None or not exited_nonzero:
+        return versions, pip_error
+    versions, metadata_error, _ = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
     if versions is not None:
         return versions, None
     return None, f"{pip_error}; {metadata_error}"

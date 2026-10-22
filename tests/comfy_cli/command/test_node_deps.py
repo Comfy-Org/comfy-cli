@@ -308,6 +308,14 @@ def test_interpreter_without_pip_still_reports_installed_versions(tmp_path):
     dist_info = Path(site) / "FakeDist-1.5.dist-info"
     dist_info.mkdir()
     (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: FakeDist\nVersion: 1.5\n")
+    # pip's leftover from an interrupted uninstall maps to the same name; it must not win.
+    leftover = Path(site) / "~akedist-0.1.dist-info"
+    leftover.mkdir()
+    (leftover / "METADATA").write_text("Metadata-Version: 2.1\nName: FakeDist\nVersion: 0.1\n")
+    # One unreadable dist must not sink the whole listing.
+    broken = Path(site) / "Broken-1.0.dist-info"
+    broken.mkdir()
+    (broken / "METADATA").write_bytes(b"Name: Broken\nVersion: 1.0\nSummary: \xff\xfe\n")
     assert subprocess.run([python, "-m", "pip", "--version"], capture_output=True).returncode != 0
 
     report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
@@ -318,6 +326,22 @@ def test_interpreter_without_pip_still_reports_installed_versions(tmp_path):
     assert reqs["fakedist>=1.0"]["installed"] == "1.5"
     assert reqs["fakedist<2"]["status"] == "satisfied"
     assert reqs["absentdist"]["status"] == "missing"
+
+
+def test_pip_list_timeout_is_not_retried(workspace, monkeypatch):
+    """A hung interpreter would hang the fallback too; don't double the wait."""
+    calls = []
+
+    def _hang(cmd, **kwargs):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(node_deps_cmd.subprocess, "run", _hang)
+
+    _, warnings = node_deps_cmd.build_report(str(workspace), python="/fake/python")
+
+    assert len(calls) == 1
+    assert [w["code"] for w in warnings] == ["installed_versions_unavailable"]
 
 
 def test_pip_list_missing_interpreter_does_not_crash(workspace, monkeypatch):
