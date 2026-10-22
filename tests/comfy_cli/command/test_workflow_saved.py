@@ -224,6 +224,28 @@ class TestLocalList:
         assert env["data"]["count"] == 1
         assert env["data"]["workflows"][0]["id"] == "sub/wan.json"
 
+    def test_total_counts_every_match_and_pages_by_offset(self, local_target, monkeypatch, capsys):
+        # A page smaller than the store must not read as the whole store:
+        # `count` is this page, `total` is every saved workflow (PM-2043).
+        rows = [
+            {"path": f"t{i:02}.json", "size": 1, "modified": 1700000000000 + i, "created": 1700000000000 + i}
+            for i in range(30)
+        ]
+        _patch_urlopen(monkeypatch, {"/userdata": rows})
+        first = _run(["list", "--where", "local", "--limit", "20"], capsys)["data"]
+        assert (first["count"], first["total"], first["has_more"], first["next_offset"]) == (20, 30, True, 20)
+        assert first["workflows"][0]["id"] == "t29.json"  # newest first
+
+        last = _run(["list", "--where", "local", "--limit", "20", "--offset", "20"], capsys)["data"]
+        assert (last["count"], last["total"], last["has_more"]) == (10, 30, False)
+        assert "next_offset" not in last
+        assert [r["id"] for r in last["workflows"]] == [f"t{i:02}.json" for i in range(9, -1, -1)]
+
+    def test_total_is_over_name_filter_matches(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
+        env = _run(["list", "--where", "local", "--name", "wan"], capsys)
+        assert (env["data"]["count"], env["data"]["total"], env["data"]["has_more"]) == (1, 1, False)
+
     def test_missing_workflows_dir_is_empty_not_error(self, local_target, monkeypatch, capsys):
         # ComfyUI 404s when the workflows/ dir doesn't exist yet — that's "none saved".
         _patch_urlopen(monkeypatch, {"/userdata": _http_error(404)})
@@ -507,6 +529,34 @@ class TestList:
         calls = _patch_urlopen(monkeypatch, {"/api/workflows": _WORKFLOW_LIST_RESPONSE})
         _run(["list", "--name", "wan", "--where", "cloud"], capsys)
         assert "name=wan" in calls[0]["url"]
+
+    def test_forwards_server_total_and_pages_by_offset(self, cloud_target, monkeypatch, capsys):
+        # The server knows the user has 30; the default page is 20. Reporting
+        # only `count` is how the agent told a user "You have 20" (PM-2043).
+        def page(start, n, has_more):
+            return {
+                "data": [{"id": f"wf-{i}", "name": f"T{i:02}"} for i in range(start, start + n)],
+                "pagination": {"total": 30, "limit": 20, "offset": start, "has_more": has_more},
+            }
+
+        calls = _patch_urlopen(monkeypatch, {"/api/workflows": page(0, 20, True)})
+        first = _run(["list", "--where", "cloud"], capsys)["data"]
+        assert (first["count"], first["total"], first["has_more"], first["next_offset"]) == (20, 30, True, 20)
+        assert "offset=" not in calls[0]["url"]
+
+        calls = _patch_urlopen(monkeypatch, {"/api/workflows": page(20, 10, False)})
+        last = _run(["list", "--where", "cloud", "--offset", "20"], capsys)["data"]
+        assert "offset=20" in calls[0]["url"]
+        assert (last["count"], last["total"], last["has_more"]) == (10, 30, False)
+        assert "next_offset" not in last
+
+    def test_omits_a_total_that_cannot_be_true(self, cloud_target, monkeypatch, capsys):
+        # Cursor-paged PaginationInfo may report total 0 beside a full page.
+        body = {"data": _WORKFLOW_LIST_RESPONSE["data"], "pagination": {"total": 0, "has_more": True}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud"], capsys)["data"]
+        assert "total" not in env
+        assert (env["has_more"], env["next_offset"]) == (True, 2)
 
 
 # ---------------------------------------------------------------------------

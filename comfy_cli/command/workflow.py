@@ -1127,7 +1127,27 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
 # ---------------------------------------------------------------------------
 
 
-def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, order: str) -> None:
+def _page_fields(*, offset: int, emitted: int, total: int | None, has_more: bool | None) -> dict[str, Any]:
+    """The paging half of a ``workflow list`` envelope.
+
+    ``count`` is the rows on THIS page, which a reader asked "how many workflows
+    do I have?" will otherwise report as the answer — a user with 30 saved
+    workflows was told "You have 20" (the default page). ``total`` is every
+    match, ``has_more`` says the page stopped short of it, and ``next_offset``
+    is what ``--offset`` takes for the next page. A field the source did not
+    supply is omitted rather than emitted as ``null``.
+    """
+    fields: dict[str, Any] = {}
+    if total is not None:
+        fields["total"] = total
+    if has_more is not None:
+        fields["has_more"] = has_more
+        if has_more:
+            fields["next_offset"] = offset + emitted
+    return fields
+
+
+def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, order: str, offset: int = 0) -> None:
     import urllib.error
     import urllib.parse
 
@@ -1155,7 +1175,8 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
         rows.sort(key=lambda r: r["path"].lower(), reverse=reverse)
     else:
         rows.sort(key=lambda r: r.get(sort_key) or 0, reverse=reverse)
-    rows = rows[: min(max(limit, 1), 100)]
+    total = len(rows)
+    rows = rows[offset : offset + min(max(limit, 1), 100)]
 
     workflows = [
         {
@@ -1167,7 +1188,11 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
         }
         for r in rows
     ]
-    payload = {"count": len(workflows), "workflows": workflows}
+    payload = {
+        "count": len(workflows),
+        "workflows": workflows,
+        **_page_fields(offset=offset, emitted=len(workflows), total=total, has_more=offset + len(workflows) < total),
+    }
     if renderer.is_pretty():
         from rich.table import Table
 
@@ -1182,7 +1207,7 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
                 sanitize_markup(r["size"]) if r["size"] is not None else "",
             )
         renderer.console().print(tbl)
-        rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
+        rprint(f"[dim]{len(workflows)} of {total} workflow(s) (local)[/dim]")
     renderer.emit(payload, command="workflow list", where="local")
 
 
@@ -1357,6 +1382,10 @@ def list_cmd(
         typer.Option("--name", show_default=False, help="Case-insensitive substring match on workflow name."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", help="Cap rows returned (max 100).")] = 20,
+    offset: Annotated[
+        int,
+        typer.Option("--offset", min=0, help="Rows to skip, for the next page (`next_offset` from the previous page)."),
+    ] = 0,
     sort: Annotated[
         str,
         typer.Option("--sort", help="Sort field: create_time | update_time | name."),
@@ -1392,9 +1421,11 @@ def list_cmd(
 
     target = _resolve_where_target(where)
     if not target.is_cloud:
-        return _local_list(renderer, target, name=name, limit=limit, sort=sort, order=order_norm)
+        return _local_list(renderer, target, name=name, limit=limit, offset=offset, sort=sort, order=order_norm)
 
     params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order_norm}
+    if offset:
+        params["offset"] = offset
     if name:
         params["name"] = name
     url = target.url("workflows") + "?" + urllib.parse.urlencode(params)
@@ -1453,6 +1484,25 @@ def list_cmd(
             if isinstance(r, dict)
         ],
     }
+    # Forward the server's own paging instead of leaving `count` (this page) as
+    # the only number. Each field is type-checked on its own because `bool` is
+    # an `int` in Python, and `total` is dropped when it cannot be true — the
+    # cursor-paged form of PaginationInfo may report 0 — so a wrong total is
+    # never emitted where an absent one is honest.
+    pagination = (body or {}).get("pagination")
+    pagination = pagination if isinstance(pagination, dict) else {}
+    total = pagination.get("total")
+    if not (isinstance(total, int) and not isinstance(total, bool) and total >= offset + len(rows)):
+        total = None
+    has_more = pagination.get("has_more")
+    payload.update(
+        _page_fields(
+            offset=offset,
+            emitted=len(rows),
+            total=total,
+            has_more=has_more if isinstance(has_more, bool) else None,
+        )
+    )
     if renderer.is_pretty():
         from rich.table import Table
 
@@ -1474,7 +1524,8 @@ def list_cmd(
                 sanitize_markup(str(r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
-        rprint(f"[dim]{len(rows)} workflow(s)[/dim]")
+        shown = f"{len(rows)} of {total}" if total is not None else str(len(rows))
+        rprint(f"[dim]{shown} workflow(s)[/dim]")
     renderer.emit(payload, command="workflow list", where="cloud")
 
 
