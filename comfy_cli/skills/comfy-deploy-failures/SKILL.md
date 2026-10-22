@@ -51,6 +51,7 @@ argument you pass.
 | `deploy_ambiguous_build` | Two or more Builds share the name before the slash | Name the Build by its id, as `<build id>/<name>` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
+| `auth_transient` | A 401 survived the one retry while another process refreshed the same sign-in; the sign-in is usable and the deployment may be running | Read it back with `comfy deploy status --deployment <id>`, then retry; do not log in again |
 | `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
 | `deploy_update_replaced` | A watched `up`, `promote` or `rollback` was replaced by a newer update; `details.replacing_release_id` names its release | Follow it with `comfy deploy status --deployment <id>`, or end it with `comfy deploy cancel --deployment <id>` |
 | `deploy_updates_unavailable` | `promote`, `rollback`, `history`, `cancel` or `events --release` on a deployment with no `revision`, or `cancel` against a deploy service too old for it | `promote` or `rollback`: `up --create` on the release instead. `history`: read `events`. `cancel`: wait for the update to land or fail. `events`: drop `--release`; those events do not say which release made them |

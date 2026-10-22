@@ -758,7 +758,9 @@ def take_last_fatal_refresh_reason() -> str | None:
     return reason
 
 
-def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
+def ensure_fresh_session(
+    *, leeway_s: int = 60, force: bool = False, allow_clear: bool = True, rejected: str | None = None
+):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
     is available.
@@ -796,6 +798,12 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     cross-process file lock (the same lock the secret store uses) with a
     double-check after acquisition: if a peer already rotated the token while
     we waited, we use the freshly persisted one instead of spending ours again.
+
+    ``rejected`` (with ``force=True``) names the access token the server just
+    refused. The double-check above compares the refresh token observed *after*
+    that 401, so it cannot see a rotation that finished before the 401 came
+    back; under the lock, a stored access token other than ``rejected`` that is
+    not near expiry is adopted instead of forcing another rotation.
     """
     from comfy_cli.auth import store as auth_store
 
@@ -821,6 +829,7 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
                 leeway_s=leeway_s,
                 force=force,
                 allow_clear=allow_clear,
+                rejected=rejected,
             )
     except TimeoutError:
         # A peer has held the lock longer than a refresh should take. Don't
@@ -833,7 +842,15 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
         return session
 
 
-def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, force: bool, allow_clear: bool = True):
+def _locked_refresh(
+    auth_store,
+    *,
+    observed_refresh_token: str,
+    leeway_s: int,
+    force: bool,
+    allow_clear: bool = True,
+    rejected: str | None = None,
+):
     """Decide → POST → persist, executed while holding the secrets lock.
 
     Re-reads the persisted session first (double-checked locking): if a peer
@@ -849,6 +866,10 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     # before locking, the family already advanced — use it, never re-send the
     # consumed token (that is exactly what trips reuse-detection).
     if session.refresh_token != observed_refresh_token:
+        return session
+    if rejected and session.access_token != rejected and not session.is_expired(leeway_s=leeway_s):
+        # A peer rotated the session before the 401 this caller is answering
+        # came back, so the refresh token observed above is already the new one.
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
         # Peer advanced the access token's expiry without us noticing a token

@@ -59,6 +59,10 @@ CLOUD_BEARER_ENV_VAR = "COMFY_CLOUD_AUTH_TOKEN"
 
 Purpose = Literal["cloud", "partner"]
 
+# A peer's access token this close to expiry is refreshed rather than adopted.
+# Matches ``ensure_fresh_session``'s own leeway.
+_ADOPT_LEEWAY_S = 60
+
 # purpose → (env var, stored-key provider, strip ambient values?)
 _PURPOSES: dict[str, tuple[str, str, bool]] = {
     "cloud": ("COMFY_CLOUD_API_KEY", CLOUD_API_KEY_PROVIDER, False),
@@ -77,7 +81,9 @@ class Credential:
         return f"Credential(kind={self.kind!r}, value=***, source={self.source!r})"
 
 
-def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool = True) -> CloudSession | None:
+def get_session(
+    *, refresh: bool = True, force: bool = False, allow_clear: bool = True, rejected: str | None = None
+) -> CloudSession | None:
     """Read the stored Comfy Cloud OAuth session.
 
     ``refresh=True`` goes through ``ensure_fresh_session`` (spends the
@@ -94,6 +100,12 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     refresh failure does NOT clear the stored session. Background watchers pass
     this — they are read-mostly and must never log the user off the shared
     session; only foreground, user-driven commands own that lifecycle.
+
+    ``rejected`` is the access token a server just refused, for a ``force=True``
+    refresh. A peer may have rotated the session while this caller waited for the
+    refresh lock; if the stored access token is no longer ``rejected`` and is not
+    near expiry, it is returned as it stands instead of spending the refresh
+    token again.
     """
     if refresh or force:
         from comfy_cli.cloud import oauth
@@ -104,15 +116,35 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     return auth_store.get_cloud_session()
 
 
-def refreshed_access_token(rejected: str | None, *, allow_clear: bool = True) -> str | None:
-    """Force the shared refresh after a server 401, and return the new access token.
+def adopted_access_token(rejected: str | None) -> str | None:
+    """The stored access token after a server 401, when a peer already replaced the rejected one.
 
-    Returns ``None`` when the refresh produced no token or the same one the
-    server just refused, so the caller surfaces the 401 rather than retrying a
-    token already known to fail. A fatal refresh clears the stored session, and
-    the 401 then carries the usual sign-in guidance.
+    Reads the store without refreshing, so no lock is waited on and no network is
+    used. ``None`` when the stored token is the rejected one, is near expiry, or
+    there is no session: the caller then forces the shared refresh.
     """
-    session = get_session(refresh=True, force=True, allow_clear=allow_clear)
+    session = get_session(refresh=False)
+    if session is None or not session.access_token or session.access_token == rejected:
+        return None
+    return None if session.is_expired(leeway_s=_ADOPT_LEEWAY_S) else session.access_token
+
+
+def refreshed_access_token(rejected: str | None, *, allow_clear: bool = True) -> str | None:
+    """The access token to retry with after a server 401, or ``None`` when there is none.
+
+    A session a peer process already rotated is adopted without a refresh, since
+    each refresh invalidates the access token the peers just installed. Only when
+    the stored token is the rejected one is the shared refresh forced.
+
+    Returns ``None`` when no token came out of that or it is the one the server
+    just refused, so the caller surfaces the 401 rather than retrying a token
+    already known to fail. A fatal refresh clears the stored session, and the 401
+    then carries the usual sign-in guidance.
+    """
+    adopted = adopted_access_token(rejected)
+    if adopted is not None:
+        return adopted
+    session = get_session(refresh=True, force=True, allow_clear=allow_clear, rejected=rejected)
     if session is None or not session.access_token or session.access_token == rejected:
         return None
     return session.access_token

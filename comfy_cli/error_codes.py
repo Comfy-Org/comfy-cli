@@ -497,6 +497,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy cloud login`",
     ),
     ErrorCode(
+        "auth_transient",
+        "A request got HTTP 401 again after the stored sign-in was re-read (or refreshed) and the request "
+        "retried once, while another process was refreshing the same sign-in. The sign-in is usable and "
+        "work the command already started may still be running on the server.",
+        "read the work back with `comfy build release show --id <id>` or `comfy deploy status --deployment <id>`, "
+        "then retry; `comfy cloud login` is not needed",
+    ),
+    ErrorCode(
         "auth_use_login_for_cloud",
         "`comfy auth set comfy-cloud` is no longer the cloud auth path.",
         "use `comfy cloud login`",

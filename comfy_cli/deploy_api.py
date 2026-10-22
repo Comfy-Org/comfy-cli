@@ -10,13 +10,15 @@ from typing import Final
 from comfy_cli import credentials
 from comfy_cli.credentials import Credential
 from comfy_cli.deploy_api_errors import (
+    DEPLOY_READ_BACK_HINT,
     DeployAPIError,
     assert_safe_deploy_url,
+    auth_transient_error,
     bad_request,
     mapped_error,
     transport_error,
 )
-from comfy_cli.http import request_json
+from comfy_cli.http import SessionRejectedAfterRetry, request_json
 from comfy_cli.target import Target
 
 DEFAULT_DEPLOY_URL: Final = "https://platformapi.comfy.org/deploy"
@@ -134,7 +136,9 @@ class DeployClient:
             _, parsed = self._send(url, request)
         except urllib.error.HTTPError as error:
             mapped = mapped_error(request.operation, error, url)
-            if error.code == 401 and self._refused_key_hint is not None:
+            if isinstance(error, SessionRejectedAfterRetry):
+                mapped = auth_transient_error(mapped, DEPLOY_READ_BACK_HINT)
+            elif error.code == 401 and self._refused_key_hint is not None:
                 mapped.hint = self._refused_key_hint
             raise mapped from error
         except (TimeoutError, urllib.error.URLError) as error:
@@ -164,7 +168,12 @@ class DeployClient:
             if token is None:
                 raise
             self.target = replace(self.target, auth_token=token)
-            return send()
+            try:
+                return send()
+            except urllib.error.HTTPError as retried:
+                if retried.code != 401:
+                    raise
+                raise SessionRejectedAfterRetry(retried) from retried
 
     def _get(self, operation: str, parts: tuple[str, ...], params: dict | None = None) -> dict:
         return self._request(_Request(operation=operation, parts=parts, params=params))

@@ -169,6 +169,14 @@ history.
 
 ### Fixed
 
+- Parallel `comfy` commands no longer die together with a 401 when the shared
+  sign-in's access token expires. After a 401 a command first re-reads the
+  stored sign-in and adopts a token a peer process already refreshed, and
+  spends the refresh token only when the stored token is the rejected one. A
+  401 that still survives the retry is reported as `auth_transient`, with the
+  read-back command (`release show --id`, `deploy status`) in its hint, instead
+  of `build_not_signed_in` or `deploy_not_signed_in` telling you to log in
+  again; those two now mean no usable sign-in exists.
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,

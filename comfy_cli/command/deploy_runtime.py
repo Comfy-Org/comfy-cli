@@ -27,6 +27,7 @@ from comfy_cli.command.deploy_resolve import (
 )
 from comfy_cli.command.deploy_types import DeployUpClient, UpRequest, required_string, server_shape_error
 from comfy_cli.deploy_api import DeployAPIError, DeployClient
+from comfy_cli.http import SessionRejectedAfterRetry
 from comfy_cli.output.renderer import Renderer
 
 T = TypeVar("T")
@@ -76,6 +77,14 @@ def _refusal_as_deploy_error(call: Callable[[], T]) -> T:
     except BuilderCredentialRefused as error:
         raise DeployAPIError(
             "deploy_not_signed_in", "the builder refused the credential (401)", status=401, hint=error.hint
+        ) from error
+    except SessionRejectedAfterRetry as error:
+        raise DeployAPIError(
+            "auth_transient",
+            "the builder refused the sign-in again after it was re-read; work already started may still be running",
+            status=401,
+            hint="read the release back with `comfy build release show --id <id>` or the deployment with "
+            "`comfy deploy status --deployment <id>`, then retry",
         ) from error
 
 

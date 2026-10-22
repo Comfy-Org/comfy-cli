@@ -29,7 +29,7 @@ import requests
 from comfy_cli import credentials
 from comfy_cli.builder_pagination import PAGE_LIMIT, cursor_pages
 from comfy_cli.credentials import Credential
-from comfy_cli.http import request_json
+from comfy_cli.http import SessionRejectedAfterRetry, request_json
 from comfy_cli.target import Target
 
 # Builder JSON responses are small (ids, status, a manifest pointer); cap well
@@ -166,8 +166,10 @@ class BuilderClient:
         """Every builder request goes through here, so a long wait survives its token expiring.
 
         The access token lasts fifteen minutes. After a 401 a client built from
-        the stored sign-in forces the shared refresh and sends the request once
-        more; the server refuses before acting, so that is safe for every method.
+        the stored sign-in adopts the session a peer already refreshed, or forces
+        the shared refresh when the stored token is the rejected one, and sends the
+        request once more; the server refuses before acting, so that is safe for
+        every method. A second 401 raises ``SessionRejectedAfterRetry``.
         """
         try:
             return request_json(url, self.target, **kwargs)
@@ -183,7 +185,7 @@ class BuilderClient:
         except urllib.error.HTTPError as error:
             if error.code != 401:
                 raise
-            raise BuilderCredentialRefused(error, self._refused_hint) from error
+            raise SessionRejectedAfterRetry(error) from error
 
     def _post(self, parts: tuple[str, ...], body: dict, *, timeout: float = _POST_TIMEOUT) -> dict:
         _, parsed = self._send(self.target.url(*parts), method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout)
