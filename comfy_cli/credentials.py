@@ -22,8 +22,8 @@ comfy-builder and comfy-deploy swap a key at ingest on every request: see
 Two *purposes* exist and their credentials are NOT interchangeable:
 
 - ``"cloud"``   — the Comfy Cloud platform API (Bearer / ``X-API-Key`` on
-  cloud.comfy.org). Env var: ``COMFY_CLOUD_API_KEY``. Values are passed
-  verbatim (no stripping), matching the historical target-resolution chain.
+  cloud.comfy.org). Env var: ``COMFY_CLOUD_API_KEY``. Env values are
+  stripped; a stored key is passed verbatim, as it always was.
 - ``"partner"`` — partner-API nodes / the partner proxy
   (``api_key_comfy_org``). Env var: ``COMFY_API_KEY``. Ambient values are
   whitespace-stripped and whitespace-only values are treated as absent,
@@ -66,7 +66,7 @@ CLOUD_BEARER_ENV_VAR = "COMFY_CLOUD_AUTH_TOKEN"
 
 Purpose = Literal["cloud", "partner"]
 
-# purpose → (env var, stored-key provider, strip ambient values?)
+# purpose → (env var, stored-key provider, strip the stored key?)
 _PURPOSES: dict[str, tuple[str, str, bool]] = {
     "cloud": ("COMFY_CLOUD_API_KEY", CLOUD_API_KEY_PROVIDER, False),
     "partner": ("COMFY_API_KEY", CLOUD_API_KEY_PROVIDER, True),
@@ -203,14 +203,14 @@ class DataPlaneToken:
         return True
 
 
-def _env_value(env_var: str, *, strip: bool = True) -> str | None:
+def _env_value(env_var: str) -> str | None:
     """``env_var``'s value, or ``None`` when it is unset, empty or whitespace-only."""
     import os
 
     value = os.environ.get(env_var)
     if value is None or not value.strip():
         return None
-    return value.strip() if strip else value
+    return value.strip()
 
 
 def env_credential(purpose: Purpose) -> Credential | None:
@@ -229,8 +229,10 @@ def env_credential(purpose: Purpose) -> Credential | None:
         token = cloud_bearer_env_token()
         if token:
             return Credential(kind="oauth", value=token, source=f"env:{CLOUD_BEARER_ENV_VAR}")
-    env_var, _provider, strip = _PURPOSES[purpose]
-    value = _env_value(env_var, strip=strip)
+    # Stripped for both purposes: the value goes into a header, where padding
+    # or a trailing newline would be refused or change the key sent.
+    env_var = _PURPOSES[purpose][0]
+    value = _env_value(env_var)
     if value:
         return Credential(kind="api_key", value=value, source=f"env:{env_var}")
     return None
@@ -244,7 +246,7 @@ def find_api_key(*, purpose: Purpose) -> Credential | None:
     """
     env_var, provider, strip = _PURPOSES[purpose]
 
-    env_value = _env_value(env_var, strip=strip)
+    env_value = _env_value(env_var)
     if env_value:
         return Credential(kind="api_key", value=env_value, source=f"env:{env_var}")
 

@@ -112,11 +112,11 @@ class TestPrecedence:
         cred = resolve_cloud_credential(purpose=purpose)
         assert cred == Credential(kind="oauth", value="live-token", source="session")
 
-    def test_expired_session_falls_through_to_env(self, purpose, clean_env):
-        clean_env.setenv(ENV_VAR[purpose], "env-key")
+    def test_expired_session_falls_through_to_stored_key(self, purpose, clean_env):
+        clean_env.setattr(auth_store, "get", _stored("stored-key"))
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(expired=True))
         cred = resolve_cloud_credential(purpose=purpose)
-        assert cred == Credential(kind="api_key", value="env-key", source=f"env:{ENV_VAR[purpose]}")
+        assert cred == Credential(kind="api_key", value="stored-key", source=f"stored:{CLOUD_API_KEY_PROVIDER}")
 
     def test_env_outranks_stored(self, purpose, clean_env):
         clean_env.setenv(ENV_VAR[purpose], "env-key")
@@ -167,11 +167,11 @@ class TestPrecedence:
     def test_base_url_mismatch_skips_session(self, purpose, clean_env):
         """The replay-guard: a session minted for another host is never sent."""
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(base_url="https://other.comfy.org"))
-        clean_env.setenv(ENV_VAR[purpose], "env-key")
+        clean_env.setattr(auth_store, "get", _stored("stored-key"))
         cred = resolve_cloud_credential(purpose=purpose, base_url="https://cloud.comfy.org")
         assert cred is not None
         assert cred.kind == "api_key"
-        assert cred.value == "env-key"
+        assert cred.value == "stored-key"
 
     def test_base_url_match_uses_session(self, purpose, clean_env):
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(base_url="https://cloud.comfy.org"))
@@ -188,7 +188,8 @@ class TestPrecedence:
 
 class TestPurposeSpecificStripping:
     """`partner` (the generate proxy) historically strips ambient keys and
-    treats whitespace-only values as absent; `cloud` passes them verbatim.
+    treats whitespace-only values as absent; `cloud` now strips env values too
+    (they go into a header) but still passes a stored key verbatim.
     Encoded per-purpose to preserve each site's exact behavior."""
 
     def test_partner_strips_env_value(self, clean_env):
@@ -207,11 +208,12 @@ class TestPurposeSpecificStripping:
         assert cred is not None
         assert cred.value == "stored-key"
 
-    def test_cloud_env_value_passed_verbatim(self, clean_env):
-        clean_env.setenv("COMFY_CLOUD_API_KEY", "  sk-abc  ")
+    def test_cloud_env_value_is_stripped(self, clean_env):
+        """It goes into X-API-Key, where padding or a newline would break the request."""
+        clean_env.setenv("COMFY_CLOUD_API_KEY", "  sk-abc \n")
         cred = resolve_cloud_credential(purpose="cloud")
         assert cred is not None
-        assert cred.value == "  sk-abc  "
+        assert cred.value == "sk-abc"
 
 
 class TestFindApiKey:
@@ -489,7 +491,7 @@ class TestForwardedBearerToken:
         cred = resolve_cloud_credential(purpose="cloud")
         assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
 
-    def test_expired_session_falls_through_to_bearer_env(self, clean_env):
+    def test_bearer_env_used_with_an_expired_session(self, clean_env):
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(expired=True))
         cred = resolve_cloud_credential(purpose="cloud")
