@@ -2175,8 +2175,9 @@ class TestOpModel:
     @staticmethod
     def _autogrow_replace_canvas(n_sources: int = 3) -> dict:
         """A BatchImagesNode whose autogrow base carries ``n_sources`` wired
-        connects (the CLI's repeated-edit path), ready to feed
-        ``replace_ops`` as ``new``.
+        connects, built through the CLI's own ``connect`` path with no removal,
+        so its numbering is contiguous (the same shape the FE's compaction
+        produces after a removal). Ready to feed ``replace_ops`` as ``new``.
 
         ``_autogrow_workflow()`` ships two IMAGE sources; one more is appended
         per requested slot beyond that, so ``n_sources`` is honoured rather
@@ -2266,8 +2267,9 @@ class TestOpModel:
     def test_replace_ops_replays_autogrow_wiring_verbatim(self):
         """replace_ops + apply_op reproduces a contiguous autogrow canvas
         exactly: every grown slot keeps its name and its link, no slot is
-        re-grown, and no link is dropped (the FE-compacted repeated-edit
-        shape).
+        re-grown, and no link is dropped. Contiguous numbering is what the FE
+        holds after a removal (it compacts); the sparse CLI shape is covered by
+        the holed-canvas tests below.
 
         "Verbatim" here is scoped to slot names, wiring, source topology and
         link count. It deliberately excludes ``inputs[].grow_id``, which
@@ -2287,11 +2289,14 @@ class TestOpModel:
 
     @staticmethod
     def _holed_autogrow_canvas() -> dict:
-        """A faithful holed canvas: sparse NAMES, dense slot array.
+        """A holed canvas: sparse NAMES, dense slot array.
 
-        ``images.image0`` + ``images.image2``, no ``image1`` — the shape the
-        CLI's repeated-edit path leaves where the frontend compacts. The FE
-        keeps the inputs array packed, so only the element numbering gaps.
+        ``images.image0`` + ``images.image2``, no ``image1``. The numbering gap
+        is the CLI side: after a removal the CLI keeps ``image2``'s name where
+        the FE would bubble it down to ``image1`` and compact. (The CLI also
+        leaves the emptied ``image1`` slot in place with ``link: None``; this
+        fixture omits that slot so the numbering gap is the only difference
+        from the contiguous canvas.)
         """
         return {
             "last_node_id": 22,
