@@ -1488,11 +1488,17 @@ def list_cmd(
     # the only number. Each field is type-checked on its own because `bool` is
     # an `int` in Python, and `total` is dropped when it cannot be true — the
     # cursor-paged form of PaginationInfo may report 0 — so a wrong total is
-    # never emitted where an absent one is honest.
+    # never emitted where an absent one is honest. An empty page past the end
+    # (`--offset` beyond the last row) keeps a positive total, which is the
+    # number a reader that overshot needs.
     pagination = (body or {}).get("pagination")
     pagination = pagination if isinstance(pagination, dict) else {}
     total = pagination.get("total")
-    if not (isinstance(total, int) and not isinstance(total, bool) and total >= offset + len(rows)):
+    if not (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and (total >= offset + len(rows) or (not rows and total > 0))
+    ):
         total = None
     has_more = pagination.get("has_more")
     payload.update(

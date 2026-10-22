@@ -558,6 +558,19 @@ class TestList:
         assert "total" not in env
         assert (env["has_more"], env["next_offset"]) == (True, 2)
 
+    def test_keeps_total_on_an_empty_page_past_the_end(self, cloud_target, monkeypatch, capsys):
+        # An offset beyond the last row still learns how many exist; a zero
+        # total there is the cursor sentinel and stays omitted.
+        body = {"data": [], "pagination": {"total": 30, "has_more": False}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "40"], capsys)["data"]
+        assert (env["count"], env["total"], env["has_more"]) == (0, 30, False)
+
+        body = {"data": [], "pagination": {"total": 0, "has_more": False}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "40"], capsys)["data"]
+        assert "total" not in env
+
 
 # ---------------------------------------------------------------------------
 # get
