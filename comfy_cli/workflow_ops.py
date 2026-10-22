@@ -2194,13 +2194,17 @@ def _slot_ref(node: dict, slots_key: str, index: Any, alias: str) -> str:
 
     Names are the canonical reference form and survive slot reordering; the
     index is the fallback for a node whose slot list the template omits.
-    ``_split_ref_slot`` partitions on the FIRST dot, so a name containing one
-    would resolve wrong — those fall back to the index too.
+    A dotted autogrow name (``images.image0``) is emitted verbatim: an alias
+    never contains a dot, and ``_split_ref_slot`` partitions on the FIRST one,
+    so the whole remainder — dots and all — is handed back as the slot. Falling
+    back to the index for those instead broke the §8.8 one-artifact/two-consumers
+    contract, because ``apply_specs`` re-mints each node from the catalog and a
+    fresh node has no grown slot at that index (Comfy-Org/comfy-cli#1034).
     """
     slots = node.get(slots_key)
     if isinstance(slots, list) and isinstance(index, int) and 0 <= index < len(slots):
         name = (slots[index] or {}).get("name") if isinstance(slots[index], dict) else None
-        if isinstance(name, str) and name and "." not in name:
+        if isinstance(name, str) and name:
             return f"${alias}.{name}"
     return f"${alias}.{index}"
 
