@@ -106,10 +106,13 @@ MAX_REGISTRY_ERROR_CHARS = 300
 # same ``[{"name", "version"}]`` shape as ``pip list --format=json``, read with
 # the stdlib. ``sys.path`` order is kept so the first dist found wins, as it does
 # for pip and for ``import``; the ``-c`` cwd entry is dropped so a stray
-# ``*.dist-info`` in the caller's directory can't count as installed.
+# ``*.dist-info`` (or a ``json.py`` shadowing the stdlib) in the caller's
+# directory can't leak in; it is dropped before anything but ``sys`` (built in)
+# is imported.
 _METADATA_LIST_SCRIPT = (
-    "import json, sys\n"
+    "import sys\n"
     "sys.path[:] = [p for p in sys.path if p]\n"
+    "import json\n"
     "from importlib import metadata\n"
     "print(json.dumps([{'name': d.metadata.get('Name'), 'version': d.metadata.get('Version')}"
     " for d in metadata.distributions()]))\n"
