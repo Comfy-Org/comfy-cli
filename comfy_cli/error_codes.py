@@ -1235,10 +1235,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "installed_versions_unavailable",
         "`comfy node deps` could not read the workspace venv's installed packages (`pip list --format=json` "
-        "failed, timed out, or returned unparseable output), so every parseable requirement is reported with "
+        "and its `importlib.metadata` fallback both failed, timed out, or returned unparseable output), so "
+        "every parseable requirement is reported with "
         '`status: "unknown"`. Surfaced in `data.warnings[]` (not as an error envelope) so the declared '
         "requirements are still reported.",
-        "check the workspace venv has pip (`comfy env`), then re-run",
+        "check the workspace interpreter runs (`comfy env`), then re-run",
     ),
     ErrorCode(
         "pack_read_error",

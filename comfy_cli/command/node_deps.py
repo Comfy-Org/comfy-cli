@@ -13,7 +13,9 @@ assessed *before* installing anything.
 
 Read-only by construction: it never installs anything and never shells out to
 ``cm-cli``. The only subprocess it runs is a single ``<workspace python> -m pip
-list --format=json`` for the whole report (not once per pack). The only network
+list --format=json`` for the whole report (not once per pack), plus one
+``importlib.metadata`` listing in the same interpreter when that interpreter has
+no pip (a ``uv venv`` ships without it). The only network
 call is the registry's side-effect-free ``GET /nodes/{id}``, made solely for
 ``--registry`` ids — never ``install_node``, whose endpoint records an
 installation and fires an analytics event server-side on every call.
@@ -28,9 +30,10 @@ Statuses:
 - ``unparseable`` — a pip option (``--extra-index-url``, ``-r other.txt``), a
   bare VCS/URL line, or anything else :class:`packaging.requirements.Requirement`
   rejects. Kept in the report rather than dropped silently;
-- ``unknown``     — the comparison could not be made: either the ``pip list``
-  probe failed (accompanied by an ``installed_versions_unavailable`` warning on
-  the report) or the installed dist records a version that isn't PEP 440.
+- ``unknown``     — the comparison could not be made: either the installed-
+  packages probe failed (``pip list`` and its ``importlib.metadata`` fallback;
+  accompanied by an ``installed_versions_unavailable`` warning on the report)
+  or the installed dist records a version that isn't PEP 440.
 
 Known caveat: pyproject dependencies are read through the shared registry
 parser (:func:`comfy_cli.command.pack_scan.read_pyproject`), which drops the
@@ -99,18 +102,26 @@ MAX_REGISTRY_ERROR_CHARS = 300
 # ---------------------------------------------------------------------------
 
 
-def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
-    """Return ``(canonical_name -> version, error)`` for the workspace venv.
+# Fallback probe for an interpreter without pip (a ``uv venv`` has none): the
+# same ``[{"name", "version"}]`` shape as ``pip list --format=json``, read with
+# the stdlib. ``sys.path`` order is kept so the first dist found wins, as it does
+# for pip and for ``import``; the ``-c`` cwd entry is dropped so a stray
+# ``*.dist-info`` in the caller's directory can't count as installed.
+_METADATA_LIST_SCRIPT = (
+    "import json, sys\n"
+    "sys.path[:] = [p for p in sys.path if p]\n"
+    "from importlib import metadata\n"
+    "print(json.dumps([{'name': d.metadata.get('Name'), 'version': d.metadata.get('Version')}"
+    " for d in metadata.distributions()]))\n"
+)
 
-    Runs ``<python> -m pip list --format=json`` exactly once. On any failure
-    the map is ``None`` and the second element carries a human-readable reason
-    — a report that can't see the venv is still a useful report.
-    """
+
+def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None]:
     from packaging.utils import canonicalize_name
 
     try:
         proc = subprocess.run(
-            [python, "-m", "pip", "list", "--format=json"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=PIP_LIST_TIMEOUT_SECONDS,
@@ -118,16 +129,16 @@ def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
         )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip().splitlines()
-        return None, f"`pip list` exited {e.returncode}" + (f": {detail[-1]}" if detail else "")
+        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else "")
     except (subprocess.SubprocessError, OSError) as e:
-        return None, f"could not run `pip list`: {e}"
+        return None, f"could not run {label}: {e}"
 
     try:
         rows = json.loads(proc.stdout)
     except ValueError as e:
-        return None, f"could not parse `pip list --format=json` output: {e}"
+        return None, f"could not parse {label} output: {e}"
     if not isinstance(rows, list):
-        return None, "`pip list --format=json` did not return a list"
+        return None, f"{label} did not return a list"
 
     versions: dict[str, str] = {}
     for row in rows:
@@ -135,8 +146,26 @@ def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
             continue
         name, version = row.get("name"), row.get("version")
         if isinstance(name, str) and name:
-            versions[canonicalize_name(name)] = str(version) if version is not None else ""
+            versions.setdefault(canonicalize_name(name), str(version) if version is not None else "")
     return versions, None
+
+
+def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
+    """Return ``(canonical_name -> version, error)`` for the workspace venv.
+
+    Runs ``<python> -m pip list --format=json`` once for the whole report. If
+    that fails — typically ``No module named pip`` in a uv-created venv — the
+    same interpreter is asked once more via ``importlib.metadata``. Only when
+    both fail is the map ``None``, with a human-readable reason naming both — a
+    report that can't see the venv is still a useful report.
+    """
+    versions, pip_error = _list_installed([python, "-m", "pip", "list", "--format=json"], "`pip list`")
+    if versions is not None:
+        return versions, None
+    versions, metadata_error = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
+    if versions is not None:
+        return versions, None
+    return None, f"{pip_error}; {metadata_error}"
 
 
 # ---------------------------------------------------------------------------
