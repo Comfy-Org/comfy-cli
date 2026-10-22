@@ -8,6 +8,7 @@ subprocess to a fixed payload, so nothing touches a real venv or the network.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -297,7 +298,10 @@ def test_interpreter_without_pip_still_reports_installed_versions(tmp_path):
 
     workspace = tmp_path / "ComfyUI"
     _make_pack(workspace, "pack", requirements="fakedist>=1.0\nfakedist<2\nabsentdist\n")
-    venv.EnvBuilder(with_pip=False).create(workspace / ".venv")
+    # Symlink on POSIX, as `python -m venv` does. When pytest itself runs in a
+    # venv, Python 3.10 records that venv as the new one's `home`; a copied
+    # binary then cannot find the stdlib ("No module named 'encodings'").
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(workspace / ".venv")
     python = str(workspace / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
     site = subprocess.run(
         [python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
