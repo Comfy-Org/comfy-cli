@@ -1101,3 +1101,151 @@ class TestSlotsCorruptDefinitions:
         env = _run(["set-slot", str(path), "3.seed=1"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_slot_invalid"
+
+
+# ---------------------------------------------------------------------------
+# slots — source_address on promoted subgraph widget rows
+# ---------------------------------------------------------------------------
+#
+# A promoted widget is advertised at ``<instance>.<name>`` and its interior
+# widget is hidden, so the row names the interior node + widget it stands for
+# in ``source_address`` — the only way a consumer recovers the real widget
+# behind a renamed promotion or tells two same-class loaders apart.
+
+
+def _gallery_workflow(name: str) -> dict:
+    return json.loads((_FIXTURES / "gallery" / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def patched_promoted_graph(monkeypatch):
+    oi = json.loads((_FIXTURES / "object_info_subgraph_promoted.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: Graph.from_object_info(oi))
+
+
+class TestSlotsSourceAddress:
+    def test_promoted_row_names_its_interior_widget(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("image_z_image_turbo.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        row = by_addr["57.unet_name"]
+        assert row["source_address"] == "57/28.unet_name"
+        # Additive only: the editable address and the UUID node_type stay.
+        assert row["node_type"] == "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
+        assert "57/28.unet_name" not in by_addr
+        # A labelled promotion still names the interior widget.
+        assert by_addr["57.text"]["source_address"] == "57/27.text"
+
+    def test_minimax_promoted_loader(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("audio_minimax_music_3.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert by_addr["37.unet_name"]["source_address"] == "37/6.unet_name"
+
+    def test_renamed_promotion_carries_the_real_widget_name(self, patched_promoted_graph, tmp_path, capsys):
+        wf = _gallery_workflow("image_z_image_turbo.json")
+        sg = wf["definitions"]["subgraphs"][0]
+        next(i for i in sg["inputs"] if i["name"] == "unet_name")["name"] = "diffusion_model"
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "57.unet_name" not in by_addr
+        assert by_addr["57.diffusion_model"]["source_address"] == "57/28.unet_name"
+
+    def test_top_level_row_has_no_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("image_z_image_turbo.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "source_address" not in by_addr["9.filename_prefix"]
+
+    def test_nested_promotion_resolves_to_the_deepest_widget(self, patched_subgraph_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _subgraph_workflow())
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        # 10.value -> inner instance 3's promoted value -> node 7's widget.
+        assert by_addr["10.value"]["source_address"] == "10/3/7.value"
+        # A legacy proxyWidgets promotion the frontend repairs on load.
+        assert by_addr["10.seed"]["source_address"] == "10/9.seed"
+        # Interior rows are not promotions.
+        assert "source_address" not in by_addr["10/9.prompt"]
+
+    def test_select_projects_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("audio_minimax_music_3.json"))
+        env = _run(["slots", str(path), "--select", "slots.#.source_address"], capsys)
+        assert env["ok"] is True
+        # Rows without the key (plain top-level widgets) are dropped, not null.
+        assert "37/6.unet_name" in env["data"]
+        assert all(isinstance(a, str) for a in env["data"])
+
+    @staticmethod
+    def _materialized_loader(interior_type: str) -> dict:
+        # Host value materialized for every promotion, so the unet_name row is
+        # emitted even when the interior widget no longer resolves.
+        wf = _gallery_workflow("image_z_image_turbo.json")
+        next(n for n in wf["nodes"] if n["id"] == 57)["widgets_values"] = [
+            "a cat",
+            1024,
+            1024,
+            0,
+            8,
+            "z.safetensors",
+            "qwen.safetensors",
+            "ae.safetensors",
+        ]
+        sg = wf["definitions"]["subgraphs"][0]
+        next(n for n in sg["nodes"] if n["id"] == 28)["type"] = interior_type
+        return wf
+
+    def test_stale_interior_widget_omits_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        # The catalog's VAELoader has no unet_name: the row stays (the host
+        # value runs) but names no dangling interior widget.
+        path = _write_workflow(tmp_path, self._materialized_loader("VAELoader"))
+        env = _run(["slots", str(path)], capsys)
+        row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
+        assert row["current_value"] == "z.safetensors"
+        assert "source_address" not in row
+
+    def test_uncatalogued_interior_class_keeps_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        # A custom node the catalog does not know is trusted as saved.
+        path = _write_workflow(tmp_path, self._materialized_loader("SomeCustomUnetLoader"))
+        env = _run(["slots", str(path)], capsys)
+        row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
+        assert row["source_address"] == "57/28.unet_name"
+
+    def test_null_interior_node_does_not_crash_the_chain(self, patched_subgraph_graph, tmp_path, capsys):
+        # Every other walk skips a non-dict ``nodes`` entry; the source chain
+        # must too rather than raising out of ``slots`` with no envelope.
+        wf = _subgraph_workflow()
+        for sg in wf["definitions"]["subgraphs"]:
+            sg["nodes"].insert(0, None)
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert by_addr["10.value"]["source_address"] == "10/3/7.value"
+
+    @pytest.mark.parametrize(
+        ("selection", "widget", "expected"),
+        [
+            ("seedream 5.0 pro", "model.size_preset", "50/1.model.size_preset"),
+            # max_images exists only on the lite option: the saved pro
+            # selection has no such widget, so no dangling address.
+            ("seedream 5.0 pro", "model.max_images", None),
+            ("seedream 5.0 lite", "model.max_images", "50/1.model.max_images"),
+            ("seedream 5.0 pro", "model.bogus", None),
+        ],
+    )
+    def test_dynamic_combo_sub_widget_follows_saved_selection(self, selection, widget, expected):
+        from comfy_cli.cql import engine as cql_engine
+        from comfy_cli.cql.promoted import PromotedInput
+
+        inner = _seedream_workflow()["nodes"][0]
+        if selection == "seedream 5.0 lite":
+            # lite inlines size_preset, width, height, max_images, fail_on_partial.
+            inner["widgets_values"] = ["p", selection, "(1K) 1024x1024 (1:1)", 2048, 2048, 3, False, 0, "fixed", False]
+        else:
+            assert inner["widgets_values"][1] == selection
+        pi = PromotedInput(
+            name=widget, type="INT", index=0, value_index=0, source_node="1", source_input=widget, source_widget=widget
+        )
+        assert cql_engine._promoted_source_address("50", {"nodes": [inner]}, pi, {}, _seedream_graph()) == expected
