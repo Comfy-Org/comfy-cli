@@ -5174,9 +5174,6 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             if fatal:
                 raise ValueError(fatal["message"])
 
-    if port is not None and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
-
     widgets[widget_idx] = value
     # A node that declares its own ``widgets_values_form`` (schema A24) is laid
     # out by that declaration, not by the class order: flattening it to the
