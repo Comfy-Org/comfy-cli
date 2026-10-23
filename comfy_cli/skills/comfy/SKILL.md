@@ -20,8 +20,8 @@ know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
 `comfy-deploy` (run a build release as a serverless deployment, and stop it
-costing money), `comfy-custom-nodes` (write or fix a custom node pack — the V3 node API,
-layout, testing, publishing), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+costing money), `comfy-custom-nodes` (write or fix a custom node pack — preferred V3,
+compatible V1, reference routing, widgets, validation and restart/discovery), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
 (surface a workflow/result in chat, never leave it in /tmp). When a task spans
 several, load them up front instead of discovering the gap mid-render.
 
@@ -364,7 +364,7 @@ of a live graph, use the structured-edit primitives below — never raw `jq`/`se
 (This rule exists because that exact jq-on-`id==128` hand-edit is the anti-pattern
 `decompose` — and these primitives — were built to kill.)
 
-## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `set-widget` / `delete-node`
+## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `disconnect` / `set-widget` / `set-node-field` / `delete-node`
 
 The **sanctioned** way to mutate a graph's *structure* from code — the
 alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. `insert-workflow`
@@ -384,7 +384,7 @@ hard-checked; unknown COMBO values / out-of-range numbers come back as soft
   human editor) → the primitives here.
 
 > **Live co-editing / CRDT:** only the structured-edit primitives (`insert-workflow`/
-> `add-node`/`connect`/`set-widget`/`delete-node`/`apply`) emit a mergeable **op** in
+> `add-node`/`connect`/`disconnect`/`set-widget`/`set-node-field`/`delete-node`/`apply`) emit a mergeable **op** in
 > `data.op`/`data.ops` (`op_id` + `actor` + `base_version` + `stamp`). Fragments +
 > `compose` produce a **whole-document** graph — fine for authoring a *fresh*
 > draft (the base), but it does **not** emit ops and will clobber a concurrent
@@ -404,7 +404,11 @@ comfy --json workflow insert-workflow wf.json template.json                # emi
 cat template.json | comfy --json workflow insert-workflow wf.json -        # '-' reads the template from stdin
 comfy --json workflow add-node    wf.json KSampler --at 400,200 $CAT  # → data.op.node_id (minted)
 comfy --json workflow connect     wf.json 7.LATENT 3.samples $CAT     # source out-slot → target in-slot
+comfy --json workflow disconnect  wf.json 3.samples $CAT              # clears that INPUT's link (target only)
 comfy --json workflow set-widget  wf.json 3.steps 35 $CAT             # widget by NAME; op carries {old,value}
+comfy --json workflow set-node-field wf.json 3 title "My Sampler"    # rename a node; PROPOSED op, no catalog needed
+comfy --json workflow set-node-field wf.json 3 title --clear         # clear a field back to absent
+comfy --json workflow set-node-field wf.json 3 flags.collapsed true  # collapse a node
 comfy --json workflow delete-node wf.json 7 $CAT                      # removes node + its links
 comfy --json workflow ls-nodes    wf.json                            # id / type / title (no catalog needed)
 ```
@@ -479,10 +483,25 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   in place.
 - **`delete-node` ≠ `delete`:** `delete-node` removes a *node from the graph file*;
   `comfy workflow delete` deletes a *saved workflow from Comfy Cloud*. Do not confuse them.
-- `add-node`/`connect`/`delete-node` operate on **top-level** nodes only.
-  `set-widget` additionally resolves values **inside a subgraph** directly — use
-  the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
-  form (`57/27.text`); no decompose needed.
+- `add-node` operates on **top-level** nodes only. `connect` (between two
+  nodes of the same subgraph) and `delete-node`/`delete-nodes` also accept the
+  interior addresses `workflow print` shows (e.g. `70/22`), but only inside a
+  subgraph definition used by a single instance; a shared definition is
+  refused rather than edited in every instance. `set-widget` additionally
+  resolves values **inside a subgraph** directly — use the flat promoted
+  address `slots` advertises (e.g. `57.text`) or the nested form
+  (`57/27.text`); no decompose needed.
+- **`set-node-field` writes one durable, per-node scalar field** — `title`,
+  `mode`, `flags.collapsed` or `flags.pinned` — (or `--clear`s it back to
+  absent). It needs no catalog — none of those four is a widget — and is the
+  only way to change one that produces a mergeable op; hand-editing the field
+  in the JSON does not replicate to a concurrent editor. Unlike `add-node`'s
+  whole-node upsert, it claims one LWW register per `(node, field)`, so a
+  title write and a concurrent widget write on the same node never contend.
+  **PROPOSED:** `set_node_field` is not yet part of the ratified
+  `docs/op-vocabulary-v1.md` contract (§1.8) — it is implemented and tested,
+  pending maintainer ratification, and mirrors comfy-multi-player#235's
+  merged CRDT op of the same name.
 
 ---
 
@@ -506,7 +525,7 @@ codes, and capabilities. Everything below flows from it.
 ```bash
 comfy --json env             # what's installed locally
 comfy --json which           # workspace path
-comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), base_url, api_key_source
+comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), credential_source, base_url, api_key_source
 comfy --json cloud status    # cloud_workspace, balance, tier, max_concurrent_jobs, upgrade_suggestion
 comfy --json auth list       # all credentials (redacted)
 ```
@@ -989,6 +1008,9 @@ comfy --json workflow slots path.json
 # → lists every slot as <node_id>.<input_name> with current values
 #   subgraph interiors: <instance_id>/<inner_id>.<input>
 #   copy addresses verbatim from this output
+#   --node <id> lists one node's slots, subgraph interior included (a
+#   template id like 94 works on an inserted canvas; that node's own rows
+#   carry template_node_id)
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"

@@ -15,10 +15,11 @@ from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, Json
 from comfy_cli.command.deploy_resolve import BuildNotPushedError, DeployResolveError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import render_spec_error
-from comfy_cli.command.deploy_types import required_string, server_shape_error
+from comfy_cli.command.deploy_types import deployment_name, required_string, server_shape_error
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,19 @@ class DeploymentPageClient(Protocol):
     ) -> Iterator[JsonObject]: ...
 
 
+def _version_of(release: JsonObject) -> int | None:
+    version = release.get("version")
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def _release_column(deployment: JsonObject) -> str:
+    version = deployment.get("releaseVersion")
+    if isinstance(version, int):
+        return f"  v{version}"
+    release_id = deployment.get("releaseId")
+    return f"  {release_id}" if isinstance(release_id, str) and release_id else ""
+
+
 def run_ls(request: ListRequest) -> None:
     renderer = get_renderer()
     try:
@@ -47,14 +61,18 @@ def run_ls(request: ListRequest) -> None:
         if not isinstance(candidate, DeploymentPageClient):
             raise server_shape_error("the deploy client cannot list deployment pages")
 
-        release_ids: set[str] | None = None
+        # The Build's own releases, each with its version where it has one;
+        # under `--workspace` rows span Builds, so each keeps only its release id.
+        versions: dict[str, int | None] | None = None
         if not request.workspace:
             paths = resolve_build_paths(request.path)
             spec = read_build_spec(paths.spec_file)
             build_id = spec.get("id")
             if not isinstance(build_id, str) or not build_id:
                 raise BuildNotPushedError
-            release_ids = {required_string(release, "id") for release in builder.list_releases(build_id)}
+            versions = {
+                required_string(release, "id"): _version_of(release) for release in builder.list_releases(build_id)
+            }
 
         deployments: list[JsonObject] = []
         for page in candidate.iter_deployments(status=request.status, limit=request.limit):
@@ -64,11 +82,16 @@ def run_ls(request: ListRequest) -> None:
             for row in page_rows:
                 if not isinstance(row, dict):
                     raise server_shape_error("the deployment list contains a non-object row")
-                if release_ids is not None and required_string(row, "releaseId") not in release_ids:
-                    continue
+                version: int | None = None
+                if versions is not None:
+                    release_id = required_string(row, "releaseId")
+                    if release_id not in versions:
+                        continue
+                    version = versions[release_id]
                 if not request.include_deleted and row.get("deletedAt") is not None:
                     continue
-                deployments.append(row)
+                named = {**row, "name": deployment_name(row)}
+                deployments.append(named if version is None else {**named, "releaseVersion": version})
                 if len(deployments) == request.limit:
                     break
             if len(deployments) == request.limit:
@@ -80,7 +103,8 @@ def run_ls(request: ListRequest) -> None:
             for deployment in deployments:
                 marker = " (deleted)" if deployment.get("deletedAt") is not None else ""
                 renderer.print(
-                    f"  {required_string(deployment, 'id')}  {required_string(deployment, 'status')}{marker}"
+                    f"  {sanitize_markup(deployment['name'] or '-')}  {required_string(deployment, 'id')}"
+                    f"  {required_string(deployment, 'status')}{_release_column(deployment)}{marker}"
                 )
         payload_rows: list[JsonValue] = [*deployments]
         renderer.emit({"deployments": payload_rows}, command="deploy ls", changed=False)

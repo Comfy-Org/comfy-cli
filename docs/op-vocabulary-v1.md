@@ -1,30 +1,37 @@
 # Op vocabulary — v1 (frozen)
 
+The accepted architectural role of this frozen, versioned contract is recorded
+in [ADR-OPERATIONS-0002](adr/OPERATIONS-0002-version-structured-workflow-operations.md).
+
 Status: **FROZEN**. This document is the normative contract for the structured-edit
 op vocabulary in `comfy_cli/workflow_ops.py`: the op kinds, their argument shapes,
-their idempotency and conflict rules, and the batch protocol. Downstream repos
-(cloud `services/agent`, `harness`, the merge consumer) cite this document **by
-commit SHA**, not by branch.
+their idempotency and conflict rules, and the batch protocol. Downstream
+consumers (the cloud agent, its test harness, the merge consumer) cite this
+document **by commit SHA**, not by branch.
 
 Machine-readable projection: `workflow_ops.FROZEN_OPS`, `workflow_ops.DEFERRED_OPS`,
 `workflow_ops.BATCHABLE_OPS`. `tests/comfy_cli/test_op_vocabulary_contract.py`
 enforces that this document, those constants, and the `apply_op` / `apply_specs`
 dispatch tables agree. A change to any of the three without the others fails CI.
 
-This freeze describes the code on the **unmerged branch
-`fix/validate-lowers-ui-to-api`**. Until that branch merges to `master`, a SHA
-citation must point at a commit on that branch.
+This freeze describes code on `main`. A SHA citation points at the commit that
+contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
-Eight kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
+Ten kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
+that amendment; see §1.2.1. `set_node_field` is the eighth and is **PROPOSED**,
+not yet ratified; see §1.8 and §15. `define_subgraph` is the tenth; see §1.9.
+No other kind is valid in v1: `apply_op` rejects an unknown kind with
 `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
+| `disconnect` | yes | `comfy workflow disconnect` | Remove the link from one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
+| `set_node_field` | yes | `comfy workflow set-node-field` | Set or clear one node's durable field — `title`, `mode`, `flags.collapsed`, `flags.pinned` (§1.8, PROPOSED) |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
@@ -59,14 +66,17 @@ Spec form (batch input):
 ```
 
 `at` is optional (layout assigns a collision-free position at mint time; the
-position freezes into the op). `as` is optional and declares a batch-local alias
+position freezes into the op). A string `"x,y"` or `"[x, y]"` is parsed to the
+same two numbers; the minted `pos` is always numeric. `as` is optional and declares a batch-local alias
 (section 5). `mode` is optional (amendment v1.4): the litegraph execution mode
 the node is minted with — `0` always (default, omitted), `1` on-event, `2` mute,
 `3` on-trigger, `4` bypass. Mute/bypass change what executes, so a recipe that
-dropped them rebuilt a different API prompt. Minted op fields beyond the
-envelope: `node_id` (mint_id int), `class_type`, `pos`, `node` (the complete
-node object — replay inserts it verbatim; a nonzero mode is stamped into it and
-echoed as an op-level `mode` field). `allow_deprecated` is optional and spec-only
+dropped them rebuilt a different API prompt. `title` is optional (amendment
+v1.7, §16): a custom display title for the node, in place of the class's
+default title. Minted op fields beyond the envelope: `node_id` (mint_id int),
+`class_type`, `pos`, `node` (the complete node object — replay inserts it
+verbatim; a nonzero mode or a given title is stamped into it and echoed as an
+op-level `mode`/`title` field). `allow_deprecated` is optional and spec-only
 (never minted into the op): a `class_type` the catalog marks `deprecated` is
 refused with `node_deprecated` unless it is `true`.
 
@@ -104,6 +114,39 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
 * Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
 
+### 1.2.1 `disconnect` (amendment v1.8)
+
+Spec form: `{"op": "disconnect", "to": "$sampler.model"}`. The standalone
+command accepts the same `<node>.<input>` target. Minted fields are `link_id`
+(the occupant observed at mint time), `to_node`, and the resolved numeric
+`to_slot`. A dynamic destination additionally carries exactly one identity
+field:
+
+* `grow` is present for a promoted subgraph input and names the declaration;
+  it claims `("input", to_node, "grow", grow.name)`.
+* `grow_id` is present for an ordinary autogrow or widget-converted input and
+  preserves the creating connect's collision-free slot identity; it claims
+  `("input", to_node, "grow_id", grow_id)`. A reconnect to that existing input
+  carries the same `grow_id` and therefore shares the register. For an interior
+  input, the target is path-scoped as
+  `("input", tuple(path), to_node, "grow_id", grow_id)`.
+
+For either dynamic form, replay uses the identity field above rather than
+treating the observed numeric `to_slot` as a concrete-slot register.
+
+`disconnect` and concrete `connect` claim the same scalar LWW register,
+`("input", to_node, to_slot)`. A winning disconnect removes whichever link
+occupies the slot when it is replayed, including both endpoint references; a
+losing disconnect changes nothing. A missing node or drifted slot is a replay
+no-op. Minting against an existing empty input is rejected so callers cannot
+mistake an already-disconnected or incorrectly addressed slot for a mutation.
+
+When the destination is an interior node, the op also carries `path` (the
+subgraph instance path) and scopes the same numeric-slot register to that path.
+It removes only a link whose source and destination are both inside the same
+single-instance definition. A boundary-crossing link and a definition shared
+by multiple live instances are rejected at mint time.
+
 ### 1.3 `set_widget`
 
 Spec form:
@@ -113,9 +156,18 @@ Spec form:
 ```
 
 `node` is an int id, alias, `$alias`, or a subgraph-scoped id (section 6).
+The doc host's `insert_workflow` remaps template ids to
+`insert:<op>:root:node:<id>`. If a bare `<id>` names no node and exactly one
+top-level node has that remapped id, the bare id addresses that node, and
+the minted `node_id` is the full `insert:` id. If two inserts remapped the
+same id, the not-found error lists both.
 Minted op fields: `node_id`, `widget` (name, never index), `value`, `old`; for a
 subgraph interior write also `path` (resolved node path, list of strings) and
-`inner_widget`; optionally `warnings` (e.g. `normalized_value`).
+`inner_widget`; optionally `warnings` (e.g. `normalized_value`). A value that
+clearly means one option is rewritten at mint time and recorded with a
+`normalized_value` warning. Examples: a directory-prefixed model name, or a
+JSON boolean written to a combo whose only options are `'true'`/`'false'`
+(case-insensitive). The minted `value` is the real option.
 
 * Idempotency: `op_id` no-op.
 * Conflict: last-writer-wins per `(node, widget)` target (section 3).
@@ -132,9 +184,19 @@ Spec form:
 ```
 
 Minted op fields: `node_id`, `removed_links` (ids of every link incident to the
-node at mint time). Replay removes the node, drops incident links (both the
-recorded ones and any link whose endpoint is the node), and scrubs dangling
-input/output references.
+node at mint time). An interior address such as `70/22` additionally carries
+the owner-instance `path` (`["70"]`); it is refused when the definition is
+shared by multiple live instances, or when the node is the source of a
+promoted widget (its host value would shift onto the wrong input). Replay
+removes the node, drops incident links (both the recorded ones and any link
+whose endpoint is the node), and scrubs dangling input/output references in
+that same graph scope — for an interior delete, including the definition's
+boundary `inputs[].linkIds` and `outputs[].linkIds`.
+
+An interior delete reuses the `delete_node` kind, so a consumer that predates
+`path` cannot reject it. comfy-multi-player 0.3.11 and earlier ignore `path`,
+remove the top-level node with the same id, and report the op `applied`. Send
+interior deletes only to a doc host on comfy-multi-player 0.3.12 or later.
 
 * Idempotency: `op_id` no-op; replaying a delete of an already-absent node is a
   no-op.
@@ -180,34 +242,7 @@ pre-reset `base_version` do not replay across it.
 * Never emitted implicitly: no `--emit-ops` surface and no bulk writer (§8.8)
   mints one. It exists only where a caller asked for it by name.
 
-### 1.7 `define_subgraph`
-
-Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
-The command performs envelope shape and JSON-serialization checks, assigns its
-id from `--id`, the definition's `id`, or a new UUID, and emits exactly one
-stamped op without modifying the local workflow:
-
-```json
-{
-  "op": "define_subgraph",
-  "op_id": "<uuid4 hex>",
-  "actor": "cli",
-  "base_version": 0,
-  "stamp": [0, "cli"],
-  "subgraph_id": "<uuid>",
-  "subgraph_definition": {"id": "<uuid>", "nodes": [], "links": []}
-}
-```
-
-Only this op may carry `subgraph_id` or `subgraph_definition`; `definitions`
-is accepted only here and on `insert_workflow`. The CLI does not
-semantically validate, apply, replay, project, or resolve conflicts for the
-definition. cmp owns those operations: reusing an id with different content
-returns `definition_conflict`, and references to unknown ids follow cmp's
-unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
-interior edits use the existing id-addressed op scopes.
-
-### 1.8 `insert_workflow` — standalone only
+### 1.7 `insert_workflow` — standalone only
 
 Command: `comfy workflow insert-workflow <file> <template>`, where `<template>`
 may be `-` to read the template payload from stdin. The CLI preserves the
@@ -233,6 +268,101 @@ or write a mutated workflow document. Per the contract decision recorded in the 
 `insert_workflow` ops may carry definitions; edit ops reject a `definitions`
 field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
 `workflow_insert_workflow_not_batchable`.
+
+### 1.8 `set_node_field` — PROPOSED (amendment v1.6, not yet ratified)
+
+Command: `comfy workflow set-node-field <file> <node_id> <field> <value>` or
+`... --clear`. Spec form (batch input):
+
+```json
+{"op": "set_node_field", "node": "$sampler", "field": "title", "value": "My Sampler"}
+```
+
+`node` resolves exactly like `set_widget`'s (int id, alias, or `$alias`).
+`field` is one of the closed set `WRITABLE_NODE_FIELDS`: `title`, `mode`,
+`flags.collapsed`, `flags.pinned`. `value` matches that field's type (`title`
+is a string, `mode` an int, the two `flags.*` fields booleans), or is `null`
+to clear the field back to absent — so a flag returns to absent the way
+workflow JSON round-trips it. Minted op fields beyond the envelope:
+`node_id`, `field`, `value`.
+
+* Idempotency: `op_id` no-op, exactly like `set_widget`.
+* Conflict: last-writer-wins per `(node_id, field)`, on its own register —
+  `("node_field", node_id, field)` — never the `("widget", node_id, widget)`
+  one, since none of the four writable fields is a catalogued widget name or
+  carries a `widget_order` position. One register per field means a `title`
+  write and a `flags.collapsed` write on the same node never contend, and
+  neither contends with a `set_widget` write on that node. See §3 and §1.8.1
+  below.
+* Invalid: `field` outside the closed set, or a `value` that doesn't match
+  that field's type (and isn't `null`), is rejected at mint time; a missing
+  node is rejected at mint time (mirrors `set_widget`'s not-found handling),
+  and at replay a since-deleted target is a no-op (delete wins), same as
+  every other write.
+* No catalog is required to mint or apply this op.
+* Why the field list is closed: everything outside it either has an op of
+  its own (`widgets_values` is `set_widget`'s; `inputs`/`outputs` belong to
+  `connect`) or is node identity (`id`, `type`) that only
+  `add_node`/`delete_node` may move. `flags` as a whole is excluded too — a
+  whole-object write would reintroduce exactly the clobber this op exists to
+  avoid.
+* No interior or subgraph-promoted variant exists in this amendment. A
+  subgraph-interior node's fields are out of scope; if that need is
+  confirmed, it should follow `set_widget`'s interior shape (`path` + a
+  field-equivalent of `inner_widget`) rather than growing a distinct
+  mechanism.
+
+#### 1.8.1 Relationship to comfy-multi-player's `set_node_field` (#235)
+
+comfy-multi-player PR #235 (merged to that repo's `main`, commit
+`28d2e6166867f16bc291f2ae60d7f4a6a0c0c9f7`) landed the generalized
+`set_node_field` op in its CRDT applier — superseding that repo's earlier,
+title-only `set_title` prototype (PR #232 / ADR-032) — because the
+title-stomp bug it originally closed generalized cleanly to the same four
+fields once `flags.collapsed`/`flags.pinned` sync came up against the same
+whole-node-upsert clobber, and a client-side sync fix should not wait on this
+document's own release cycle. This amendment brings comfy-cli's local op
+vocabulary into alignment with that merged upstream shape rather than the
+withdrawn single-field one.
+
+comfy-multi-player's op additionally carries an optional
+`node_incarnation` field — its Y.Doc can, in principle, see a node id reused
+after a tombstoned delete, so its LWW register is scoped by `(node_id,
+node_incarnation, field)`. **comfy-cli has no equivalent field and does not
+need one**: node ids here are minted by `mint_id()` as leaderless random
+53-bit integers and are never reused (§6, §1.5's resurrection-hazard note),
+so a bare `("node_field", node_id, field)` register is already
+collision-free. A future reconciliation pass (once this amendment is
+ratified) should confirm comfy-multi-player's applier accepts an op that
+omits `node_incarnation` rather than requiring one only because its own
+local model can need it.
+
+### 1.9 `define_subgraph`
+
+Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
+The command performs envelope shape and JSON-serialization checks, assigns its
+id from `--id`, the definition's `id`, or a new UUID, and emits exactly one
+stamped op without modifying the local workflow:
+
+```json
+{
+  "op": "define_subgraph",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "subgraph_id": "<uuid>",
+  "subgraph_definition": {"id": "<uuid>", "nodes": [], "links": []}
+}
+```
+
+Only this op may carry `subgraph_id` or `subgraph_definition`; `definitions`
+is accepted only here and on `insert_workflow`. The CLI does not
+semantically validate, apply, replay, project, or resolve conflicts for the
+definition. cmp owns those operations: reusing an id with different content
+returns `definition_conflict`, and references to unknown ids follow cmp's
+unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
+interior edits use the existing id-addressed op scopes.
 
 ## 2. Idempotency and identity
 
@@ -450,26 +580,36 @@ event; replication starts from that snapshot.
 
 Current contract, pinned:
 
-* **Only `set_widget` is subgraph-scoped.** Three address forms are accepted
-  and normalize to ONE write target: flat promoted (`57.text`, routed through
-  the instance's `proxyWidgets`), nested interior (`57/3.steps`), and the
-  flattened UI→API alias (`57:3.cfg`). The minted op carries the **resolved**
-  `path` (e.g. `["57", "27"]`) plus `inner_widget`, so replay needs no
-  proxyWidgets logic, and the LWW target is
-  `("widget", ("57", "27"), "text")` — a flat-form and a nested-form
-  concurrent write to the same interior widget converge under 8.1.
-* **`connect` refuses subgraph scope** with a structural explanation: an
-  interior endpoint is rejected with "a link cannot cross the subgraph
-  boundary"; a promoted-widget target is rejected with "promoted widget (a
-  value), not a link input".
-* **`add_node` and `delete_node` cannot address interior nodes** at all; an
-  interior id fails as node-not-found against the top-level inventory.
-* An interior write to a **shared** definition forks the definition at apply
-  time (`engine._isolate_shared_subgraph`): the definition is deep-copied
+* **`set_widget`, `connect`, and `disconnect` have subgraph-scoped forms.** For
+  `set_widget`, three address forms are accepted and normalize to ONE write
+  target: flat promoted (`57.text`, routed through the instance's
+  `proxyWidgets`), nested interior (`57/3.steps`), and the flattened UI→API
+  alias (`57:3.cfg`). The minted op carries the **resolved** `path` (e.g.
+  `["57", "27"]`) plus `inner_widget`, so replay needs no proxyWidgets logic,
+  and the LWW target is `("widget", ("57", "27"), "text")` — a flat-form and
+  a nested-form concurrent write to the same interior widget converge under
+  8.1.
+* **`connect` and `disconnect` permit links wholly inside one supported,
+  single-instance definition.** Their ops carry the instance `path`, and their
+  LWW input identity is scoped by that path. A link that crosses the subgraph
+  boundary is still rejected with "a link cannot cross the subgraph boundary";
+  a promoted-widget target is still rejected with "promoted widget (a value),
+  not a link input". Both operations refuse a shared definition rather than
+  silently rewiring every instance that uses it.
+* **`delete_node` permits an interior node in one supported, single-instance
+  definition.** Its op carries the owner-instance `path`; its node-presence
+  identity is scoped by that path, and replay removes incident definition
+  links plus their endpoint references. It refuses a shared definition rather
+  than deleting from every instance, and refuses a node that backs a promoted
+  widget. A later interior `set_widget` on the deleted node is a no-op (delete
+  wins). `add_node` still cannot address an interior location from the CLI
+  authoring surface.
+* An interior **widget** write to a shared definition forks the definition at
+  apply time (`engine._isolate_shared_subgraph`): the definition is deep-copied
   under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
-  are never aliased.
+  are never aliased. Interior connect/disconnect use the refusal above instead.
 * **Promoted widgets are HOST writes** (`cql.promoted`). A
   `set_widget` on a promoted input carries `promoted: {instance_path,
   value_index}` instead of `path`, and its LWW target is the host register
@@ -796,7 +936,7 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 ## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
 
-The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+The frontend (ComfyUI_frontend ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted subgraph widget's
 value on the HOST instance — `widgets_values[i]` on the instance, positional
 over the definition's inputs that resolve to an interior widget — and runs
 that value over the interior default. Interior `path` writes (§8.7) therefore
@@ -884,3 +1024,235 @@ the op additionally carries `promoted.repair = {entry, ids}` with the
 subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
+
+## 15. Amendment v1.6 — 2026-09-22 (`set_node_field`: a generalized node-field op — PROPOSED, pending ratification)
+
+> **Status of this amendment: PROPOSED.** Every prior amendment in this
+> document (§§10–14) recorded a change already decided and shipped. This one
+> is different in kind: it adds a new frozen op kind, which §9 says requires
+> updating `FROZEN_OPS`/`BATCHABLE_OPS`, the dispatch tables, and this
+> document together — and this commit does exactly that so the contract test
+> (`tests/comfy_cli/test_op_vocabulary_contract.py`) stays green — but adding
+> a kind to a document three other repos pin BY SHA (see the top of this
+> document) is a decision for
+> this repo's maintainers, not something a single PR can ratify by merging.
+> Treat `set_node_field` as implemented-and-tested-but-not-yet-blessed until a
+> maintainer says otherwise; a downstream repo should not move its pin to
+> this SHA on the strength of this amendment alone.
+>
+> **This amendment supersedes the earlier, withdrawn `set_title` proposal**
+> that briefly occupied this same §1.8/§15 slot. That proposal covered only
+> `title`; it is replaced outright, not layered on top of, by the
+> generalized op below — see "Supersedes `set_title`" below for why.
+
+### What changed and why
+
+A node's `title`, `mode` and `flags` enter a workflow document only as
+passthrough fields on `add_node`'s initial `node` snapshot (§1.1). No op
+wrote any of them afterward: a rename, a mute/bypass, a collapse or a pin
+made after the node already existed — by hand, by a script, or by the in-app
+agent — produced no replayable op, so a merge consumer had nothing to
+receive and a concurrent edit from two sources resolved by accident (arrival
+order in whatever process last touched the file) rather than by any of this
+document's convergence guarantees. §1.8 adds `set_node_field` to close that
+gap for all four fields at once, following `set_widget`'s existing top-level
+shape (§8.1's stamp comparison, §2's idempotency, the delete-wins rule in
+§3) rather than introducing new machinery — one LWW register per
+`(node_id, field)` so none of the four, nor a `set_widget` write on the same
+node, ever contend with each other.
+
+### Supersedes `set_title`
+
+An earlier revision of this amendment proposed a title-only `set_title` op.
+It is withdrawn in favor of `set_node_field` because the identical
+whole-node-upsert clobber that motivated a title op turned out to apply
+equally to `mode` (mute/bypass) and the two `flags.*` fields once
+ComfyUI_frontend needed to sync `flags.collapsed`/`flags.pinned` out of the
+canvas — the same gap, one field wider each time. Rather than land three more
+single-field ops in sequence, this revision generalizes to the closed field
+list up front, matching the shape comfy-multi-player's own upstream PR
+converged on for the same reason (see below). No comfy-cli release ever
+shipped `set_title`; this is a same-PR replacement, not a deprecation.
+
+### Prior art: comfy-multi-player PR #235 (merged)
+
+comfy-multi-player PR #235 (merged to that repo's `main`, commit
+`28d2e6166867f16bc291f2ae60d7f4a6a0c0c9f7`) generalized its own earlier,
+title-only prototype (PR #232 / ADR-032) into the same `set_node_field` shape
+this amendment defines, ahead of this document, because the fix was scoped
+and needed there and a client-side sync fix should not wait on this
+document's own release cycle. This document's §1.8 defines the shape
+comfy-cli now implements; §1.8.1 records the one payload difference
+(`node_incarnation`) and why comfy-cli's model does not need it. Ratifying
+this amendment is what lets comfy-multi-player cite a real upstream
+definition for its already-merged op instead of the two living in permanent
+disagreement.
+
+### Scope of this change
+
+* `FROZEN_OPS` and `BATCHABLE_OPS` gain `set_node_field`
+  (`comfy_cli/workflow_ops.py`); `WRITABLE_NODE_FIELDS` is the closed field
+  list (`title`, `mode`, `flags.collapsed`, `flags.pinned`).
+* `apply_op` dispatches it via `_apply_set_node_field`; `apply_specs`
+  dispatches the `{"op": "set_node_field", "node": ..., "field": ...,
+  "value": ...}` spec form via the new `set_node_field()` primitive.
+* `_write_target` gains the `("node_field", node_id, field)` register
+  (§1.8) — one register per field, not per node.
+* `comfy workflow set-node-field <file> <node_id> <field> <value>` (or
+  `--clear`) is the new standalone/batch-authoring command, mirroring
+  `set-widget`'s CLI shape.
+* No change to any existing kind's semantics, to `DEFERRED_OPS`, or to
+  §§2–8.8 beyond the new §1.8 addition and this section.
+
+### What is explicitly NOT done here
+
+* **Not ratified.** See the status callout above.
+* **No interior/subgraph-promoted `set_node_field` variant** — §1.8 states
+  this is out of scope, mirroring comfy-multi-player#235's own scope.
+* **No reconciliation commit against comfy-multi-player** — that is
+  follow-up work for once (and if) this amendment is accepted.
+
+## 16. Amendment v1.7 — 2026-09-20 (node title at creation)
+
+### 16.1 `add_node` carries an optional `title`
+
+A spec (and the minted op) may set `title` to a string: a custom display title
+for the node, in place of the class's default class-derived title. Before this
+amendment `add_node()` took no `title` kwarg, `_build_node()` never wrote a
+`title` key into a fresh node, and neither `add-node`'s CLI surface nor the
+`apply_specs` vocabulary exposed one — there was no way to name a node at
+creation, nor any separate rename/set-title op to do it afterward.
+
+`title` is omitted from the node object entirely when not given (the
+pre-amendment shape), so a fresh node keeps falling back to the frontend's
+class-derived default exactly as before. When given, it is stamped into
+`op.node["title"]` (which stays authoritative for replay, §8.5) and echoed as
+an op-level `title` field, mirroring how `mode` (amendment v1.4) is carried.
+An op without `title` is exactly the pre-amendment shape, so existing ops
+replay unchanged.
+
+This is independent of amendment v1.6's `set_node_field` (§15): that op
+writes `title` (among other fields) on a node that already exists, while this
+amendment is the only way to set it at `add_node` mint time. The two do not
+contend — `add_node` mints the node before any `set_node_field` write could
+target it — and neither depends on the other landing.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 17. Amendment v1.8 — 2026-09-22 (`disconnect`)
+
+This amendment adds `disconnect` as the ninth frozen op kind so a caller can
+remove an input link without replacing the whole workflow or deleting either
+endpoint. It is batchable, has the standalone `comfy workflow disconnect`
+command, and shares each destination input's last-write-wins register with
+`connect`; §1.2.1 defines the wire shape and replay semantics.
+
+Dynamic inputs keep their logical identity instead of treating a shifted
+numeric slot as the register. Promoted inputs use `grow.name`; ordinary
+autogrow and widget-converted inputs use the creating connect's `grow_id`.
+Interior links wholly inside one eligible, single-instance definition carry
+the instance path in that identity. Links that cross a subgraph boundary, and
+links inside a shared definition, remain refused.
+
+The `grow_id` rule deliberately re-scopes a reconnect-shaped `connect` from
+the older concrete `("input", to_node, to_slot)` target to
+`("input", to_node, "grow_id", grow_id)`. It is therefore a coordinated
+applier upgrade: an older replica that does not recognize `connect.grow_id`
+must not participate in mixed-version replay with v1.8. Downstream appliers
+must add the same target before moving their pinned vocabulary SHA to this
+amendment.
+
+The replay path also retains a winning reconnect that arrives before the
+connect which materializes its grown input, then applies that pending write
+when the stable `grow_id` slot appears. Tests cover both replay orders for
+ordinary autogrow and widget-converted inputs, concrete and promoted inputs,
+and path-scoped interior links.
+
+`FROZEN_OPS` and `BATCHABLE_OPS`, the spec and replay dispatch tables, the
+standalone CLI, and this contract change together as required by §9.
+`DEFERRED_OPS` remains empty; no existing op kind is removed.
+
+## 18. Amendment v1.9 — 2026-09-22 (authorable annotation nodes: `Note` / `MarkdownNote` carry `text`)
+
+### 18.1 `add_node` mints `Note` and `MarkdownNote`
+
+§1.1 / §13.2 stated that `add_node` rejects every UI-only type. Production
+agent traces show the agent repeatedly asking for `Note` / `MarkdownNote` and
+being refused; every downstream replica (comfy-multi-player applier, frontend
+follower) already round-trips those nodes — the applier stores an uncatalogued
+positional `widgets_values` opaquely and the follower materializes a note with
+its text box — so the catalog refusal on this surface was the only thing
+between "add a note" and a note on the canvas.
+
+`add_node` now mints the two **annotation** UI-only types. The authorable set
+is `AUTHORABLE_VIRTUAL_NODE_TYPES = {"Note", "MarkdownNote"}` (a strict subset
+of `UI_ONLY_NODE_TYPES`). The spec gains one optional, spec-and-node key:
+
+```json
+{"op": "add_node", "class_type": "Note", "text": "trigger word: zxc", "as": "n"}
+```
+
+* `text` (string, default `""`) becomes the note's single positional widget:
+  `op.node.widgets_values == [text]`. The minted node has no sockets
+  (`inputs == outputs == []`), `mode`/`flags`/`properties` at their defaults,
+  and a layout-assigned `pos`/`size` unless `at` is given. `op.node` stays
+  authoritative for replay (§8.5), so a replica with no notion of `Note`
+  inserts it verbatim.
+* A non-string `text` is `ValueError` at mint time (batch: aborts atomically,
+  `applied_count == 0`, §4). An explicit `"text": null` in a spec counts as
+  non-string — omit the key for an empty note. `text` on a **catalog** class is likewise
+  `ValueError` — catalog widgets are addressed by name through `set_widget`;
+  a stray `text` is an error, not a dropped field.
+* CLI: `comfy workflow add-node <file> Note --text "..."`. Envelope unchanged.
+* The class is decided by **name, before the catalog**: `Note` / `MarkdownNote`
+  mint the annotation shape even if a backend happens to register a class with
+  that name (the frontend treats those names as editor-only regardless of the
+  backend, so the CLI must not turn an agent's note into an executable node).
+* Recipe `${param}` substitution (`apply --param`, `foreach`) does **not**
+  interpolate `text`: a note is prose for a human reader, so
+  `"text": "seed is ${seed}"` applies verbatim and does not require a declared
+  `seed` param. Every other add_node key still interpolates.
+* Execution: unchanged. `workflow_to_api` owns the exclusion of UI-only types
+  from the API prompt and keeps dropping these nodes; a test pins the exact
+  shape `add_node` mints against the converter.
+* Telemetry: `text` joins the redacted argument names (it is user prose, like
+  a prompt), so a `--text` value never reaches the tracking payload.
+
+`Reroute`, `PrimitiveNode`, `GetNode`, `SetNode` remain refused
+(`node_not_found`, `details.ui_only: true`): they carry data flow the converter
+resolves specially, and authoring them here would need link semantics this
+surface does not model.
+
+### 18.2 `capture` deliberately unchanged
+
+§13.2's capture behaviour stands: `capture` still skips UI-only nodes,
+including `Note` / `MarkdownNote`, and reports them as `ui_only_node_skipped`
+warnings — worded as "skipped by design", not "apply cannot mint them", since
+the latter is no longer true for the two annotation types. The recipe
+rebuilds the executable graph, not the canvas decoration. Capturing notes into
+recipes (now that `apply` would accept them) is a possible follow-up; it is not
+part of this amendment so a recipe captured before v1.9 and one captured after
+stay byte-identical.
+
+### 18.3 `replace_ops` carries `text` on the spec half
+
+`replace_ops` (behind `templates fetch --emit-ops` / `replace`) emits
+dual-shape `add_node` entries: the op half carries the full `node`, the spec
+half is what `apply_specs` replays. For a `Note` / `MarkdownNote` the spec
+half now includes `text` (= the source node's `widgets_values[0]` when it is a
+string, else `""`), so replaying the emitted batch through `apply` reproduces
+the note body instead of reminting every note as `""`.
+
+### 18.4 `set_widget` on a note
+
+A minted note has no named widgets, so `set_widget` on it is refused with a
+targeted message ("its body is `text`, set at add time; delete and re-add"),
+instead of the generic "(none — all inputs are links)". Editing an existing
+note's body in place is a follow-up (it needs a positional write path every
+replica agrees on, like the `legacy_primitive` one); it is out of scope for
+v1.9.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
+pinning this document by SHA move the SHA together with their comfy-cli pin.

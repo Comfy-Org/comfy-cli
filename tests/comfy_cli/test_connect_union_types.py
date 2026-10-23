@@ -6,14 +6,13 @@ ComfyUI expresses a multi-type input as a comma-separated union
 whole strings, so a FILE_3D_GLB output was refused by an input that explicitly
 accepts FILE_3D_GLB.
 
-Measured on prod comfy-agent traces (2026-07-23 → 07-28): ~23 connect/apply_ops
-failures of this exact shape, e.g.
+connect/apply_ops could fail with errors of this shape, e.g.
 
-  type mismatch: FILE_3D_GLB output of node 4318783979958460 cannot connect to
+  type mismatch: FILE_3D_GLB output of node 4 cannot connect to
   MESH,FILE_3D_GLB,FILE_3D_GLTF,FILE_3D_OBJ,FILE_3D_FBX,FILE_3D_STL,FILE_3D_USDZ,
-  ... input 'mesh' of node 2451178264782280
+  ... input 'mesh' of node 7
 
-  type mismatch: FILE_3D output of node 890530584279986 cannot connect to
+  type mismatch: FILE_3D output of node 3 cannot connect to
   FILE_3D_GLB,FILE_3D_FBX,FILE_3D_OBJ,FILE_3D_STL,FILE_3D input 'model_3d' of ...
 
 Both name the source type inside the accepted list, so the agent reads the hint,
@@ -65,8 +64,8 @@ def graph() -> Graph:
 @pytest.mark.parametrize(
     "out_type,in_type",
     [
-        ("FILE_3D_GLB", MESH_UNION),  # prod: Load3D GLB -> mesh
-        ("FILE_3D", MODEL3D_UNION),  # prod: Load3D FILE_3D -> model_3d
+        ("FILE_3D_GLB", MESH_UNION),  # e.g. Load3D GLB -> mesh
+        ("FILE_3D", MODEL3D_UNION),  # e.g. Load3D FILE_3D -> model_3d
         ("MESH", MESH_UNION),  # first member of the union
         ("FILE_3D", MESH_UNION),  # last member of the union
     ],
@@ -96,7 +95,7 @@ def test_connect_union_matching_is_not_substring_based(graph):
 @pytest.mark.parametrize(
     "out_type,in_type",
     [
-        ("IMAGE", "COMFY_MATCHTYPE_V3"),  # prod: LoadImage -> ResizeImageMaskNode.input
+        ("IMAGE", "COMFY_MATCHTYPE_V3"),  # e.g. LoadImage -> ResizeImageMaskNode.input
         ("MASK", "COMFY_MATCHTYPE_V3"),
         ("COMFY_MATCHTYPE_V3", "IMAGE"),  # and back out: .resized -> PreviewImage.images
         ("COMFY_MATCHTYPE_V3", MESH_UNION),

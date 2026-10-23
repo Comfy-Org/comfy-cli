@@ -1,5 +1,8 @@
 # `comfy run --json`: Machine-Readable Output (NDJSON)
 
+The accepted architecture for machine-readable output is recorded in
+[ADR-AUTOMATION-0003](adr/AUTOMATION-0003-one-versioned-machine-output-dialect.md).
+
 > **Dialect change (breaking).** The legacy `{"event": …, "schema_version": 1,
 > "error": {"kind": …}}` dialect was removed; `comfy run --json` now emits the
 > CLI-wide renderer stream. Every event line carries `schema: "event/1"` and a
@@ -29,7 +32,38 @@ A local ComfyUI server does **not** broadcast execution events: it addresses
 state file `comfy run` wrote, else `/queue`, else `/history` — and reconnects
 under it; the terminal envelope reports which id it used (`data.client_id`) and
 whether it was the real submitter (`data.attached`). Use `--client-id` to force a
-specific one. Both keys are present on *every* `jobs watch` terminal envelope: a
+specific one — except on a run submitted by `comfy run --client-id`, where the
+id belongs to a live client being fed on purpose. Resolution withholds it
+deliberately (`attached: false`) and the watch polls status instead; passing
+`--client-id` on such a run is refused with `client_id_rejected`
+(`reason: "borrowed"`) before any socket opens. That marker is read from the job
+state file *and* from the `extra_data` the server echoes back, and an override is
+honoured only once one of them has actually vouched for the run. If there is no
+local state file and the prompt's own server record cannot be read — the fetch
+failed, the body came back the wrong shape, or neither `/queue` nor `/history`
+mentions the prompt — then nothing has ruled the marker out, so the run is not
+assumed unmarked: the watch polls (`attached: false`) and an explicit
+`--client-id` is refused with `reason: "indeterminate"`. A retry clears that once
+the server answers again; a `prompt_id` that is a typo or already pruned stays
+unreadable, and no id works for it.
+
+The check is on the id as well as on the prompt: naming a borrowed client's id
+as `--client-id` while watching some *other*, perfectly ordinary prompt is
+refused the same way, because attaching evicts that client either way. Those
+ids are read from `/queue`, and if that read does not come back whole the
+override is refused as `indeterminate` rather than waved through — an empty
+list of borrowed ids counts as "nobody is borrowing" only when the queue was
+actually walked. What it cannot see is a run that has already *left* the queue:
+an id that run was feeding is honoured again. Watch by `prompt_id` and let
+resolution do its job; `--client-id` is a last resort. One more gap: a prompt that is
+*already terminal* short-circuits before any of this runs, so a non-empty
+`--client-id` is ignored rather than refused there — harmless, because that path
+opens no socket at all. Separately, and by design, this protects only runs
+*comfy-cli* submitted with `--client-id`: a browser tab that submits its own
+prompt stamps no marker, so watching that prompt re-attaches as the tab, exactly
+as the last paragraph of this section describes for any re-attach. Both
+`data.client_id` and `data.attached` are present on every *local* `jobs watch`
+terminal envelope (cloud watch emits neither): a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id
 is ComfyUI's own session-resume path, so a submitter that is *still* holding that
@@ -39,6 +73,28 @@ it reconnects.
 `data.completed_nodes` on the terminal envelope does not depend on the stream: it
 is the union of what the watch observed and what `/history` records for the
 prompt, so it is populated even for a watch that attached after the job ended.
+
+`data.poll_reason` says why a watch polled instead of opening a socket, and is
+`null` when it attached (and on a prompt that was already terminal, which opens
+no socket either). `"borrowed"` means the run was submitted for another client
+that is receiving its events — drop `--client-id` and keep polling.
+`"indeterminate"` means nothing could vouch for the run — retry once the server
+answers. `data.attached` alone cannot separate those two, and they want opposite
+responses, which is why the reason is published rather than only printed.
+
+**`data.execution_error` on a failed watch.** Any `jobs watch` that ends in
+`status: "error"` — not just a borrowed or poll-only one — carries the node's
+structured failure under `data.execution_error`, never under
+`data.details.error`. Both of the command's exits do this: the live/poll path
+and the short-circuit for a prompt that had already failed before the watch
+started. `data.details` keeps the rest of the record on the paths that have one.
+The key is what the shared error classifier reads to produce
+`error.code` / `error.message` / `error.hint` — the same path `comfy run` uses —
+so a failure left anywhere else reaches the envelope unclassified, and also
+unredacted: `current_inputs` is scrubbed and `traceback` capped to its last two
+frames only for the value under this key. Earlier builds of this branch put it
+at `data.details.error` (live path) and `data.error` (terminal path); neither is
+published any more.
 
 ## Overview
 
@@ -181,6 +237,8 @@ the `--print-prompt` and `--no-wait` stream shapes.
 | -------------------- | ------------------------------------------------------------------ | -------------------------------- | ---- |
 | `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login` | —                     | 1 |
 | `cloud_http_error`   | The cloud API returned a non-2xx response on submit or while polling | `status` (int), `body` (str) on submit; `status`, `prompt_id` while polling | 1 |
+| `cloud_rate_limited` | The cloud API throttled the request (HTTP 429) on submit or while polling. Throttling is not a verdict on the workflow, but it does not by itself prove the submit had no effect, and the CLI never repeats a submit on its own. On submit, wait, then check `comfy jobs ls --where cloud` for the job before re-running; while polling, the job was already submitted, so follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running (the job record is left non-terminal). Cloud only: a local server's 429 is `client_error` | same as `cloud_http_error`, plus `retry_after` (seconds) when the server sent `Retry-After` | 1 |
+| `cloud_payment_required` | The cloud refused the request because the account's plan does not allow it (HTTP 402, or a legacy HTTP 429 whose body type is a plan refusal: free generations used up, subscription required, a partner node or model that needs a paid plan). Not throttling and not a workflow problem; nothing was queued, so do not retry or edit the workflow. A full queue stays `cloud_rate_limited` | `status` (402 or 429), `body` (str), `reason` (the server's refusal type, when it sent one) | 1 |
 | `cloud_timeout`      | The cloud job produced no progress for `--timeout` seconds          | `prompt_id` (str)               | 1 |
 | `cql_no_graph`       | A UI-format workflow needs the cloud `object_info` snapshot to be lowered to API format, and it could not be loaded — run `comfy nodes refresh --where cloud` | — | 1 |
 
@@ -434,8 +492,9 @@ piped under `--no-json` they are plain lines every five seconds, with no
 carriage returns.
 ### `deploy_progress`
 
-Emitted by `comfy deploy up --watch` and `comfy deploy status --watch` while the
-deployment's status is `provisioning` or `starting`. It is part of those
+Emitted by `comfy deploy up --watch`, `comfy deploy promote --watch`,
+`comfy deploy rollback --watch` and `comfy deploy status --watch` while the deployment's status is `provisioning`
+or `starting`. It is part of those
 commands, not the `run` stream, and validates against
 `deploy_progress_event.json`.
 
@@ -473,6 +532,15 @@ returns. Ctrl-C during `--watch` exits 130 after printing that the deployment
 keeps coming up and the command that re-attaches, and in the JSON modes still
 writes the envelope for the last state it read.
 
+A watch rides out a deploy API that stops answering, as it does for a few
+seconds while a new version rolls out: a 5xx or a failed connection on its read
+is retried, backing off (2, 4, 8, then 15 seconds), for about a minute from the
+first failure, and the watch says once that it is retrying. A 4xx still ends the
+watch at once. If the API is still not answering when the window closes, the
+watch ends with the error code `deploy_watch_lost` and exit code **75**, never 1:
+only the watch ended, and the deployment may still be coming up. Its `hint`
+carries the command that re-attaches and `details.deployment_id` the deployment.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:
@@ -492,7 +560,7 @@ On `--wait` success, `data` carries:
 | `elapsed_seconds`   | float \| null   | Wall-clock duration (null when not waiting)            |
 | `host` / `port`     | str / int       | **Local only.** Target server                          |
 | `base_url`          | str             | **Cloud only.** Target cloud endpoint                  |
-| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`) |
+| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`); null when no record could be written — see [below](#known-limit-a-state-file-failure-is-never-a-run-failure) |
 
 `cached_node_ids` and `executed_node_ids` may overlap: a cached
 output-bearing node emits both `execution_cached` and `executed`. Agents
@@ -508,6 +576,39 @@ watcher keeps the state file updated; follow up with
 the same on both targets, `watcher_spawned` included (add `--where cloud` to
 the follow-up commands for a cloud job). The async envelope carries no
 `outputs_by_node` / `outputs_by_item` / `warnings` — nothing has run yet.
+
+### Known limit: a state-file failure is never a run failure
+
+Writing the job's state file is best-effort on an **async submit** (the default,
+no `--wait`, local or cloud) and on **local `--wait`**. If the state directory
+can't be written — a config root that resolved somewhere unreachable, a
+read-only or sandboxed home, a full disk — the run still reports `ok: true`,
+because by then the server has already accepted the prompt. What the envelope
+says depends on the path, and `data.state_file` is `null` on both:
+
+- **async submit** — `data.status: "queued"`, exactly as it would be with the
+  record written.
+- **local `--wait`** — the run goes on to completion in the foreground and
+  finishes `data.status: "completed"` with its outputs, so a failed state write
+  costs you only the on-disk record, not the result.
+
+**`state_file: null` is not a failed run**, and in particular it is not a
+transport error: there is nothing to retry, and re-submitting queues a second
+job for a prompt that is already running. Follow an async job by `prompt_id`
+(`comfy jobs status <prompt_id>`) and treat a missing record as "unknown", not
+"did not run".
+
+With no record there is also nothing for a background watcher to update, so the
+spawn is skipped and `data.watcher_spawned` is `false` — poll
+`comfy jobs status` yourself, as that field already instructs.
+
+Run with `LOG_LEVEL=DEBUG` to see the swallowed cause.
+
+**Cloud `--wait` is not yet covered.** That path still writes its state record
+directly, including inside its own error handlers, so an unwritable state
+directory there can surface as a traceback after the job was accepted rather
+than as a clean envelope. Treat the guarantee above as scoped to the paths
+named in the first paragraph.
 
 ### Known limit: `--wait` has no background watcher
 
@@ -533,7 +634,9 @@ crash the CLI hasn't established: when local `--wait` gives up on its *own*
 `--timeout` (`ws_timeout`), and when cloud `--wait` dies on a network error
 that escapes its handlers (a DNS failure or connection reset while polling, as
 opposed to the handled `cloud_timeout` / `cloud_unauthorized` /
-`cloud_http_error` exits, which record a terminal verdict of their own). In
+`cloud_http_error` exits, which record a terminal verdict of their own), or
+when cloud `--wait` gives up on a throttled status poll (`cloud_rate_limited`,
+recorded as the record's `error` until the next successful status poll). In
 both cases the record is left non-terminal with no pid, the reap never touches
 it, and `comfy jobs status <prompt_id>` can still consult the server for the
 real outcome.
@@ -585,6 +688,20 @@ lacks `api_node` flags the list is simply empty (fail-open). When
 `spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
 `⚠ uses partner-API (paid) nodes …` line after the verdict.
 
+On a canvas whose ids `get_template` remapped (`insert:<op>:root:node:94`), an
+issue on such a node also carries `template_node_id` (`"94"`), the id the
+template showed; `workflow slots --node`, `set-widget` and the other edit
+commands accept it. It is absent when a literal node `94` exists or two
+inserts carry that id.
+
+A literal of the wrong JSON type is an error (`shape_mismatch`) unless the
+server converts it the way ComfyUI does (a lossless subset of its conversions) —
+an integer string on an INT input, a numeric string on a FLOAT input, a number
+on a STRING input. That one is a `coercible_type` warning: `value` is the stored
+literal, `coerced_value` the typed value the server runs with, and `hint` the
+`set-widget` command for non-link inputs when no catalog error or fatal finding
+refuses the converted value. Range checks judge `coerced_value`.
+
 Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
 a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
 exit code `1`. Structural failures (missing file, non-object JSON, an
@@ -624,8 +741,9 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `workflow_unknown_nodes`  | Pre-submit validation found unknown class_types / shape mismatches              | `errors` (array), `warnings` (array)               | 1 |
 | `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`), `host`, `port` | 1 |
 | `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
+| `client_id_rejected`      | `--client-id` was combined with something it cannot serve. On `comfy run`: the flag was blank (`empty`), the effective target is cloud (`cloud` — the flag addresses a local ComfyUI socket, and cloud fans execution events out per user/workspace anyway), or `--wait` was passed (`wait` — the run's events go to the named client, so this invocation would watch a silent socket). Also raised by `comfy jobs watch` when the prompt is marked as having borrowed a live client's id (`borrowed`): that run is poll-only and no `--client-id` override is honoured. `comfy jobs watch` raises it with `indeterminate` when no job state file was readable and the prompt's own server record could not be read either (the `/queue` + `/history` fetch failed, returned the wrong shape, or simply never mentioned the prompt): nothing has ruled the marker out, so the override is refused rather than risking the eviction — retry once the server answers. `comfy jobs watch` also raises `empty` for a blank `--client-id`, as `comfy run` does. Refused before anything is submitted and before any socket is opened | `reason` (str, `"empty"`, `"cloud"`, `"wait"`, `"borrowed"` or `"indeterminate"`) | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
-| `client_error`            | Server returned another HTTP 4xx response                                       | `status` (int, 4xx), `body` (str)                  | 1 |
+| `client_error`            | Server returned another HTTP 4xx response (including 429; `cloud_rate_limited` is Cloud only) | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`         | `status` (int, 2xx)                                | 1 |
 | `ws_timeout`              | WebSocket `recv` idle past `--timeout`                                          | `timeout` (int, seconds)                           | 1 |
@@ -633,6 +751,32 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `cancelled`               | Run was interrupted — client `SIGINT` (Ctrl-C) or the server's `execution_interrupted` (e.g. `/interrupt`) | —                       | 130 |
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)               | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) | 1 |
 | `transient_auth`          | The `execution_error` cause was an API node's server-side session token expiring mid-execution — transient, so resubmitting the same workflow succeeds. Local credentials are fine; `comfy cloud login` does not help | Same fields as `execution_error` | 1 |
+
+### CLI-wide codes
+
+Two codes can end any command's `--json` stream, not only `comfy run`:
+
+| `code`           | Triggered when                                                                 | `details`                                                                                  | Exit |
+| ---------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ---- |
+| `usage_error`    | argv did not parse (unknown option or command, missing value); nothing ran     | `command` (str), `exit_code` (int); `option` and `did_you_mean` for a near-miss option     | 2 |
+| `internal_error` | The command crashed on an exception it did not handle (a comfy-cli bug)        | `exception` (str, the exception type), `command` (str), `traceback` (array of up to 3 `file:line:func` strings, innermost last) | 1 |
+
+`internal_error`'s `message` is `"<Type>: <text>"`, capped at 500 characters.
+URL query strings, bearer tokens, `key=value` token pairs and `user:pass@`
+userinfo are replaced with `***`. The full traceback still goes to stderr.
+Whether anything was written depends on where the command crashed, so re-read
+state before retrying.
+
+### Workflow-edit refusal fields
+
+`workflow set-widget` / `set-slot` / `ls-nodes` add these fields for agents:
+
+| Where | Field | Meaning |
+| ----- | ----- | ------- |
+| `unknown_enum_value` finding (the `set-widget` error's `details`, `validate` findings) | `best_match` (str, optional) | The ONE option sharing the rejected value's leading token (`'16:9 (Landscape)'` → `'16:9 (Widescreen)'`). It is also first in `did_you_mean`. It is never auto-applied, and is absent for filenames and ambiguous tokens |
+| `unknown_dynamic_sub_input` warning (`set-slot`) | `revealed_by` (array of str, optional) | The options of the dynamic combo that reveal the requested sub-widget (`model.prompt_expansion_mode` → `["MiniMax H3 Max", "MiniMax H3 Max Turbo"]`). Set the selector to one of them first |
+| `workflow ls-nodes` rows | `ui_only` (true, optional) | A frontend-only node (Reroute, Note, MarkdownNote, PrimitiveNode, GetNode, SetNode). It is readable on the canvas but cannot be added with `add-node` or shown with `nodes show` |
+| `workflow ls-nodes` rows | `subgraph` (true, optional) | A subgraph instance: its `type` is the definition uuid, not a node class |
 
 ### `exception_type` field
 
@@ -716,6 +860,9 @@ should treat the run as failed when **both**:
   empty.
 
 Stderr may contain a Python traceback in these cases.
+
+An exception inside the CLI itself is not one of these. It ends the stream
+with an [`internal_error`](#cli-wide-codes) envelope.
 
 ## Examples
 

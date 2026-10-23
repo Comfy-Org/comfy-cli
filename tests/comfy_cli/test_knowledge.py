@@ -800,8 +800,225 @@ class TestCli:
         assert data["env_file"] == str(path)
         assert data["url"] == knowledge.default_url()
         assert data["ttl_seconds"] == knowledge.DEFAULT_TTL_SECONDS
-        assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 23, "deprecations": 2}
+        assert data["counts"] == {
+            "models": 5,
+            "capabilities": 2,
+            "aliases": 23,
+            "deprecations": 2,
+            "custom_node_authoring": 0,
+        }
         _validate(data)
+
+    def test_authoring_uses_only_requested_canonical_slice(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": "# Guide\n\n## API only\n\nAPI ONLY\n\n## Validation\n\nVALIDATION MUST NOT LEAK\n",
+                "slices": [
+                    {
+                        "id": "api-only",
+                        "heading": "API only",
+                        "retrieval_classes": ["api-schema"],
+                        "api_generations": ["v3"],
+                    },
+                    {
+                        "id": "validation",
+                        "heading": "Validation",
+                        "retrieval_classes": ["validation"],
+                        "api_generations": ["v1", "v3"],
+                    },
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+
+        rc, env = _run(["authoring", "api-schema", "--api-generation", "v3"], capsys)
+
+        assert rc == 0
+        payload = env["data"]
+        assert "API ONLY" in payload["content"]
+        assert "VALIDATION MUST NOT LEAK" not in json.dumps(payload)
+        assert payload["source"] == "comfy-knowledge"
+        assert payload["degraded"] is False
+        assert payload["provenance"] == {"playbook": "custom-node-authoring", "slice_ids": ["api-only"]}
+        assert payload["applies_to"] == {"api_generations": ["v3"]}
+        _validate(payload)
+
+    def test_authoring_serves_every_producer_retrieval_class(self, tmp_path, monkeypatch, capsys):
+        """A producer class absent from AUTHORING_CLASSES silently drops its slice.
+
+        The slice metadata below is the `custom-node-authoring` frontmatter published by
+        comfy-knowledge `7a3574e3deeae860f46901c39e3606f7a3acfc96`. `_index_custom_node_authoring`
+        skips any slice declaring an unknown class, so a class the producer ships and this consumer
+        has not adopted degrades to the packaged fallback with canonical content sitting unread in
+        the bundle. Red before packaging-publishing, frontend-extension, v1-to-v3-migration and
+        execution-caching were adopted; green after.
+        """
+        producer_slices = (
+            ("invocation-and-evidence", ["invocation", "ecosystem-reference"], ["v1", "v3"]),
+            ("v3-registration-and-schema", ["api-schema"], ["v3"]),
+            ("v1-registration-and-schema", ["api-schema"], ["v1"]),
+            ("values-and-tensors", ["api-schema"], ["v1", "v3"]),
+            ("caching-and-recomputation", ["execution-caching"], ["v1", "v3"]),
+            ("dependencies-and-capabilities", ["dependencies-capabilities"], ["v1", "v3"]),
+            ("validation-and-repair", ["validation", "troubleshooting"], ["v1", "v3"]),
+            ("packaging-and-publishing", ["packaging-publishing"], ["v1", "v3"]),
+            ("frontend-extension-assets", ["frontend-extension"], ["v1", "v3"]),
+            ("agent-authored-packs", ["frontend-extension"], ["v1", "v3"]),
+            ("v1-to-v3-migration", ["v1-to-v3-migration"], ["v1", "v3"]),
+        )
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": "# Guide\n\n"
+                + "".join(f"## {slice_id}\n\nBODY {slice_id}\n\n" for slice_id, _, _ in producer_slices),
+                "slices": [
+                    {
+                        "id": slice_id,
+                        "heading": slice_id,
+                        "retrieval_classes": classes,
+                        "api_generations": generations,
+                    }
+                    for slice_id, classes, generations in producer_slices
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+
+        declared = {name for _, classes, _ in producer_slices for name in classes}
+        assert declared <= set(knowledge.AUTHORING_CLASSES)
+
+        for knowledge_class in sorted(declared):
+            rc, env = _run(["authoring", knowledge_class], capsys)
+            payload = env["data"]
+            assert rc == 0, knowledge_class
+            assert payload["degraded"] is False, knowledge_class
+            assert payload["source"] == "comfy-knowledge", knowledge_class
+            assert payload["provenance"]["slice_ids"], knowledge_class
+            _validate(payload)
+
+    def test_authoring_ignores_heading_lines_inside_fenced_code(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": (
+                    "```markdown\n## API only\nDECOY REQUESTED HEADING\n```\n\n"
+                    "## API only\n\nCANONICAL START\n\n"
+                    "~~~python\n# Not a boundary\n## Validation\n~~~\n\n"
+                    "AFTER FENCED HEADING\n\n# Next section\n\nMUST NOT LEAK\n"
+                ),
+                "slices": [
+                    {
+                        "id": "api-only",
+                        "heading": "API only",
+                        "retrieval_classes": ["api-schema"],
+                        "api_generations": ["v3"],
+                    }
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+
+        rc, env = _run(["authoring", "api-schema", "--api-generation", "v3"], capsys)
+
+        assert rc == 0
+        content = env["data"]["content"]
+        assert "CANONICAL START" in content
+        assert "AFTER FENCED HEADING" in content
+        assert "DECOY REQUESTED HEADING" not in content
+        assert "MUST NOT LEAK" not in content
+
+    def test_authoring_unavailable_uses_visible_bounded_fallback(self, capsys):
+        rc, env = _run(["authoring", "validation"], capsys)
+        assert rc == 0
+        payload = env["data"]
+        assert payload["source"] == "packaged-fallback"
+        assert payload["degraded"] is True
+        assert payload["degraded_reason"] == f"knowledge bundle unavailable ({knowledge.REASON_SIGNED_OUT})"
+        assert "filesystem presence is never proof" in payload["content"]
+        assert len(payload["content"].encode()) < 2500
+        _validate(payload)
+
+    def test_authoring_stale_bundle_uses_fallback(self, monkeypatch, capsys):
+        _seed_cache(age_seconds=knowledge.DEFAULT_TTL_SECONDS + 1)
+        monkeypatch.setattr(knowledge, "_http_get", lambda _url: (_ for _ in ()).throw(RuntimeError("offline")))
+        rc, env = _run(["authoring", "api-schema"], capsys)
+        assert rc == 0
+        assert env["data"]["degraded_reason"] == "knowledge bundle is stale"
+        assert env["data"]["source"] == "packaged-fallback"
+
+    def test_authoring_oversized_slice_is_rejected_to_fallback(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": "## Huge\n\n" + "x" * 9000,
+                "slices": [
+                    {
+                        "id": "huge",
+                        "heading": "Huge",
+                        "retrieval_classes": ["validation"],
+                        "api_generations": ["v1", "v3"],
+                    }
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+        rc, env = _run(["authoring", "validation"], capsys)
+        assert rc == 0
+        assert env["data"]["degraded"] is True
+        assert "has no usable 'validation' authoring slice" in env["data"]["degraded_reason"]
+
+    def test_authoring_schema_boundary_rejects_unbounded_metadata(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": "## Safe\n\nSHOULD NOT LOAD\n",
+                "slices": [
+                    {
+                        "id": "safe",
+                        "heading": "Safe",
+                        "retrieval_classes": ["validation"],
+                        "api_generations": ["v1", "v3"],
+                        "unexpected": "x",
+                    }
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+        _rc, env = _run(["authoring", "validation"], capsys)
+        assert env["data"]["source"] == "packaged-fallback"
+        assert "SHOULD NOT LOAD" not in env["data"]["content"]
+
+    def test_authoring_lone_surrogate_degrades_instead_of_crashing_loader(self, tmp_path, monkeypatch, capsys):
+        path = _env_bundle(tmp_path, monkeypatch, manifest=None)
+        data = json.loads(path.read_text())
+        data["playbooks"] = {
+            "custom-node-authoring": {
+                "content": "## Unsafe\n\n\ud800\n",
+                "slices": [
+                    {
+                        "id": "unsafe",
+                        "heading": "Unsafe",
+                        "retrieval_classes": ["validation"],
+                        "api_generations": ["v3"],
+                    }
+                ],
+            }
+        }
+        path.write_text(json.dumps(data))
+        knowledge._reset_for_testing()
+        _rc, env = _run(["authoring", "validation", "--api-generation", "v3"], capsys)
+        assert env["data"]["source"] == "packaged-fallback"
 
     def test_status_with_nothing(self, capsys):
         rc, env = _run(["status"], capsys)

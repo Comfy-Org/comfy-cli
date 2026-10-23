@@ -54,6 +54,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build refs model-dirs": "build_refs_model_dirs",
     "comfy build blob ls": "build_blob_ls",
     "comfy deploy up": "deploy_up",
+    "comfy deploy promote": "deploy_promote",
+    "comfy deploy rollback": "deploy_rollback",
+    "comfy deploy rename": "deploy_rename",
+    "comfy deploy cancel": "deploy_cancel",
+    "comfy deploy history": "deploy_history",
     "comfy deploy status": "deploy_status",
     "comfy deploy ls": "deploy_ls",
     "comfy deploy show": "deploy_show",
@@ -101,10 +106,15 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow insert-workflow": "workflow",
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",
+    "comfy workflow disconnect": "workflow",
     "comfy workflow set-widget": "workflow",
+    "comfy workflow set-node-field": "workflow",
     "comfy workflow delete-node": "workflow",
     "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
+    # Whole-document edits: same `_finish` op envelope as the primitives above.
+    "comfy workflow clear": "workflow",
+    "comfy workflow reset-doc": "workflow",
     "comfy workflow apply": "workflow",
     "comfy workflow capture": "workflow",
     "comfy workflow foreach": "workflow",
@@ -168,6 +178,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy knowledge status": "knowledge",
     "comfy knowledge resolve": "knowledge",
     "comfy knowledge pick": "knowledge",
+    "comfy knowledge authoring": "knowledge",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
@@ -219,6 +230,8 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     # the deployment coming up; same rule about stderr
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",
+    "comfy deploy promote": "deploy_progress_event",
+    "comfy deploy rollback": "deploy_progress_event",
 }
 
 

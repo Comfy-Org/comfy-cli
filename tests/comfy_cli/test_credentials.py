@@ -97,18 +97,26 @@ class TestPrecedence:
         assert cred is not None
         assert cred.source == f"env:{ENV_VAR[purpose]}"
 
-    def test_live_session_outranks_env_and_stored(self, purpose, clean_env):
+    def test_env_outranks_live_session_without_refreshing_it(self, purpose, clean_env):
+        refreshed = []
         clean_env.setenv(ENV_VAR[purpose], "env-key")
+        clean_env.setattr(auth_store, "get", _stored("stored-key"))
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw) or _session())
+        cred = resolve_cloud_credential(purpose=purpose)
+        assert cred == Credential(kind="api_key", value="env-key", source=f"env:{ENV_VAR[purpose]}")
+        assert refreshed == []
+
+    def test_live_session_outranks_stored_key(self, purpose, clean_env):
         clean_env.setattr(auth_store, "get", _stored("stored-key"))
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(token="live-token"))
         cred = resolve_cloud_credential(purpose=purpose)
         assert cred == Credential(kind="oauth", value="live-token", source="session")
 
-    def test_expired_session_falls_through_to_env(self, purpose, clean_env):
-        clean_env.setenv(ENV_VAR[purpose], "env-key")
+    def test_expired_session_falls_through_to_stored_key(self, purpose, clean_env):
+        clean_env.setattr(auth_store, "get", _stored("stored-key"))
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(expired=True))
         cred = resolve_cloud_credential(purpose=purpose)
-        assert cred == Credential(kind="api_key", value="env-key", source=f"env:{ENV_VAR[purpose]}")
+        assert cred == Credential(kind="api_key", value="stored-key", source=f"stored:{CLOUD_API_KEY_PROVIDER}")
 
     def test_env_outranks_stored(self, purpose, clean_env):
         clean_env.setenv(ENV_VAR[purpose], "env-key")
@@ -159,11 +167,11 @@ class TestPrecedence:
     def test_base_url_mismatch_skips_session(self, purpose, clean_env):
         """The replay-guard: a session minted for another host is never sent."""
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(base_url="https://other.comfy.org"))
-        clean_env.setenv(ENV_VAR[purpose], "env-key")
+        clean_env.setattr(auth_store, "get", _stored("stored-key"))
         cred = resolve_cloud_credential(purpose=purpose, base_url="https://cloud.comfy.org")
         assert cred is not None
         assert cred.kind == "api_key"
-        assert cred.value == "env-key"
+        assert cred.value == "stored-key"
 
     def test_base_url_match_uses_session(self, purpose, clean_env):
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(base_url="https://cloud.comfy.org"))
@@ -180,7 +188,8 @@ class TestPrecedence:
 
 class TestPurposeSpecificStripping:
     """`partner` (the generate proxy) historically strips ambient keys and
-    treats whitespace-only values as absent; `cloud` passes them verbatim.
+    treats whitespace-only values as absent; `cloud` now strips env values too
+    (they go into a header) but still passes a stored key verbatim.
     Encoded per-purpose to preserve each site's exact behavior."""
 
     def test_partner_strips_env_value(self, clean_env):
@@ -199,11 +208,12 @@ class TestPurposeSpecificStripping:
         assert cred is not None
         assert cred.value == "stored-key"
 
-    def test_cloud_env_value_passed_verbatim(self, clean_env):
-        clean_env.setenv("COMFY_CLOUD_API_KEY", "  sk-abc  ")
+    def test_cloud_env_value_is_stripped(self, clean_env):
+        """It goes into X-API-Key, where padding or a newline would break the request."""
+        clean_env.setenv("COMFY_CLOUD_API_KEY", "  sk-abc \n")
         cred = resolve_cloud_credential(purpose="cloud")
         assert cred is not None
-        assert cred.value == "  sk-abc  "
+        assert cred.value == "sk-abc"
 
 
 class TestFindApiKey:
@@ -373,6 +383,7 @@ class TestResolveAllowClear:
             )
 
         monkeypatch.setattr(oauth, "refresh_tokens", _flake)
+        monkeypatch.setattr(oauth.time, "sleep", lambda s: None)  # skip the in-lock retry backoff
         cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
         assert cred == Credential(kind="api_key", value="env-key", source="env:COMFY_CLOUD_API_KEY")
         assert auth_store.get_cloud_session() is not None  # stale session kept
@@ -474,13 +485,13 @@ class TestForwardedBearerToken:
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "   \n\t")
         assert resolve_cloud_credential(purpose="cloud") is None
 
-    def test_live_session_outranks_bearer_env(self, clean_env):
+    def test_bearer_env_outranks_live_session(self, clean_env):
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(token="live-token"))
         cred = resolve_cloud_credential(purpose="cloud")
-        assert cred == Credential(kind="oauth", value="live-token", source="session")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
 
-    def test_expired_session_falls_through_to_bearer_env(self, clean_env):
+    def test_bearer_env_used_with_an_expired_session(self, clean_env):
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
         clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(expired=True))
         cred = resolve_cloud_credential(purpose="cloud")
@@ -495,3 +506,58 @@ class TestForwardedBearerToken:
     def test_bearer_env_ignored_for_partner_purpose(self, clean_env):
         clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
         assert resolve_cloud_credential(purpose="partner") is None
+
+
+# ---------------------------------------------------------------------------
+# the key comfy build and comfy deploy send in place of a sign-in
+# ---------------------------------------------------------------------------
+
+
+class TestPlatformApiKey:
+    """`platform_api_key` is what comfy build and comfy deploy send in ``X-API-Key``:
+    the env key whatever sign-in is stored, the saved key only when none is."""
+
+    @pytest.mark.parametrize(
+        ("env", "signed_in", "saved", "expected"),
+        [
+            ("comfyui-env", True, "comfyui-saved", Credential("api_key", "comfyui-env", "env:COMFY_CLOUD_API_KEY")),
+            ("comfyui-env", False, None, Credential("api_key", "comfyui-env", "env:COMFY_CLOUD_API_KEY")),
+            (
+                None,
+                False,
+                "comfyui-saved",
+                Credential("api_key", "comfyui-saved", f"stored:{CLOUD_API_KEY_PROVIDER}"),
+            ),
+            (None, True, "comfyui-saved", None),
+            ("   ", False, None, None),
+            (None, False, None, None),
+        ],
+        ids=[
+            "env-key-outranks-a-sign-in",
+            "env-key-alone",
+            "saved-key-without-a-sign-in",
+            "sign-in-outranks-a-saved-key",
+            "blank-env-key-is-absent",
+            "nothing-set",
+        ],
+    )
+    def test_picks_the_key_to_send(self, clean_env, env, signed_in, saved, expected):
+        if env is not None:
+            clean_env.setenv("COMFY_CLOUD_API_KEY", env)
+        if signed_in:
+            clean_env.setattr(auth_store, "get_cloud_session", lambda: _session())
+        if saved is not None:
+            clean_env.setattr(auth_store, "get", _stored(saved))
+        assert credentials.platform_api_key() == expected
+
+    def test_env_key_is_stripped(self, clean_env):
+        clean_env.setenv("COMFY_CLOUD_API_KEY", "  comfyui-env\n")
+        key = credentials.platform_api_key()
+        assert key is not None and key.value == "comfyui-env"
+
+    def test_never_refreshes_the_sign_in(self, clean_env):
+        refreshed = []
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw))
+        clean_env.setattr(auth_store, "get", _stored("comfyui-saved"))
+        credentials.platform_api_key()
+        assert refreshed == []

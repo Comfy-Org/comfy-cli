@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_rollback.json",
+  "title": "comfy deploy rollback --json data payload",
+  "type": "object",
+  "required": [
+    "deployment",
+    "release",
+    "previousRelease",
+    "waiting"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "deployment": {
+      "type": "object",
+      "required": [
+        "id",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "provisioning",
+            "starting",
+            "ready",
+            "unhealthy",
+            "stopping",
+            "stop_failed",
+            "stopped",
+            "failed"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "The release the deployment rolled back to, or moves to while the rollback waits. `version` is absent for a release the Build no longer lists."
+    },
+    "previousRelease": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "The release the deployment served before the rollback."
+    },
+    "waiting": {
+      "type": "boolean",
+      "description": "True while the rollback waits for its release's copy to be ready; the release in `release` serves only once it lands."
+    }
+  }
+}

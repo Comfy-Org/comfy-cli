@@ -1,14 +1,14 @@
 """set-widget addresses the agent derives from comfy's own output.
 
-Measured on stg-v2/nightly comfy-agent traces (2026-09-20..21):
+Two address shapes an agent can plausibly derive:
 
 * ``<instance>/primitive_string_multiline_2.value`` — a ``print_workflow``
   BINDING key (``bindings`` maps it to ``<instance>/18``) used as the node
-  part of an address. Refused as "interior node primitive_string_multiline_2
-  not found" (22 calls).
-* ``51.value`` on a legacy frontend ``PrimitiveNode`` — refused as "widget
+  part of an address. Was refused as "interior node
+  primitive_string_multiline_2 not found".
+* ``51.value`` on a legacy frontend ``PrimitiveNode`` — was refused as "widget
   'value' not found on PrimitiveNode; available widgets: (none …)" although a
-  write through the node it feeds (``15.text``) already lands on it (8 calls).
+  write through the node it feeds (``15.text``) already lands on it.
 """
 
 from __future__ import annotations

@@ -55,8 +55,9 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
 # Reference skills: resolvable by `comfy skills show`, and deliberately outside
 # `default_skill_names()`, so no plain `install` writes one. A parent skill cites
 # one by name so its depth loads on demand instead of sitting in every agent's
-# context on every task. An explicit request — a path token, or `skills=` here —
-# still installs one, and `uninstall` accepts these names so it can come back off.
+# context on every task. An explicit request, a path to the CLI's own copy or
+# `skills=` here, still installs one, and `uninstall` accepts these names so it
+# can come back off.
 #
 # This exists because the usual progressive-disclosure pattern — a short
 # SKILL.md pointing at sibling `references/*.md` — cannot work here. Only
@@ -71,6 +72,16 @@ REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build-failures", "comfy-build-failures"),
     ("comfy-deploy-failures", "comfy-deploy-failures"),
     ("comfy-agent-permissions", "comfy-agent-permissions"),
+    ("comfy-custom-nodes-invocation", "comfy-custom-nodes-invocation"),
+    ("comfy-custom-nodes-search", "comfy-custom-nodes-search"),
+    ("comfy-custom-nodes-api-schema", "comfy-custom-nodes-api-schema"),
+    ("comfy-custom-nodes-validation", "comfy-custom-nodes-validation"),
+    ("comfy-custom-nodes-dependencies", "comfy-custom-nodes-dependencies"),
+    ("comfy-custom-nodes-troubleshooting", "comfy-custom-nodes-troubleshooting"),
+    ("comfy-custom-nodes-packaging", "comfy-custom-nodes-packaging"),
+    ("comfy-custom-nodes-frontend", "comfy-custom-nodes-frontend"),
+    ("comfy-custom-nodes-migration", "comfy-custom-nodes-migration"),
+    ("comfy-custom-nodes-caching", "comfy-custom-nodes-caching"),
 )
 
 
@@ -202,6 +213,34 @@ def load_skill_source(token: str) -> SkillSource:
     if p.is_dir() and p.name != name:
         raise ValueError(f"{md}: frontmatter name {name!r} must match directory name {p.name!r}")
     return SkillSource(name=name, content=content, bundled=False)
+
+
+class ShippedSkillNameError(ValueError):
+    """A path-loaded skill claims a name the CLI ships."""
+
+
+SHIPPED_NAME_HINT = "give the skill a `name:` of its own; `comfy skills show <name>` prints the shipped one"
+
+
+def refuse_shipped_name(src: SkillSource, origin: str) -> None:
+    """Raise ShippedSkillNameError when a path-loaded skill claims a name the CLI ships.
+
+    The install target is named from the frontmatter, so without this a file
+    declaring ``name: comfy`` overwrites the shipped driver skill in every agent.
+    Names compare case-folded, since ``Comfy`` and ``comfy`` are one folder on
+    macOS and Windows. The shipped text itself still passes, which keeps a path
+    to the CLI's own copy of a reference skill working. Uninstall never calls
+    this: removing a shipped skill overwrites nothing.
+    """
+    if src.bundled:
+        return
+    shipped = next((n for n in readable_skill_names() if n.casefold() == src.name.casefold()), None)
+    if shipped is None or src.content == skill_content(shipped):
+        return
+    raise ShippedSkillNameError(
+        f"{origin}: frontmatter name {src.name!r} is the skill {shipped!r} that comfy-cli ships, "
+        "and a path cannot replace it"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +391,7 @@ class _ResolvedSkill:
     content: str | None = None  # None when not fetched
 
 
-def _resolve(skills: Sequence[str] | None, *, fetch: bool) -> list[_ResolvedSkill]:
+def _resolve(skills: Sequence[str] | None, *, fetch: bool, refuse_shipped: bool = False) -> list[_ResolvedSkill]:
     """Resolve skill tokens once, so planning and installing cannot disagree.
 
     With ``fetch=False`` content stays None. That is all planning and ``status``
@@ -369,6 +408,8 @@ def _resolve(skills: Sequence[str] | None, *, fetch: bool) -> list[_ResolvedSkil
         if _looks_like_path(token):
             # Raises ValueError on invalid path skills — caller handles.
             src = load_skill_source(token)
+            if refuse_shipped:
+                refuse_shipped_name(src, token)
             out.append(_ResolvedSkill(name=src.name, content=src.content if fetch else None))
         else:
             out.append(_resolve_named(token, fetch=fetch))
@@ -419,7 +460,7 @@ def install(
     """
     root = project_root or Path.cwd()
     results: list[TargetResult] = []
-    for resolved in _resolve(skills, fetch=True):
+    for resolved in _resolve(skills, fetch=True, refuse_shipped=True):
         all_paths = _resolve_paths(skill_name=resolved.name, scope=scope, project_root=root)
         kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
         for kind in kinds:

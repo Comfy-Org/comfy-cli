@@ -271,3 +271,124 @@ def test_ls_still_refuses_a_row_with_no_release(tmp_path: Path, monkeypatch) -> 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert envelope["error"]["code"] == "deploy_server_error"
     assert "releaseId" in envelope["error"]["message"]
+
+
+def _invoke_pretty(*args: str):
+    return CliRunner().invoke(app, ["--no-json", "deploy", "ls", *args], env={"COLUMNS": "400"})
+
+
+def test_a_builds_rows_carry_and_print_their_release_version(tmp_path: Path, monkeypatch) -> None:
+    # Given two deployments on two of the Build's releases
+    builder = FakeBuilder(
+        [
+            {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
+            {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        ]
+    )
+    deploy = PagedDeploy([[_summary("dep-old", "release-4"), _summary("dep-new", "release-5")]])
+    _install_clients(monkeypatch, builder, deploy)
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path))
+    pretty = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert {row["id"]: row["releaseVersion"] for row in _deployments(as_json)} == {"dep-old": 4, "dep-new": 5}
+    assert "dep-old  ready  v4" in pretty.stdout
+    assert "dep-new  ready  v5" in pretty.stdout
+
+
+def test_workspace_rows_keep_only_the_release_id(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[_summary("other-live", "release-other")]]))
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path), "--workspace")
+    pretty = _invoke_pretty(str(write_spec(tmp_path)), "--workspace")
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert "releaseVersion" not in _deployments(as_json)[0]
+    assert "other-live  ready  release-other" in pretty.stdout
+
+
+def test_a_release_without_a_version_still_lists(tmp_path: Path, monkeypatch) -> None:
+    # Given a Build release the builder sent with no version
+    builder = FakeBuilder([{"id": "release-5", "buildId": "build-1", "deployable": True}])
+    _install_clients(monkeypatch, builder, PagedDeploy([[_summary("dep-1", "release-5")]]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then the row prints its release id in place of a version
+    assert result.exit_code == 0, result.stderr
+    assert "dep-1  ready  release-5" in result.stdout
+
+
+def test_a_workspace_row_without_a_release_still_lists(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    row = _summary("other-live", "release-other")
+    row["releaseId"] = None
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[row]]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)), "--workspace")
+
+    # Then the row prints with no release column
+    assert result.exit_code == 0, result.stderr
+    assert "other-live  ready" in result.stdout
+
+
+def test_each_row_leads_with_the_deployments_name(tmp_path: Path, monkeypatch) -> None:
+    # Given production, staging, and one deployment from before names
+    rows = [
+        {**_summary("dep-a1", "release-5"), "name": "production"},
+        {**_summary("dep-b2", "release-5"), "name": "staging"},
+        {**_summary("dep-c3", "release-5"), "name": None},
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then the name comes first and the id stays beside it
+    assert result.exit_code == 0, result.stderr
+    assert "production  dep-a1  ready  v5" in result.stdout
+    assert "staging  dep-b2  ready  v5" in result.stdout
+    assert "-  dep-c3  ready  v5" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["prod [/]", "eu[red]x", "[link=http://evil]prod[/link]"])
+def test_a_name_holding_markup_prints_as_written(tmp_path: Path, monkeypatch, name: str) -> None:
+    # Given
+    rows = [{**_summary("dep-a1", "release-5"), "name": name}]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert f"{name}  dep-a1  ready  v5" in result.stdout
+
+
+def test_json_rows_carry_a_name_null_where_comfy_deploy_sent_none(tmp_path: Path, monkeypatch) -> None:
+    # Given a named row, one with no name field, and two whose name is malformed
+    rows = [
+        {**_summary("dep-a1", "release-5"), "name": "production"},
+        _summary("dep-c3", "release-5"),
+        {**_summary("dep-d4", "release-5"), "name": ""},
+        {**_summary("dep-e5", "release-5"), "name": 5},
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then a name that is not one reads as none, as status reads it
+    assert result.exit_code == 0, result.stderr
+    names = {row["id"]: row["name"] for row in _deployments(result)}
+    assert names == {"dep-a1": "production", "dep-c3": None, "dep-d4": None, "dep-e5": None}
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(_payload(result))

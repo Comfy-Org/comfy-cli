@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final, Literal, TypeAlias
 
@@ -50,6 +50,12 @@ class BuildSpecError(Exception):
 
 class BuildSpecInvalidError(BuildSpecError):
     code = "build_spec_invalid"
+
+    def __init__(self, message: str, *, path: Path | None = None, issues: Sequence[Mapping[str, str]] = ()) -> None:
+        super().__init__(message, path=path)
+        # One ``{field, reason}`` per problem when the check found several, so a
+        # machine caller gets them apart rather than parsing the message.
+        self.issues = [dict(issue) for issue in issues]
 
 
 class BuildSpecWriteError(BuildSpecError):

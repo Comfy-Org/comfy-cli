@@ -4,5 +4,11 @@
   "title": "comfy build validate --json data payload",
   "description": "Offline authoring and wire validation of the local spec, with optional advisory public-model lookup states.",
   "type": "object",
-  "additionalProperties": true
+  "additionalProperties": true,
+  "properties": {
+    "folder_case_checked": {
+      "description": "Present only when the spec has models. False when no usable folder list was read from the builder (offline, without `--remote`; a read that failed or named no folder), so a case variant of a folder (`Loras` for `loras`) passed unchecked; the builder refuses it at the release.",
+      "type": "boolean"
+    }
+  }
 }

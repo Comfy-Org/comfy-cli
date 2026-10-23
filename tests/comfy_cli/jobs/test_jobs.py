@@ -6,6 +6,7 @@ ComfyUI server is a separate manual demo step.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -2157,6 +2158,57 @@ def test_poll_cloud_once_records_in_progress_as_running():
     assert state.status not in jobs_state.TERMINAL_STATUSES
 
 
+class _RaisingCloudClient:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def get_job_status(self, prompt_id):
+        raise self._exc
+
+
+@pytest.mark.parametrize(("retry_after", "expected"), [(12.0, 12), (1.5, 1.5), (None, None)])
+def test_poll_cloud_once_maps_exhausted_429_to_cloud_rate_limited(retry_after, expected):
+    """Once the client gives up retrying a 429, the watcher must record the same
+    `cloud_rate_limited` envelope the foreground commands emit, with the prompt
+    id and the server's Retry-After, not a generic `watcher_poll_error`."""
+    from comfy_cli import jobs_state
+    from comfy_cli.comfy_client import HTTPError
+    from comfy_cli.command import job_watcher
+
+    client = _RaisingCloudClient(HTTPError(429, "Too Many Requests", retry_after=retry_after))
+    state = jobs_state.new(prompt_id="pid-429", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is False
+    assert state.status not in jobs_state.TERMINAL_STATUSES
+    assert state.error is not None
+    assert state.error["code"] == "cloud_rate_limited"
+    assert state.error["hint"]
+    details = state.error["details"]
+    assert details["prompt_id"] == "pid-429"
+    assert details["status"] == 429
+    if expected is None:
+        assert "retry_after" not in details
+    else:
+        assert details["retry_after"] == expected
+
+
+@pytest.mark.parametrize("exc_factory", [lambda: _http_error(500), lambda: ConnectionResetError("reset")])
+def test_poll_cloud_once_keeps_watcher_poll_error_for_other_failures(exc_factory):
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=_RaisingCloudClient(exc_factory())) is False
+    assert state.error is not None
+    assert state.error["code"] == "watcher_poll_error"
+    assert state.error["details"] == {}
+
+
+def _http_error(status):
+    from comfy_cli.comfy_client import HTTPError
+
+    return HTTPError(status, "boom")
+
+
 def test_retryable_error_is_classified_everywhere_the_other_failures_are():
     """`retryable_error` is part of the raw cloud vocabulary `output/glyphs.py`
     already renders ✗, but was the one failure spelling missing from the shared
@@ -3365,21 +3417,23 @@ def test_watch_executing_escapes_server_controlled_node_markup():
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_watch_client_id_prefers_the_job_state_file(monkeypatch):
-    """`comfy run` records the submitting client_id on disk — cheapest source,
-    and no HTTP call should be needed when it is there."""
+def test_select_watch_client_id_prefers_the_job_state_file(monkeypatch):
+    """`comfy run` records the submitting client_id on disk, and that record
+    wins over whatever the server's copy of extra_data says."""
     from comfy_cli import jobs_state
 
     jobs_state.write(jobs_state.new(prompt_id="pid-a", client_id="cid-from-state", workflow="w", where="local"))
 
-    def _no_http(url, **kw):
-        raise AssertionError(f"should not have queried the server: {url}")
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {"queue_running": [[0, "pid-a", {}, {"client_id": "cid-from-queue"}, {}]]}
+        raise AssertionError(f"unexpected url: {url}")
 
-    monkeypatch.setattr(jobs_mod, "_http_get_json", _no_http)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-a") == "cid-from-state"
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-a", None) == ("cid-from-state", None)
 
 
-def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
+def test_select_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
     """A prompt submitted by something else (browser, older CLI) has no state
     file — /queue's extra_data still carries the submitting client_id."""
 
@@ -3392,10 +3446,10 @@ def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
         raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-b") == "cid-from-queue"
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-b", None) == ("cid-from-queue", None)
 
 
-def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
+def test_select_watch_client_id_falls_back_to_history_then_none(monkeypatch):
     def fake_get(url, **kw):
         if url.endswith("/queue"):
             return {"queue_running": [], "queue_pending": []}
@@ -3404,17 +3458,21 @@ def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
         return {}
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-c") == "cid-from-history"
-    # Nothing anywhere -> None, so the caller can warn instead of pretending.
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-missing") is None
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-c", None) == ("cid-from-history", None)
+    # A prompt neither store mentions leaves its record unread, so nothing has
+    # ruled out the borrowed marker and the watch polls rather than attaching.
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-missing", None) == (None, "indeterminate")
 
 
-def test_resolve_watch_client_id_survives_an_unreachable_server(monkeypatch):
+def test_select_watch_client_id_polls_when_the_server_is_unreachable(monkeypatch):
+    """An unreachable server leaves borrowed-ness UNKNOWN, not disproved, so the
+    watch polls rather than attaching to an id it could not vet."""
+
     def boom(url, **kw):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-x") is None
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-x", None) == (None, "indeterminate")
 
 
 def test_history_completed_nodes_unions_cached_executed_and_output_nodes(monkeypatch):
@@ -3543,6 +3601,43 @@ def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
     assert env["data"]["attached"] is True and env["data"]["client_id"] == "cid-sub"
 
 
+def test_watch_live_execution_error_is_promoted_to_execution_error(monkeypatch, capsys):
+    """An attached watch that ends on the WS `execution_error` event publishes
+    the failure under `execution_error`, the same key the poll exits use — the
+    event payload itself has no `error` key to lift."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+    frames = [f"frame{i}" for i in range(6)]
+    event = {
+        "prompt_id": "pid-w",
+        "node_id": "5",
+        "node_type": "KSampler",
+        "exception_message": "boom",
+        "exception_type": "RuntimeError",
+        "traceback": frames,
+        "current_inputs": {"seed": 42},
+        "executed": ["1"],
+    }
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[{"type": "execution_error", "data": event}])
+
+    assert result.exit_code == 1, result.output
+    assert "clientId=cid-sub" in ws.url
+    env = lines[-1]
+    assert env["ok"] is False and env["error"]["code"] == "execution_error"
+    payload = env["error"]["details"]
+    assert payload["status"] == "error" and payload["attached"] is True
+    record = payload["execution_error"]
+    assert record["node_type"] == "KSampler" and record["node_id"] == "5"
+    assert record["exception_message"] == "boom"
+    # Same envelope hygiene as the poll exit: widget values redacted, traceback
+    # capped to its tail.
+    assert "current_inputs" not in record
+    assert record["traceback"] == frames[-2:]
+
+
 def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkeypatch, capsys):
     """Symptom 2 is independent of streaming: even with zero WS events, the
     envelope's `completed_nodes` comes from the server's own /history record."""
@@ -3553,7 +3648,7 @@ def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkey
         ]
     )
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots, None))
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: None)
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (None, None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"4", "1"})
 
     result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
@@ -3592,7 +3687,7 @@ def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, cap
 
 def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "resolved")
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (req or "resolved", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
     _result, ws, lines = _run_local_watch(
@@ -3608,7 +3703,7 @@ def test_watch_terminal_envelope_validates_against_the_jobs_schema(monkeypatch, 
     import jsonschema
 
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "cid")
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: ("cid", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
     _result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
@@ -4027,6 +4122,57 @@ def test_http_get_json_oversize_body_is_a_runtime_error_not_a_truncated_parse(mo
     with pytest.raises(RuntimeError) as exc_info:
         jobs_mod._http_get_json("http://127.0.0.1:8188/history")
     assert "http://127.0.0.1:8188/history" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        http.client.IncompleteRead(b"half"),
+        http.client.BadStatusLine("not a status line"),
+        ConnectionResetError("reset by peer"),
+    ],
+    ids=["remote-disconnected", "incomplete-read", "bad-status-line", "connection-reset"],
+)
+def test_http_get_json_turns_a_hangup_into_the_one_failure_family(monkeypatch: pytest.MonkeyPatch, raised):
+    """A server that accepts the connection and then hangs up is an ordinary
+    transient, not a traceback.
+
+    urllib only wraps what the *request* raises, so these surface raw out of
+    `getresponse()` — and `URLError` does not cover them. Every call site
+    catches RuntimeError and nothing else, so anything escaping as its own type
+    crashes the command; `jobs watch` in particular depends on this to decide a
+    run's ownership is unverifiable instead of dying mid-decision.
+    """
+    import comfy_cli.http as http_mod
+
+    def boom(req, timeout=None):
+        raise raised
+
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", boom)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jobs_mod._http_get_json("http://127.0.0.1:8188/queue")
+    assert "http://127.0.0.1:8188/queue" in str(exc_info.value)
+
+
+def test_watch_polls_when_a_hangup_hides_the_borrowed_marker(monkeypatch: pytest.MonkeyPatch):
+    """End to end: a mid-read hangup leaves ownership unverifiable, and an
+    explicit --client-id is refused rather than attached."""
+    import comfy_cli.http as http_mod
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_state, "read", lambda _: None)
+
+    def hangup(req, timeout=None):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", hangup)
+
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-h", None) == (None, "indeterminate")
+    with pytest.raises(jobs_mod._ClientIdRejected) as exc_info:
+        jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-h", "someone-elses-live-id")
+    assert exc_info.value.reason == "indeterminate"
 
 
 def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyPatch):
@@ -4567,3 +4713,22 @@ def test_jobs_schema_empty_base_url_does_not_buy_the_host_port_exemption():
 
     # A real cloud payload is untouched by either guard.
     validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
+
+
+def test_poll_cloud_once_clears_a_recorded_rate_limit_on_the_next_good_poll():
+    """`run --wait` leaves a poll 429 as a non-terminal record carrying
+    `cloud_rate_limited`; the next successful status poll must clear it."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    state = jobs_state.new(prompt_id="pid-429", client_id="c", workflow="w", where="cloud")
+    state.error = rate_limited_error("poll", 3.0, {"prompt_id": "pid-429"})
+
+    class _Ok:
+        def get_job_status(self, prompt_id):
+            return {"status": "in_progress"}
+
+    assert job_watcher._poll_cloud_once(state, client=_Ok()) is False
+    assert state.error is None
+    assert state.status not in jobs_state.TERMINAL_STATUSES

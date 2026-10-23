@@ -3,7 +3,7 @@
 Scenario 1 — *"the agent edited the widget under layer 2, not on the surface;
 the value on the surface overwrites it and the user never sees it."* The
 frontend serializes a promoted widget's value on the HOST instance
-(ADR 0009); ``set-widget 57.width`` used to follow ``proxyWidgets`` into the
+(ADR-SUBGRAPH-PROMOTION-0009); ``set-widget 57.width`` used to follow ``proxyWidgets`` into the
 interior node, a value the frontend neither runs nor displays. The write must
 land on the host — and when an outside node feeds the promoted input
 (*"users even have number or text boxes connected to the promoted widget"*),

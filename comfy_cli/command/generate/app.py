@@ -54,7 +54,7 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
 from comfy_cli.output.sanitize import sanitize_markup
 
-_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
+_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Reve, …)."
 
 _CONTEXT_SETTINGS = {
     "allow_extra_args": True,
@@ -645,10 +645,11 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     code="emit_workflow_unsupported_model",
                     message=str(e),
                     hint=(
-                        "choose a model whose `emit_supported` is true in `comfy --json generate list` "
-                        "(see `details.supported`), or call the model through the proxy without --emit-workflow"
+                        "retry with the first alias in `details.suggested` (same kind of media), or any whose "
+                        "`emit_supported` is true in `comfy --json generate list` (`details.supported`); "
+                        "or call the model through the proxy without --emit-workflow"
                     ),
-                    details={"model": e.model, "supported": e.supported},
+                    details={"model": e.model, "supported": e.supported, "suggested": e.suggested},
                 )
                 raise typer.Exit(code=1) from e
             except workflow_ops.DeprecatedNodeType as e:
@@ -1297,5 +1298,5 @@ def _print_top_help() -> None:
         "`comfy generate consent always`) to skip, required for --json / non-TTY runs.[/dim]"
     )
     rprint(
-        "[dim]Auth: run `comfy cloud login` (session outranks env var), set COMFY_API_KEY, or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
+        "[dim]Auth: run `comfy cloud login`, set COMFY_API_KEY (outranks the session), or pass --api-key. Get one at https://platform.comfy.org.[/dim]"
     )

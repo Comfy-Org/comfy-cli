@@ -5,8 +5,8 @@ every node, link, group and subgraph-definition id deterministically remapped
 from the op id.
 
 Generated with comfy-multi-player `src/remap.ts` → `remapInsertedWorkflowIds`
-at commit `622865b`, op id `1ed4449ae23f3bcc8b599de88f69fd6a` (a real stg-v2
-turn), over the sibling fixtures:
+at commit `622865b`, op id `1ed4449ae23f3bcc8b599de88f69fd6a`, over the
+sibling fixtures:
 
 | fixture | source |
 | --- | --- |

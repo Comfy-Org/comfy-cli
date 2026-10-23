@@ -210,6 +210,26 @@ def test_build_flux_ultra_without_width_height_keeps_default_aspect_ratio():
     assert wf["1"]["inputs"]["aspect_ratio"] == "16:9"
 
 
+def test_build_flux_ultra_carries_the_endpoints_own_flags():
+    """The endpoint takes aspect_ratio/raw/prompt_upsampling/image_prompt_strength
+    directly, and each is a widget on the node, so emit must carry them."""
+    wf = emit.build_workflow(
+        "flux-ultra",
+        {
+            "prompt": "a fox",
+            "aspect_ratio": "1:1",
+            "raw": True,
+            "prompt_upsampling": True,
+            "image_prompt_strength": 0.5,
+        },
+    )
+    inputs = wf["1"]["inputs"]
+    assert inputs["aspect_ratio"] == "1:1"
+    assert inputs["raw"] is True
+    assert inputs["prompt_upsampling"] is True
+    assert inputs["image_prompt_strength"] == 0.5
+
+
 def test_build_flux_ultra_only_width_errors_instead_of_dropping_it():
     # flux-ultra has no fixed width/height fallback (unlike flux-2), so a lone
     # --width would otherwise be silently dropped in favor of the "16:9" default.
@@ -277,7 +297,7 @@ EMIT_REFUSED_FLAGS = {
         "prompt_upsampling",
         "safety_tolerance",
     ],
-    "flux-ultra": ["guidance_scale", "negative_prompt", "num_images", "num_inference_steps"],
+    "flux-ultra": ["image_prompt", "output_format", "safety_tolerance", "webhook_secret", "webhook_url"],
     "kling-i2v": [
         "callback_url",
         "camera_control",
@@ -290,6 +310,7 @@ EMIT_REFUSED_FLAGS = {
         "shot_type",
         "sound",
         "static_mask",
+        "voice_list",
         "watermark_info",
     ],
     "nano-banana": [],
@@ -363,7 +384,7 @@ def test_unsupported_model_raises_a_typed_error_carrying_the_supported_list():
 
 
 def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, monkeypatch):
-    """The prod payload: `generate_workflow flux-pro` → `emit_workflow_failed`
+    """`--emit-workflow` on `flux-pro` → `emit_workflow_failed`
     "--emit-workflow does not support model 'flux-pro'. Supported: …". The
     umbrella code also covers bad params and unwritable paths, so the agent
     could not tell "pick another model" from "fix your arguments". Now it is
@@ -380,6 +401,7 @@ def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, mon
     assert err["code"] == "emit_workflow_unsupported_model"
     assert err["details"]["model"] == "flux-pro"
     assert err["details"]["supported"] == emit.supported_models()
+    assert err["details"]["suggested"][0] == "flux-2"
     assert "generate list" in err["hint"]
     assert not out.exists()
 

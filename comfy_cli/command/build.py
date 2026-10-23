@@ -56,6 +56,7 @@ from comfy_cli.command.build_diff import (
 from comfy_cli.command.build_digest_cache import ModelDigestCache
 from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import (
+    SPEC_SUFFIXES,
     BuildPaths,
     BuildSpecNotFoundError,
     InstallOverrides,
@@ -88,10 +89,13 @@ from comfy_cli.command.build_targets import (
     catalog_choices,
     parse_build_targets,
 )
-from comfy_cli.command.build_upload_progress import UploadProgressReporter
+from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan_line
 from comfy_cli.command.build_validation import (
+    _go_trim,
     lookup_public_model_sources,
+    model_label,
     project_wire_definition,
+    validate_kept_links,
     validate_local_build_spec,
 )
 from comfy_cli.command.pack_scan import read_pyproject
@@ -1571,6 +1575,49 @@ def init_cmd(
     )
 
 
+def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path) -> NoReturn:
+    """The ``build_spec_invalid`` envelope for a spec the local checks refused. When
+    they found several problems the message lists each on its own line, and JSON also
+    carries them apart under ``details.invalid``."""
+    details: dict = {"path": str(spec_file)}
+    if error.issues and not renderer.is_pretty():
+        details["invalid"] = error.issues
+    renderer.error(code=error.code, message=str(error), details=details)
+    raise typer.Exit(code=1) from error
+
+
+#: Said when no folder list was read, so a case variant of a folder passed unchecked.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+
+def _has_models(spec: Mapping) -> bool:
+    definition = spec.get("definition")
+    return isinstance(definition, dict) and bool(definition.get("models"))
+
+
+def _model_directories(renderer, client, spec: Mapping) -> frozenset[str] | None:
+    """The builder's vetted model directories, read only by a signed-in command whose
+    spec has models, or None. They are what tells a case variant ("Loras") from a new
+    folder. A list that cannot be read, or names no folder, refuses nothing, and says
+    so: the save warns about the same field. A blank name ("", "  ") names no folder."""
+    if client is None or not _has_models(spec):
+        return None
+    try:
+        listed = client.list_model_directories()
+    except Exception:
+        # Advisory, so no failure to read it (a cut-off body, an oversized one) stops the command.
+        listed = None
+    vetted = (
+        frozenset(name for name in listed if isinstance(name, str) and _go_trim(name))
+        if isinstance(listed, list)
+        else None
+    )
+    if not vetted:
+        renderer.warn(f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}")
+        return None
+    return vetted
+
+
 def _read_spec(renderer, spec_file: Path) -> dict:
     try:
         return read_build_spec(spec_file)
@@ -1931,15 +1978,16 @@ def push_cmd(
     # The scratch directory holds one archive per local node, and it is released
     # the moment the last upload lands: nothing after this block reads an
     # archive, and the create/update round-trip that follows can take a while.
+    directories = _model_directories(renderer, client, spec)
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
-            validate_local_build_spec(spec, paths)
+            validate_local_build_spec(spec, paths, model_directories=directories)
             preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
+            validate_kept_links(preparation.definition)
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)
         except BuildSpecInvalidError as error:
-            renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-            raise typer.Exit(code=1) from error
+            _raise_spec_invalid(renderer, error, paths.spec_file)
 
         uploads = pending_uploads(preparation)
         payload = {
@@ -1953,10 +2001,23 @@ def push_cmd(
             "uploaded": 0,
             "deduped": 0,
         }
+        if _has_models(spec):
+            payload["folder_case_checked"] = directories is not None
         reported = _warn_skipped_symlinks(renderer, preparation.skipped_symlinks)
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The envelope is the whole answer and prints nothing in pretty mode, so a
+            # person gets the real push's opening line and word that nothing moved.
+            # "Already held" is what the spec records; the builder, never asked,
+            # may hold more.
+            if renderer.is_pretty():
+                renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
+                renderer.info(
+                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                )
+                if _has_models(spec):
+                    renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None
@@ -2077,6 +2138,7 @@ def push_cmd(
             lambda: client.create_release(target_id, requested),
             {"buildId": target_id},
             hint=_CUT_RETRY_HINT,
+            models=preparation.definition.get("models") or [],
         )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
@@ -2422,19 +2484,21 @@ def _status_drift(renderer, ctx, paths, stored: dict, *, no_scan: bool, comfy_ve
 def _builder_client(renderer, builder_url: str | None):
     """Build an authed BuilderClient, or emit a not-signed-in envelope + exit(1).
 
-    A caller that already holds a Cloud JWT — the Developer Platform agent service
-    forwarding the request's token, or CI — injects it via ``COMFY_BUILDER_TOKEN``
-    and skips the interactive OAuth session ``from_session`` uses. The env var wins
-    over a stored session so an explicit token always takes precedence.
+    A caller that already holds a Cloud JWT, such as the Developer Platform agent
+    service forwarding the request's token, injects it via ``COMFY_BUILDER_TOKEN``,
+    and that explicit token comes first. Otherwise ``from_credentials`` uses a
+    Cloud JWT from ``COMFY_CLOUD_AUTH_TOKEN`` or a workspace API key from
+    ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the stored sign-in. Empty
+    or whitespace-only values count as unset.
     """
     from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
     base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
-    token = os.environ.get("COMFY_BUILDER_TOKEN")
+    token = (os.environ.get("COMFY_BUILDER_TOKEN") or "").strip()
     if token:
         return BuilderClient(base_url, token)
     try:
-        return BuilderClient.from_session(base_url)
+        return BuilderClient.from_credentials(base_url)
     except BuilderAuthError as e:
         renderer.error(code="build_not_signed_in", message=str(e))
         raise typer.Exit(code=1) from e
@@ -2458,6 +2522,10 @@ _BUILDER_REFUSALS: Final = {
     "BUILD_IN_USE": {
         "code": "build_in_use",
         "message": "a deployment still references one of this build's releases",
+    },
+    "BUILD_LIMIT": {
+        "code": "build_limit",
+        "message": "the workspace already holds as many builds as its limit allows, counting every member's builds",
     },
 }
 
@@ -2496,6 +2564,28 @@ def _capped_message(text: str) -> str:
     return encoded[:_BUILDER_MESSAGE_CAP].decode("utf-8", "ignore")
 
 
+def _capped_lines(heading: str, lines: list[str], where: str) -> str:
+    """*heading* and as many whole *lines* as fit ``_BUILDER_MESSAGE_CAP``, then, when
+    some did not fit, a line counting them that says *where* every one is listed.
+
+    ``_capped_message`` would stop the last line mid-word with nothing to say the
+    rest were dropped, and the pretty panel leaves ``details.invalid`` out, so the
+    rest would be nowhere. Room for the count line is kept back at its longest,
+    since how many are dropped is only known once the kept lines are chosen."""
+    text = "\n".join([heading, *lines])
+    if len(text.encode("utf-8", "replace")) <= _BUILDER_MESSAGE_CAP:
+        return text
+    more = "  ... and {} more; " + where
+    room = _BUILDER_MESSAGE_CAP - len(heading.encode("utf-8", "replace")) - 1 - len(more.format(len(lines)).encode())
+    kept = []
+    for line in lines:
+        room -= len(line.encode("utf-8", "replace")) + 1
+        if room < 0:
+            break
+        kept.append(line)
+    return "\n".join([heading, *kept, more.format(len(lines) - len(kept))])
+
+
 #: Any URL in an exception's text, with its query string. Both shapes ``requests``
 #: produces quote what they were talking to: ``raise_for_status`` gives the whole
 #: URL ("... for url: https://host/o?sig=..."), while a ``ConnectionError`` gives
@@ -2522,7 +2612,13 @@ def _without_signed_query(e: BaseException) -> str:
     return _URL_QUERY_RE.sub(lambda m: m.group(0).partition("?")[0], str(e))
 
 
-def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None, hint: str | None = None) -> None:
+def _report_builder_error(
+    renderer,
+    e,
+    subject: Mapping[str, str] | None = None,
+    hint: str | None = None,
+    models: Sequence[Mapping] = (),
+) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `PAYMENT_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
@@ -2564,19 +2660,16 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
             body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
-        # A 401 means the sign-in itself was refused, and the client has already
-        # tried a refresh, so the only way forward is signing in again.
+        # A 401 means the credential itself was refused, and a client built from the
+        # sign-in has already tried a refresh, so the credential has to change. The
+        # client knows which credential it sent, so it names the one to replace.
         if e.code == 401:
+            from comfy_cli.builder_api import BuilderCredentialRefused
+
             renderer.error(
                 code="build_not_signed_in",
-                message="the builder refused the sign-in token (401)",
-                # A token passed in through the environment is never refreshed, and
-                # signing in again would not replace it, so it has to be swapped.
-                hint=(
-                    "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
-                    if os.environ.get("COMFY_BUILDER_TOKEN")
-                    else "run `comfy cloud login` first"
-                ),
+                message="the builder refused the credential (401)",
+                hint=e.hint if isinstance(e, BuilderCredentialRefused) else "run `comfy cloud login` first",
             )
             return
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
@@ -2586,7 +2679,40 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
             )
             return
         builder_error, builder_message = _builder_error_fields(body)
-        # All three refusals are 409 in the builder's contract and nothing else
+        # A definition the builder refused: its reasons lead, one per line, where the
+        # generic branch below would lead with the code and leave the reasons in the
+        # body excerpt as one JSON string. The caller's retry hint is dropped with it,
+        # since only an edit clears this.
+        if e.code == 400 and builder_error == "INVALID_DEFINITION":
+            invalid = _named_models(_builder_invalid(body), models)
+            if invalid or builder_message:
+                details = {**(subject or {}), "status": e.code}
+                if invalid and not renderer.is_pretty():
+                    details["invalid"] = invalid
+                lines = [
+                    f"  {issue['field']}"
+                    + (f" ({issue['model']})" if "model" in issue else "")
+                    + f": {issue['reason']}"
+                    for issue in invalid
+                ]
+                # Only the cut refuses a target or a blob, and neither is the definition.
+                refused = "the build's definition" if _invalid_kinds(invalid) <= {"spec"} else "the release"
+                # The list apart is only in JSON, so that is where the count line points.
+                where = (
+                    "read every one with `--json`" if renderer.is_pretty() else "read every one in `details.invalid`"
+                )
+                renderer.error(
+                    code="build_definition_invalid",
+                    message=(
+                        _capped_lines(f"the builder refused {refused}:", lines, where)
+                        if invalid
+                        else _capped_message(builder_message)
+                    ),
+                    hint=_definition_invalid_hint(invalid),
+                    details=details,
+                )
+                return
+        # Every refusal in the table is 409 in the builder's contract and nothing else
         # sends them, so a mapped code under any other status came from something
         # that is not the builder and must not be answered with its remediation.
         refusal = _BUILDER_REFUSALS.get(builder_error) if e.code == 409 else None
@@ -2633,7 +2759,14 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
     )
 
 
-def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hint: str | None = None):
+def _builder_call(
+    renderer,
+    fn,
+    subject: Mapping[str, str] | None = None,
+    *,
+    hint: str | None = None,
+    models: Sequence[Mapping] = (),
+):
     """Run a builder API call, mapping every failure class to one error envelope
     + exit(1) via _report_builder_error. *subject* names the id the command is
     acting on, so a refusal an agent must act on says which one.
@@ -2645,7 +2778,8 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hin
 
     ``hint`` rides through to the builder-error and transport envelopes for calls
     whose failure leaves the caller unable to tell whether the write landed. See
-    ``_CUT_RETRY_HINT``.
+    ``_CUT_RETRY_HINT``. ``models`` are the models of the definition the builder
+    read, when the caller has them, so a refused ``models[<n>]`` names its model.
     """
     import urllib.error
 
@@ -2662,7 +2796,7 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hin
     # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
     # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e, subject, hint)
+        _report_builder_error(renderer, e, subject, hint, models)
         raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
@@ -2701,6 +2835,83 @@ def _builder_error_fields(body: str) -> tuple[str, str]:
     )
 
 
+def _builder_invalid(body: str) -> list[dict[str, str]]:
+    """The ``invalid`` list of a builder 400 (``[{field, reason}]``), dropping any
+    entry in another shape, or ``[]`` when the body carries none."""
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return []
+    raw = parsed.get("invalid") if isinstance(parsed, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"field": _encodable(item["field"]), "reason": _encodable(item["reason"])}
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
+    ]
+
+
+_MODEL_FIELD: Final = re.compile(r"models\[(\d+)\]")
+
+
+def _named_models(invalid: list[dict[str, str]], models: Sequence[Mapping]) -> list[dict[str, str]]:
+    """*invalid* with each ``models[<n>]`` issue naming its model as a local refusal
+    does (``model_label``), when *models* are the ones the builder counted."""
+    named = []
+    for issue in invalid:
+        match = _MODEL_FIELD.match(issue["field"])
+        index = int(match[1]) if match else len(models)
+        entry = models[index] if index < len(models) else None
+        label = model_label(entry) if isinstance(entry, dict) else ""
+        named.append({**issue, "model": _encodable(label)} if label else issue)
+    return named
+
+
+def _invalid_kinds(invalid: list[dict[str, str]]) -> set[str]:
+    """What each refused field is about: ``targets`` for the cut's ``targets[<n>]``
+    (the n-th ``--target``), ``blob`` for its ``blob:<id>``, ``spec`` for the rest."""
+    return {
+        "targets" if issue["field"].startswith("targets[") else "blob" if issue["field"].startswith("blob:") else "spec"
+        for issue in invalid
+    }
+
+
+#: The fix for a ``targets[<n>]`` field, which releases_cut.go ``validateTargets``
+#: returns for a repeated os/gpu pair or one the builder cannot build.
+_TARGETS_HINT = (
+    "a `targets[<n>]` field is the n-th `--target` value, counting from 0: drop a repeated one or "
+    "pick one `comfy build refs build-targets` lists, then run the command again with those `--target` values"
+)
+
+#: The fix for a ``blob:<id>`` field. The cut checks a node's zip as well as a
+#: model's file, and a push uploads again only a ``source: local`` entry without a
+#: ``blobId``. Which kind the entry is lives in the spec, not here, so it covers both.
+_BLOB_HINT = (
+    "a `blob:<id>` field is a file the definition names (a model's file, a node's zip) that never "
+    "reached the builder whole: delete that `blobId` from its entry in the spec, and if that entry has "
+    "no `source: local`, give it `source: local` with a `localPath` to the model's file or the node's "
+    "directory, or another source it can take (a model's `sourceUri`, a node's `registryVersion` or "
+    "`repository`); then run `comfy build push`, which uploads a local file again and saves its new id"
+)
+
+
+def _definition_invalid_hint(invalid: list[dict[str, str]]) -> str | None:
+    """The hint for a refused definition or release, or None for the registered one.
+    The cut refuses a ``--target`` value and a file that never reached storage under
+    the same code as the definition, and no edit to the spec's rules clears either, so
+    each kind present names its own fix."""
+    kinds = _invalid_kinds(invalid)
+    if kinds <= {"spec"}:
+        return None
+    fixes = {
+        "spec": "fix each named definition field in the spec and push it again",
+        "targets": _TARGETS_HINT,
+        "blob": _BLOB_HINT,
+    }
+    return "; ".join(fix for kind, fix in fixes.items() if kind in kinds)
+
+
 def _builder_msg(body: str) -> str:
     """Pull ``"<error>: <message>"`` out of a builder JSON error body ({error, message}),
     or ``""`` when the body isn't the expected shape."""
@@ -2733,7 +2944,7 @@ def _resolve_build_id(renderer, client, scope: _BuildScope) -> str:
     )
 
 
-@app.command("ls", help="List the workspace's builds.")
+@app.command("ls", help="List the builds you can see: your own, or every member's on enterprise.")
 @tracking.track_command("build")
 def ls_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
@@ -2813,6 +3024,108 @@ def _newest_release_id(renderer, client, build_id: str) -> str:
         )
         raise typer.Exit(code=1)
     return release_id
+
+
+def _path_shaped(value: str) -> bool:
+    """Whether ``value`` is spelled like a path, whatever is on disk.
+
+    `.` and `..`, anything with a path separator, and a `.yaml`/`.json` name (the
+    suffixes `resolve_build_paths` reads as a spec file) can never be one release
+    id, so they are classified by spelling alone, like `build_paths` classifies
+    PATH: one argument means one thing whether or not it exists.
+    """
+    separators = {"/", os.sep, os.altsep} - {None}
+    return (
+        value in {".", ".."}
+        or any(separator in value for separator in separators)
+        or Path(value).suffix in SPEC_SUFFIXES
+    )
+
+
+def _spec_behind(release: str, *, path_shaped: bool) -> tuple[Path | None, bool]:
+    """The spec file RELEASE names when read as a PATH, and whether it is there.
+
+    Runs on every RELEASE given without a PATH, ids included, so for a bare
+    name it never raises: `Path.is_file` only swallows "not found", and an id
+    over 255 characters (file name too long), one naming a folder the caller
+    cannot read (`PermissionError`) or a `~name` with no such user
+    (`expanduser` raises `RuntimeError`) would otherwise fail the read with a
+    traceback. Any of those is "no spec here"; the spec path is ``None`` when it
+    cannot even be resolved.
+
+    A ``path_shaped`` RELEASE is a path whatever is on disk, so an error from
+    looking at its spec file raises, as it does for the same path given as
+    PATH (`release ls locked/`): a spec in a folder the caller cannot read is
+    there, and must not be reported as missing.
+    """
+    try:
+        spec_file = resolve_build_paths(release, require_spec=False).spec_file
+    except (OSError, ValueError, RuntimeError):
+        return None, False
+    if path_shaped:
+        return spec_file, spec_file.is_file()
+    try:
+        return spec_file, spec_file.is_file()
+    except (OSError, ValueError):
+        return spec_file, False
+
+
+def _release_or_path(
+    renderer, release: str | None, path: str | None, build_id: str | None
+) -> tuple[str | None, str | None]:
+    """Split the read verbs' ``[RELEASE] [PATH]`` into what the caller meant.
+
+    Every sibling verb (`release create`, `release ls`, `build show`, `deploy
+    up`) takes a path first, defaulting to `.`, so `release show .` is the
+    natural thing to type. Read as a release id, `.` reached the builder as
+    `GET /v1/releases/.`, the dot segment collapsed onto the collection, and
+    the caller got an opaque 302.
+
+    So with no PATH after it, RELEASE is a path when it looks like one: spelled
+    like a path (`_path_shaped`), or a bare name of a folder that holds a build
+    spec. A bare name that merely matches some file or folder in the cwd stays a
+    release id: the builder's failure text tells callers to run `comfy build
+    release logs <versionId> --target ...` with no PATH. A path-shaped RELEASE
+    with no spec behind it fails as `build_spec_not_found` here, before any
+    request, rather than travelling to the builder as an id (unless `--id`
+    names the Build, when PATH is never read, so it is not probed either).
+
+    Whatever id is left is refused when it is blank, only dots, or holds a path
+    separator: the read client joins it into the URL unencoded (`Target.url`
+    only strips slashes off the ends), so a dot segment aims the read at the
+    collection or its parent and a separator at another route. Refused here,
+    above the client, so the first envelope is the actionable one rather than a
+    sign-in prompt.
+    """
+    if release is None:
+        return None, path
+    if path is None and release.strip():
+        path_shaped = _path_shaped(release)
+        if path_shaped and build_id is not None:
+            # `--id` picks the Build, and PATH is never read then, so a path
+            # is as harmless here as it is after the release id. Checked
+            # before the probe, which raises on a path it cannot look at.
+            return None, release
+        spec_file, has_spec = _spec_behind(release, path_shaped=path_shaped)
+        if has_spec:
+            return None, release
+        if path_shaped:
+            if spec_file is not None:
+                error = BuildSpecNotFoundError(spec_file)
+                renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+                raise typer.Exit(code=1)
+            # No spec path to report (`~nosuchuser/x` names no home folder),
+            # so it falls to the path-shaped refusal below.
+    release = release.strip()
+    if not release or set(release) == {"."} or _path_shaped(release):
+        renderer.error(
+            code="build_missing_input",
+            message="RELEASE must name one release, not a path, a blank or a dot-only path segment.",
+            hint="pass the release id shown by `comfy build release ls`, or only a build path to read its newest release",
+            details={"invalid": [release]},
+        )
+        raise typer.Exit(code=1)
+    return release, path
 
 
 def _selected_release_id(renderer, client, scope: _BuildScope, release: str | None) -> str:
@@ -2953,13 +3266,20 @@ def release_ls(
 def release_show(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path, build_id)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     detail = _builder_call(renderer, lambda: client.get_release(release_id))
@@ -2973,9 +3293,15 @@ def release_show(
 def release_logs(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     target: Annotated[
         str | None,
         typer.Option("--target", help=f"Target whose log to read, as {TARGET_FORM} (e.g. linux/nvidia)."),
@@ -2985,6 +3311,7 @@ def release_logs(
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path, build_id)
     target_value = require_option(
         "--target",
         target,
@@ -3065,11 +3392,11 @@ def validate_cmd(
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
+    directories = _model_directories(renderer, client, spec)
     try:
-        wire_definition = validate_local_build_spec(spec, paths)
+        wire_definition = validate_local_build_spec(spec, paths, model_directories=directories)
     except BuildSpecInvalidError as error:
-        renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-        raise typer.Exit(code=1) from error
+        _raise_spec_invalid(renderer, error, paths.spec_file)
 
     result = {
         "spec_file": str(paths.spec_file),
@@ -3077,11 +3404,16 @@ def validate_cmd(
         "wire_definition": wire_definition,
         "model_lookups": [],
     }
+    if _has_models(spec):
+        result["folder_case_checked"] = directories is not None
     if client is not None:
         lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
+        # A failed read of the list has already said so.
+        if client is None and _has_models(spec):
+            renderer.info(f"validate reads the builder's folder list only with --remote, so {_FOLDER_CASE_UNCHECKED}.")
         for lookup in result["model_lookups"]:
             label = lookup["filename"] or lookup["entry"]
             detail = f": {lookup['error']}" if lookup.get("error") else ""
@@ -3193,13 +3525,20 @@ def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
 def release_manifest(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path, build_id)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     manifest = _builder_call(renderer, lambda: client.get_release_manifest(release_id))

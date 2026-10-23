@@ -90,8 +90,10 @@ BUILD_AUTH_CASES = (
     BuildAuthCase(FixtureKind.VALIDATE, "validate", False, _ZERO),
     BuildAuthCase(FixtureKind.INIT_SNAPSHOT, "init", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.UPDATE_SNAPSHOT, "update", True, _ONE_PLUS),
-    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 0),
-    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 1),
+    # One call each for the builder's model directories, which a spec with models reads
+    # to tell a case variant of a folder from a new one; the lookups come after it.
+    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 1),
+    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 2),
     BuildAuthCase(FixtureKind.PUSH, "push", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.PUSH_DRY_RUN, "push", False, _ZERO),
     BuildAuthCase(FixtureKind.PULL, "pull", True, _ONE_PLUS),

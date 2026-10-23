@@ -23,7 +23,7 @@ class ComputeCatalogClient(Protocol):
 
 
 def _compute_client() -> ComputeCatalogClient:
-    return DeployClient.from_session()
+    return DeployClient.from_credentials()
 
 
 def _regions(catalog: JsonObject) -> list[JsonObject]:

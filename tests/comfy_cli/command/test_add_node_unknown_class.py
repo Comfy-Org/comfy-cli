@@ -1,7 +1,7 @@
 """`workflow add-node` must fail like `nodes show` does when a class is unknown.
 
-Measured on prod comfy-agent traces (2026-07-23 → 07-28): 12 failures where the
-agent named a class that does not exist, and it got NO suggestions back:
+When an agent named a class that does not exist, `workflow add-node` gave NO
+suggestions back:
 
   add_node:  "unknown node type 'MarkdownNote'"
   add_node:  "unknown node type 'Note'"
@@ -55,10 +55,14 @@ def test_unknown_class_emits_node_not_found_with_close_matches(patched_graph, tm
 
 
 def test_ui_only_node_is_rejected_with_a_specific_reason(patched_graph, tmp_path, capsys):
-    """Note/MarkdownNote/Reroute/GetNode/SetNode/PrimitiveNode exist only in the
-    UI graph. difflib gives no useful match for them (and for GetNode returns
-    actively misleading ones), so they need their own message."""
-    for cls in ("Note", "MarkdownNote", "GetNode", "Reroute"):
+    """Reroute/GetNode/SetNode/PrimitiveNode exist only in the UI graph and carry
+    data flow, so they stay refused. difflib gives no useful match for them (and
+    for GetNode returns actively misleading ones), so they need their own message.
+
+    Note/MarkdownNote used to be in this list; they are now authorable (see
+    test_add_node_virtual_notes.py) — the two traces at the top of this file were
+    the agent asking for exactly that."""
+    for cls in ("GetNode", "Reroute", "SetNode", "PrimitiveNode"):
         env = _add(tmp_path, capsys, cls)
         assert env["ok"] is False, cls
         err = env["error"]
@@ -83,3 +87,90 @@ def test_uuid_class_type_is_named_as_a_subgraph_instance(patched_graph, tmp_path
 def test_known_class_still_adds(patched_graph, tmp_path, capsys):
     env = _add(tmp_path, capsys, "VAEDecode")
     assert env["ok"] is True, env
+
+
+def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys):
+    """Reroute/GetNode are wiring helpers, not annotations — no note route."""
+    env = _add(tmp_path, capsys, "Reroute")
+    assert "insert-workflow" not in (env["error"].get("hint") or "")
+
+
+def test_set_widget_on_a_note_names_the_replace_route(patched_graph, tmp_path, capsys):
+    """An agent calling set_widget
+    {"address": "insert:cdcd…:root:node:101.text"} on a MarkdownNote got
+    "widget 'text' not found on MarkdownNote; available widgets: (none — all
+    inputs are links)" — false (a note has no inputs) and
+    no way forward. A note's text is not name-addressable (the catalog has no
+    schema for it; the doc host stores it opaquely), so say that and name the
+    route that works: delete the note and insert a replacement."""
+    note_id = "insert:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd:root:node:101"
+    wf = _base_workflow()
+    wf["nodes"].append(
+        {"id": note_id, "type": "MarkdownNote", "pos": [0, 400], "inputs": [], "outputs": [], "widgets_values": [""]}
+    )
+    env = _run(["set-widget", str(_write(tmp_path, wf)), f"{note_id}.text", "## Seedance 2.5"], capsys)
+    assert env["ok"] is False
+    err = env["error"]
+    blob = json.dumps(err)
+    assert "all inputs are links" not in blob, err
+    assert "delete" in (err.get("hint") or "") and "insert-workflow" in (err.get("hint") or ""), err
+
+
+def _note(node_id, cls="MarkdownNote") -> dict:
+    return {"id": node_id, "type": cls, "pos": [0, 400], "inputs": [], "outputs": [], "widgets_values": [""]}
+
+
+_SG = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"
+
+
+def _note_workflows() -> list[tuple[str, dict, object]]:
+    """Every address form that resolves to a note: a string spelling of an int
+    id, an interior note inside a subgraph instance, and a bare template id
+    that only resolves through set_widget's retry onto the inserted node."""
+    by_str = _base_workflow()
+    by_str["nodes"].append(_note(42))
+
+    interior = _base_workflow()
+    interior["nodes"].append({"id": 5, "type": _SG, "pos": [0, 0], "inputs": [], "outputs": [], "widgets_values": []})
+    interior["definitions"] = {
+        "subgraphs": [{"id": _SG, "name": "sg", "nodes": [_note(9, "Note")], "links": [], "inputs": [], "outputs": []}]
+    }
+
+    retried = _base_workflow()
+    retried["nodes"].append(_note("insert:abababababababababababababababab:root:node:101"))
+    return [("string id", by_str, "42"), ("subgraph interior", interior, "5/9"), ("retry", retried, 101)]
+
+
+@pytest.mark.parametrize("case", [c[0] for c in _note_workflows()])
+def test_every_address_that_resolves_to_a_note_is_refused_as_a_note(case):
+    """The note guard must look at the RESOLVED target, not the raw id: a
+    string id, a subgraph interior path and the retry onto an inserted node
+    all reach a note, and each must raise NoteTextNotWritable instead of
+    the generic widget error."""
+    from comfy_cli import workflow_ops
+
+    _, wf, addr = next(c for c in _note_workflows() if c[0] == case)
+    with pytest.raises(workflow_ops.NoteTextNotWritable):
+        workflow_ops.set_widget(wf, _graph(), addr, "text", "hello")
+
+
+@pytest.mark.parametrize("case", [c[0] for c in _note_workflows()])
+def test_the_note_replacement_route_names_an_address_delete_node_accepts(case):
+    """The hint's delete step must name the note's RESOLVED top-level id — the
+    exact id delete_node requires — not the address the caller typed ("42"
+    for node 42, a bare template id for an inserted node). An interior note
+    cannot be removed by delete_node at all, so its hint must not promise it."""
+    from comfy_cli import workflow_ops
+
+    _, wf, addr = next(c for c in _note_workflows() if c[0] == case)
+    with pytest.raises(workflow_ops.NoteTextNotWritable) as info:
+        workflow_ops.set_widget(wf, _graph(), addr, "text", "hello")
+    hint = info.value.hint
+    if case == "subgraph interior":
+        assert "delete node" not in hint, hint
+        assert "subgraph" in hint, hint
+        return
+    token = hint.split("delete node ", 1)[1].split(" ", 1)[0]
+    node_id = int(token) if token.lstrip("-").isdigit() else token
+    workflow_ops.delete_node(wf, _graph(), node_id)  # must not raise
+    assert info.value.node_id == node_id

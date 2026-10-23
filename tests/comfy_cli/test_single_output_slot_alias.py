@@ -1,17 +1,17 @@
 """A single-output node should accept ANY requested output name.
 
 Agents address an output by its TYPE when the node has exactly ONE output
-(they were never shown the real name). Real prod cases (5 failures):
+(they were never shown the real name). For example:
 
     LUMA_RAY32_KEYFRAME -> actual name 'keyframes'
-    CAMERA_CONTROL      -> actual name 'camera_control'    (x2)
+    CAMERA_CONTROL      -> actual name 'camera_control'
     ELEVENLABS_VOICE    -> actual name 'voice'
     IMAGE               -> actual name 'images'
 
 The case/separator tolerance already on this branch
 (test_output_slot_normalized.py) only accepts a variant of the SAME name
-(case/underscore-insensitive) — it does not cover an outright rename, so all
-five kept failing with "output 'X' not found ... outputs: [...]".
+(case/underscore-insensitive) — it does not cover an outright rename, so each
+of these kept failing with "output 'X' not found ... outputs: [...]".
 
 Fix in `_resolve_output_slot`: when the node has exactly one output, an
 unmatched name resolves to that one output (there is no ambiguity — it's the
@@ -39,10 +39,10 @@ def g():
 @pytest.mark.parametrize(
     "asked,name,out_type",
     [
-        ("LUMA_RAY32_KEYFRAME", "keyframes", "LUMA_RAY32_KEYFRAME"),  # prod: LUMA_RAY32_KEYFRAME
-        ("CAMERA_CONTROL", "camera_control", "CAMERA_CONTROL"),  # prod: CAMERA_CONTROL (x2)
-        ("ELEVENLABS_VOICE", "voice", "ELEVENLABS_VOICE"),  # prod: ELEVENLABS_VOICE
-        ("IMAGE", "images", "IMAGE"),  # prod: IMAGE
+        ("LUMA_RAY32_KEYFRAME", "keyframes", "LUMA_RAY32_KEYFRAME"),  # outright rename
+        ("CAMERA_CONTROL", "camera_control", "CAMERA_CONTROL"),  # outright rename
+        ("ELEVENLABS_VOICE", "voice", "ELEVENLABS_VOICE"),  # outright rename
+        ("IMAGE", "images", "IMAGE"),  # plural of the type
         ("anything_at_all", "output", "SOMETYPE"),  # any alias at all — not just a type name
     ],
 )

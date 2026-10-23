@@ -15,10 +15,14 @@ import hashlib as _hashlib
 import json
 import logging
 import math
+import shlex
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -37,10 +41,21 @@ _IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN
 # type is a link. Kept to types verified against saved workflows:
 # ``Load3D.image`` / ``Load3DAdvanced.viewport_state`` (``LOAD_3D``),
 # ``SaveGLB``/``Preview3D``'s injected ``image`` (``PREVIEW_3D``),
-# ``LoadAudioUI.audioUI`` (``AUDIO_UI``). ``LOAD3D_CAMERA`` is deliberately
+# ``LoadAudioUI.audioUI`` (``AUDIO_UI``), ``RecordAudio.audio``
+# (``AUDIO_RECORD``), ``WebcamCapture.image`` (``WEBCAM``).
+# ``LOAD3D_CAMERA`` is deliberately
 # absent: ``camera_info`` is ``serialize: false`` and writes no slot.
 _FRONTEND_DOM_WIDGET_TYPES = frozenset(
-    {"LOAD_3D", "LOAD_3D_ADVANCED", "PREVIEW_3D", "AUDIO_UI", "IMAGEUPLOAD", "AUDIOUPLOAD"}
+    {
+        "LOAD_3D",
+        "LOAD_3D_ADVANCED",
+        "PREVIEW_3D",
+        "AUDIO_UI",
+        "AUDIO_RECORD",
+        "WEBCAM",
+        "IMAGEUPLOAD",
+        "AUDIOUPLOAD",
+    }
 )
 
 # What a fresh node serializes in a DOM-widget slot. ``add_node`` must emit
@@ -73,6 +88,82 @@ LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOT
 # and stays writable, while the injected button/player/viewport slots (these
 # two plus the ``PREVIEW_3D`` ``image`` of ``_PREVIEW_3D_CLASSES``) are refused
 # by every write surface — see ``_WidgetEntry.frontend_injected``.
+# ---------------------------------------------------------------------------
+# Enum option listings on findings
+# ---------------------------------------------------------------------------
+#
+# An enum finding used to carry the WHOLE option list, twice (``suggestions``
+# and ``valid_options``). On a model loader that is every installed file, so a
+# few bad filenames over a large folder made a huge payload. The closest few
+# options and the count are what a
+# caller acts on; the full list stays one explicit request away.
+
+#: An option list this short is cheap and is carried whole as ``valid_options``.
+ENUM_INLINE_MAX = 12
+#: How many closest options a finding names.
+ENUM_SUGGEST_MAX = 5
+
+_FULL_ENUM_OPTIONS: ContextVar[bool] = ContextVar("comfy_full_enum_options", default=False)
+
+
+@contextmanager
+def full_enum_options(enabled: bool = True) -> Iterator[None]:
+    """Within this block, findings carry every option as ``valid_options``
+    whatever the list's length (``validate --full-options``)."""
+    token = _FULL_ENUM_OPTIONS.set(enabled)
+    try:
+        yield
+    finally:
+        _FULL_ENUM_OPTIONS.reset(token)
+
+
+def enum_option_fields(options: list, closest: list | None = None) -> dict[str, Any]:
+    """The option-listing fields of one enum finding.
+
+    ``suggestions`` is the ``closest`` matches (or, with none, the first
+    options), at most :data:`ENUM_SUGGEST_MAX`; ``option_count`` is the whole
+    list's length. ``valid_options`` is the full, typed list only when it is
+    short (:data:`ENUM_INLINE_MAX`) or the caller asked for it
+    (:func:`full_enum_options`); otherwise ``options_omitted`` says how many
+    options the finding does not name.
+    """
+    opts = list(options)
+    suggestions = list(closest or [])[:ENUM_SUGGEST_MAX] or opts[:ENUM_SUGGEST_MAX]
+    out: dict[str, Any] = {"suggestions": suggestions, "option_count": len(opts)}
+    if len(opts) <= ENUM_INLINE_MAX or _FULL_ENUM_OPTIONS.get():
+        out["valid_options"] = opts
+    else:
+        out["options_omitted"] = len(opts) - len(suggestions)
+    return out
+
+
+def enum_listing_hint(
+    field: str, options: list, suggestions: list, class_type: str | None = None, *, listing: str = "choices"
+) -> str:
+    """The hint of an enum finding. A short list is named whole; a long one
+    is pointed at — the closest options are already in ``suggestions`` — with
+    the way to filter the rest instead of dumping it."""
+    n = len(options)
+    if n <= ENUM_INLINE_MAX or _FULL_ENUM_OPTIONS.get():
+        return f"valid options: {', '.join(str(v) for v in options)}"
+    if "." in field:
+        # A dotted name is a dynamic-combo sub-input: it sits under
+        # `dynamic_options[].inputs`, not top-level `inputs`.
+        return (
+            f"pick one of `suggestions` ({len(suggestions)} of {n} options); re-run validate with "
+            f"--full-options to list all {n}"
+        )
+    target = shlex.quote(class_type) if class_type else "<class>"
+    # Catalog names are untrusted text: encode the field as a selector string
+    # literal and shell-quote both arguments, so the copyable command neither
+    # breaks the selector nor runs anything a node pack put in a name.
+    query = shlex.quote(f'inputs.#(name=={json.dumps(field)}).{listing}.#(%"*<text>*")#')
+    return (
+        f"pick one of `suggestions` ({len(suggestions)} of {n} options); to search all {n}, filter them with "
+        f"`comfy nodes show {target} --select {query}`, or re-run validate with --full-options"
+    )
+
+
 FRONTEND_MARKER_SLOTS = frozenset({"control_after_generate", "upload", "audioUI"})
 
 # ``Comfy.AudioWidget`` appends an ``audioUI`` player to exactly these classes.
@@ -124,7 +215,9 @@ class PortOptions:
     step: float | None = None
     default: Any = None
     multiline: bool = False
-    control_after_generate: bool = False
+    # None when the spec omits the flag, so an explicit ``False`` can override
+    # the seed/noise_seed name rule (``useIntWidget`` uses ``??``).
+    control_after_generate: bool | None = None
     force_input: bool = False
     # ``socketless``: a display-only input (ImageCompare's compare_view slider,
     # Painter's canvas). The frontend renders it and serializes nothing for it,
@@ -193,6 +286,10 @@ class Port:
         ONE input, but the server expects autogrown slot keys —
         ``images.image0``, ``images.image1``, … one per connection."""
         return self.type.startswith("COMFY_AUTOGROW")
+
+    @property
+    def is_dynamic_group(self) -> bool:
+        return self.type == "COMFY_DYNAMICGROUP_V3"
 
     @property
     def is_dynamic_combo(self) -> bool:
@@ -407,16 +504,92 @@ class Port:
             return []
         import difflib
 
+        from comfy_cli.model_variants import precision_sibling
+
         opts = [str(e) for e in self.enum_values]
         base = str(value).rsplit("/", 1)[-1]
         bases = [o.rsplit("/", 1)[-1] for o in opts]
-        out: list[str] = []
+        # The same model in another precision outranks any spelling neighbour.
+        sibling = precision_sibling(value, opts)
+        out: list[str] = [sibling] if sibling is not None else []
         for g in difflib.get_close_matches(base, bases, n=limit, cutoff=0.5):
             for o in opts:
                 if o.rsplit("/", 1)[-1] == g and o not in out:
                     out.append(o)
                     break
         return out[:limit]
+
+    def _numeric_combo_member(self, value: Any) -> bool:
+        """Whether a numeric ``value`` equals a numeric option BY NUMBER.
+
+        The string comparison above misses ``1`` against a float option
+        ``1.0``: a frontend-saved workflow writes ``1.0`` as ``1`` (JavaScript
+        has one number type), and the server's own membership test is Python
+        ``1 in [..., 1.0, ...]`` — true. Booleans never count as numbers here.
+        """
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return False
+        return any(
+            not isinstance(o, bool) and isinstance(o, int | float) and o == value for o in self.enum_values or []
+        )
+
+    def ratio_combo_match(self, value: Any) -> str | None:
+        """The ONE option carrying the same ``W:H`` ratio as ``value``, else ``None``.
+
+        For an aspect-ratio combo the ratio IS the value and the parenthetical
+        is a display label: ``'16:9 (Landscape)'`` and a bare ``'16:9'`` both
+        mean ``'16:9 (Widescreen)'`` when that is the only option starting
+        ``16:9``. Unlike :meth:`best_combo_match` (any leading word, a hint
+        only), this is narrow enough for the edit path to WRITE: the token must
+        be a numeric ratio and exactly one option must share it.
+        """
+        if self.type != "COMBO" or not self.enum_values or self.is_upload_backed:
+            return None
+        import re
+
+        token = _leading_token(value)
+        if not re.fullmatch(r"\d+(?:\.\d+)?:\d+(?:\.\d+)?", token):
+            return None
+        hits = [o for o in self.enum_values if isinstance(o, str) and _leading_token(o) == token]
+        if len(hits) != 1 or hits[0] == value:
+            return None
+        return hits[0]
+
+    def best_combo_match(self, value: Any) -> str | None:
+        """The ONE option sharing a rejected value's leading token, else ``None``.
+
+        ``'16:9 (Landscape)'`` against ``'16:9 (Widescreen)'``/``'9:16 (...)'``/…:
+        the ratio is the part that matters and exactly one option has it, so
+        that option is the likely intent. The caller NAMES it and never writes
+        it. A single-token value (a filename, a bare word) has no qualifier to
+        disagree on and gets ``None``, as does a token two options share and any
+        value with a file extension.
+        """
+        if self.type != "COMBO" or not self.enum_values:
+            return None
+        import re
+
+        text = str(value).strip()
+        # A filename ('flux dev.safetensors') sharing a leading word with
+        # another file is a different model, not a relabelled option.
+        if re.search(r"\.[A-Za-z][A-Za-z0-9]{0,11}$", text):
+            return None
+        token, _, rest = text.partition(" ")
+        if not token or not rest.strip():
+            return None
+        hits = [str(o) for o in self.enum_values if _leading_token(o) == token]
+        return hits[0] if len(hits) == 1 else None
+
+    def _note_precision_sibling(self, warning: dict, value: Any) -> None:
+        """Name the option that is ``value`` in another precision, when there
+        is exactly one: an unavailable ``*_int8_convrot`` file whose ``*_fp16``
+        build is installed is a one-edit fix, not a model choice."""
+        from comfy_cli.model_variants import precision_sibling
+
+        sibling = precision_sibling(value, list(self.enum_values or []))
+        if sibling is not None:
+            warning["precision_sibling"] = sibling
+            warning["message"] += f" ({sibling!r} is the same model in another precision: set it)"
 
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
@@ -445,8 +618,51 @@ class Port:
             if isinstance(value, bool) or not isinstance(value, str | int | float):
                 return f"{self.name}: expected COMBO (string or number), got {type(value).__name__}"
         elif self.type == "BOOLEAN":
+            if isinstance(value, str) and value.strip().lower() == "true":
+                # The server coerces with bool(), so the string "True" runs as
+                # true; some schemas default to it (DrawViTPose.draw_head).
+                return None
+            if isinstance(value, str):
+                return (
+                    f"{self.name}: expected BOOLEAN, got str {value!r} — the server reads any non-empty "
+                    "string as true; set it to false"
+                    if value.strip().lower() == "false"
+                    else f"{self.name}: expected BOOLEAN, got str {value!r}"
+                )
             if not isinstance(value, bool):
                 return f"{self.name}: expected BOOLEAN, got {type(value).__name__}"
+        return None
+
+    def server_coercion(self, value: Any) -> Any | None:
+        """The typed value the server makes of a literal :meth:`validate_shape`
+        refuses, or ``None`` when the server's conversion fails or is not
+        mirrored here.
+
+        ``execution.validate_inputs`` runs ``int(val)`` on an INT input,
+        ``float(val)`` on a FLOAT one and ``str(val)`` on a STRING one before
+        any range check, and the node receives the result: a template that saved
+        ``"1536"`` for an INT runs with ``1536``. Only those three conversions
+        are mirrored, and none is relaxed further: ``"1536.0"`` is not
+        converted for INT (the server's ``int("1536.0")`` raises), nor is a
+        non-integral number on INT (``int(1536.9)`` truncates), a bool, a non-finite string (``"nan"``, ``"inf"``; stricter than the
+        server, which takes them) or a non-finite number on a STRING input, and
+        BOOLEAN is not mirrored at all because ``bool("false")`` is true.
+        """
+        if isinstance(value, bool):
+            return None
+        if self.type == "INT" and isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return None
+        if self.type == "FLOAT" and isinstance(value, str):
+            try:
+                number = float(value)
+            except ValueError:
+                return None
+            return number if math.isfinite(number) else None
+        if self.type == "STRING" and (isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))):
+            return str(value)
         return None
 
     def validate_catalog(self, value: Any) -> list[dict]:
@@ -478,17 +694,30 @@ class Port:
             if isinstance(value, float) and value.is_integer():
                 candidates.add(str(int(value)))
             enum_str = {str(e) for e in self.enum_values}
-            if not (candidates & enum_str):
+            if not (candidates & enum_str) and not self._numeric_combo_member(value):
+                suggestions = self.suggest_combo(value, limit=ENUM_SUGGEST_MAX)
+                best = self.best_combo_match(value)
+                if best is not None:
+                    suggestions = [best, *(s for s in suggestions if s != best)][:ENUM_SUGGEST_MAX]
+                listing = enum_option_fields(self.enum_values, suggestions)
                 warning = {
                     "code": "unknown_enum_value",
                     "field": self.name,
                     "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
-                    "valid_options": list(self.enum_values),
+                    "option_count": listing["option_count"],
                 }
-                suggestions = self.suggest_combo(value)
+                if best is not None:
+                    warning["best_match"] = best
+                for key in ("suggestions", "valid_options", "options_omitted"):
+                    if key in listing:
+                        warning[key] = listing[key]
                 if suggestions:
                     warning["did_you_mean"] = suggestions
                     warning["message"] += f" — closest: {', '.join(suggestions)}"
+                if best is not None:
+                    lead = _leading_token(value)
+                    warning["message"] += f" ({best!r} is the only option starting {lead!r})"
+                self._note_precision_sibling(warning, value)
                 warnings.append(warning)
         elif self.type == "COMBO" and self.enum_declared:
             # The server declared this field's choices and shipped NONE of them:
@@ -601,10 +830,9 @@ class Morphism:
 # match-type: a generic port whose concrete type is resolved at runtime from
 # what it is wired to (ComfySwitchNode, ResizeImageMaskNode and friends). It was
 # not recognised here, so every edge into or out of a V3 match-type port was
-# reported as edge_type_mismatch — ~30 spurious warnings in a single 48h prod
-# window, on graphs that were correct. The agent had to write a paragraph
-# explaining them away in nearly every reply, which teaches it to discount
-# validator output generally.
+# reported as edge_type_mismatch — spurious warnings on graphs that were
+# correct. An agent then has to explain them away in nearly every reply, which
+# teaches it to discount validator output generally.
 _WILDCARD_TYPE_PREFIX = "COMFY_MATCHTYPE"
 _WILDCARD_TYPES = frozenset({"*"})
 
@@ -657,9 +885,8 @@ def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
     the frontend's ``isValidConnection`` — which expands a COMMA-SEPARATED
     union on both ends (``INT,FLOAT`` on a math operand, ``MESH,FILE_3D_GLB,…``
     on a 3D importer) before comparing. Comparing the raw strings reported a
-    ``FLOAT`` output into an ``INT,FLOAT`` input as ``edge_type_mismatch``:
-    12 of the 23 such warnings in a 3-day prod window were this shape, on
-    edges the frontend draws and the server runs.
+    ``FLOAT`` output into an ``INT,FLOAT`` input as ``edge_type_mismatch``,
+    on edges the frontend draws and the server runs.
     """
     if is_wildcard_type(src_type) or is_wildcard_type(dst_type):
         return True
@@ -669,12 +896,15 @@ def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
     return _is_valid_connection(src_type, dst_type)
 
 
-#: ``(class_type, input)`` pairs whose value is a viewport capture the frontend
-#: serializes at queue time, read unconditionally by the node
-#: (``Load3D.execute``: ``image['image']``). A headless submit carries the
-#: add-node default ``""`` and crashes with "string indices must be integers".
-#: The ``viewport_state`` siblings tolerate a non-dict, so they are not listed.
-_FRONTEND_CAPTURE_INPUTS = frozenset({("Load3D", "image")})
+#: ``(class_type, input)`` pairs whose value the frontend captures at queue
+#: time, with the shape the server-side node requires. A headless ``add_node``
+#: carries only the DOM-widget placeholder and otherwise crashes in the node.
+#: ``Load3D.viewport_state`` tolerates a non-dict, so it is not listed.
+_FRONTEND_CAPTURE_INPUTS = {
+    ("Load3D", "image"): "image_bundle",
+    ("RecordAudio", "audio"): "filename",
+    ("WebcamCapture", "image"): "filename",
+}
 
 
 #: Types the frontend registers a widget constructor for (``ComfyWidgets`` in
@@ -728,37 +958,51 @@ def _is_dynamic_combo_type(type_id: str) -> bool:
 
 def _has_control_after_generate_slot(port: Port) -> bool:
     """True if the frontend places a ``control_after_generate`` marker widget
-    right after this port — explicit (schema ``control_after_generate: True``)
-    or implicit (the frontend's ``useIntWidget`` composable always companions
-    an INT ``seed``/``noise_seed`` input, regardless of the schema flag).
-    ``port.name`` may be dotted for a dynamic-combo sub-input (``model.seed``);
-    the implicit rule keys off the leaf name, same as the converter.
-    Mirrors ``workflow_to_api._has_control_after_generate_companion``'s
-    schema-level test."""
-    if port.options.control_after_generate:
-        return True
-    # Same seed-like rule as the converter's companion guard: partner nodes
-    # name the widget every which way — ``image_seed``/``model_seed`` (Tripo),
-    # ``Seed`` (Rodin3D), ``rand_seed``, ``noise_seed_sde``, ``variation_seed``
-    # — and several ship it UNFLAGGED, yet the frontend still appends the
-    # companion. An exact ``seed``/``noise_seed`` match here made the exported
-    # widget catalog off by one for every such node, so a name<->index
-    # consumer wrote into the marker slot.
-    leaf_name = port.name.rsplit(".", 1)[-1]
-    return port.type == "INT" and "seed" in leaf_name.lower()
+    right after this port.
+
+    Mirrors ``useIntWidget``: the schema flag when present (an explicit ``false``
+    suppresses the slot), else the legacy convention of an
+    INT input named exactly ``seed`` or ``noise_seed``. A dynamic-combo
+    sub-input is named ``<selector>.<key>`` (``sampling_mode.seed``), so the
+    name rule never applies to it, and ``image_seed``/``texture_seed`` get a
+    companion only when flagged. Reserving a slot the frontend does not create
+    shifts every later widget by one on a saved node (TextGenerate's
+    ``presence_penalty`` read from ``thinking``) and makes ``add_node`` write
+    stray markers the canvas then loads positionally (Tripo P-series).
+    """
+    if port.options.control_after_generate is not None:
+        return port.options.control_after_generate
+    return port.type == "INT" and port.name in ("seed", "noise_seed")
 
 
-def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
+def load_3d_button_slots(
+    m: Morphism, widgets_values: list[Any] | dict[str, Any] | None = None
+) -> tuple[tuple[str, str], ...]:
     """The button slots the LOAD_3D custom widget injects into ``m``, if any.
 
+    ``Comfy.Load3DAdvanced`` rewrites that class's raw ``LOAD_3D`` input to
+    ``LOAD_3D_ADVANCED`` before widget construction. Its dedicated factory
+    adds only the viewport component, so the static catalog and fresh nodes
+    must not inherit these slots from the raw ``object_info`` shape. A saved
+    legacy node can still contain the three button values, however; the
+    value-aware walk retains those slots so edits stay positionally aligned.
+
     ``getCustomWidgets().LOAD_3D`` attaches them only when the node already
-    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so the loaders
-    (``Load3D``, ``Load3DAdvanced``) get them and the viewers fed by a
-    ``model_3d`` link (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
+    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so ``Load3D``
+    gets them and viewers fed by a ``model_3d`` link
+    (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
     They are constructed before the component widget, so the caller places them
     immediately BEFORE the ``LOAD_3D`` slot — unlike every entry in
     ``frontend_extra_widget_names``, which trails the declared inputs.
     """
+    if getattr(m, "id", "") == "Load3DAdvanced":
+        expected = [value for _name, value in _LOAD_3D_BUTTON_SLOTS]
+        # Two consecutive fixed markers are an unambiguous legacy prefix.
+        # Accepting a single marker could mistake current viewport state for
+        # the old upload button, while requiring all three makes a truncated
+        # legacy node unsafe to extend by name.
+        if not isinstance(widgets_values, list) or widgets_values[1:3] != expected[:2]:
+            return ()
     if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
         return ()
     return _LOAD_3D_BUTTON_SLOTS
@@ -816,7 +1060,7 @@ def _is_link(
         return False
     # A dynamic combo is a widget port even when its options block is missing
     # or malformed — the frontend always renders the selector inline.
-    if _is_dynamic_combo_type(type_id):
+    if _is_dynamic_combo_type(type_id) or type_id == "COMFY_DYNAMICGROUP_V3":
         return False
     if type_id in _FRONTEND_DOM_WIDGET_TYPES and not force_input:
         return False
@@ -900,9 +1144,9 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
     )
 
 
-def _control_after_generate_set(val: Any) -> bool:
+def _control_after_generate_set(val: Any) -> bool | None:
     if val is None:
-        return False
+        return None
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
@@ -1163,6 +1407,7 @@ class Graph:
             if not isinstance(raw, dict):
                 continue
             m = _parse_morphism(node_id, raw)
+            _unconstrain_frontend_combos(m)
             g._nodes[m.id] = m
             # A deprecated class stays addressable by name (show, validate,
             # edits on a graph that already holds it) but is never a
@@ -1528,15 +1773,16 @@ class Graph:
         return order
 
     def widget_order_default(self, class_name: str) -> list[str]:
-        """Static order with every dynamic combo expanded at its FIRST key.
+        """Static order with every dynamic combo expanded at its declared default.
 
         :meth:`widget_order` is deliberately value-independent — a combo
         contributes only its selector, because which sub-inputs exist depends on
         the node's current selection. A CATALOG has no node and no selection, but
         its consumers still need the sub-input names in order to address them
         (``set-widget <id>.model.resolution``). So the catalog publishes the order
-        a FRESH node would have, which is the first key — the same option
-        ``add_node`` materializes via :meth:`widget_defaults`.
+        a FRESH node would have: the schema default when declared, otherwise
+        the first key — the same option ``add_node`` materializes via
+        :meth:`widget_defaults`.
         """
         m = self._nodes.get(class_name)
         if m is None:
@@ -1552,7 +1798,8 @@ class Graph:
         m = self._nodes.get(class_name)
         if m is None:
             return []
-        return [e.name for e in _expand_widget_entries(m, widgets_values or [])]
+        defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
+        return [e.name for e in _expand_widget_entries(m, widgets_values or [], first_key=defaults)]
 
     def editable_widget_names(self, class_name: str, widgets_values: list[Any] | None = None) -> list[str]:
         """The subset of :meth:`widget_order_for_node` a write may target —
@@ -1560,7 +1807,8 @@ class Graph:
         m = self._nodes.get(class_name)
         if m is None:
             return []
-        return _editable_widget_names(_expand_widget_entries(m, widgets_values or []))
+        defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
+        return _editable_widget_names(_expand_widget_entries(m, widgets_values or [], first_key=defaults))
 
     def frontend_injected_widget_names(self, class_name: str) -> list[str]:
         """Names in the widget order that the frontend injects with no schema
@@ -1574,7 +1822,7 @@ class Graph:
     def dynamic_combo_options(self, class_name: str) -> dict[str, dict[str, Any]]:
         """Every dynamic-combo selector of ``class_name`` with EVERY option's slots.
 
-        ``{selector: {"default": <first key>, "options": {key: {"widgets": [...],
+        ``{selector: {"default": <declared default or first key>, "options": {key: {"widgets": [...],
         "defaults": {...}}}}}`` — per option, the DIRECT widget slots it inserts
         after its selector, in positional order (the same walk as
         :func:`_expand_widget_entries`: link-only sub-inputs own no slot, a
@@ -1609,23 +1857,86 @@ class Graph:
                         widgets.append("control_after_generate")
                         defaults["control_after_generate"] = "fixed"
                 options[str(key)] = {"widgets": widgets, "defaults": defaults}
-            out[name] = {"default": str(keys[0]) if keys else None, "options": options}
+            default = _widget_default(port)
+            out[name] = {"default": str(default) if default is not None else None, "options": options}
 
         for p in m.inputs:
             if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
                 describe(p, p.name, 0)
         return out
 
+    def dynamic_sub_widget_options(
+        self, class_name: str, widget: str, widgets_values: list[Any] | None = None
+    ) -> tuple[str, list[str]] | None:
+        """``(selector, [option keys])`` when ``widget`` is a dynamic-combo
+        sub-widget that only SOME of the selector's options reveal, else ``None``.
+
+        ``MinimaxHailuo03TextToVideoNode`` + ``model.prompt_expansion_mode`` →
+        ``("model", ["MiniMax H3 Max", "MiniMax H3 Max Turbo"])``: the default
+        ``MiniMax H3`` has no such widget, so a write to it on a node still on
+        that option must say which option to select first. A widget every
+        option reveals (or none) returns ``None``.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return None
+        if widgets_values is None:
+            combos = self.dynamic_combo_options(class_name)
+        else:
+            combos = {}
+            for entry in _expand_widget_entries(m, widgets_values):
+                port = entry.port
+                if port is None or not port.dynamic_options or not _is_dynamic_combo_type(port.type):
+                    continue
+                options: list[tuple[Any, dict[str, Any]]] = []
+                for option in port.dynamic_options:
+                    key = option.get("key")
+                    if key is None:
+                        continue
+                    sub_ports = _dynamic_combo_sub_ports(port.dynamic_options, key, entry.name)
+                    widgets = [sub_port.name for sub_port in sub_ports if not sub_port.is_link]
+                    if any(
+                        _has_control_after_generate_slot(sub_port) for sub_port in sub_ports if not sub_port.is_link
+                    ):
+                        widgets.append("control_after_generate")
+                    options.append((key, {"widgets": widgets}))
+                combos[entry.name] = {"options": options}
+        for selector, spec in combos.items():
+            options = spec.get("options") or {}
+            option_items = options.items() if isinstance(options, dict) else options
+            keys = [key for key, opt in option_items if widget in (opt.get("widgets") or [])]
+            if keys and len(keys) < len(options):
+                return selector, keys
+        return None
+
+    def widget_default_for_node(self, class_name: str, widget: str, widgets_values: list[Any] | None = None) -> Any:
+        """Schema default for ``widget`` in the node's active dynamic layout.
+
+        Unlike :meth:`widget_defaults`, this follows the outer selections in
+        ``widgets_values`` before locating a nested selector, so a truncated
+        node does not borrow the same-named selector default from the first
+        outer option.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return None
+        for entry in _expand_widget_entries(m, widgets_values or []):
+            if entry.name == widget and entry.port is not None:
+                if entry.port.dynamic_options and _is_dynamic_combo_type(entry.port.type):
+                    return _widget_default(entry.port) if entry.port.options.default is not None else None
+                return _widget_default(entry.port)
+        return None
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
-        (first key), their sub-widgets, and control_after_generate. Used by
+        (declared default or first key), their sub-widgets, and control_after_generate. Used by
         ``add-node`` so a fresh node is runtime-valid, aligned with the converter."""
         m = self._nodes.get(class_name)
         if m is None:
             return {}
         out: dict[str, Any] = {}
-        # Same walk as ``widget_order_default`` (first key at every dynamic
-        # combo, link-only sub-inputs skipped), so the two can never disagree
+        # Same walk as ``widget_order_default`` (declared default or first key
+        # at every dynamic combo, link-only sub-inputs skipped), so the two can never disagree
         # about which names own a slot.
         button_values = dict(load_3d_button_slots(m))
         for entry in _expand_widget_entries(m, [], first_key=True):
@@ -1778,9 +2089,19 @@ class Graph:
             # unresolved selection keep the old generic checks.
             dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
             dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combos(
-                node_id, class_type, m, node_inputs
+                node_id, class_type, m, node_inputs, range_is_error=node_id in reachable
             )
+            group_errors: list[dict] = []
+            group_warnings: list[dict] = []
+            for group in (p for p in m.inputs if p.is_dynamic_group):
+                e, w, _ = _check_dynamic_group(
+                    node_id, class_type, group, node_inputs, range_is_error=node_id in reachable
+                )
+                group_errors.extend(e)
+                group_warnings.extend(w)
             for input_name, value in node_inputs.items():
+                if input_name in port_by_name and port_by_name[input_name].is_dynamic_group:
+                    continue
                 if (
                     "." in input_name
                     and input_name.split(".", 1)[0] in dyn_port_names
@@ -2042,15 +2363,22 @@ class Graph:
                     continue
                 if port is None:
                     continue
-                if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and (
-                    not isinstance(value, dict) or "image" not in value
-                ):
+                capture_kind = _FRONTEND_CAPTURE_INPUTS.get((class_type, input_name))
+                capture_missing = (
+                    capture_kind == "image_bundle" and (not isinstance(value, dict) or "image" not in value)
+                ) or (capture_kind == "filename" and (not isinstance(value, str) or not value.strip()))
+                if capture_missing:
+                    capture_description = (
+                        "browser viewport capture ({image, mask, normal, …})"
+                        if capture_kind == "image_bundle"
+                        else "filename uploaded by the browser capture widget"
+                    )
                     finding = {
                         "node_id": node_id,
                         "field": input_name,
                         "code": "frontend_capture_required",
                         "message": (
-                            f"{class_type}.{input_name} is the browser viewport capture ({{image, mask, normal, …}}) "
+                            f"{class_type}.{input_name} is the {capture_description} "
                             f"that only the ComfyUI frontend produces at queue time; {value!r} makes the node crash "
                             f"on the server"
                         ),
@@ -2061,23 +2389,12 @@ class Graph:
                     }
                     (errors if node_id in reachable else warnings).append(finding)
                     continue
-                # Shape check (hard error)
-                shape_err = port.validate_shape(value)
-                if shape_err:
-                    errors.append(
-                        {
-                            "node_id": node_id,
-                            "field": input_name,
-                            "code": "shape_mismatch",
-                            "message": shape_err,
-                            "hint": f"expected {port.type}; check the value type",
-                        }
-                    )
-                    continue
-                # Catalog checks (enum membership, etc.). Range violations are a
-                # hard reject only on a node the server will actually run; on a
-                # pruned (output-unreachable) node they stay advisory warnings.
-                cat_errors, cat_warnings = _validate_catalog_value(
+                # Shape check (hard error, or a warning when the server converts
+                # the value), then catalog checks (enum membership, etc.). Range
+                # violations are a hard reject only on a node the server will
+                # actually run; on a pruned (output-unreachable) node they stay
+                # advisory warnings.
+                cat_errors, cat_warnings = _validate_literal_value(
                     node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
                 )
                 errors.extend(cat_errors)
@@ -2094,6 +2411,7 @@ class Graph:
             # silently lose its dangling_edge error with nothing standing in
             # for it.
             warnings.extend(dyn_warnings)
+            warnings.extend(group_warnings)
             # Required-presence checks apply only to output-reachable nodes: the
             # server prunes unreachable nodes without validating them, so
             # enforcing required inputs on a disconnected node over-rejects a
@@ -2104,6 +2422,7 @@ class Graph:
                 errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
                 errors.extend(_check_required_present(node_id, m, node_data))
                 errors.extend(dyn_errors)
+                errors.extend(group_errors)
 
         # No-outputs check: the server rejects any prompt with zero output
         # nodes (execution.py:1155-1162, prompt_no_outputs) — including an
@@ -2147,10 +2466,10 @@ class Graph:
         # promoted check above, such a graph could validate as
         # "0 errors, 0 warnings" while doing nothing the author intended.
         #
-        # Observed in prod: a depth-ControlNet whose output was never wired into
-        # the sampler validated completely clean; the graph then ran twice,
-        # producing an image with no pose applied, and cost two paid GPU runs and
-        # three turns of "it does nothing" before the dangling link was found.
+        # For example, a depth-ControlNet whose output was never wired into the
+        # sampler validated completely clean; the graph would then run and
+        # produce an image with no pose applied, costing paid GPU runs before
+        # the dangling link was found.
         #
         # Advisory, not an error: a scratch node parked mid-build is legitimate,
         # and the server does run the graph. It only has to be VISIBLE.
@@ -2304,11 +2623,36 @@ class Graph:
         }
 
 
+def _declared_dynamic_default(p: Port) -> Any:
+    """The actual option key named by a dynamic combo default, else ``None``."""
+    if p.options.default is None:
+        return None
+    keys = [option.get("key") for option in p.dynamic_options if option.get("key") is not None]
+    default = p.options.default
+    exact = next((key for key in keys if type(key) is type(default) and key == default), None)
+    if exact is not None:
+        return exact
+    if isinstance(default, int | float) and not isinstance(default, bool):
+        numeric = next(
+            (key for key in keys if isinstance(key, int | float) and not isinstance(key, bool) and key == default),
+            None,
+        )
+        if numeric is not None:
+            return numeric
+    string_matches = [key for key in keys if str(key) == str(default)]
+    return string_matches[0] if len(string_matches) == 1 else None
+
+
 def _widget_default(p: Port) -> Any:
     """The value a fresh node carries for widget port ``p`` — a dynamic
-    combo's first key, else the schema default, else the first choice, else
-    the DOM-widget placeholder, else ``None``."""
+    combo's declared default (or first key), else the schema default, else the
+    first choice, else the DOM-widget placeholder, else ``None``."""
+    if p.is_dynamic_group:
+        return p.options.min or 0
     if p.dynamic_options:
+        declared = _declared_dynamic_default(p)
+        if declared is not None:
+            return declared
         return p.enum_values[0] if p.enum_values else None
     if p.options.default is not None:
         return p.options.default
@@ -2332,7 +2676,7 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
         "is_link": p.is_link,
         "section": "required" if p.required else "optional",
         # V3 dynamic combos keep their selection keys in enum_values
-        # internally (e.g. so widget_defaults can pick the first key), but
+        # internally (e.g. so widget_defaults can fall back to the first key), but
         # those keys are exposed to callers as `selection_keys` /
         # `dynamic_options[].key` below, not as flat `choices` — they are not
         # membership choices for the field (see _is_scalar_choice).
@@ -2344,6 +2688,12 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
             "default": p.options.default,
         },
     }
+    if p.is_dynamic_group:
+        entry["dynamic_group"] = {
+            "template": p.options.template,
+            "min": p.options.min if p.options.min is not None else 0,
+            "max": p.options.max if p.options.max is not None else 20,
+        }
     if p.is_autogrow:
         lo, hi = p.autogrow_limits
         template = p.autogrow_element_template or {}
@@ -2451,6 +2801,29 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
     return reachable
 
 
+#: COMBO inputs whose options the FRONTEND defines (the node's own widgets), so
+#: object_info declares an empty list the server never checks against:
+#: ``CustomCombo.validate_inputs`` returns True for any choice. A known-narrow
+#: allowlist: object_info carries no structural signal separating "the frontend
+#: fills this combo" from "no files installed", so another node with the same
+#: pattern still reports no_options_available until it is added here.
+_FRONTEND_DEFINED_COMBOS = {"CustomCombo": frozenset({"choice"})}
+
+
+def _unconstrain_frontend_combos(m: Morphism) -> None:
+    """Leave a frontend-defined COMBO unconstrained, like a port whose options
+    object_info does not declare at all (no ``no_options_available``)."""
+    names = _FRONTEND_DEFINED_COMBOS.get(m.id)
+    if names:
+        m.inputs = [replace(p, enum_values=[], enum_declared=False) if p.name in names else p for p in m.inputs]
+
+
+def _closest_options(value: Any, options: list) -> list:
+    """Up to :data:`ENUM_SUGGEST_MAX` options closest to ``value`` by name."""
+    by_str = {str(o): o for o in options}
+    return [by_str[m] for m in difflib.get_close_matches(str(value), list(by_str), n=ENUM_SUGGEST_MAX, cutoff=0.5)]
+
+
 def _validate_catalog_value(
     node_id: str, class_type: str, input_name: str, port: Port, value: Any, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict]]:
@@ -2468,23 +2841,17 @@ def _validate_catalog_value(
     warnings: list[dict] = []
     for w in port.validate_catalog(value):
         if w["code"] == "unknown_enum_value":
-            top = port.enum_values[:8]
+            # The closest options and the count, not the whole list (see
+            # enum_option_fields): a short list is still carried whole.
+            listing = enum_option_fields(port.enum_values, w.get("did_you_mean"))
             errors.append(
                 {
                     "node_id": node_id,
                     "field": input_name,
                     "code": "unknown_enum_value",
                     "message": w["message"],
-                    "hint": f"valid options include: {', '.join(str(v) for v in top)}"
-                    + (
-                        f" (and {len(port.enum_values) - 8} more — see valid_options)"
-                        if len(port.enum_values) > 8
-                        else ""
-                    ),
-                    "suggestions": port.enum_values[:20],
-                    # full, typed list — never truncated, so the agent
-                    # can pick a real value instead of guessing.
-                    "valid_options": list(port.enum_values),
+                    "hint": enum_listing_hint(input_name, port.enum_values, listing["suggestions"], class_type),
+                    **listing,
                 }
             )
         elif w["code"] == "no_options_available":
@@ -2544,6 +2911,129 @@ def _validate_catalog_value(
     return errors, warnings
 
 
+def _validate_literal_value(
+    node_id: str, class_type: str, input_name: str, port: Port, value: Any, *, range_is_error: bool = True
+) -> tuple[list[dict], list[dict]]:
+    """Shape and catalog checks for one literal input value. Returns (errors, warnings).
+
+    A wrong JSON type is a ``shape_mismatch`` error unless the server converts
+    it (:meth:`Port.server_coercion`): ``"1536"`` on an INT input
+    runs, so it is a ``coercible_type`` warning naming the typed value to
+    store, and the catalog checks judge the converted value, as the server's
+    range check does.
+    """
+    shape_err = port.validate_shape(value)
+    if shape_err is None:
+        return _validate_catalog_value(node_id, class_type, input_name, port, value, range_is_error=range_is_error)
+    coerced = port.server_coercion(value)
+    if coerced is None:
+        error = {
+            "node_id": node_id,
+            "field": input_name,
+            "code": "shape_mismatch",
+            "message": shape_err,
+            "hint": f"expected {port.type}; check the value type",
+        }
+        return [error], []
+    errors, warnings = _validate_catalog_value(
+        node_id, class_type, input_name, port, coerced, range_is_error=range_is_error
+    )
+    typed = json.dumps(coerced)
+    address_arg = shlex.quote(f"{node_id}.{input_name}")
+    typed_arg = shlex.quote(typed)
+    refused = bool(errors) or any(w.get("code") in FATAL_FINDING_CODES for w in warnings)
+    finding = {
+        "node_id": node_id,
+        "field": f"{node_id}.{class_type}.{input_name}",
+        "code": "coercible_type",
+        "severity": finding_severity("coercible_type"),
+        "message": f"{shape_err} — the server converts it to {coerced!r}",
+        "hint": (
+            f"the converted value is refused too: fix {input_name} per its other finding"
+            if refused
+            else f"store the typed value {typed} instead"
+            if port.is_link
+            else f"store the typed value {typed} instead: on a canvas, "
+            f"`comfy workflow set-widget <file> [options] {address_arg} -- {typed_arg}`"
+        ),
+        "value": value,
+        "coerced_value": coerced,
+    }
+    return errors, [finding, *warnings]
+
+
+def _check_dynamic_group(
+    node_id: str, class_type: str, port: Port, present: dict, *, range_is_error: bool = True
+) -> tuple[list[dict], list[dict], set[str]]:
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    valid_keys: set[str] = set()
+    try:
+        if "." in port.name:
+            raise DynamicGroupBindingError("CLI does not support DynamicGroup inside DynamicCombo")
+        _validate_dynamic_group_port(port)
+        fields = _dynamic_group_fields(port)
+    except DynamicGroupBindingError as error:
+        errors.append(
+            {"node_id": node_id, "field": port.name, "code": "invalid_dynamic_group_schema", "message": str(error)}
+        )
+        return errors, warnings, valid_keys
+    field_names = {field.name for field in fields}
+    rows: set[int] = set()
+    maximum = port.options.max if port.options.max is not None else 20
+    minimum = port.options.min if port.options.min is not None else 0
+    for key in present:
+        if not key.startswith(f"{port.name}."):
+            continue
+        index, separator, field = key[len(port.name) + 1 :].partition(".")
+        if (
+            not separator
+            or not index.isascii()
+            or not index.isdecimal()
+            or (len(index) > 1 and index.startswith("0"))
+            or field not in field_names
+            or len(index) > len(str(maximum))
+            or int(index) >= maximum
+        ):
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "field": key,
+                    "code": "invalid_dynamic_group_input",
+                    "message": f"expected {port.name}.<index>.<template field>, with index below {maximum}",
+                }
+            )
+            continue
+        rows.add(int(index))
+        valid_keys.add(key)
+    if not minimum <= len(rows) <= maximum:
+        errors.append(
+            {
+                "node_id": node_id,
+                "field": port.name,
+                "code": "dynamic_group_row_count",
+                "message": f"expected {minimum} to {maximum} submitted rows, got {len(rows)}",
+            }
+        )
+    for row in sorted(rows):
+        for field in fields:
+            name = f"{port.name}.{row}.{field.name}"
+            e, w, _, _ = _check_dynamic_combo_sub(
+                node_id,
+                class_type,
+                name,
+                field.raw_spec,
+                field.required,
+                present,
+                {},
+                0,
+                range_is_error=range_is_error,
+            )
+            errors.extend(e)
+            warnings.extend(w)
+    return errors, warnings, valid_keys
+
+
 def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[dict]:
     """Required inputs that are absent from ``node_data["inputs"]`` entirely.
 
@@ -2568,7 +3058,7 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
     for port in m.inputs:
         if not port.required or port.is_autogrow:
             continue
-        if port.is_dynamic_combo or port.type.startswith("COMFY_DYNAMICSLOT"):
+        if port.is_dynamic_combo or port.is_dynamic_group or port.type.startswith("COMFY_DYNAMICSLOT"):
             continue
         if port.name in present:
             continue
@@ -2615,7 +3105,7 @@ def _dynamic_combo_options(spec: Any) -> list[dict]:
 
 
 def _check_dynamic_combos(
-    node_id: str, class_type: str, m: Morphism, node_inputs: dict
+    node_id: str, class_type: str, m: Morphism, node_inputs: dict, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Validate every dynamic-combo input against the option its selector names.
 
@@ -2652,7 +3142,14 @@ def _check_dynamic_combos(
     resolved: dict[str, Any] = {}
     for port in dynamic_ports:
         e, w, v, u = _check_dynamic_combo_input(
-            node_id, class_type, port.name, port.raw_spec, port.required, present, resolved
+            node_id,
+            class_type,
+            port.name,
+            port.raw_spec,
+            port.required,
+            present,
+            resolved,
+            range_is_error=range_is_error,
         )
         errors.extend(e)
         warnings.extend(w)
@@ -2749,6 +3246,8 @@ def _check_dynamic_combo_input(
     present: dict,
     resolved: dict[str, Any],
     depth: int = 0,
+    *,
+    range_is_error: bool = True,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """One dynamic-combo input: resolve its selected option, check its sub-inputs.
 
@@ -2787,9 +3286,8 @@ def _check_dynamic_combo_input(
             # the colon is self-refuting — say plainly that the schema
             # couldn't be read instead of dangling an empty enumeration.
             hint = (
-                f"set {name!r} to one of its options: "
-                + ", ".join(str(k) for k in keys[:8])
-                + (f" (and {len(keys) - 8} more — see valid_options)" if len(keys) > 8 else "")
+                f"set {name!r} to one of its options — "
+                + enum_listing_hint(name, keys, keys[:ENUM_SUGGEST_MAX], class_type, listing="selection_keys")
                 if keys
                 else f"{name!r} is required, but its option schema didn't parse — check object_info for this node"
             )
@@ -2803,8 +3301,7 @@ def _check_dynamic_combo_input(
                         f"which option's sub-inputs apply, so this node fails at execution"
                     ),
                     "hint": hint,
-                    "suggestions": keys[:20],
-                    "valid_options": keys,
+                    **enum_option_fields(keys),
                 }
             )
             return errors, warnings, set(), {f"{name}."}
@@ -2836,11 +3333,11 @@ def _check_dynamic_combo_input(
         # already validated by the driver loop.
         return errors, warnings, set(), {f"{name}."}
 
-    option = next((o for o in options if o.get("key") == selected), None)
+    option = next((o for o in options if _dynamic_combo_server_key_matches(o.get("key"), selected)), None)
     if option is None:
-        # Strict ``==`` on the key — the same test the server
+        # Ordinary Python equality on the key — the same test the server
         # (``DynamicCombo._expand_schema_for_dynamic``) and the converter both
-        # apply, so all three agree on which option expands.
+        # apply, including Python's bool/numeric equality.
         #
         # Same late failure as the absent selector above: an unmatched key
         # expands to nothing, so the server drops this node's inputs rather
@@ -2856,10 +3353,14 @@ def _check_dynamic_combo_input(
                     f"{selected!r} not in {len(keys)} known options for {name} — its sub-inputs "
                     f"cannot be resolved, so this node fails at execution"
                 ),
-                "hint": f"valid options: {', '.join(str(k) for k in keys[:8])}"
-                + (f" (and {len(keys) - 8} more — see valid_options)" if len(keys) > 8 else ""),
-                "suggestions": keys[:20],
-                "valid_options": keys,
+                "hint": enum_listing_hint(
+                    name,
+                    keys,
+                    _closest_options(selected, keys) or keys[:ENUM_SUGGEST_MAX],
+                    class_type,
+                    listing="selection_keys",
+                ),
+                **enum_option_fields(keys, _closest_options(selected, keys)),
             }
         )
         return errors, warnings, set(), {f"{name}."}
@@ -2888,7 +3389,15 @@ def _check_dynamic_combo_input(
             dotted = f"{name}.{sub_name}"
             valid_keys.add(dotted)
             e, w, v, u = _check_dynamic_combo_sub(
-                node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth
+                node_id,
+                class_type,
+                dotted,
+                sub_spec,
+                sub_required,
+                present,
+                resolved,
+                depth,
+                range_is_error=range_is_error,
             )
             errors.extend(e)
             warnings.extend(w)
@@ -2906,6 +3415,8 @@ def _check_dynamic_combo_sub(
     present: dict,
     resolved: dict[str, Any],
     depth: int,
+    *,
+    range_is_error: bool = True,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Presence + shape + catalog checks for one expanded sub-input.
 
@@ -2918,8 +3429,20 @@ def _check_dynamic_combo_sub(
     if port.is_dynamic_combo:
         # Nested dynamic combo: its own selector/presence rules apply one level down.
         return _check_dynamic_combo_input(
-            node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth + 1
+            node_id,
+            class_type,
+            dotted,
+            sub_spec,
+            sub_required,
+            present,
+            resolved,
+            depth + 1,
+            range_is_error=range_is_error,
         )
+
+    if port.is_dynamic_group:
+        errors, warnings, keys = _check_dynamic_group(node_id, class_type, port, present, range_is_error=range_is_error)
+        return errors, warnings, keys, set()
 
     if port.is_autogrow:
         # An autogrow sub-input wires as `<dotted>.<slot>` keys and routinely
@@ -2959,7 +3482,9 @@ def _check_dynamic_combo_sub(
         slot_prefix = f"{dotted}."
         # `min: 0` (Seedream) yields no required slots; `min: 1` (Grok image
         # edit's `model.images`) makes `model.images.image_1` a server-side
-        # required input — prod submitted one with no image wired.
+        # required input. A graph with no image wired there gets
+        # required_input_missing here, instead of passing validation and
+        # failing on submit.
         missing = [s for s in port.autogrow_required_slots if s not in present] if sub_required else []
         errors = [
             {
@@ -3004,24 +3529,7 @@ def _check_dynamic_combo_sub(
         # output-index checks on this same key.
         return [], [], set(), set()
 
-    shape_err = port.validate_shape(value)
-    if shape_err:
-        return (
-            [
-                {
-                    "node_id": node_id,
-                    "field": dotted,
-                    "code": "shape_mismatch",
-                    "message": shape_err,
-                    "hint": f"expected {port.type}; check the value type",
-                }
-            ],
-            [],
-            set(),
-            set(),
-        )
-
-    errs, warns = _validate_catalog_value(node_id, class_type, dotted, port, value)
+    errs, warns = _validate_literal_value(node_id, class_type, dotted, port, value, range_is_error=range_is_error)
     return errs, warns, set(), set()
 
 
@@ -3237,6 +3745,7 @@ _MAX_SUBGRAPH_DEPTH = 32
 # :func:`split_node_path`, which matches segments against real ids, never with
 # a bare ``str.split``.
 _SUBGRAPH_PATH_SEP = "/"
+_MAX_DEFINITION_ALIAS_MASK_BITS = 8_000_000
 
 
 def split_node_path(workflow: dict, node_path: str) -> list[str]:
@@ -3269,6 +3778,240 @@ def split_node_path(workflow: dict, node_path: str) -> list[str]:
     return segments
 
 
+def _definition_alias_conflicts(
+    definitions: list[dict],
+    by_id: dict[str, dict],
+    candidates: dict[str, dict],
+    name_aliases: dict[str, dict],
+) -> set[str]:
+    """Candidate names reachable as real node types from their own definition.
+
+    Collapse the definition-id graph into strongly connected components, then
+    propagate candidate-name bitsets once over the resulting DAG. This makes
+    every alias query an O(1) bit lookup after one serialized-graph walk,
+    including long chains and cycles.
+    """
+    if not candidates:
+        return set()
+    unique_definitions: list[dict] = []
+    index_by_identity: dict[int, int] = {}
+    for definition in definitions:
+        if id(definition) not in index_by_identity:
+            index_by_identity[id(definition)] = len(unique_definitions)
+            unique_definitions.append(definition)
+    # One Python integer per component carries one bit per candidate. Bound
+    # the total logical bit matrix before allocating it; name aliases are an
+    # optional compatibility fallback, so overflow is safely ambiguous.
+    if len(candidates) * len(unique_definitions) > _MAX_DEFINITION_ALIAS_MASK_BITS:
+        return set(candidates)
+    edges: list[set[int]] = [set() for _ in unique_definitions]
+    bit_by_name = {name: 1 << index for index, name in enumerate(candidates)}
+    direct_masks = [0] * len(unique_definitions)
+    for index, definition in enumerate(unique_definitions):
+        raw_nodes = definition.get("nodes")
+        for node in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            node_type = node.get("type")
+            if isinstance(node_type, str):
+                direct_masks[index] |= bit_by_name.get(node_type, 0)
+                # IDs win, but an older definition can itself hold a
+                # name-typed nested instance. Follow that edge as well or a
+                # conflict below it is invisible to the reachability mask.
+                nested = by_id.get(node_type) or name_aliases.get(node_type)
+                nested_index = index_by_identity.get(id(nested)) if nested is not None else None
+                if nested_index is not None:
+                    edges[index].add(nested_index)
+
+    # Kosaraju's two iterative passes avoid Python recursion limits on hostile
+    # or simply very deep definition graphs.
+    order: list[int] = []
+    seen: set[int] = set()
+    for start in range(len(unique_definitions)):
+        if start in seen:
+            continue
+        stack = [(start, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                order.append(node)
+                continue
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.append((node, True))
+            stack.extend((child, False) for child in edges[node] if child not in seen)
+
+    reverse_edges: list[set[int]] = [set() for _ in unique_definitions]
+    for parent, children in enumerate(edges):
+        for child in children:
+            reverse_edges[child].add(parent)
+    component = [-1] * len(unique_definitions)
+    component_count = 0
+    for start in reversed(order):
+        if component[start] >= 0:
+            continue
+        component[start] = component_count
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            for parent in reverse_edges[node]:
+                if component[parent] < 0:
+                    component[parent] = component_count
+                    stack.append(parent)
+        component_count += 1
+
+    component_masks = [0] * component_count
+    component_edges: list[set[int]] = [set() for _ in range(component_count)]
+    for node, children in enumerate(edges):
+        source_component = component[node]
+        component_masks[source_component] |= direct_masks[node]
+        for child in children:
+            target_component = component[child]
+            if source_component != target_component:
+                component_edges[source_component].add(target_component)
+    indegree = [0] * component_count
+    for children in component_edges:
+        for child in children:
+            indegree[child] += 1
+    ready = [index for index, degree in enumerate(indegree) if degree == 0]
+    topological: list[int] = []
+    while ready:
+        current = ready.pop()
+        topological.append(current)
+        for child in component_edges[current]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+    for current in reversed(topological):
+        for child in component_edges[current]:
+            component_masks[current] |= component_masks[child]
+
+    conflicts: set[str] = set()
+    for name, definition in candidates.items():
+        definition_index = index_by_identity.get(id(definition))
+        if definition_index is not None and component_masks[component[definition_index]] & bit_by_name[name]:
+            conflicts.add(name)
+    return conflicts
+
+
+class _SubgraphDefs(dict[str, dict]):
+    """Definition index with per-index promotion traversal caches."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.registered_definition_ids: set[int] = set()
+        self._registered_definition_refcounts: dict[int, int] = {}
+        self.promotion_visit_limit: int | None = None
+        self.promotion_visit_limits: dict[int, int] = {}
+        self.promotion_definition_metrics: dict[int, tuple[dict, int, tuple[dict, ...]]] = {}
+        self.promotion_budget_roots: dict[str, set[int]] = {}
+        self.promotion_holders: dict[int, tuple[dict, dict[Any, list[tuple[dict, int, dict]]]]] = {}
+        self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
+        self.promotion_input_positions: dict[int, tuple[dict, dict[int, int]]] = {}
+        self.promotion_input_memberships: dict[int, tuple[dict, dict[Any, set[int]]]] = {}
+        self.promotion_sources: dict[
+            int,
+            tuple[dict, dict[int, tuple[str, str]], dict[tuple[str, str], str]],
+        ] = {}
+        self.promotion_inputs: dict[int, tuple[dict, list[Any]]] = {}
+        self.promotion_boundaries: dict[tuple[int, int], tuple[dict, list[tuple[list[str], str]]]] = {}
+        self.promotion_inputs_budget: list[int] | None = None
+        self.promotion_sources_budget: list[int] | None = None
+        self.promotion_boundary_budget: list[int] | None = None
+        self.promotion_inputs_memo: dict[tuple[int, int, tuple[int, ...]], list[Any]] = {}
+        self.promotion_inputs_stable_memo: dict[tuple[int, int], tuple[list[Any], frozenset[int]]] = {}
+        self.promotion_inputs_dependencies: dict[tuple[int, int, tuple[int, ...]], frozenset[int]] = {}
+        self.promotion_inputs_cycle_memo: dict[tuple[int, int, tuple[int, ...]], bool] = {}
+        self.promotion_inputs_names: dict[int, dict[str, Any]] = {}
+        self.promotion_boundary_memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] = {}
+        self.promotion_boundary_stable_memo: dict[
+            tuple[int, int, int], tuple[list[tuple[list[str], str]], frozenset[int]]
+        ] = {}
+        self.promotion_boundary_dependencies: dict[tuple[int, int, int, tuple[int, ...]], frozenset[int]] = {}
+        self.promotion_boundary_cycle_memo: dict[tuple[int, int, int, tuple[int, ...]], bool] = {}
+        self.promotion_boundary_names: dict[int, dict[Any, dict]] = {}
+        self.promotion_boundary_output_budget: list[int] | None = None
+
+    def _invalidate_derived_state(self) -> None:
+        # Local import avoids an engine/promoted import cycle. Definition
+        # membership changes can otherwise leave id-keyed results attached to
+        # a later object that reuses the removed definition's address.
+        from comfy_cli.cql.promoted import _invalidate_promotion_caches
+
+        _invalidate_promotion_caches(self)
+
+    def _add_registered_definition(self, value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        identity = id(value)
+        self._registered_definition_refcounts[identity] = self._registered_definition_refcounts.get(identity, 0) + 1
+        self.registered_definition_ids.add(identity)
+
+    def _remove_registered_definition(self, value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        identity = id(value)
+        remaining = self._registered_definition_refcounts.get(identity, 0) - 1
+        if remaining > 0:
+            self._registered_definition_refcounts[identity] = remaining
+        else:
+            self._registered_definition_refcounts.pop(identity, None)
+            self.registered_definition_ids.discard(identity)
+
+    def __setitem__(self, key: str, value: dict) -> None:
+        exists = key in self
+        previous = self.get(key)
+        if exists and previous is value:
+            return
+        if exists:
+            self._remove_registered_definition(previous)
+        super().__setitem__(key, value)
+        self._add_registered_definition(value)
+        self._invalidate_derived_state()
+
+    def __delitem__(self, key: str) -> None:
+        previous = self[key]
+        super().__delitem__(key)
+        self._remove_registered_definition(previous)
+        self._invalidate_derived_state()
+
+    def update(self, *args, **kwargs) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def clear(self) -> None:
+        changed = bool(self)
+        super().clear()
+        self.registered_definition_ids.clear()
+        self._registered_definition_refcounts.clear()
+        if changed:
+            self._invalidate_derived_state()
+
+    def pop(self, key: str, *args):
+        exists = key in self
+        value = super().pop(key, *args)
+        if exists:
+            self._remove_registered_definition(value)
+            self._invalidate_derived_state()
+        return value
+
+    def popitem(self):
+        item = super().popitem()
+        self._remove_registered_definition(item[1])
+        self._invalidate_derived_state()
+        return item
+
+    def setdefault(self, key: str, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     """Index subgraph definitions so an instance's ``type`` resolves to its def.
 
@@ -3279,13 +4022,25 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     always wins. We still register ``name`` as a *fallback* key (only when it
     doesn't shadow an id and isn't ambiguous across defs) to support older
     name-typed templates that predate UUID ids.
+
+    Containers that are not a ``dict``/``list`` read as "no definitions", so a
+    corrupt file degrades to an empty index rather than raising (a truthy
+    non-dict ``definitions`` or non-list ``subgraphs``) or walking a string
+    per-character. A def whose ``nodes`` is present but not a list is dropped
+    too: every caller walks ``sg.get("nodes") or []``, which only replaces a
+    falsy value.
     """
-    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
-    by_id: dict[str, dict] = {}
+    definitions = workflow.get("definitions")
+    if not isinstance(definitions, dict):
+        return {}
+    defs = definitions.get("subgraphs")
+    if not isinstance(defs, list):
+        return {}
+    by_id: dict[str, dict] = _SubgraphDefs()
     name_counts: dict[str, int] = {}
     name_first: dict[str, dict] = {}
     for sg in defs:
-        if not isinstance(sg, dict):
+        if not isinstance(sg, dict) or not isinstance(sg.get("nodes") or [], list):
             continue
         sg_id = sg.get("id")
         if isinstance(sg_id, str) and sg_id:
@@ -3294,10 +4049,97 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
         if isinstance(name, str) and name:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, sg)
-    for name, count in name_counts.items():
-        if count == 1 and name not in by_id:
-            by_id[name] = name_first[name]
+    ids_only = dict(by_id)
+    definitions = [definition for definition in defs if isinstance(definition, dict)]
+    used_types: set[str] = set()
+    node_blocks = [workflow.get("nodes"), *(definition.get("nodes") for definition in definitions)]
+    for raw_nodes in node_blocks:
+        for node in raw_nodes if isinstance(raw_nodes, list) else []:
+            if isinstance(node, dict) and isinstance(node.get("type"), str):
+                used_types.add(node["type"])
+    unique_names = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in by_id}
+    candidates = {name: definition for name, definition in unique_names.items() if name in used_types}
+    # Reject aliases that are already ambiguous through definition-id edges
+    # before following any legacy name-typed edges. Otherwise a rejected alias
+    # can manufacture a false self-reachability path for another valid alias.
+    intrinsic_conflicts = _definition_alias_conflicts(definitions, ids_only, candidates, {})
+    viable_aliases = {name: definition for name, definition in unique_names.items() if name not in intrinsic_conflicts}
+    conflicts = intrinsic_conflicts | _definition_alias_conflicts(
+        definitions,
+        ids_only,
+        candidates,
+        viable_aliases,
+    )
+    # Conflict analysis only needs bits for names used as node types, but the
+    # compatibility index still publishes every unique, non-conflicting name.
+    for name, definition in unique_names.items():
+        if name not in conflicts:
+            by_id[name] = definition
     return by_id
+
+
+def _leading_token(value: Any) -> str:
+    """A combo value's first space-separated token: the ``16:9`` of
+    ``'16:9 (Widescreen)'``, the part the combo-match rules compare."""
+    return str(value).strip().partition(" ")[0]
+
+
+def _def_contains_type(
+    sg: dict,
+    type_name: str,
+    by_id: dict[str, dict],
+    *,
+    budget: list[int] | None = None,
+) -> bool:
+    """Whether definition ``sg`` holds a node typed ``type_name`` at any depth.
+
+    The walk descends into nested instances by definition id (``by_id`` holds
+    only id keys at this point), each definition once, so a cycle terminates.
+
+    A definition cannot contain an instance of itself, so such a node is a real
+    node class (gallery templates name a subgraph after the core node inside
+    it, e.g. ``WanMoveTrackToVideo``). Registering the name fallback would
+    resolve that node to its own definition and every nested-promotion walk
+    would recurse into itself. It also shows the name is a node class in this
+    workflow, so a bare type of that name anywhere is ambiguous between the
+    class and an old-style name-typed instance; the index leaves ambiguous
+    names unregistered, as it does for two definitions sharing a name.
+    """
+    seen: set[int] = set()
+    stack = [sg]
+    while stack:
+        if budget is not None:
+            if budget[0] <= 0:
+                # A name fallback is optional compatibility. On hostile graphs,
+                # ambiguity is safer than spending quadratic work to prove the
+                # alias clean.
+                return True
+            budget[0] -= 1
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        raw_nodes = cur.get("nodes")
+        for n in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(n, dict):
+                continue
+            node_type = n.get("type")
+            if node_type == type_name:
+                return True
+            nested = by_id.get(str(node_type)) if isinstance(node_type, str) else None
+            if nested is not None:
+                stack.append(nested)
+    return False
+
+
+def _definition_alias_budget(definitions: list[dict]) -> list[int]:
+    """One serialized-graph-sized allowance shared by all name-alias checks."""
+    size = len(definitions)
+    for definition in definitions:
+        nodes = definition.get("nodes")
+        if isinstance(nodes, list):
+            size += len(nodes)
+    return [max(1, size)]
 
 
 def _widgets_as_list(widgets_values: Any) -> list[Any]:
@@ -3326,6 +4168,7 @@ def _widgets_as_positional(widgets_values: Any, graph: Graph | None, class_type:
     onto the class's default widget order when the catalog knows it — each
     named value lands at its schema position, names the schema doesn't know are
     dropped (they have no positional home), and missing names read as ``None``.
+    Group layouts retain the count and selector defaults used by their walk.
     Without a catalog (or an unknown class) this degrades to
     :func:`_widgets_as_list`'s "no positional values known" behavior.
 
@@ -3337,6 +4180,18 @@ def _widgets_as_positional(widgets_values: Any, graph: Graph | None, class_type:
     if isinstance(widgets_values, list):
         return list(widgets_values)
     if isinstance(widgets_values, dict) and graph is not None:
+        morphism = graph.node(class_type)
+        if morphism and any(p.is_dynamic_group for p in morphism.inputs):
+            values = []
+            for entry in _expand_widget_entries(morphism, widgets_values):
+                default = None
+                if entry.port:
+                    if entry.port.is_dynamic_group:
+                        default = 0
+                    elif _is_dynamic_combo_type(entry.port.type) and entry.port.dynamic_options:
+                        default = entry.port.options.default
+                values.append(widgets_values.get(entry.name, default))
+            return values
         order = graph.widget_order_default(class_type)
         if order:
             return [widgets_values.get(name) for name in order]
@@ -3404,9 +4259,9 @@ def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
     if not isinstance(key, str):
         return False
     if key in port_by_name:
-        return True
+        return not port_by_name[key].is_dynamic_group
     base = port_by_name.get(key.split(".", 1)[0])
-    return base is not None and (base.is_autogrow or base.is_dynamic_combo)
+    return base is not None and (base.is_autogrow or base.is_dynamic_combo or base.is_dynamic_group)
 
 
 def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
@@ -3469,6 +4324,16 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
     Dropping a segment to recurse looked up a name no map is keyed by, which
     silently skipped the check the caller only runs when a port comes back.
     """
+    if port.is_dynamic_group:
+        suffix = dotted[len(port.name) + 1 :]
+        index, sep, field = suffix.partition(".")
+        if sep and index.isascii() and index.isdecimal() and (len(index) == 1 or not index.startswith("0")):
+            try:
+                fields = _dynamic_group_fields(port, f"{port.name}.{index}")
+            except DynamicGroupBindingError:
+                return None
+            return next((p for p in fields if p.name == dotted), None)
+        return None
     if port.is_autogrow:
         element = port.autogrow_element_type
         if not element:
@@ -3489,6 +4354,16 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
     return None
 
 
+def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
+    """Match the backend DynamicCombo parser's ordinary Python equality."""
+    return left == right
+
+
+def _dynamic_combo_server_key_matches(left: Any, right: Any) -> bool:
+    """Compatibility alias for callers that explicitly name server semantics."""
+    return _dynamic_combo_key_matches(left, right)
+
+
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
     """The selected option's sub-inputs as Ports, dotted under ``prefix``.
 
@@ -3496,9 +4371,11 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
     malformed. Connection-only sub-inputs (e.g. ``COMFY_AUTOGROW_V3`` image
     lists) are included with ``is_link=True`` so callers can skip them.
     """
-    option = next((o for o in dynamic_options if o.get("key") == selector), None)
-    if option is None:
-        return []
+    option = next((o for o in dynamic_options if _dynamic_combo_key_matches(o.get("key"), selector)), None)
+    return _dynamic_combo_option_ports(option, prefix) if option is not None else []
+
+
+def _dynamic_combo_option_ports(option: dict, prefix: str) -> list[Port]:
     sub_def = option.get("inputs")
     if not isinstance(sub_def, dict):
         return []
@@ -3512,9 +4389,162 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
     return ports
 
 
+def _dynamic_group_fields(port: Port, prefix: str = "") -> list[Port]:
+    template = port.options.template
+    if not isinstance(template, dict):
+        raise DynamicGroupBindingError("DynamicGroup template must be an object")
+    fields: list[Port] = []
+    for section in ("required", "optional"):
+        section_def = template.get(section, {})
+        if not isinstance(section_def, dict):
+            raise DynamicGroupBindingError(f"DynamicGroup template section {section!r} must be an object")
+        fields.extend(
+            _port_from_spec(f"{prefix}.{name}" if prefix else name, spec, section == "required")
+            for name, spec in section_def.items()
+        )
+    return fields
+
+
+def _dynamic_group_widgets(port: Port, prefix: str = "") -> list[Port]:
+    widgets: list[Port] = []
+    for widget in _dynamic_group_fields(port, prefix):
+        widgets.append(widget)
+        if widget.options.control_after_generate:
+            widgets.append(
+                Port(
+                    name=f"{widget.name}.0",
+                    type="COMBO",
+                    enum_values=["fixed", "increment", "decrement", "randomize"],
+                    enum_declared=True,
+                    options=PortOptions(default="fixed"),
+                )
+            )
+    return widgets
+
+
+class DynamicGroupBindingError(ValueError):
+    pass
+
+
+def _dynamic_group_row_count(value: Any, available: int, width: int) -> int:
+    # A corrupt controller must not allocate a roster larger than the saved data.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or not width or value * width > available:
+        raise DynamicGroupBindingError("DynamicGroup row count does not match the saved widget values")
+    return value
+
+
+def _validate_dynamic_group_port(port: Port) -> None:
+    minimum = port.options.min if port.options.min is not None else 0
+    maximum = port.options.max if port.options.max is not None else 20
+    if (
+        isinstance(minimum, bool)
+        or isinstance(maximum, bool)
+        or not isinstance(minimum, int)
+        or not isinstance(maximum, int)
+        or not 0 <= minimum <= maximum <= 20
+        or maximum == 0
+    ):
+        raise DynamicGroupBindingError(
+            f"DynamicGroup bounds under {port.name!r} require integers 0 <= min <= max and 1 <= max <= 20"
+        )
+    if port.options.force_input or not isinstance(port.name, str) or not port.name or "." in port.name:
+        raise DynamicGroupBindingError(f"DynamicGroup controller {port.name!r} must be a non-forced, undotted widget")
+    fields = _dynamic_group_fields(port)
+    if not fields or any(
+        field.is_link
+        or field.options.force_input
+        or field.is_autogrow
+        or field.is_dynamic_group
+        or field.is_dynamic_combo
+        or field.dynamic_options
+        for field in fields
+    ):
+        raise DynamicGroupBindingError(
+            f"DynamicGroup template under {port.name!r} requires non-dynamic widgets without forceInput"
+        )
+    for widget in [port, *fields]:
+        spec = widget.raw_spec
+        options = spec[1] if isinstance(spec, (list, tuple)) and len(spec) > 1 and isinstance(spec[1], dict) else {}
+        if options.get("defaultInput"):
+            raise DynamicGroupBindingError(f"DynamicGroup widget {widget.name!r} must not use defaultInput")
+        control = options.get("control_after_generate")
+        if widget is not port and control is not None and not isinstance(control, bool):
+            raise DynamicGroupBindingError(
+                f"DynamicGroup field {widget.name!r} requires a boolean control_after_generate flag"
+            )
+    names = [field.name for field in fields]
+    if any(not isinstance(name, str) or not name or "." in name for name in names):
+        raise DynamicGroupBindingError(f"DynamicGroup template under {port.name!r} requires undotted field names")
+    if len(names) != len(set(names)):
+        raise DynamicGroupBindingError(f"DynamicGroup duplicate template field under {port.name!r}")
+
+
+def _validate_dynamic_group_schema(m: Morphism) -> None:
+    def reject_nested_group(port: Port, depth: int) -> None:
+        if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+            return
+        for option in port.dynamic_options:
+            for sub in _dynamic_combo_option_ports(option, port.name):
+                if sub.type.startswith("COMFY_DYNAMICGROUP"):
+                    raise DynamicGroupBindingError("CLI does not support DynamicGroup inside DynamicCombo")
+                reject_nested_group(sub, depth + 1)
+
+    for port in m.inputs:
+        reject_nested_group(port, 0)
+        if port.type.startswith("COMFY_DYNAMICGROUP") and not port.is_dynamic_group:
+            raise DynamicGroupBindingError(f"unsupported DynamicGroup schema {port.type!r} on {m.id}")
+        if not port.is_dynamic_group:
+            continue
+        if any(p.name.startswith(f"{port.name}.") for p in m.inputs):
+            raise DynamicGroupBindingError(f"DynamicGroup generated-name collision under {port.name!r} on {m.id}")
+        _validate_dynamic_group_port(port)
+
+
+def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry] | None:
+    _validate_dynamic_group_schema(m)
+    if not any(p.is_dynamic_group for p in m.inputs):
+        return None
+    values = node.get("widgets_values")
+    form = node.get("widgets_values_form")
+    source = values
+    if "widgets_values_form" in node:
+        if not isinstance(form, dict) or set(form) != {"order"}:
+            raise DynamicGroupBindingError("widgets_values_form must contain only an order array")
+        order = form["order"]
+        if not isinstance(order, list) or not order or any(not isinstance(n, str) or not n for n in order):
+            raise DynamicGroupBindingError("widgets_values_form.order must be a non-empty array of widget names")
+        if isinstance(values, list):
+            if len(values) != len(order):
+                raise DynamicGroupBindingError("widgets_values_form length does not match widgets_values")
+            source = dict(zip(order, values))
+        elif isinstance(values, dict):
+            if len(order) != len(set(order)) or any(n not in values for n in order):
+                raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
+        else:
+            raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
+    entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
+    saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
+    if saved_length is not None:
+        while len(entries) > saved_length and entries[-1].frontend_injected:
+            entries.pop()
+    if form is not None and form["order"] != [e.name for e in entries]:
+        raise DynamicGroupBindingError("widgets_values_form does not match the available DynamicGroup schema")
+    if isinstance(values, list) and len(entries) != len(values):
+        raise DynamicGroupBindingError("DynamicGroup schema does not match the saved widget values")
+    for index, entry in enumerate(entries):
+        if entry.owner is None or entry.port is None or entry.port.raw_spec is not None:
+            continue
+        if isinstance(source, dict) and entry.name not in source:
+            continue
+        companion = source[entry.name] if isinstance(source, dict) else source[index]
+        if entry.port.validate_shape(companion) or entry.port.validate_catalog(companion):
+            raise DynamicGroupBindingError(f"DynamicGroup companion {entry.name!r} must use a supported control mode")
+    return entries
+
+
 def _expand_widget_entries(
     m: Morphism,
-    widgets_values: list[Any],
+    widgets_values: list[Any] | dict[str, Any],
     *,
     first_key: bool = False,
     sub_links: list[Port] | None = None,
@@ -3528,9 +4558,9 @@ def _expand_widget_entries(
     — top-level or sub — is followed by its ``control_after_generate`` marker
     slot, exactly as the frontend serializes it.
 
-    ``first_key=True`` selects every dynamic combo's first option instead of
-    reading ``widgets_values`` — the layout of a FRESH node, which is what the
-    static catalog (``widget_order_default``) and ``add_node``
+    ``first_key=True`` selects every dynamic combo's declared default, falling
+    back to its first option, instead of reading ``widgets_values`` — the
+    layout of a FRESH node, which is what the static catalog (``widget_order_default``) and ``add_node``
     (``widget_defaults``) publish. One walk for both keeps them from ever
     disagreeing with the value-aware order ``set-widget`` indexes by.
 
@@ -3538,18 +4568,55 @@ def _expand_widget_entries(
     contribute (``COMFY_AUTOGROW_V3`` groups, ``GEMINI_INPUT_FILES``…) — they
     own no slot, but the wiring side needs to know they exist.
     """
+    _validate_dynamic_group_schema(m)
     entries: list[_WidgetEntry] = []
+
+    def saved_value(name: str, index: int, default: Any = None) -> Any:
+        if isinstance(widgets_values, dict):
+            return widgets_values.get(name, default)
+        return widgets_values[index] if index < len(widgets_values) else default
 
     def emit(name: str, port: Port, owner: str | None, depth: int) -> None:
         entries.append(_WidgetEntry(name=name, port=port, owner=owner))
-        if port.dynamic_options and _is_dynamic_combo_type(port.type):
+        if port.is_dynamic_group:
+            idx = len(entries) - 1
+            fields = _dynamic_group_widgets(port)
+            if first_key:
+                count = int(port.options.min or 0)
+            elif isinstance(widgets_values, dict):
+                field_names = {field.name for field in _dynamic_group_fields(port)}
+                rows: set[str] = set()
+                for key in widgets_values:
+                    if not isinstance(key, str) or not key.startswith(f"{name}."):
+                        continue
+                    row, separator, field_name = key[len(name) + 1 :].partition(".")
+                    if (
+                        separator
+                        and field_name in field_names
+                        and row.isascii()
+                        and row.isdecimal()
+                        and (len(row) == 1 or not row.startswith("0"))
+                    ):
+                        rows.add(row)
+                if rows and name not in widgets_values:
+                    raise DynamicGroupBindingError(f"DynamicGroup controller {name!r} is missing for saved rows")
+                count = _dynamic_group_row_count(saved_value(name, idx, 0), len(rows), 1)
+                limit = str(count)
+                count = _dynamic_group_row_count(count, sum((len(row), row) < (len(limit), limit) for row in rows), 1)
+            else:
+                count = _dynamic_group_row_count(saved_value(name, idx, 0), len(widgets_values) - idx - 1, len(fields))
+            for row in range(count):
+                for sub in _dynamic_group_widgets(port, f"{name}.{row}"):
+                    entries.append(_WidgetEntry(name=sub.name, port=sub, owner=name))
+        elif port.dynamic_options and _is_dynamic_combo_type(port.type):
             if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
                 return
             idx = len(entries) - 1
             if first_key:
-                selector = port.enum_values[0] if port.enum_values else None
+                selector = _widget_default(port)
             else:
-                selector = widgets_values[idx] if idx < len(widgets_values) else port.options.default
+                default = _widget_default(port) if port.options.default is not None else None
+                selector = saved_value(name, idx, default)
             for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):
                 if sub.is_link:
                     if sub_links is not None:
@@ -3559,7 +4626,7 @@ def _expand_widget_entries(
         elif _has_control_after_generate_slot(port):
             entries.append(_WidgetEntry(name="control_after_generate", port=None, owner=owner))
 
-    buttons = load_3d_button_slots(m)
+    buttons = load_3d_button_slots(m, widgets_values)
     for p in m.inputs:
         if p.is_link:
             continue
@@ -3585,6 +4652,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     m = graph.node(node_type)
     if m is None:
         return []
+    _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
     for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
@@ -3676,7 +4744,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             # (recursing for nested instances). A legacy template whose
             # curated surface comes entirely from ``proxyWidgets`` (nothing
             # linked) keeps its hand-picked view without recursion.
-            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph, workflow, scope)
+            declared, fully_curated = _declared_subgraph_slots(node, sg, node_path, graph, workflow, scope)
             for slot in declared:
                 if (node_id, slot["name"]) not in exclude:
                     add(slot)
@@ -3729,11 +4797,11 @@ def _declared_subgraph_slots(
     any_declared = False
     all_resolved = True
     defs = _subgraph_defs_by_id(workflow) if workflow is not None else {}
-    promoted_by_name = {p.name: p for p in _promoted.promoted_inputs(sg, defs)}
+    promoted_by_name = _promoted._promoted_name_index(_promoted.promoted_inputs(sg, defs))
     for inp in sg.get("inputs") or []:
         if not isinstance(inp, dict):
             continue
-        inp_name = inp.get("name", "")
+        inp_name = _promoted._input_name(inp.get("name"))
         if not inp_name:
             continue
         pi = promoted_by_name.get(inp_name)
@@ -3747,7 +4815,7 @@ def _declared_subgraph_slots(
             # Only a LIVE link counts (the workflow's for a top-level instance,
             # the containing definition's for a nested one); a dangling id is
             # what the frontend drops on load, so the host value runs.
-            linked_from = _promoted.live_external_link(scope if scope is not None else workflow, instance, inp_name)
+            linked_from = _promoted.live_external_link(scope if scope is not None else workflow, instance, inp_name, sg)
         elif pi is not None and pi.is_widget:
             current = _UNRESOLVED
         else:
@@ -3877,20 +4945,88 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    if not isinstance(node.get("widgets_values"), list):
-        # Persist the positional projection so downstream re-reads (the
-        # dynamic-combo selector path re-reads from the node) see the same
-        # values this write is about to index against.
-        node["widgets_values"] = widgets
+    group_entries = _validate_dynamic_group_layout(node, m)
+    has_group = group_entries is not None
+    if has_group and "widgets_values_named" in node and not isinstance(node["widgets_values_named"], dict):
+        raise ValueError("widgets_values_named must be an object before editing widgets")
+    raw_values = node.get("widgets_values")
+    # Stage normalization, padding, and selector defaults locally. A refused or
+    # invalid write promises that nothing changed, so none of this may reach the
+    # node before the target exists and its value has validated.
+    widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
+    if extend:
+        button_defaults = dict(load_3d_button_slots(m, widgets))
+
+        def entry_default(entry: _WidgetEntry) -> Any:
+            if entry.port is not None:
+                if (
+                    entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and _declared_dynamic_default(entry.port) is None
+                ):
+                    return None
+                return _widget_default(entry.port)
+            if entry.name == "control_after_generate":
+                return "fixed"
+            return button_defaults.get(entry.name)
+
+        # A truncated positional array can omit a dynamic selector while its
+        # declared default makes a nested sub-widget virtually addressable.
+        # Materialize every missing selector ancestor first; otherwise padding
+        # writes the sub-value beside ``None`` and the next layout drops or
+        # reinterprets it.
+        materialized_selectors: set[str] = set()
+        while True:
+            entries_now = _expand_widget_entries(m, widgets)
+            target_idx = next((idx for idx, entry in enumerate(entries_now) if entry.name == input_name), None)
+            missing = next(
+                (
+                    (idx, entry.port)
+                    for idx, entry in enumerate(entries_now)
+                    if idx >= len(widgets)
+                    and entry.port is not None
+                    and entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and entry.port.options.default is not None
+                    and (input_name.startswith(f"{entry.name}.") or (target_idx is not None and idx < target_idx))
+                ),
+                None,
+            )
+            if missing is None:
+                break
+            selector_idx, selector = missing
+            selector_name = entries_now[selector_idx].name
+            if selector_name in materialized_selectors:
+                raise ValueError(f"could not stabilize dynamic-combo layout for {node_type}")
+            materialized_selectors.add(selector_name)
+            for gap_idx in range(len(widgets), selector_idx):
+                widgets.append(entry_default(entries_now[gap_idx]))
+            selector_default = _widget_default(selector)
+            widgets.append(selector_default)
+            default_values, _default_names = _dynamic_combo_default_values(
+                selector.dynamic_options,
+                selector_default,
+                selector.name,
+            )
+            widgets.extend(default_values)
     order = graph.widget_order_for_node(node_type, widgets)
+    if has_group and order.count(input_name) > 1:
+        raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):
         raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
+    if group_entries is not None:
+        entries = group_entries
     try:
         widget_idx = order.index(input_name)
     except ValueError:
-        warning = _unknown_dynamic_sub_warning(m, input_name, order, widgets)
+        warning = _unknown_dynamic_sub_warning(
+            m,
+            input_name,
+            order,
+            widgets,
+            revealed_by=graph.dynamic_sub_widget_options(node_type, input_name, widgets),
+        )
         if warning is not None:
             return [warning]
         avail = _editable_widget_names(entries)
@@ -3906,13 +5042,49 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # declared port.
         port = next((p for p in m.inputs if p.name == input_name), None)
 
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, extend=extend)
+    if port is not None and port.is_dynamic_group:
+        return _write_dynamic_group_count(node, port, widget_idx, value, entries, widgets)
 
     if widget_idx >= len(widgets):
         if not extend:
             raise ValueError(f"widget index {widget_idx} out of range for {node_type}")
-        widgets.extend([None] * (widget_idx + 1 - len(widgets)))
+        button_defaults = dict(load_3d_button_slots(m, widgets))
+        # Leave a missing dynamic selector target absent so its writer sees a
+        # real option change and materializes that option's complete roster.
+        padding_stop = (
+            widget_idx
+            if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options
+            else widget_idx + 1
+        )
+        for gap_idx in range(len(widgets), padding_stop):
+            entry = entries[gap_idx] if gap_idx < len(entries) else None
+            if entry is None:
+                widgets.append(None)
+            elif entry.port is not None:
+                if (
+                    entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and _declared_dynamic_default(entry.port) is None
+                ):
+                    widgets.append(None)
+                else:
+                    widgets.append(_widget_default(entry.port))
+            elif entry.name == "control_after_generate":
+                widgets.append("fixed")
+            else:
+                widgets.append(button_defaults.get(entry.name))
+
+    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+        return _write_dynamic_combo_selector(
+            node,
+            port,
+            input_name,
+            widget_idx,
+            value,
+            entries,
+            widgets=widgets,
+            extend=extend,
+        )
 
     warnings: list[dict] = []
     if port:
@@ -3920,26 +5092,128 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         if err:
             raise ValueError(err)
         warnings = port.validate_catalog(value)
+        if any(p.is_dynamic_group and input_name.startswith(f"{p.name}.") for p in m.inputs):
+            fatal = next((finding for finding in warnings if finding.get("severity") == SEVERITY_ERROR), None)
+            if fatal:
+                raise ValueError(fatal["message"])
+
+    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
-    node["widgets_values"] = widgets
+    # A node that declares its own ``widgets_values_form`` (schema A24) is laid
+    # out by that declaration, not by the class order: flattening it to the
+    # class's positional array would drop the keys only the declaration names
+    # (a frontend extension's own widget) and leave a form that no longer
+    # matches its values.
+    if isinstance(raw_values, dict) and (has_group or "widgets_values_form" in node):
+        node["widgets_values"] = {**raw_values, input_name: value}
+    else:
+        node["widgets_values"] = widgets
+    if has_group and "widgets_values_named" in node:
+        node["widgets_values_named"][input_name] = value
     return warnings
 
 
-def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str], widgets: list[Any]) -> dict | None:
+def _write_dynamic_group_count(
+    node: dict, port: Port, index: int, count: Any, entries: list[_WidgetEntry], widgets: list[Any]
+) -> list[dict]:
+    minimum = port.options.min if port.options.min is not None else 0
+    maximum = port.options.max if port.options.max is not None else 20
+    if isinstance(count, bool) or not isinstance(count, int) or not minimum <= count <= maximum:
+        raise ValueError(f"{port.name}: row count must be an integer between {minimum} and {maximum}")
+    if "inputs" in node and (
+        not isinstance(node["inputs"], list) or any(not isinstance(inp, dict) for inp in node["inputs"])
+    ):
+        raise ValueError(f"{port.name}: inputs must be an array of input objects before resizing rows")
+    raw_values = node.get("widgets_values")
+    old_entries = [e for e in entries[index + 1 :] if e.owner == port.name]
+    old_values = (
+        {e.name: raw_values[e.name] for e in old_entries if e.name in raw_values}
+        if isinstance(raw_values, dict)
+        else {e.name: value for e, value in zip(old_entries, widgets[index + 1 :])}
+    )
+    new_fields = [p for row in range(count) for p in _dynamic_group_widgets(port, f"{port.name}.{row}")]
+    names = {p.name for p in new_fields}
+    removed = {e.name for e in old_entries} - names
+    if any(i.get("name") in removed and i.get("link") is not None for i in node.get("inputs", [])):
+        raise ValueError(f"{port.name}: disconnect the removed rows before reducing their count")
+    surviving_inputs = [
+        (index, inp) for index, inp in enumerate(node.get("inputs") or []) if inp.get("name") not in removed
+    ]
+    if any(
+        inp.get("link") is not None and previous != current for current, (previous, inp) in enumerate(surviving_inputs)
+    ):
+        raise ValueError(f"{port.name}: disconnect shifted inputs before reducing their count")
+    old_names = {e.name for e in old_entries}
+    new_values = {
+        p.name: old_values[p.name] if p.name in old_values else _widget_default(p)
+        for p in new_fields
+        if p.name in old_values or p.name not in old_names
+    }
+    if isinstance(raw_values, dict):
+        node["widgets_values"] = {
+            **{name: value for name, value in raw_values.items() if name not in removed},
+            port.name: count,
+            **new_values,
+        }
+    else:
+        node["widgets_values"] = (
+            widgets[:index]
+            + [count]
+            + [new_values[p.name] for p in new_fields]
+            + widgets[index + 1 + len(old_entries) :]
+        )
+    if "widgets_values_named" in node:
+        named = node["widgets_values_named"]
+        for name in removed:
+            named.pop(name, None)
+        named[port.name] = count
+        named.update(new_values)
+    if "widgets_values_form" in node:
+        node["widgets_values_form"]["order"] = (
+            [e.name for e in entries[: index + 1]]
+            + [p.name for p in new_fields]
+            + [e.name for e in entries[index + 1 + len(old_entries) :]]
+        )
+    if "inputs" in node:
+        node["inputs"] = [inp for _, inp in surviving_inputs]
+    return []
+
+
+def _unknown_dynamic_sub_warning(
+    m: Morphism,
+    input_name: str,
+    order: list[str],
+    widgets: list[Any],
+    *,
+    revealed_by: tuple[str, list[str]] | None = None,
+) -> dict | None:
     """Warning dict for a ``<combo>.<sub>`` address not present under the
     combo's CURRENT selector, or ``None`` when ``input_name`` isn't a
-    dynamic-combo sub-address (caller falls through to the hard error)."""
+    dynamic-combo sub-address (caller falls through to the hard error).
+
+    ``revealed_by`` is :meth:`Graph.dynamic_sub_widget_options` for the
+    address: when another option of the combo has the widget, the warning
+    names those options instead of a bare ``<option>`` placeholder."""
     if "." not in input_name:
         return None
     base = input_name.split(".", 1)[0]
     base_port = next((p for p in m.inputs if p.name == base), None)
     if base_port is None or not _is_dynamic_combo_type(base_port.type) or base not in order:
         return None
+    # A nested selector (`model.mode` for `model.mode.refine`) is the one to
+    # name when the node's current outer option has it. Otherwise fall back to
+    # the outer combo with no option hint rather than point at a selector the
+    # node does not have.
+    if revealed_by is not None and revealed_by[0] in order:
+        base = revealed_by[0]
     base_idx = order.index(base)
     selector = widgets[base_idx] if base_idx < len(widgets) else None
     valid = [n for n in order if n.startswith(f"{base}.")]
-    return {
+    keys = revealed_by[1] if revealed_by is not None and revealed_by[0] == base else []
+    switch = " or ".join(repr(k) for k in keys) if keys else "<option>"
+    warning = {
         "code": "unknown_dynamic_sub_input",
         "field": input_name,
         "message": (
@@ -3950,13 +5224,24 @@ def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str],
             if valid
             else f"{base}={selector!r} has no widget sub-inputs"
         )
-        + f" — set {base}=<option> first to switch rosters",
+        + f" — set {base}={switch} first to switch rosters",
         "valid_addresses": valid,
     }
+    if keys:
+        warning["revealed_by"] = keys
+    return warning
 
 
 def _write_dynamic_combo_selector(
-    node: dict, port: Port, input_name: str, widget_idx: int, value: Any, entries: list[_WidgetEntry], *, extend: bool
+    node: dict,
+    port: Port,
+    input_name: str,
+    widget_idx: int,
+    value: Any,
+    entries: list[_WidgetEntry],
+    widgets: list[Any],
+    *,
+    extend: bool,
 ) -> list[dict]:
     """Write a dynamic combo's selector, rebuilding the sub-widget roster when
     the selected option changes.
@@ -3968,20 +5253,21 @@ def _write_dynamic_combo_selector(
     defaults (option sub-spec ``default``; first enum option for combos), and
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
-    widgets = _widgets_as_list(node.get("widgets_values"))
-    if value not in port.enum_values:
+    raw_values = node.get("widgets_values")
+    preserve_named = isinstance(raw_values, dict) and any(e.port and e.port.is_dynamic_group for e in entries)
+    if not any(_dynamic_combo_key_matches(value, key) for key in port.enum_values):
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
 
     current = widgets[widget_idx] if widget_idx < len(widgets) else None
-    if value == current:
+    if _dynamic_combo_key_matches(value, current):
         # Same option — the roster is unchanged; plain in-place write.
         if widget_idx >= len(widgets):
             if not extend:
                 raise ValueError(f"widget index {widget_idx} out of range for {node.get('type')}")
             widgets.extend([None] * (widget_idx + 1 - len(widgets)))
         widgets[widget_idx] = value
-        node["widgets_values"] = widgets
+        node["widgets_values"] = {**raw_values, input_name: value} if preserve_named else widgets
         return []
 
     # Sub-entries owned (directly or via nesting) by this combo sit contiguously
@@ -3998,7 +5284,28 @@ def _write_dynamic_combo_selector(
         head.extend([None] * (widget_idx - len(head)))
     tail = list(widgets[widget_idx + 1 + old_span :])
     new_subs, new_names = _dynamic_combo_default_values(port.dynamic_options, value, input_name)
-    node["widgets_values"] = head + [value] + new_subs + tail
+    if preserve_named:
+        old_names = {e.name for e in entries[widget_idx + 1 : widget_idx + 1 + old_span]}
+        node["widgets_values"] = {
+            **{name: saved for name, saved in raw_values.items() if name not in old_names},
+            input_name: value,
+            **dict(zip(new_names, new_subs)),
+        }
+    else:
+        node["widgets_values"] = head + [value] + new_subs + tail
+    if any(entry.port and entry.port.is_dynamic_group for entry in entries):
+        if "widgets_values_form" in node:
+            node["widgets_values_form"]["order"] = (
+                [entry.name for entry in entries[: widget_idx + 1]]
+                + new_names
+                + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
+            )
+        if "widgets_values_named" in node:
+            named = node["widgets_values_named"]
+            for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
+                named.pop(entry.name, None)
+            named[input_name] = value
+            named.update(zip(new_names, new_subs))
     return [
         {
             "code": "dynamic_combo_roster_rebuilt",
@@ -4024,9 +5331,7 @@ def _dynamic_combo_default_values(
     for sub in _dynamic_combo_sub_ports(dynamic_options, selector, prefix):
         if sub.is_link:
             continue
-        default = sub.options.default
-        if default is None and sub.enum_values:
-            default = sub.enum_values[0]
+        default = _widget_default(sub)
         values.append(default)
         names.append(sub.name)
         if _is_dynamic_combo_type(sub.type) and sub.dynamic_options:
@@ -4079,11 +5384,15 @@ def _count_instances(workflow: dict, def_id: str) -> int:
     for n in workflow.get("nodes") or []:
         if isinstance(n, dict) and str(n.get("type", "")) == def_id:
             count += 1
-    for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
-        if isinstance(sg, dict):
-            for n in sg.get("nodes") or []:
-                if isinstance(n, dict) and str(n.get("type", "")) == def_id:
-                    count += 1
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            sg_nodes = sg.get("nodes") if isinstance(sg, dict) else None
+            if isinstance(sg_nodes, list):
+                for n in sg_nodes:
+                    if isinstance(n, dict) and str(n.get("type", "")) == def_id:
+                        count += 1
     return count
 
 

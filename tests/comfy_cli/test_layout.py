@@ -121,6 +121,56 @@ def test_assign_positions_reverse_order_connects_full_depth():
 # 10px margin, let nodes it called clear sit 20px inside each other on screen.
 
 
+def test_assign_positions_sizes_a_note_by_name_not_catalog():
+    """`Note`/`MarkdownNote` have no catalog entry; the planner must still give
+    them a real footprint (the one `workflow_ops.add_node` stamps) rather than
+    the anonymous DEFAULT_SIZE, or the next node is placed inside the note."""
+
+    class _NoCatalog:
+        def node(self, _ct):
+            return None
+
+        def widget_order(self, _ct):
+            return []
+
+    specs = [
+        {"op": "add_node", "class_type": "Note", "as": "n"},
+        {"op": "add_node", "class_type": "Sampler", "as": "s"},
+    ]
+    out = layout.assign_positions({"nodes": [], "links": []}, _NoCatalog(), specs)
+    note_h = layout.note_size("Note")[1]
+    assert note_h > layout.DEFAULT_SIZE[1], "precondition: a note is taller than the anonymous fallback"
+    # Same layer (no edges) -> stacked in a column below the note. The gap must
+    # clear the NOTE's body; sized as DEFAULT_SIZE the sampler would land inside it.
+    gap = out[1]["at"][1] - out[0]["at"][1]
+    assert gap >= note_h + layout.TITLE_H
+    # And the unknown-type fallback really is smaller, so this test can fail.
+    fallback = layout.assign_positions(
+        {"nodes": [], "links": []}, _NoCatalog(), [{**specs[0], "class_type": "Zote"}, specs[1]]
+    )
+    assert fallback[1]["at"][1] - fallback[0]["at"][1] < gap
+
+
+def test_assign_positions_tolerates_a_malformed_class_type():
+    """A recipe with `class_type: ["Note"]` (a list, not a string) is a spec error
+    apply_specs reports with its index. The planner runs first and must not
+    raise TypeError (unhashable list) on the way — before the by-name check
+    was guarded with isinstance, `["Note"] in frozenset(...)` did exactly that."""
+
+    class _LikeRealGraph:
+        # comfy_cli.cql.engine.Graph.node screens non-str keys and returns None.
+        def node(self, ct):
+            return None if not isinstance(ct, str) else _FakeMeta(0, 0)
+
+        def widget_order(self, _ct):
+            return []
+
+    specs = [{"op": "add_node", "class_type": ["Note"], "as": "bad"}]
+    (out,) = layout.assign_positions({"nodes": [], "links": []}, _LikeRealGraph(), specs)
+    assert out["class_type"] == ["Note"], "the planner reports nothing; apply_specs owns the error"
+    assert isinstance(out["at"], list) and len(out["at"]) == 2
+
+
 def test_occupied_includes_the_title_band_above_pos():
     x, y, w, h = layout.occupied((100.0, 200.0), (240.0, 120.0))
     assert (x, w) == (100.0, 240.0)

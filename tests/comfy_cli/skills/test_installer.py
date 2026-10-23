@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import knowledge
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 from comfy_cli.skills import (
@@ -187,6 +188,147 @@ def test_comfy_debug_skill_covers_common_error_codes():
     text = skill_content("comfy-debug")
     for code in ("server_not_running", "cloud_not_configured", "workflow_not_api_format", "prompt_rejected"):
         assert code in text, f"comfy-debug skill should mention {code}"
+
+
+def test_custom_node_skill_snapshot_keeps_runtime_contract():
+    """The product-loaded artifact is a router, not the authoring manual."""
+    router = skill_content("comfy-custom-nodes")
+    assert "knowledge authoring invocation" in router
+    assert "knowledge authoring troubleshooting" in router
+    assert "io.ComfyNode" not in router
+    # The router grows with the class count — it lists one command and one packaged
+    # fallback per retrieval class — so a flat byte cap goes stale and the next class
+    # gets paid for by squeezing the prose. Bound the fixed prose and the per-class
+    # cost separately instead. Tighter than a flat 2500 at the six classes this
+    # started with; it still has to stay far under `before_body // 3` below.
+    assert len(router.encode()) < 1300 + 160 * len(knowledge.AUTHORING_CLASSES)
+
+    corpus = "\n".join(skill_content(name) for name in reference_skill_names())
+    for needle in (
+        "V1 is legacy but supported",
+        "SEARCH_REQUIRED",
+        "SEARCH_OPTIONAL",
+        "SEARCH_AVOID",
+        "reference fidelity is unverified",
+        "Cloud-incompatible",
+        "filesystem presence is never proof",
+        "Do not promise hot reload",
+        "comfy node publish --token",
+        "WEB_DIRECTORY",
+        "node_replacement",
+        "Never put credentials in widget values",
+        "object_info_stale",
+        "never compares equal to itself",
+    ):
+        assert needle in corpus
+
+
+def test_custom_node_validation_names_what_to_refresh():
+    """A bare "restart ComfyUI and refresh" reads as "reload the browser tab"
+    or "run `comfy nodes refresh`"; neither re-reads `/object_info`."""
+    text = " ".join(skill_content("comfy-custom-nodes-validation").split())
+    assert not re.search(r"(?i)restart(ed)?,? (comfyui )?(and )?refresh\b", text)
+    assert not re.search(r"(?i)(refresh|reload)(ing)? (the |your )?(comfyui )?(browser|page|tab)\b", text)
+    assert "restart ComfyUI and re-run that command" in text
+    assert "`comfy nodes refresh` re-pulls annotations, not `/object_info`" in text
+    assert "browser reload changes neither" in text
+
+
+def test_custom_node_search_routes_have_positive_and_negative_controls():
+    """A search cue without an avoid control teaches indiscriminate search."""
+    text = skill_content("comfy-custom-nodes-search")
+    for route in ("SEARCH_REQUIRED", "SEARCH_OPTIONAL", "SEARCH_AVOID"):
+        assert route in text
+    assert "self-contained" in text
+    assert "untrusted" in text
+
+
+def test_custom_node_caching_fallback_states_the_silent_failure_mode():
+    """The two facts an author cannot read off their own node's source.
+
+    A signature that raises is swallowed into a NaN, so the symptom is endless
+    recomputation and never a crash — saying "crash" sends the author looking
+    for a traceback that is never emitted. And `rawLink` is the one input mode
+    where a linked input is not `None`, so a flat "every linked input is None"
+    is the wrong contract for it.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "never compares equal to itself" in text
+    assert "recomputes every run" in text
+    assert not re.search(r"(?i)\bis (therefore )?a crash\b", text)
+    assert "rawLink" in text
+    assert "every ancestor's signature" in text
+
+
+def test_custom_node_caching_fallback_names_the_hiddens_that_are_not_populated():
+    """The signature pass is not an execution pass, so most hiddens are empty.
+
+    `IsChangedCache.get` calls `get_input_data(node["inputs"], class_def, node_id, None)`
+    with no `dynprompt` and no `extra_data`, so `PROMPT` is `{}` and `DYNPROMPT`,
+    `EXTRA_PNGINFO`, `EXECUTION_LIST` and the auth-token hiddens are `None`. Only
+    `UNIQUE_ID` is real. An author told "hidden inputs are real" fingerprints a
+    constant and ships the stale-output bug this slice exists to prevent.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "UNIQUE_ID" in text
+    assert "`PROMPT` arrives as `{}`" in text
+    assert not re.search(r"(?i)hidden inputs are real", text)
+
+
+def test_custom_node_caching_fallback_qualifies_size_and_mtime_with_a_digest():
+    """Size plus mtime misses a same-size in-place rewrite; core hashes contents."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "content digest" in text
+    assert "LoadImage" in text
+
+
+def test_custom_node_caching_fallback_states_what_to_hashable_accepts():
+    """`to_hashable` takes scalars, Mapping and Sequence; anything else is a sentinel."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "unhashable sentinel" in text
+    assert not re.search(r"(?i)containers of those", text)
+
+
+def test_custom_node_initial_context_and_jit_budget_fixture():
+    """Measured fixture: unrelated turns pay only for the small router."""
+    fixture = json.loads((Path(__file__).parent / "fixtures/custom_node_context_budget.json").read_text())
+    router = skill_content("comfy-custom-nodes")
+    names = [name for name in reference_skill_names() if name.startswith("comfy-custom-nodes-")]
+    slices = [skill_content(name) for name in names]
+    before_body = fixture["initial_context"]["before"]["bytes"]
+    initial_bytes = len(router.encode())
+    assert initial_bytes == fixture["initial_context"]["after"]["bytes"]
+    assert len(router.split()) == fixture["initial_context"]["after"]["tokens"]
+    jit_bytes = [len(body.encode()) for body in slices]
+    fixture_order = (
+        "invocation",
+        "ecosystem-reference",
+        "api-schema",
+        "validation",
+        "dependencies-capabilities",
+        "troubleshooting",
+        "packaging-publishing",
+        "frontend-extension",
+        "v1-to-v3-migration",
+        "execution-caching",
+    )
+    assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
+    assert initial_bytes < before_body // 3
+    assert max(jit_bytes) < before_body // 3
+    assert all(body not in router for body in slices)
+
+
+def test_loaded_custom_node_skill_routes_without_preloading_authoring_body(tmp_path: Path):
+    """Mutation-sensitive product path: inspect what a real default install writes."""
+    install(scope="project", project_root=tmp_path, targets=["claude-code"])
+    loaded = (tmp_path / ".claude/skills/comfy-custom-nodes/SKILL.md").read_text()
+    assert "knowledge authoring invocation" in loaded
+    assert "knowledge authoring validation" in loaded
+    assert "io.ComfyNode" not in loaded
+
+    mutated = loaded.replace("knowledge authoring invocation", "knowledge model invocation")
+    assert "knowledge authoring invocation" in loaded
+    assert "knowledge authoring invocation" not in mutated
 
 
 def test_comfy_skill_covers_cloud_setup_and_routing():
@@ -941,3 +1083,158 @@ def test_description_is_read_from_frontmatter_only():
         "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
     )
     assert frontmatter_description(with_example) == "The real one."
+
+
+# ---------------------------------------------------------------------------
+# Security: a path cannot take over a name the CLI ships
+# ---------------------------------------------------------------------------
+
+
+def _install_cli(monkeypatch, cwd: Path, *args: str):
+    """Run `comfy skills <args>` from `cwd` with the JSON renderer; return (result, last envelope)."""
+    monkeypatch.chdir(cwd)
+    _force_json_renderer()
+    try:
+        result = CliRunner().invoke(app, list(args))
+    finally:
+        reset_renderer_for_testing()
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    return result, json.loads(lines[-1]) if lines else None
+
+
+def _write_skill(path: Path, name: str, body: str = "Not the shipped skill.") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: d.\n---\n{body}\n", encoding="utf-8")
+
+
+def _project(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
+    return root
+
+
+def _agent_files(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.name != "skills-manifest.json"
+    }
+
+
+@pytest.mark.parametrize(
+    ("layout", "name"),
+    [
+        ("notcomfy/SKILL.md", "comfy"),  # a file in a folder of another name
+        ("comfy", "comfy"),  # a folder carrying the shipped name
+        ("pins/SKILL.md", "comfy-build-pins"),  # a reference skill's name
+        ("evil/SKILL.md", "Comfy"),  # one folder with `comfy` on macOS and Windows
+    ],
+)
+def test_install_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path, layout: str, name: str):
+    root = _project(tmp_path)
+    token = tmp_path / "src" / layout
+    _write_skill(token / "SKILL.md" if not layout.endswith(".md") else token, name)
+    before = _agent_files(root)
+
+    result, envelope = _install_cli(monkeypatch, root, "install", "--scope", "project", "--skill", str(token))
+
+    assert result.exit_code == 1, result.output
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert repr(name) in envelope["error"]["message"]
+    assert "comfy skills show" in envelope["error"]["hint"]
+    assert _agent_files(root) == before
+
+
+def test_install_api_refuses_a_path_declaring_a_shipped_name(tmp_path: Path):
+    """The library entry point holds the same line as the command."""
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    with pytest.raises(ValueError, match="'comfy'"):
+        install(scope="project", project_root=tmp_path, skills=[str(md)], targets=["claude-code"])
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_validate_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path):
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    result, envelope = _install_cli(monkeypatch, tmp_path, "validate", str(md))
+    assert result.exit_code == 1, result.output
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert "comfy skills show" in envelope["error"]["hint"]
+
+
+def test_install_accepts_the_shipped_reference_skill_by_its_installed_path(monkeypatch, tmp_path: Path):
+    import comfy_cli.skills as skills_pkg
+
+    root = _project(tmp_path)
+    shipped = Path(skills_pkg.__file__).parent / "comfy-build-pins"
+    result, envelope = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(shipped)
+    )
+    assert result.exit_code == 0, result.output
+    installed = root / ".claude" / "skills" / "comfy-build-pins" / "SKILL.md"
+    assert installed.read_text(encoding="utf-8") == skill_content("comfy-build-pins")
+    # ...and so does the copy that install just wrote, passed back by its own folder.
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "cursor", "--skill", str(installed.parent)
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_install_accepts_an_unedited_copy_of_a_shipped_skill_with_crlf(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    copy = tmp_path / "src" / "comfy" / "SKILL.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(skill_content("comfy").replace("\n", "\r\n").encode("utf-8"))
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(copy)
+    )
+    assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "comfy" / "SKILL.md").exists()
+
+
+def test_install_accepts_an_own_name_by_folder_and_by_file(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    folder = tmp_path / "src" / "my-skill"
+    _write_skill(folder / "SKILL.md", "my-skill")
+    loose = tmp_path / "loose" / "SKILL.md"
+    _write_skill(loose, "my-other-skill")
+    for token in (folder, loose):
+        result, _ = _install_cli(
+            monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(token)
+        )
+        assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "my-skill" / "SKILL.md").exists()
+    assert (root / ".claude" / "skills" / "my-other-skill" / "SKILL.md").exists()
+
+
+def test_uninstall_by_path_still_removes_an_edited_shipped_skill(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    install(scope="project", project_root=root, skills=["comfy"])
+    installed = root / ".claude" / "skills" / "comfy"
+    _write_skill(installed / "SKILL.md", "comfy", body="Edited by the user.")
+
+    result, _ = _install_cli(monkeypatch, root, "uninstall", "--scope", "project", "--skill", str(installed))
+
+    assert result.exit_code == 0, result.output
+    assert not (installed / "SKILL.md").exists()
+    assert not (root / ".cursor" / "rules" / "comfy.mdc").exists()
+    assert "comfy" not in (root / "AGENTS.md").read_text(encoding="utf-8").split("# mine", 1)[1]
+
+
+def test_agent_permissions_skill_names_every_permanently_refused_host():
+    """The skill tells the model not to request these, because `approve` vets
+    with `vet_host` and refuses them: a request for one waits until denied. A
+    host added to `_REFUSED_HOSTS` without a line here would be requested."""
+    from comfy_cli.agent import _REFUSED_HOSTS
+
+    rows = [
+        line
+        for line in skill_content("comfy-agent-permissions").splitlines()
+        if line.startswith("|") and "do **not** call `request_host`" in line
+    ]
+    assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
+    for host in _REFUSED_HOSTS:
+        assert host in rows[0], f"the row should name the refused host {host}"
