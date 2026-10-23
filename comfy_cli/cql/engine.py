@@ -4365,6 +4365,10 @@ def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: d
     all. The server ignores the first three, so none may hard-fail; a caller
     that must tell the resolvable cases apart from the unresolvable one uses
     :func:`_resolve_dotted_slot`.
+
+    An autogrow slot whose group declares no element type is NOT one of those
+    cases: it comes back as a ``"*"``-typed port, so the slot keeps its
+    structural link checks and accepts any source type.
     """
     return _resolve_dotted_slot(port_by_name, dotted, node_inputs)[0]
 
