@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ from pathlib import Path
 
 import requests
 from packaging import version
+
+from comfy_cli._safe_exec import resolve_binary
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +42,35 @@ def check_for_newer_pypi_version(package_name, current_version):
         return False, current_version
 
 
+class UpgradeUnavailable(RuntimeError):
+    """No installer can upgrade the environment comfy-cli is running from."""
+
+    def __init__(self, message: str, hint: str):
+        super().__init__(message)
+        self.hint = hint
+
+
 def upgrade_cli():
-    """Upgrade the ``comfy-cli`` package itself via pip against the running
-    interpreter. Raises ``CalledProcessError`` if pip fails — fail fast."""
+    """Upgrade the ``comfy-cli`` package itself in the environment it runs from.
+
+    A ``uv tool install`` env ships without pip, so it is upgraded through
+    ``uv tool upgrade``; anything else goes through pip against the running
+    interpreter. Raises ``UpgradeUnavailable`` when neither installer is usable
+    and ``CalledProcessError`` if the installer fails — fail fast."""
+    if (Path(sys.prefix) / "uv-receipt.toml").is_file():
+        uv = resolve_binary("uv")
+        if uv is None:
+            raise UpgradeUnavailable(
+                "comfy-cli was installed with `uv tool`, but `uv` is not on PATH.",
+                hint="run `uv tool upgrade comfy-cli` from a shell where uv is available",
+            )
+        subprocess.run([uv, "tool", "upgrade", "comfy-cli"], check=True)
+        return
+    if importlib.util.find_spec("pip") is None:
+        raise UpgradeUnavailable(
+            f"pip is not installed in the comfy-cli environment ({sys.prefix}).",
+            hint="upgrade comfy-cli with the tool that installed it (e.g. `pipx upgrade comfy-cli`)",
+        )
     subprocess.run([sys.executable, "-m", "pip", "install", "-U", "comfy-cli"], check=True)
 
 

@@ -169,6 +169,13 @@ history.
 
 ### Fixed
 
+- `comfy update` no longer dies with a `FileNotFoundError` traceback when the
+  configured workspace directory does not exist (never installed, or deleted).
+  It now fails with a `not_in_workspace` error that points at `comfy install`.
+- `comfy update cli` works for a `uv tool install` of comfy-cli. Those envs ship
+  without pip, so the old `python -m pip install -U` always failed; it now runs
+  `uv tool upgrade comfy-cli`, and any installer failure is reported as an
+  `update_cli_failed` error rather than a traceback.
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
