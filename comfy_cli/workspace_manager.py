@@ -378,6 +378,39 @@ class WorkspaceManager:
 
         return mode, detected
 
+    def discovery_data(self) -> dict:
+        """Describe the selected workspace, including Desktop's split layout.
+
+        Desktop fallback is reporting-only: discovering a Desktop installation
+        must not implicitly select it for commands that install or launch code.
+        """
+        from dataclasses import replace
+
+        from comfy_cli import desktop_install
+
+        path = self.workspace_path
+        kind = self.workspace_type.value if self.workspace_type is not None else None
+        exists = bool(path and os.path.isdir(path))
+        data = {"path": str(path) if path else None, "type": kind, "exists": exists}
+        found = desktop_install.detect()
+        selected = desktop_install.install_for_dir(path, found) if path and found else None
+        if not exists and kind == WorkspaceType.DEFAULT.value and found and found.selected:
+            selected = found.selected
+            data.update(path=selected.code_dir, type="desktop", exists=True)
+        if found and (selected or not data["exists"]):
+            if selected:
+                reason = found.selected_reason if selected is found.selected else "matches the selected workspace"
+                found = replace(found, selected=selected, selected_reason=reason)
+            data["desktop"] = found.to_dict()
+            if found.problems:
+                data["desktop"]["problems"] = list(found.problems)
+                data["warnings"] = [{"code": "desktop_config_unreadable", "message": p} for p in found.problems]
+        if not data["exists"]:
+            data.setdefault("warnings", []).insert(
+                0, {"code": "workspace_not_found", "message": f"Workspace directory does not exist: {data['path']}"}
+            )
+        return data
+
     def fill_print_table(self):
         config_manager = ConfigManager()
         mode, _detected = self._reported_manager_state()
@@ -398,11 +431,18 @@ class WorkspaceManager:
         else:
             uv_compile_status = "[dim]Disabled[/dim]"
 
-        return [
-            ("Current selected workspace", f"[bold green]→ {self.workspace_path}[/bold green]"),
+        discovery = self.discovery_data()
+        rows = [
+            ("Current selected workspace", f"[bold green]→ {discovery['path']}[/bold green]"),
             ("Manager", manager_status),
             ("UV Compile Default", uv_compile_status),
         ]
+        desktop = discovery.get("desktop")
+        if desktop and desktop["code_dir"]:
+            rows.extend([("Desktop code", desktop["code_dir"]), ("Desktop data", desktop["data_dir"])])
+            rows.append(("Desktop model roots", "\n".join(root["path"] for root in desktop["model_roots"])))
+        rows.extend(("Warning", warning["message"]) for warning in discovery.get("warnings", []))
+        return rows
 
     def fill_data(self) -> dict:
         """Structured workspace info for ``comfy env --json``."""
@@ -410,8 +450,7 @@ class WorkspaceManager:
         uv_compile_value = config_manager.get(constants.CONFIG_KEY_UV_COMPILE_DEFAULT)
         mode, detected = self._reported_manager_state()
         return {
-            "path": str(self.workspace_path) if self.workspace_path else None,
-            "type": self.workspace_type.value if self.workspace_type is not None else None,
+            **self.discovery_data(),
             "manager_mode": mode,
             "manager_detected": detected,
             "uv_compile_default": (str(uv_compile_value).lower() == "true" if uv_compile_value is not None else False),

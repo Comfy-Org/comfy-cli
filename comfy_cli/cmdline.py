@@ -2748,7 +2748,8 @@ def set_default(
 @tracking.track_command()
 def which():
     renderer = get_renderer()
-    comfy_path = workspace_manager.workspace_path
+    workspace = workspace_manager.discovery_data()
+    comfy_path = workspace["path"]
     if comfy_path is None:
         renderer.error(
             code="not_in_workspace",
@@ -2757,9 +2758,18 @@ def which():
         )
         raise typer.Exit(code=1)
 
-    workspace_type_value = (
-        workspace_manager.workspace_type.value if workspace_manager.workspace_type is not None else None
-    )
+    workspace_type_value = workspace["type"]
+    if not workspace["exists"]:
+        details = {"path": comfy_path, "workspace_type": workspace_type_value}
+        if "desktop" in workspace:
+            details["desktop"] = workspace["desktop"]
+        renderer.error(
+            code="workspace_not_found",
+            message=f"Workspace directory does not exist: {comfy_path}",
+            hint="run: comfy install   (or pass --workspace /path/to/ComfyUI)",
+            details=details,
+        )
+        raise typer.Exit(code=1)
     if renderer.is_pretty():
         import sys as _sys
 
@@ -2781,12 +2791,17 @@ def which():
                 server_running=server_running,
                 server_url=_display_url(host, port),
                 version=ConfigManager().get_cli_version(),
+                desktop=workspace.get("desktop"),
             )
         )
+        for warning in workspace.get("warnings", []):
+            renderer.console().print(warning["message"], markup=False)
     renderer.emit(
         {
             "workspace_path": str(comfy_path),
             "workspace_type": workspace_type_value,
+            "exists": workspace["exists"],
+            **{key: workspace[key] for key in ("desktop", "warnings") if key in workspace},
         },
         command="which",
     )
@@ -2866,6 +2881,9 @@ def env():
     # JSON path: collect structured data without printing the table.
     data = EnvChecker().fill_data()
     data["workspace"] = workspace_manager.fill_data()
+    warnings = data["workspace"].pop("warnings", None)
+    if warnings:
+        data["warnings"] = warnings
     renderer.emit(data, command="env")
 
 

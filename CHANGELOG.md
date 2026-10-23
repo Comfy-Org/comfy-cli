@@ -181,6 +181,11 @@ history.
   already finished. Neither old key is published any more. The second exit was
   also skipping the trimming and redaction that key drives, so it emitted the
   full traceback and a `current_inputs` that can hold an api_key.
+- `comfy which` and `comfy env` report Desktop's split code, data and model
+  roots without changing launch/install selection. A nonexistent selected
+  workspace no longer succeeds in `which`; discovery reports malformed Desktop
+  configuration and marks inferred data roots as unverified.
+
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
