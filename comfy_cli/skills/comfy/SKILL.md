@@ -1180,11 +1180,11 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 - Output format is FLAC, not MP3
 - For instrumental: set lyrics to empty string `""`
 - Wire both positive AND negative to same TextEncode output when cfg=1.0
-- **Cloud can't load uploaded audio.** `LoadAudio` AND `VHS_LoadAudioUpload`
-  enums are blind to uploads (only ever list `bedroom.mp4`), even though
-  `LoadImage` sees uploaded images. Don't upload→LoadAudio — it wall-fails with
-  no signpost. Generate audio **in-graph** (a TTS / music node) and wire it by
-  connection into the consumer (e.g. KlingAvatar `sound_file`).
+- **Uploaded audio loads on cloud.** `comfy --json upload <file> --where cloud`,
+  then set `LoadAudio`'s `audio` to `data.uploads[0].cloud_name` (the file's
+  sha256 plus its extension). When the audio is generated in the same job,
+  still prefer wiring it by connection into the consumer (e.g. KlingAvatar
+  `sound_file`) over a download/upload round trip.
 - **Emotional TTS:** `eleven_multilingual_v2` is a flat reader. For real emotion
   use `eleven_v3` + inline performance tags in the text (`[whispers]`,
   `[voice breaking]`, `[long pause]`) + lower `stability` (~0.30) for swing.
@@ -1252,9 +1252,8 @@ assembled film; if review fails a scene, fix and re-run the graph (the
 extra assembly cost is small next to the video generations). The
 job-boundary alternative (save clips → download → `assets push` →
 LoadVideo in a second graph) is the fallback for a genuine review gate —
-and note its current limit: pushed *images* appear in LoadImage's choices,
-pushed *videos* are not yet catalogued for LoadVideo on cloud, so the
-cross-job video handoff requires local assembly today.
+and it works on cloud: an uploaded video loads in `LoadVideo` by its
+`cloud_name`, the same way an uploaded image loads in `LoadImage`.
 
 Some steps don't belong in a Comfy graph at all — final assembly, format
 conversion, timing/structure analysis of generated media. Comfy outputs are
