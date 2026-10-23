@@ -390,6 +390,32 @@ class TestDomWidgetInputs:
         inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
         assert inputs == {"model_file": "m.fbx", "viewport_state": "upload3dmodel", "width": 512, "height": 600}
 
+    def test_load3d_advanced_two_marker_prefix_edit_and_convert_agree(self, graph: Graph):
+        # Two markers make the legacy layout, so the editor places all three
+        # button slots even when the third value is not "clear". The converter
+        # must skip the same three, not stop at the last marker it recognises.
+        values = ["m.fbx", "upload3dmodel", "uploadExtraResources", 800, 600, 512, 512]
+        assert graph.widget_order_for_node("Load3DAdvanced", values) == [
+            "model_file",
+            *_LOAD_3D_BUTTONS,
+            "viewport_state",
+            "width",
+            "height",
+        ]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 640)
+        assert wf["nodes"][0]["widgets_values"] == [
+            "m.fbx",
+            "upload3dmodel",
+            "uploadExtraResources",
+            800,
+            600,
+            640,
+            512,
+        ]
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": 600, "width": 640, "height": 512}
+
     def test_load3d_advanced_catalog_entry_names_no_button(self, graph: Graph):
         # The exported catalog is what the cloud doc host projects saved
         # documents through, so it must carry the live node's shape too.

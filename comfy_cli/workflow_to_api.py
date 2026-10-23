@@ -2002,13 +2002,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node_type: str |
                 # component widget, so their values sit between ``model_file`` and
                 # this slot. Consuming them here read "upload3dmodel" into the
                 # viewport input and shifted width/height by three.
-                while (
-                    vidx < len(widget_values)
-                    and isinstance(widget_values[vidx], str)
-                    and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
-                ):
+                if node_type == "Load3DAdvanced":
+                    # The shared predicate matched, so the editor placed all
+                    # three button slots here whatever the third value holds;
+                    # skip the same three or the two read different values.
                     legacy_buttons_consumed = True
-                    vidx += 1
+                    vidx = min(vidx + len(LOAD_3D_BUTTON_VALUES), len(widget_values))
+                else:
+                    while (
+                        vidx < len(widget_values)
+                        and isinstance(widget_values[vidx], str)
+                        and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+                    ):
+                        legacy_buttons_consumed = True
+                        vidx += 1
             if vidx >= len(widget_values):
                 if legacy_buttons_consumed:
                     # A save truncated after its button markers still names this
