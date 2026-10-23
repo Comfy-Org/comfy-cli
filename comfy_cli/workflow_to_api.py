@@ -1801,6 +1801,26 @@ def _get_ordered_input_names(node_type: str, node: dict, object_info: dict) -> l
     return out
 
 
+def _is_plain_combo_option_tree(input_spec: Any) -> bool:
+    """Whether ``input_spec`` is a plain ``COMBO`` shipping a dynamic combo's
+    ``{key, inputs}`` option tree — the dialect some partner schemas use for
+    the selector that ``COMFY_*COMBO*`` declares elsewhere.
+
+    The option shape is the parser's (``engine._parse_input_spec``): a
+    non-empty list whose every entry is a dict carrying ``key``. Deliberately
+    restricted to the ``COMBO`` type name rather than accepting the tree on any
+    type: the engine renders a non-widget type as a connection whatever its
+    ``options`` say (``Port.is_link``), so widening here would hand a socket a
+    ``widgets_values`` slot and shift every later value.
+    """
+    if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2:
+        return False
+    if input_spec[0] != "COMBO" or not isinstance(input_spec[1], dict):
+        return False
+    options = input_spec[1].get("options")
+    return isinstance(options, list) and bool(options) and all(isinstance(o, dict) and "key" in o for o in options)
+
+
 def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     """Return (is_widget, is_dynamic_combo) for an INPUT_TYPES spec."""
     if not isinstance(input_spec, (list, tuple)) or not input_spec:
@@ -1829,6 +1849,16 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
+        # A ``{key, inputs}`` option tree makes this a dynamic combo whatever
+        # the type is called — some partner schemas ship the tree under a plain
+        # ``COMBO``. Tested BEFORE the plain-widget set below, which would
+        # otherwise claim ``COMBO`` as a single-slot widget and leave the
+        # selected option's sub-inputs unlowered: the engine expands them
+        # (``Port.is_dynamic_combo``), so the validator then reports
+        # ``required_input_missing`` for a ``model.value`` this converter never
+        # emitted.
+        if _is_plain_combo_option_tree(input_spec):
+            return True, True
         # The frontend renders a widget only for a type with a registered
         # widget constructor (``widgetStore.inputIsWidget``); every other type,
         # whatever its casing, is a connection socket that owns no
@@ -2316,10 +2346,13 @@ def _widget_rejects_control_value(input_spec: Any, value: str) -> bool:
         return False
     if type_field in ("INT", "FLOAT", "BOOLEAN"):
         return True
-    if type_field == "COMBO":
-        return not _combo_lists_option(input_spec, value)
+    # Checked before the plain-COMBO arm: for a tree-bearing ``COMBO``
+    # ``_combo_lists_option`` would compare the control keyword against option
+    # DICTS and always report a rejection.
     if _is_widget_input(input_spec)[1]:
         return not any(_dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(input_spec))
+    if type_field == "COMBO":
+        return not _combo_lists_option(input_spec, value)
     return False
 
 
