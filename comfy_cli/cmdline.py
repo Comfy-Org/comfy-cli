@@ -1759,10 +1759,22 @@ def update(
         raise typer.Exit(code=1)
 
     if "cli" == target:
-        from comfy_cli.update import upgrade_cli
+        from comfy_cli.update import UpgradeUnavailable, upgrade_cli
 
         rprint("Updating comfy-cli...")
-        upgrade_cli()
+        try:
+            upgrade_cli()
+        except UpgradeUnavailable as e:
+            get_renderer().error(code="update_cli_failed", message=str(e), hint=e.hint)
+            raise typer.Exit(code=1) from e
+        except subprocess.CalledProcessError as e:
+            get_renderer().error(
+                code="update_cli_failed",
+                message=f"`{' '.join(map(str, e.cmd))}` failed with exit code {e.returncode}.",
+                hint="see the installer output above; re-running `comfy update cli` is safe",
+                details={"returncode": e.returncode},
+            )
+            raise typer.Exit(code=1) from e
         return
 
     comfy_path = workspace_manager.workspace_path
@@ -1798,10 +1810,20 @@ def update(
             )
             raise typer.Exit(code=code) from e
     else:
-        rprint(f"Updating ComfyUI in {comfy_path}...")
-        if comfy_path is None:
-            rprint("ComfyUI path is not found.")
+        # The default workspace path comes from config and can name a directory that
+        # was never installed (or was deleted), so check existence, not just None.
+        if comfy_path is None or not os.path.isdir(comfy_path):
+            get_renderer().error(
+                code="not_in_workspace",
+                message=(
+                    "ComfyUI workspace not found."
+                    if comfy_path is None
+                    else f"ComfyUI workspace not found: {comfy_path}"
+                ),
+                hint="run `comfy install`, or pass `--workspace` to point at an existing install",
+            )
             raise typer.Exit(code=1)
+        rprint(f"Updating ComfyUI in {comfy_path}...")
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:

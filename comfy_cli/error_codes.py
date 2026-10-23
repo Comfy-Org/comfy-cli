@@ -1188,6 +1188,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "read the cm-cli output above for the failing pack, then re-run `comfy update all`",
     ),
     ErrorCode(
+        "update_cli_failed",
+        "`comfy update cli` could not upgrade comfy-cli: either no usable installer was found "
+        "(a `uv tool` env without `uv` on PATH, or an env without pip) or the installer exited "
+        "non-zero, in which case `details.returncode` carries its status.",
+        "follow the error's hint; for a `uv tool` install, `uv tool upgrade comfy-cli` always works",
+    ),
+    ErrorCode(
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",

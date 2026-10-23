@@ -101,11 +101,46 @@ class TestLatestUpgradeVersion:
 
 class TestUpgradeCli:
     @patch("comfy_cli.update.subprocess.run")
-    def test_runs_pip_install_upgrade(self, mock_run):
-        upgrade_cli()
+    def test_runs_pip_install_upgrade(self, mock_run, tmp_path):
+        with patch.object(update.sys, "prefix", str(tmp_path)):
+            upgrade_cli()
         args = mock_run.call_args[0][0]
         assert args[1:] == ["-m", "pip", "install", "-U", "comfy-cli"]
         assert mock_run.call_args[1]["check"] is True
+
+    @patch("comfy_cli.update.subprocess.run")
+    def test_uv_tool_install_upgrades_through_uv(self, mock_run, tmp_path):
+        """A `uv tool install` env has no pip, so `python -m pip` always fails there."""
+        (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+        with (
+            patch.object(update.sys, "prefix", str(tmp_path)),
+            patch("comfy_cli.update.resolve_binary", return_value="/opt/bin/uv"),
+        ):
+            upgrade_cli()
+        assert mock_run.call_args[0][0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
+        assert mock_run.call_args[1]["check"] is True
+
+    @patch("comfy_cli.update.subprocess.run")
+    def test_uv_tool_install_without_uv_on_path_is_unavailable(self, mock_run, tmp_path):
+        (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+        with (
+            patch.object(update.sys, "prefix", str(tmp_path)),
+            patch("comfy_cli.update.resolve_binary", return_value=None),
+            pytest.raises(update.UpgradeUnavailable) as excinfo,
+        ):
+            upgrade_cli()
+        assert "uv tool upgrade comfy-cli" in excinfo.value.hint
+        mock_run.assert_not_called()
+
+    @patch("comfy_cli.update.subprocess.run")
+    def test_env_without_pip_is_unavailable(self, mock_run, tmp_path):
+        with (
+            patch.object(update.sys, "prefix", str(tmp_path)),
+            patch("comfy_cli.update.importlib.util.find_spec", return_value=None),
+            pytest.raises(update.UpgradeUnavailable),
+        ):
+            upgrade_cli()
+        mock_run.assert_not_called()
 
 
 @pytest.mark.parametrize("payload", ["[]", '"x"', '{"checked_at": "abc"}'])
