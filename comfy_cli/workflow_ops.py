@@ -1044,7 +1044,7 @@ def _set_widget_impl(
     from comfy_cli.cql import promoted as _promoted
 
     # Subgraph-aware. A promoted widget's value lives on the HOST instance
-    # (ADR 0009: the host value wins over the interior default at run time),
+    # (ADR-SUBGRAPH-PROMOTION-0009: the host value wins over the interior default at run time),
     # and when an outside node feeds the promoted input, on THAT node — never
     # on the interior node the legacy ``proxyWidgets`` route pointed at. So a
     # flat ``57.width``, the interior ``57/13.width`` it backs, and a primitive
