@@ -35,6 +35,7 @@ import tempfile
 import time
 import urllib.error
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1878,6 +1879,139 @@ def _write_spec(renderer, path: Path, spec: dict) -> None:
         raise typer.Exit(code=1) from error
 
 
+_WORKFLOW_OPT = typer.Option(
+    "--workflow",
+    help="Also check, on the builder, that the local definition installs every node this workflow JSON uses. "
+    "Requires sign-in.",
+)
+
+#: The blob a local node becomes at push. The workflow check reads the node as that
+#: upload; without a stand-in the node has no source on the wire and its pack
+#: would read as missing.
+_PENDING_UPLOAD: Final = "pending-upload"
+
+
+def _read_workflow(renderer, value: str) -> tuple[Path, dict]:
+    """``--workflow``'s file, parsed, or a ``build_workflow_invalid`` exit before any HTTP."""
+    path = Path(value).expanduser()
+    hint = "pass --workflow <path> naming a ComfyUI workflow JSON file (the editing format or the API export)"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        renderer.error(
+            code="build_workflow_invalid",
+            message=f"could not read the ComfyUI workflow at {path}: {error}",
+            hint=hint,
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from error
+    if not isinstance(data, dict):
+        renderer.error(
+            code="build_workflow_invalid",
+            message=f"{path} is not a ComfyUI workflow: expected a JSON object.",
+            hint=hint,
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1)
+    return path, data
+
+
+def _coverage_definition(definition: dict) -> dict:
+    """The local *definition* as the wire carries it, with every local node not yet
+    uploaded standing in as the upload a push makes of it."""
+    staged = deepcopy(definition)
+    for node in staged.get("customNodes") or []:
+        if isinstance(node, dict) and node.get("source") == "local" and not str(node.get("blobId") or "").strip():
+            node["blobId"] = _PENDING_UPLOAD
+    return project_wire_definition(staged)
+
+
+_NODES_MISSING_HINT = (
+    "add each named pack to the spec's definition.customNodes as its line says: a published pack as `id` + "
+    "`registryVersion`, an unpublished one as `repository` + `gitRef` (a commit); then run the command again"
+)
+
+
+def _missing_pack_route(pack: dict) -> str:
+    """How the spec adds *pack*: from the registry when the builder names a published
+    version, else from its repository (the builder's ``packId`` is then the clone
+    URL). Nothing when the answer names neither."""
+    if pack.get("latestVersion"):
+        return f" (add from the registry: id {pack['packId']}, registryVersion {pack['latestVersion']})"
+    repository = pack.get("repository") or (pack["packId"] if pack["packId"].startswith("https://") else "")
+    if repository:
+        return f" (unpublished; add from its repository: repository {repository}, gitRef a commit)"
+    return ""
+
+
+def _check_workflow(renderer, client, path: Path, workflow: dict, definition: dict) -> dict:
+    """Ask the builder whether the local *definition* installs every node class
+    *workflow* uses, and return the payload entry only when it provably does.
+
+    Anything short of that exits 1 and nothing after it runs: a missing pack, a
+    class the builder could not decide (``unverified``), an error answer, a builder
+    without the route, an answer in another shape."""
+    from comfy_cli.builder_api import WorkflowCheckUnavailable
+
+    details: dict = {"path": str(path)}
+    wire = _coverage_definition(definition)
+    try:
+        coverage = _builder_call(
+            renderer,
+            lambda: client.validate_workflow(workflow, wire),
+            details,
+            hint=f"the workflow {path} was not checked against the build definition; retry once the builder answers",
+        )
+    except WorkflowCheckUnavailable as error:
+        renderer.error(
+            code="build_workflow_check_unavailable",
+            message=f"{error}, so the workflow {path} was not checked",
+            hint="use a builder that serves POST /v1/workflows/validate (--builder-url), or drop --workflow",
+            details=details,
+        )
+        raise typer.Exit(code=1) from error
+    if coverage["complete"]:
+        return {"path": str(path), "format": coverage["format"], "complete": True, "covered": coverage["covered"]}
+    missing, unverified = coverage["missing"], coverage["unverified"]
+    # The builder's strings (pack id, classes, version, repository, class type,
+    # reason) reach the terminal here, and a lone surrogate in any of them would
+    # print nothing.
+    lines = [
+        _encodable(f"  {pack['packId']}: {', '.join(pack['classes'])}{_missing_pack_route(pack)}") for pack in missing
+    ]
+    lines += [_encodable(f"  not verified: {item['classType']} ({item['reason']})") for item in unverified]
+    # The lists apart are only in JSON, as with a refused definition.
+    if not renderer.is_pretty():
+        details.update({"missing": missing, "unverified": unverified})
+    where = "read every one with `--json`" if renderer.is_pretty() else "read every one in `details`"
+    if missing:
+        renderer.error(
+            code="build_workflow_nodes_missing",
+            message=_capped_lines(
+                f"the local build definition lacks node packs the workflow {path} uses:", lines, where
+            ),
+            hint=_NODES_MISSING_HINT,
+            details=details,
+        )
+    else:
+        renderer.error(
+            code="build_workflow_unverified",
+            message=_capped_lines(
+                f"the builder could not verify that the local build definition installs the workflow {path}'s nodes:",
+                lines,
+                where,
+            ),
+            hint="retry for `lookupFailed`; the builder cannot see inside an uploaded or pinned pack or place an "
+            "unknown class, so check those yourself, then run without --workflow",
+            details=details,
+        )
+    raise typer.Exit(code=1)
+
+
+def _covered_line(coverage: dict) -> str:
+    return f"workflow {coverage['path']}: the local definition installs all {coverage['covered']} custom node class(es) it uses"
+
+
 @app.command("push", help="Push the local comfy-build spec to the builder.")
 @tracking.track_command("build")
 def push_cmd(
@@ -1921,8 +2055,17 @@ def push_cmd(
         typer.Option("--custom-nodes-dir", help="Custom-nodes folder used to resolve node localPath values."),
     ] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+    workflow: Annotated[str | None, _WORKFLOW_OPT] = None,
 ):
     renderer = get_renderer()
+    if workflow is not None and dry_run:
+        renderer.error(
+            code="build_missing_input",
+            message="--workflow is checked on the builder, and --dry-run sends nothing.",
+            hint="drop --dry-run to check the workflow before a real push, or run `comfy build validate --workflow`",
+            details={"conflict": ["--workflow", "--dry-run"]},
+        )
+        raise typer.Exit(code=1)
     if release and dry_run:
         renderer.error(
             code="build_missing_input",
@@ -1948,6 +2091,7 @@ def push_cmd(
             details={"missing": ["--release"]},
         )
         raise typer.Exit(code=1)
+    checked_workflow = _read_workflow(renderer, workflow) if workflow is not None else None
     if release and not targets:
         targets = _parse_release_targets(
             renderer,
@@ -2021,6 +2165,11 @@ def push_cmd(
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None
+        # Before the spec is rewritten, anything is uploaded, or a Build is saved.
+        if checked_workflow is not None:
+            payload["workflow_coverage"] = _check_workflow(renderer, client, *checked_workflow, preparation.definition)
+            if renderer.is_pretty():
+                renderer.info(_covered_line(payload["workflow_coverage"]))
 
         if preparation.stale_source_uri_models:
             _write_spec(renderer, paths.spec_file, spec_without_stale_source_uris(spec, preparation))
@@ -3360,7 +3509,7 @@ def release_logs(
     renderer.emit({**content, "releaseId": release_id}, command="build release logs")
 
 
-@app.command("validate", help="Validate the local comfy-build spec without contacting the builder.")
+@app.command("validate", help="Validate the local comfy-build spec; only --remote and --workflow contact the builder.")
 @tracking.track_command("build")
 def validate_cmd(
     path: Annotated[
@@ -3380,8 +3529,10 @@ def validate_cmd(
         typer.Option("--custom-nodes-dir", help="Custom-nodes folder used to resolve node localPath values."),
     ] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+    workflow: Annotated[str | None, _WORKFLOW_OPT] = None,
 ):
     renderer = get_renderer()
+    checked_workflow = _read_workflow(renderer, workflow) if workflow is not None else None
     client = _builder_client(renderer, builder_url) if remote else None
     try:
         paths = resolve_build_paths(
@@ -3409,8 +3560,14 @@ def validate_cmd(
     if client is not None:
         lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
+    if checked_workflow is not None:
+        # The spec as it is on disk, unsaved edits included, never the remote Build.
+        checker = client or _builder_client(renderer, builder_url)
+        result["workflow_coverage"] = _check_workflow(renderer, checker, *checked_workflow, spec["definition"])
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
+        if checked_workflow is not None:
+            renderer.info(_covered_line(result["workflow_coverage"]))
         # A failed read of the list has already said so.
         if client is None and _has_models(spec):
             renderer.info(f"validate reads the builder's folder list only with --remote, so {_FOLDER_CASE_UNCHECKED}.")
