@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy nodes widget-catalog` includes a recursive `widget_layout` with every
+  dynamic selector branch and branch-qualified field identities. The catalog pin
+  now covers non-default branches too. Injected upload/audio controls are excluded
+  from serialized slots; seed companions and 3D image state remain included.
+  Dynamic selector keys must be unique strings. Consumers must adopt the new
+  layout before decoding non-default modes; the existing flat order is unchanged.
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
