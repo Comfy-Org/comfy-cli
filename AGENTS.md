@@ -84,9 +84,17 @@ ownership rule, compatibility contract, or dependency choice. Keep transient
 implementation details in the PR instead. Capture the context, alternatives,
 tradeoffs, and consequences that a future maintainer cannot infer from code.
 Start from `docs/adr/TEMPLATE.md`. Its Context, Decision, Alternatives
-considered, and Consequences sections are recommended review guidance, not a
-schema enforced by the validator; concise records may adapt them when that
-makes the decision clearer.
+considered, What we reject, Consequences, Validation, and Revisit triggers
+sections are recommended review guidance, not a schema enforced by the validator;
+concise records may adapt them when that makes the decision clearer. Relate an ADR
+to earlier records with Builds on, Refines, Amends, or Supersedes and state what
+remains true. An Accepted decision remains binding until its replacement is also
+Accepted; a Proposed replacement is review context, not permission to contradict it.
+
+The validator tests are this repository's native replay of the shared conformance
+cases: exact status values, real calendar dates, full-identifier collisions,
+companion ownership, and direct/reference-style supersession links. A workflow run
+is not itself proof that the ADR check is configured as a required merge gate.
 
 ADR files are named
 `<DOMAIN>[-<SUBDOMAIN>]-<NNNN>-descriptive-title.md`: use at most two
