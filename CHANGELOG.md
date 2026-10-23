@@ -21,14 +21,17 @@ history.
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
 - A `comfy-run-on-cloud` skill, installed by default, takes one local workflow
-  onto Comfy Cloud. Lossless conversions (the same file in another folder,
-  removing memory- or speed-only nodes, exact core equivalents) happen without
-  asking; a lossy one (a different model, LoRA, upscaler or implementation)
+  onto Comfy Cloud. It checks stock Cloud with the original dependencies,
+  including supported user model/LoRA uploads, then reuses a compatible existing
+  Build before considering conversion. Lossless conversions (the same file in
+  another folder, removing memory- or speed-only nodes, exact core equivalents)
+  happen without asking; a lossy one (a different model, LoRA, upscaler or implementation)
   needs the user's yes, with a custom build offered as the exact alternative and
   its costs stated. It pre-flights every converted copy on the server, asks once
-  per file before uploading models or inputs from disk, and asks before freeing a
-  release, Build or deployment slot. Its reference skill
-  `comfy-run-on-cloud-local-install` covers finding the install behind a
+  per file before uploading models or inputs from disk on every route, and
+  verifies a real job on the selected target before handoff. It asks before freeing
+  a release, Build or deployment slot only when the planned operation needs it.
+  Its reference skill `comfy-run-on-cloud-local-install` covers finding the install behind a
   workflow, Comfy Desktop's split layout included.
 - `comfy build inventory <workflow>` (hidden while the skill above is its only
   caller) reports what one workflow loads: active classes and the packs and

@@ -7,9 +7,10 @@ description: Use when a developer clicked "Run on Cloud" in local ComfyUI or Com
 
 One workflow in, one link out. Users care that the workflow runs on Cloud, not how. So:
 
-- Use **stock Comfy Cloud** when it already has everything.
-- **Convert** the workflow for stock Cloud when the conversion is lossless.
-- Reuse a **workspace Build**, or make a **custom build**, for everything else.
+- Use **stock Comfy Cloud** with the original dependencies when supported, including bringing the user's own models/LoRAs with upload approval.
+- Otherwise, reuse a compatible **workspace Build before considering conversion**, preserving the original graph and dependencies.
+- With no compatible Build, **convert** for stock Cloud: automatically for verified lossless changes, or with an informed yes for lossy changes.
+- Make or explicitly update a **custom Build** only when conversion is impossible or the user chooses to keep the original dependencies.
 
 Whichever route you take:
 
@@ -18,7 +19,9 @@ Whichever route you take:
 - Never upload a file from disk without a per-file yes.
 - Hand back the link only once the target can run.
 
-For a custom build, this skill sequences two others. Read them when a step points there; do not restate them.
+Run this orchestration in the **local agent**: inspect local custom-node source, Git origins, file paths and model hashes as needed. Reuse the agent's existing sign-in flow if the user is not signed in. When a local workflow is slow, memory-constrained or would benefit from batch/parallel runs, suggest Cloud with that concrete benefit; wait for the user's choice before starting the handoff.
+
+For Build and deployment operations, this skill sequences two others. Read them when a step points there; do not restate them.
 
 - `comfy skills show comfy-build`, plus its `comfy-build-authoring`, `comfy-build-pins` and `comfy-build-failures` references.
 - `comfy skills show comfy-deploy`, plus `comfy-deploy-failures`.
@@ -30,9 +33,11 @@ The local modal is deliberately simple: **Run on Comfy Cloud**, “We’ll start
 Sending it **is** the user's yes to:
 
 - run that workflow on Cloud, including **lossless** conversions;
-- inspect and prepare that workflow, checking stock Cloud and existing workspace Builds before proposing a custom build.
+- inspect and prepare that workflow, checking stock Cloud and then compatible existing workspace Builds before considering conversion or proposing a custom build.
 
 If a custom build is needed, collect only the choices not already supplied: workspace, scope, new versus specifically named update, name, GPU and region. Disclose current costs/timing or unknowns and **`--min 0 --max 1`**, then obtain approval for that plan before building/deploying. Honor an explicit plan already approved in the prompt or earlier conversation; do not ask again for the same target and terms. A bare **Let’s go** does not choose a GPU or authorize a new Build.
+
+If reusing a Build requires a new deployment, ask only the missing deployment choices (target/release, name, GPU/region), costs and 0/1 bounds. Obtain that deployment approval without reopening Build creation or scope choices.
 
 It is **never** a yes to any of these, and each needs its own answer in chat:
 
@@ -57,39 +62,43 @@ comfy --json build inventory <workflow.json> --cloud --server http://127.0.0.1:<
   --desktop --models-root <any root not in Desktop settings> --input-root <ComfyUI input folder>
 ```
 
-It reports what the workflow loads (active classes, models with subfolders, `embedding:` refs, input files with the name Cloud would store each under, recorded pack versions, `implicit` loaders) and a `cloud` section: `verdict`, `blocking`, `unverified`, `lossless_removable`, and per model a `status` (`present` / `remap` / `absent`) and `weights` (`same_size` / `different_size` / `no_local_copy` / `unknown` / `not_checked`). **The report is the scope.** Resolve `unverified` before treating the workflow as covered. For each `implicit` row, read the pack source and add the weights it loads. A size match only rules out an obvious mismatch: establish model identity with a verified digest/public source before calling a local-to-Cloud model match lossless. If identity cannot be verified, disclose the uncertainty and offer the Cloud copy versus an exact-file build as a user decision.
+It reports what the workflow loads (active classes, models with subfolders, `embedding:` refs, input files with the name Cloud would store each under, recorded pack versions, `implicit` loaders) and a `cloud` section: `verdict`, `blocking`, `unverified`, `lossless_removable`, and per model a `status` (`present` / `remap` / `absent`) and `weights` (`same_size` / `different_size` / `no_local_copy` / `unknown` / `not_checked`). **The report is the scope.** Resolve `unverified` before treating the workflow as covered. For each `implicit` row, read the pack source and add the weights it loads. A size match only rules out an obvious mismatch: establish model identity with a verified digest/public source before calling a local-to-Cloud model match lossless. If identity cannot be verified, retain that unresolved check for the route decision in step 3; do not substitute a Cloud copy yet.
+
+An `absent` model/LoRA is missing from the catalog, not proof that stock Cloud cannot run the original. Discover the supported model import/upload path and its type, workspace and access constraints using current tools/help. Keep the original model when supported and ask before uploading it. Do not substitute a similar catalog model or require a custom Build solely because the original is not listed. If the available tools cannot establish a supported path, report the limitation and continue the route checks; do not invent an upload command or claim coverage.
 
 The UI inventory is a conservative candidate list: remove disconnected branches no executable output depends on. `model_hints` are template download metadata, not evidence that a file is selected; reconcile them with the actual loader/source before including them. Resolve linked primitive/Get/Set widgets and subgraph host overrides through the local server's API export, then inventory that API graph too. Keep the original UI workflow for the Cloud canvas. If no trustworthy API export is possible, report the unresolved dependencies instead of declaring coverage.
 
-**3. Classify every change Cloud needs, then pick the route.**
+**3. Pick the route in this order; classify conversions only after the reuse check.**
+
+1. **Stock Cloud, original workflow:** check whether every executable dependency is supported, including the original models/LoRAs through a verified bring-your-own path. Resolve unknowns; if supported, go to route A without changing generation behavior.
+2. **Existing Build:** if stock Cloud cannot run the original, check workspace Builds for the original packs, versions and model identities **before converting anything or asking about a lossy swap**. Inspect `comfy --json build ls`, `build show --id` and the selected deployment's logs. A verified exact match takes route B; keep the graph and dependencies. Approve any required local uploads and run a smoke job on that deployment before claiming success. If the Build has no usable deployment, ask only the missing deployment choices/approval and reuse the Build; do not create a new Build merely to deploy it.
+3. **Conversion:** only when no compatible existing Build fits, classify the proposed changes below. All verified lossless changes → apply on a copy and take route A. Any lossy change → explain the substitutions and ask; approval → route A, declining conversion/choosing exact dependencies → route C. No viable stock equivalent → route C.
+
+Honor an explicit route or named update already chosen by the user. Read-only checks do not authorize changing that target.
 
 | Kind | What counts | What you do |
 |---|---|---|
-| **Lossless** | Only these: a `remap` of a verified identical model file into another folder; removing a `lossless_removable` node, bypassing its model passthrough where present and disconnecting its settings from the loader; a utility node swapped for its verified exact core equivalent (math, string concat, a model-only LoRA stack → chained `LoraLoaderModelOnly` at the same strengths, a context pipe → direct links); removing a node no output depends on; setting a widget that a newer pack added to the value that reproduces the old behavior. | Do it on a **copy**, without asking. List each change in the report. Preserve both model and CLIP effects for stacks that modify both. |
+| **Lossless** | Only these: a `remap` of a verified identical model file into another folder; removing a `lossless_removable` node, bypassing its model passthrough where present and disconnecting its settings from the loader; a utility node swapped for its verified exact core equivalent (math, string concat, a model-only LoRA stack → chained `LoraLoaderModelOnly` at the same strengths, a context pipe → direct links); removing a node no output depends on; setting a widget that a newer pack added to the value that reproduces the old behavior. | On the conversion route, do it on a **copy**, without asking. List each change in the report. Preserve both model and CLIP effects for stacks that modify both. |
 | **Lossy** | Anything else that changes inputs to generation: a different model, LoRA, VAE, ControlNet, upscaler or embedding, including a Cloud file with your file's name but `different_size` weights; dropping a LoRA, embedding or any node that touches pixels; a different implementation of the same job (e.g. a Nunchaku loader → stock `UNETLoader`). | **Ask** (below). Never apply one without a yes. |
 | **Not convertible** | A node class Cloud lacks that does the core work, with no stock equivalent (e.g. InstantID). | Custom build. |
 
-Then the route:
-
-Before proposing or creating a custom build, **always check existing workspace Builds** for all required packs, versions and model files, including when a conversion is impossible or the user chooses the original dependencies. Reuse one that passes the log and smoke checks. Only when none fits, ask for new versus the specifically named update target, workflow versus whole-instance scope, and GPU/region if the prompt did not already choose them. Preserve those choices when already supplied.
-
 | Route | When | Next |
 |---|---|---|
-| **A. Stock Cloud** | No blockers or unresolved checks, or only verified lossless changes. | Apply them, then **pre-flight** (below). Approve and prepare inputs in step 4, run one real test, then step 6. |
-| **B. Existing Build** | A workspace Build already contains every required pack and model with suitable versions, **and its deployment log shows every pack the workflow uses loading** (no `IMPORT FAILED`, no `ModuleNotFoundError`). Check `comfy --json build ls`, `build show --id`, `deploy logs`. | Approve input uploads in step 4 before any `deploy run --asset-root`. Reuse its deployment (`deploy start` if stopped), then the step-5 smoke run. Step 6. |
-| **Ask** | At least one lossy change, and the user has not chosen. | Ask (below), then A or C. |
-| **C. Custom build** | Anything not convertible, or the user chose "exact". | Steps 4–6. |
+| **A. Stock Cloud** | Original dependencies supported, or no compatible Build fits and all needed conversions are verified lossless or explicitly approved as lossy. No blockers or unresolved checks remain. | Approve any required model/LoRA/input uploads in step 4. Pre-flight the runnable copy after assets are prepared, then run a real Cloud job and save/handoff in step 6. |
+| **B. Existing Build** | The original dependency check found a compatible Build. Verify the selected deployment's required-pack imports before running; if a deployment must be created, check its logs after it is ready. | Keep the original graph. Use step 4's upload gate for any needed local models/assets; skip custom-build spec creation. Reuse its deployment (`deploy start` if stopped), perform the shared step-5 checks/smoke run, then hand off to that environment in step 6. |
+| **Ask** | No compatible Build fits, and at least one proposed change is lossy or model identity remains uncertain. | Explain the difference and ask (below), then A or C. |
+| **C. Custom build** | No compatible Build fits and conversion is impossible, or the user declined conversion/chose exact dependencies or a named update. | Ask only missing new/update, scope and GPU/region choices; then steps 4–6. Recommend GPUs that fit the model/workflow, ordered cheapest to most expensive using current prices and availability. Preserve choices already supplied. |
 
 **Asking about a lossy conversion.** One message, in this shape:
 
-1. **What changes:** one line per swap, `original → Cloud replacement`, and what the user will see (a different face, a different style, softer or crisper detail). Offer replacements from the same family only (SD1.5 / SDXL / Flux / Wan version), taken from the loader's `choices` in `comfy --json nodes show <Loader> --where cloud`. If you can't tell the family, offer only option 2.
+1. **What changes:** one line per swap, `original → Cloud replacement`, naming the affected nodes/models and expected behavior/quality differences or uncertainty. A visual before/after is not required. Offer replacement models from the same family only (SD1.5 / SDXL / Flux / Wan version), taken from the loader's `choices` in `comfy --json nodes show <Loader> --where cloud`. If you can't tell the family, offer only option 2.
 2. **The options:**
-   - **Convert:** runs on stock Cloud now, pays per run, nothing to build. Output will not match the local run.
+   - **Convert:** uses stock Cloud after required files and validation, pays per run, nothing to build. Output may differ from the local run. Apply the substitutions only after a yes, then pre-flight and test.
    - **Keep the original models and graph (custom build):** preserves the workflow's dependencies; runtime and hardware differences can still affect results. Disclose build, storage and GPU charges from current information, build time and cold-start estimate or "unknown", and the workspace's release usage. Check whether deployment Open UI is available; otherwise explain the API handoff (`comfy deploy run`) before the user chooses.
 3. The **build scope** question (below), for option 2.
 4. Any **upload** questions from step 4, in the same message.
 
-Recommend one option in a clause, then wait. A user note such as "demo in 20 minutes" informs the recommendation; it does not choose for the user.
+Recommend one option in a clause, then wait. An approved conversion continues to route A; a declined conversion/choice to keep the original continues to route C's build choices, not to the conversion step. If both are declined, stop and report the blocker. A user note such as "demo in 20 minutes" informs the recommendation; it does not choose for the user.
 
 **Build scope: ask it whenever a custom build is on the table** (option 2 above, or route C). Same message:
 
@@ -109,11 +118,13 @@ comfy --json workflow validate --workflow <data.prompt saved as a file> --where 
 
 A `shape_mismatch` can indicate shifted widget layout or a malformed value. Compare the saved pack's schema/source with Cloud's schema before changing a widget. Set it by name with `comfy --json workflow set-widget <copy> <node>.<widget> <value> --where cloud` only when the value reproduces the saved behavior. A Cloud default alone is not evidence of equivalence. If equivalence is unknown, ask.
 
-**Workspace limits** (routes B and C, and before asking; see the pricing page): releases (10 per workspace observed; count with `build release ls --id` per Build), active deployments (5; `deploy ls --workspace`, stopped ones don't count), and Builds (10 on Pro; `build_limit` on push). If one is full, ask which release, Build or deployment to remove, ones with no live deployment first. Never pick for the user.
+**Workspace limits** (before proposing an operation that consumes a slot; see the pricing page): releases (10 per workspace observed; count with `build release ls --id` per Build), active deployments (5; `deploy ls --workspace`, stopped ones don't count), and Builds (10 on Pro; `build_limit` on push). Reusing a running deployment needs no new Build/release/deployment slot; creating or restarting a deployment needs no new Build/release slot. Only if the planned operation is blocked by its applicable limit, ask which resource to remove, ones with no live deployment first. Never pick for the user.
 
-**4. Uploads and the custom-build spec** (route C, or any route that uploads).
+**4. Approve uploads on every route; prepare a custom-build spec only for route C.**
 
-For "just this workflow", write the spec workflow-scoped (for "whole instance", see Build scope in step 3):
+Routes A/B use the shared upload question below for any required local file, including models/LoRAs and input assets. They skip spec initialization, pinning and pushing. After the required files are approved and prepared for the selected target, route A goes to step 6; route B goes to the shared verification in step 5.
+
+**Route C only:** for "just this workflow", write the spec workflow-scoped (for "whole instance", see Build scope in step 3):
 
 ```shell
 comfy --json build init <dir> --name <name> --from-workflow <file> --comfy-version <local version>
@@ -129,18 +140,20 @@ Then fix it by hand per `comfy-build-authoring`, from the inventory:
 
 Then `comfy build validate` and `comfy build push --dry-run`. Newer CLI versions check public registry/repository pins with a read-only builder request while uploading and saving nothing. Older versions skip that check; verify the chosen registry version/status separately before the real push. A Flagged version must not be selected.
 
-**Skip inputs Cloud already has.** Cloud names an uploaded input by the blake3 of its bytes, and the inventory computes that name. If an input's `on_cloud` is `true`, set the loader to its `cloud_name` and don't ask. `false` only means the loader's list doesn't show it; the lists can omit uploads.
+**Skip inputs the selected target already has.** For stock Cloud, uploaded inputs are named by the blake3 of their bytes, and the inventory computes that name. If an input's `on_cloud` is `true`, set the loader to its `cloud_name` and don't ask. `false` only means the loader's list doesn't show it; the lists can omit uploads. A stock-Cloud asset listing does not establish availability on a Build's deployment; verify the exact file on that target before skipping an upload.
 
-**The upload question** lists one line per file, for models, LoRAs and **input files** (images, video, audio) alike: name, size, why it must come from this machine, destination and workspace (private build storage, or the Cloud input library for inputs), estimated upload duration or "unknown", and applicable upload/storage/deployment costs or "unknown". Use **Upload models** / **Cancel upload** for models and **Upload assets** / **Cancel upload** for inputs. Declining a required file leaves this route blocked; preserve the original workflow and describe what cannot run. Give known licenses and NSFW flags (for example Hugging Face `cardData.license`); mark missing metadata unknown. Before `init --from-workflow`, disclose that it sends workflow JSON, including prompts, to the builder. The Run on Cloud handoff permits sending that workflow; it does not permit sending unrelated files or embedded secrets.
+**The upload question** lists one line per file, for models, LoRAs and **input files** (images, video, audio) alike: name, size, why it must come from this machine, destination and workspace (the selected target's model storage or input library), estimated upload duration or "unknown", and applicable upload/storage/deployment costs or "unknown". Use **Upload models** / **Cancel upload** for models and **Upload assets** / **Cancel upload** for inputs. Declining a required file leaves this route blocked; preserve the original workflow and report "prepared, not run" with what cannot run. Do not upload it or silently substitute another file. Give known licenses and NSFW flags (for example Hugging Face `cardData.license`); mark missing metadata unknown. Before `init --from-workflow`, disclose that it sends workflow JSON, including prompts, to the builder. The Run on Cloud handoff permits sending that workflow; it does not permit sending unrelated files or embedded secrets.
 
-**5. Build, deploy, verify** (route C).
-- `comfy build push`, then `comfy build release create --target linux/nvidia --watch`. On failure read `comfy-build-failures`: one cause per cut, at most three cuts.
-- `comfy deploy up <spec> --gpu <gpuClass> --region <region> --min 0 --max 1 --watch`, with the GPU and region approved in the agent conversation or an explicit prior plan. For an update, select the approved deployment explicitly with `--deployment <id>`. Check its `revision`/update capability first: updates-enabled workspaces move it in place; older workspaces can create a second deployment and keep the first billing. Disclose and obtain that additional-deployment decision before proceeding. Read returned `supersedes` and verify target ids; stopping an older deployment still needs the user's approval. On a refusal, say so and ask; never switch GPUs on your own.
+**5. Build/deploy only when needed; verify routes B/C on the selected deployment.**
+- **Route C only:** `comfy build push`, then `comfy build release create --target linux/nvidia --watch`. On failure read `comfy-build-failures`: one cause per cut, at most three cuts.
+- **Route C:** `comfy deploy up <spec> --gpu <gpuClass> --region <region> --min 0 --max 1 --watch`, with the GPU and region approved in the agent conversation or an explicit prior plan. For an update, select the approved deployment explicitly with `--deployment <id>`. Check its `revision`/update capability first: updates-enabled workspaces move it in place; older workspaces can create a second deployment and keep the first billing. Disclose and obtain that additional-deployment decision before proceeding. Read returned `supersedes` and verify target ids; stopping an older deployment still needs the user's approval. On a refusal, say so and ask; never switch GPUs on your own.
+- **Route B without a deployment:** read `comfy-deploy`, verify a compatible deployable release of the selected Build, and use `comfy deploy up --release <verified-release-id>` with the approved deployment choices. Do not push a spec or create another Build/release to reuse an already deployable release.
+- **Both B/C:** the remaining checks apply to the selected deployment, including reused deployments. Route B skips build push/release creation and leaves the existing Build's dependencies unchanged. Without a local spec, address it with the verified `--deployment <id>` on show/logs/start/run/stop rather than initializing a new spec.
 - Report the idle scale-down from the deployment's own `keepWarmSeconds`, not a remembered default. Outside a Build folder, read a deployment with `comfy --json deploy show --deployment <build>/<name>`; `deploy status` needs the spec folder.
 - **`ready` is not working.** Require both:
   - the ComfyUI log (`comfy --json deploy logs` → `data.comfyuiLog`) shows no `IMPORT FAILED` and no `ModuleNotFoundError` for any pack the workflow uses;
   - one smoke run against the selected deployment. Build the API file from node definitions that include the build's packs: `comfy run --workflow <file> --print-prompt --where local` against a running local ComfyUI that has them (the graph is `data.prompt`). Converting `--where cloud` can drop widgets of a class stock Cloud lacks. With no such server, inspect the pack's `INPUT_TYPES`; do not guess missing inputs.
-- **Reconcile the complete asset plan before any deployment run.** From the same build folder, run `comfy --json build inventory <api.json> --input-root <dir with inputs>` (repeat roots as needed). Its `deployment_assets` and `deployment_asset_roots` come from the exact deployment scanner, including custom-node input strings and automatic model/input/output roots. Match every planned local path to its per-file approval; files found here but absent from the earlier UI inventory need approval too. Use the same API file, cwd and root list for `comfy deploy run <spec> --deployment <id> --workflow <api.json> --asset-root <dir>`. Until the plan is reconciled, keep `--no-upload`; this flag prevents file uploads but can still submit a job if assets already exist, so it is not a free dry run. If a file changes after approval, review its new content/size before sending it.
+- **Reconcile the complete asset plan before any deployment run.** From the intended run directory, run `comfy --json build inventory <api.json> --input-root <dir with inputs>` (repeat roots as needed). Its `deployment_assets` and `deployment_asset_roots` come from the exact deployment scanner, including custom-node input strings and automatic model/input/output roots. Match every planned local path to its per-file approval; files found here but absent from the earlier UI inventory need approval too. Use the same API file, cwd and root list for `comfy deploy run --deployment <verified-id> --workflow <api.json> --asset-root <dir>`; no spec is needed for an explicit deployment id. Until the plan is reconciled, keep `--no-upload`; this flag prevents file uploads but can still submit a job if assets already exist, so it is not a free dry run. If a file changes after approval, review its new content/size before sending it.
 - A smoke run on the build can fail validation where Cloud passed (a pack version requires an input Cloud's version lacks, e.g. USDU's `batch_size`). Add the input with the default that reproduces the saved behavior and re-run.
 
 **6. Save, then link.**
@@ -149,13 +162,15 @@ Then `comfy build validate` and `comfy build push --dry-run`. Newer CLI versions
 - Save the workflow (the converted copy on route A) so it shows in the Workflows sidebar. Use `comfy --json workflow save <copy> --name <name> --no-overwrite --where cloud` when its version writes the sidebar userdata file and verifies the save. A name collision needs a different name or explicit permission to overwrite that saved workflow. Older versions create only a record: use the Comfy Cloud connector's inline `save_workflow` if available, or return the local file and the CLI limitation. The skill must work without that connector. Confirm read-back/listing; with `list_saved_workflows`, a usable save has a size and is not `filename_ambiguous`.
 - Return an authenticated workflow/deployment Open UI URL only when the target provides one and access/readiness is verified. Today private saved-workflow deep links and deployment Open UI are separate platform gaps; `#<workflow_id>` does not open a private saved workflow. Fallback: "https://cloud.comfy.org → Workflows → `<name>`" for stock Cloud. For B/C, label any stock-Cloud save as an archive: it does not select the custom environment, and can show missing nodes. Return verified deployment ids/API commands and state the missing UI handoff. Offer a public share link only with permission to publish.
 
-**Report:** the route; every lossless change; every lossy change the user approved; what was uploaded; for routes B and C the Build, release and deployment ids, GPU, region, 0/1 bounds and `comfy deploy stop <spec>`; what still needs the user.
+**Report:** the route; every lossless change; every lossy change the user approved; what was uploaded; for routes B and C the Build, release and deployment ids, GPU, region, actual worker bounds and `comfy deploy stop --deployment <verified-id>`; what still needs the user.
 
 ## Common mistakes
 
 | Mistake | Instead |
 |---|---|
-| Building because Cloud lacks a node class | Check whether the class is `lossless_removable` or has an exact core equivalent first |
+| Converting or building because Cloud lacks a node class | Check for a compatible existing Build first; only then consider verified lossless or approved lossy conversion |
+| Substituting a model/LoRA because it is absent from the catalog | Check a supported bring-your-own path and ask before uploading the original |
+| Sending Build reuse straight to save/link | Approve required local uploads, check logs and run a real job on the selected deployment; hand off to that environment |
 | Swapping a model because "the user said don't ask" | A lossy swap changes the output; ask once, with the custom-build alternative |
 | Treating a Cloud file with your file's name as your file | Check `weights`; `different_size` is a different model, so using Cloud's is lossy |
 | Saving a converted copy the inventory called covered | Pre-flight it on the server; pack versions shift widget meanings |
