@@ -2918,6 +2918,102 @@ class TestExecuteCloudWait:
         # The poll budget was actually spent before giving up.
         assert client.get_history.call_count == comfy_client._MAX_POLL_FAILURES
 
+    def _run_wait_on_job_statuses(self, workflow_file, fake_target, statuses):
+        """Run --wait with a real wait loop over a faked /jobs/<id> sequence.
+
+        History never reports done, which is what cloud does for a job that
+        fails before it executes. The last status repeats for any later poll.
+        Returns (exit code, client).
+        """
+        import itertools
+
+        import typer
+
+        from comfy_cli import comfy_client
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        client = comfy_client.Client(fake_target)
+        client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-ended", number=1, node_errors={}))
+        client.get_history = MagicMock(return_value=None)
+        client.get_job_status = MagicMock(side_effect=itertools.chain(statuses, itertools.repeat(statuses[-1])))
+
+        # Each poll's sleep advances a fake clock, so a wait that misses the
+        # terminal status reaches its silence deadline (cloud_timeout) quickly.
+        clock = [1_000_000.0]
+
+        def _sleep(seconds):
+            clock[0] += seconds
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="run"))
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=client),
+            patch("comfy_cli.comfy_client.time.sleep", side_effect=_sleep),
+            patch("comfy_cli.comfy_client.time.time", side_effect=lambda: clock[0]),
+        ):
+            with pytest.raises(typer.Exit) as excinfo:
+                execute_cloud(workflow_file, wait=True, timeout=600)
+        return excinfo.value.exit_code, client
+
+    def test_wait_ends_on_failed_job_status_with_its_error(self, api_workflow_file, fake_target, capsys):
+        """A job the jobs endpoint reports failed ends the wait at once with
+        the job's error, instead of waiting out --timeout to cloud_timeout."""
+        from comfy_cli import jobs_state
+
+        failed = {
+            "id": "prompt-ended",
+            "status": "failed",
+            "execution_error": {
+                "node_id": "10",
+                "node_type": "LoadImage",
+                "exception_type": "ImageDownloadError",
+                "exception_message": "Failed to download image missing.png",
+                "traceback": ["frame 1", "frame 2", "frame 3"],
+                "current_inputs": {"image": "missing.png"},
+            },
+        }
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file, fake_target, [{"id": "prompt-ended", "status": "pending"}, failed]
+        )
+
+        assert exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "execution_error"
+        assert envelope["error"]["message"] == "LoadImage (node 10): Failed to download image missing.png"
+        details = envelope["error"]["details"]
+        assert details["prompt_id"] == "prompt-ended"
+        assert details["exception_type"] == "ImageDownloadError"
+        assert details["node_id"] == "10"
+        assert "current_inputs" not in details
+        # Ended on the second poll, not after 600s of silence.
+        assert client.get_job_status.call_count == 2
+        state = jobs_state.read("prompt-ended")
+        assert state.status == "error"
+        assert state.error["code"] == "execution_error"
+
+    def test_wait_ends_on_cancelled_job_status(self, api_workflow_file, fake_target, capsys):
+        from comfy_cli import jobs_state
+
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file,
+            fake_target,
+            [{"id": "prompt-ended", "status": "in_progress"}, {"id": "prompt-ended", "status": "cancelled"}],
+        )
+
+        assert exit_code == 130
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "cancelled"
+        assert client.get_job_status.call_count == 2
+        assert jobs_state.read("prompt-ended").status == "cancelled"
+
     def test_wait_envelope_data_validates_against_run_schema(self, api_workflow_file, fake_target, capsys):
         from pathlib import Path
 

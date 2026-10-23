@@ -506,6 +506,7 @@ class Client:
         poll_interval: float = 2.0,
         timeout: float = 600.0,
         progress_probe=None,
+        ended_probe=None,
     ) -> dict:
         """Block until the prompt finishes; return the final history record.
 
@@ -524,6 +525,13 @@ class Client:
         nothing about the job, which is usually still running. A little
         jitter on the interval keeps concurrent waiters from synchronizing
         into request bursts that trip cloud rate limits.
+
+        ``ended_probe(history_record)`` runs after ``progress_probe`` on every
+        poll whose history record is not yet done. A non-None return ends the
+        wait and is returned in place of the history record. Cloud uses it to
+        stop on a job its jobs endpoint already reports as failed or
+        cancelled: such a job may never get a done history record, so without
+        it the wait would only end on the silence timeout.
         """
         sentinel = object()
         last_signal = sentinel
@@ -551,6 +559,10 @@ class Client:
                 if signal != last_signal:
                     last_signal = signal
                     last_change = time.time()
+            if ended_probe is not None:
+                ended = ended_probe(record)
+                if ended is not None:
+                    return ended
             if time.time() - last_change >= timeout:
                 raise TimeoutError(f"workflow {prompt_id} reported no progress for {timeout}s")
             nap = poll_interval + random.uniform(0, min(poll_interval, 1.0) * 0.5)

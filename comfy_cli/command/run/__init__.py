@@ -1042,6 +1042,30 @@ def _returned_output_node_count(record: dict) -> int:
     return sum(1 for v in outputs.values() if isinstance(v, dict) and v)
 
 
+def _cloud_ended_record(job_status: dict, history: dict | None) -> dict | None:
+    """Final record for a cloud job its /jobs/<id> status shows has ended, else None.
+
+    A job that fails before it executes (a missing input image, say) may never
+    get a done history record, so the history poll alone waits it out to the
+    silence timeout. Failed and cancelled jobs get a record built from the
+    jobs-endpoint body, carrying its error, in the shape the terminal-status
+    code in ``execute_cloud`` reads. A completed job returns its history record
+    once one exists, since that is where the outputs are.
+    """
+    raw = str(job_status.get("status") or "").lower()
+    state = jobs_state.CLOUD_STATUS_ALIASES.get(raw)
+    if state == "completed":
+        return history or None
+    if state in ("error", "cancelled"):
+        return {
+            "status": {"status_str": state},
+            "execution_error": job_status.get("execution_error"),
+            "error_message": job_status.get("error_message"),
+            "outputs": {},
+        }
+    return None
+
+
 def execute_cloud(
     workflow: str,
     *,
@@ -1375,14 +1399,24 @@ def execute_cloud(
     # `clear_watcher_identity` re-reads under the lock and no-ops on those.
     try:
         try:
+            # The latest /jobs/<id> body, kept so `_ended` can read the status
+            # `_probe` fetched without a second request per poll.
+            last_job: dict = {}
 
             def _probe():
                 st = client.get_job_status(submit.prompt_id)
+                last_job.clear()
                 if not st:
                     return None
+                last_job.update(st)
                 return (st.get("status"), st.get("progress"), st.get("queue_position"))
 
-            record = client.wait_for_completion(submit.prompt_id, timeout=float(timeout), progress_probe=_probe)
+            def _ended(history):
+                return _cloud_ended_record(last_job, history)
+
+            record = client.wait_for_completion(
+                submit.prompt_id, timeout=float(timeout), progress_probe=_probe, ended_probe=_ended
+            )
         except TimeoutError as e:
             state.status = "error"
             state.error = {"code": "cloud_timeout", "message": str(e)}
@@ -1447,8 +1481,21 @@ def execute_cloud(
         else:
             status_str = str(exec_status).lower()
 
+        if status_str == "cancelled":
+            state.status = "cancelled"
+            state_file = jobs_state.write(state)
+            renderer.error(
+                code="cancelled",
+                message="Workflow execution was cancelled",
+                details={"prompt_id": submit.prompt_id, "status": status_str},
+                exit_code=130,
+            )
+            raise typer.Exit(code=130)
+
         if status_str in ("error", "failed"):
-            verdict = execution_errors.classify(record.get("error_message") or status_str)
+            verdict = execution_errors.classify(
+                record.get("execution_error") or record.get("error_message") or status_str
+            )
             state.status = "error"
             state.error = {
                 "code": verdict["code"],
