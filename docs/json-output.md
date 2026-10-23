@@ -834,6 +834,24 @@ are objects in the normal case; treat a non-object item as an opaque message.
 `node_id` is always taken from the payload's own map key, so a server-supplied
 `node_id` field inside a record cannot override it.
 
+### Incomplete model names
+
+`comfy knowledge resolve` resolves declared model ids and aliases. An incomplete
+family/version name such as `Qwen 2.1` still returns `knowledge_unknown_model`
+with exit code 1. When catalog ids or aliases contain the same family word and
+numeric components, in order, `error.details.candidate_ids` lists up to five
+sorted, distinct canonical ids. Omitted words are allowed for suggestions;
+substituted family words and different versions are not.
+Suggestions conservatively skip queries and catalog aliases containing non-ASCII
+letters or numbers rather than discard or normalize those qualifiers. Declared
+id and alias resolution still uses its existing rules.
+
+These are suggestions, even when there is only one. Ask which model is intended,
+then retry `comfy knowledge resolve <exact-id>`. They grant no permission to
+download or run a model. Successful full-name resolution and unknown-name errors
+without candidates retain their existing behavior; `close_matches` remains a
+separate spelling hint.
+
 ## Output object
 
 Entries of `executed.outputs`:
