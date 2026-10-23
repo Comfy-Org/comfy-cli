@@ -77,6 +77,45 @@ def test_build_authorize_url_includes_every_required_param():
 # Callback server — happy path + bad state + error param
 # ---------------------------------------------------------------------------
 
+_PRE_SECRETS_AGENT_SCOPES = (
+    "comfy-cloud:workflows:read comfy-cloud:workflows:write comfy-cloud:jobs:read comfy-cloud:jobs:write "
+    "comfy-cloud:files:read comfy-cloud:files:write comfy-cloud:assets:read comfy-cloud:assets:write "
+    "comfy-cloud:hub:read comfy-cloud:hub:write comfy-cloud:user:read comfy-cloud:settings:read "
+    "comfy-cloud:settings:write comfy-cloud:billing:read"
+)
+
+
+def test_default_scopes_append_secrets_and_agent_write():
+    """The secrets/agent mutations are gated on these two scopes; they are
+    appended so the existing prefix of the joined string never reorders."""
+    from comfy_cli.cloud import _DEFAULT_SCOPES
+
+    assert " ".join(_DEFAULT_SCOPES) == (
+        _PRE_SECRETS_AGENT_SCOPES + " comfy-cloud:secrets:write comfy-cloud:agent:write"
+    )
+
+
+def test_login_authorize_url_requests_default_scopes(monkeypatch: pytest.MonkeyPatch):
+    """With no env/config override, the authorize URL asks for the full default list."""
+    from types import SimpleNamespace
+
+    from comfy_cli import cloud, config_manager
+
+    monkeypatch.delenv("COMFY_CLOUD_SCOPES", raising=False)
+    monkeypatch.setattr(config_manager, "ConfigManager", lambda: SimpleNamespace(get=lambda key: None))
+    url = oauth._build_authorize_url(
+        base_url="https://testcloud.comfy.org",
+        client_id="comfy-cli",
+        redirect_uri="http://127.0.0.1:51234/callback",
+        scopes=cloud.get_scopes(),
+        state="STATE",
+        challenge="C" * 43,
+        resource="https://testcloud.comfy.org/api",
+    )
+    scope = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["scope"][0].split()
+    assert "comfy-cloud:secrets:write" in scope
+    assert "comfy-cloud:agent:write" in scope
+
 
 def _drive_callback(*, expected_state: str, query: str) -> oauth._CallbackCapture:
     capture = oauth._CallbackCapture()
@@ -522,6 +561,17 @@ class TestEnsureFreshSession:
         assert result.access_token == "NEW"
         assert result.is_expired() is False
         assert saved["access_token"] == "NEW"
+
+    def test_refresh_does_not_send_scope(self, monkeypatch):
+        """A refresh cannot widen a grant (RFC 6749 §6), so asking for the
+        current default list on refresh would only risk an invalid_scope."""
+        seen: dict = {}
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
+        monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: None)
+        monkeypatch.setattr(oauth, "_post_form", lambda url, body: seen.update(body) or {"access_token": "NEW"})
+        oauth.ensure_fresh_session()
+        assert seen["grant_type"] == "refresh_token"
+        assert "scope" not in seen
 
     def test_no_refresh_token_returns_stale_without_calling_refresh(self, monkeypatch):
         called = []
