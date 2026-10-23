@@ -181,6 +181,17 @@ history.
   already finished. Neither old key is published any more. The second exit was
   also skipping the trimming and redaction that key drives, so it emitted the
   full traceback and a `current_inputs` that can hold an api_key.
+- Parallel build and deploy requests rejected on an old access token now adopt
+  a peer's refreshed token under the shared refresh lock instead of rotating it
+  again. Each rejected request retries at most once. If session recovery still
+  fails while a refreshable sign-in remains stored, the watch reports that the
+  remote work may continue instead of telling you to sign in again.
+  `comfy build release create --watch`, `comfy deploy up`, `promote`,
+  `rollback` and `comfy deploy status --watch` now end with the new code
+  `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint
+  names the command that reads the release or deployment again. A 401 before
+  anything was accepted, on a workspace API key, or when no refreshable sign-in
+  remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING

@@ -541,6 +541,14 @@ watch ends with the error code `deploy_watch_lost` and exit code **75**, never 1
 only the watch ended, and the deployment may still be coming up. Its `hint`
 carries the command that re-attaches and `details.deployment_id` the deployment.
 
+A 401 on a watch's read triggers serialized session recovery: the client adopts
+a peer's newer token or refreshes the rejected one, then retries at most once.
+If recovery fails while a refreshable sign-in for the same environment remains
+stored, the watch ends with `watch_auth_lost`, again with exit code **75** and
+the same `details`. Its `hint` reattaches the watch without a re-login prompt.
+The remote work may continue. A 401 with no refreshable sign-in remaining, or
+on a workspace API key, stays `deploy_not_signed_in`.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:
