@@ -687,9 +687,25 @@ JSON files on disk via `workflow slots/set-slot/vary` instead.
 comfy --json workflow list                             # paginated, sorted by create_time
 comfy --json workflow list --name "wan" --limit 5      # case-insensitive name filter
 comfy --json workflow get <id> --out my.json           # writes workflow JSON
-comfy --json workflow save my.json --name "X" --description "Y"
+comfy --json workflow save my.json --name "X"          # → workflows/X.json in the sidebar
+comfy --json workflow save my.json --name "X" --no-overwrite  # refuse if X exists
 comfy --json workflow delete <id>
 ```
+
+`workflow save` writes `workflows/<name>.json`, the file the Cloud
+**Workflows sidebar** lists, so tell the user it is there under that name
+(an open tab needs a refresh) and opens from it. `data.filename` is that
+entry; `data.workflow_id` is the record Cloud keeps for it. A
+`workflow_record_unresolved` warning means only the id read-back failed —
+the save landed, but the record may be missing or stale, so don't re-run it.
+A same-name save replaces the
+workflow; `--no-overwrite` refuses with `workflow_exists` instead.
+`--description` is ignored (the file has no such field).
+Cloud `workflow delete <id>` removes the sidebar file and record. If duplicate
+names make the file association ambiguous, it leaves both unchanged with
+`workflow_filename_ambiguous`; inspect the same-name records and remove the
+intended file in the sidebar first. `workflow_delete_incomplete` means the file
+was removed but record cleanup needs checking with `workflow list`.
 
 ## Cancel a running job
 
