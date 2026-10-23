@@ -2399,16 +2399,27 @@ class Graph:
                     }
                     (errors if node_id in reachable else warnings).append(finding)
                     continue
-                # Shape check (hard error, or a warning when the server converts
-                # the value), then catalog checks (enum membership, etc.). Range
-                # violations are a hard reject only on a node the server will
-                # actually run; on a pruned (output-unreachable) node they stay
-                # advisory warnings.
-                cat_errors, cat_warnings = _validate_literal_value(
-                    node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
-                )
-                errors.extend(cat_errors)
-                warnings.extend(cat_warnings)
+                # A dynamic-combo SELECTOR is judged once, by
+                # ``_check_dynamic_combos`` above, which resolves the chosen
+                # option and reports a miss as an ``unknown_enum_value`` error.
+                # ``validate_catalog`` would report the same field a second
+                # time — and disagree about it, since its COMBO arm (which a
+                # tree-bearing plain ``COMBO`` now reaches, because its type
+                # literally IS ``"COMBO"`` and its keys populate
+                # ``enum_values``) matches on the stringified value, so ``"8"``
+                # passes against key ``8`` where the server's own expansion
+                # uses ``==``. Keep the stricter, server-accurate one.
+                if not port.is_dynamic_combo:
+                    # Shape check (hard error, or a warning when the server converts
+                    # the value), then catalog checks (enum membership, etc.). Range
+                    # violations are a hard reject only on a node the server will
+                    # actually run; on a pruned (output-unreachable) node they stay
+                    # advisory warnings.
+                    cat_errors, cat_warnings = _validate_literal_value(
+                        node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
+                    )
+                    errors.extend(cat_errors)
+                    warnings.extend(cat_warnings)
 
             # dyn_warnings are advisory (stray-dotted-key / catalog-membership
             # notices), the same class as the ungated shape/catalog checks the

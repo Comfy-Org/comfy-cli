@@ -1247,3 +1247,49 @@ class TestUnresolvedDynamicComboSelections:
         }
         result = graph.validate_workflow(wf)
         assert "dependency_cycle" not in _codes(result), result["errors"]
+
+
+class TestDynamicComboSelectorIsEnumCheckedOnce:
+    """A tree-bearing plain ``COMBO`` is a dynamic combo whose TYPE is still
+    literally ``"COMBO"`` and whose option keys populate ``enum_values``, so it
+    reaches both the dynamic-combo selector check and ``validate_catalog``'s
+    COMBO arm. Reporting the same field twice is noise, and the two disagree:
+    the catalog arm matches on the stringified value (``"8"`` passes against
+    key ``8``) where the server's own expansion uses ``==``.
+    """
+
+    @staticmethod
+    def _graph(keys: list[Any]) -> Graph:
+        return Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMBO",
+                                {"options": [{"key": k, "inputs": {"required": {}}} for k in keys]},
+                            ]
+                        }
+                    },
+                    "input_order": {"required": ["model"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                }
+            }
+        )
+
+    def test_an_unknown_selection_is_reported_exactly_once(self) -> None:
+        graph = self._graph(["A", "B"])
+        result = graph.validate_workflow({"1": {"class_type": "DynamicPass", "inputs": {"model": "nope"}}})
+        findings = [f for f in result["errors"] + result["warnings"] if f.get("code") == "unknown_enum_value"]
+        assert len(findings) == 1, findings
+
+    def test_a_stringified_selection_is_rejected_as_the_server_would(self) -> None:
+        """``validate_catalog`` would accept ``"8"`` against key ``8``; the
+        server's ``DynamicCombo._expand_schema_for_dynamic`` uses ``==`` and
+        expands nothing, so this must stay a single hard error."""
+        graph = self._graph([8, 12])
+        result = graph.validate_workflow({"1": {"class_type": "DynamicPass", "inputs": {"model": "8"}}})
+        assert _codes(result).count("unknown_enum_value") == 1, result
+        assert not [w for w in result["warnings"] if w.get("code") == "unknown_enum_value"], result["warnings"]
