@@ -815,6 +815,148 @@ def set_widget(
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
 
 
+def set_dynamic_group_rows(
+    workflow: dict,
+    graph,
+    node_id: Any,
+    group: str,
+    rows: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, list[dict]]:
+    """Replace a DynamicGroup's rows with ``rows``, expressed as ordinary
+    ``set_widget`` ops: the row count first, then every widget of each written
+    row, including a field's ``<field>.0`` control mode. Omitted widgets take
+    the template default.
+
+    A row with a connected or promoted field keeps its index and values and
+    is left out of ``rows``, which fill the other positions in order. Links
+    are never moved, so ``rows`` must cover every free position before the
+    last pinned row.
+
+    The writes run on a copy, so ``workflow`` is unchanged when any is refused.
+    The ops share one stamp, so an earlier write to the group at the same
+    stamp is refused rather than left to the ``op_id`` tiebreak, and replay
+    must apply them in order: the row writes address rows the count creates.
+    """
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    workflow = copy.deepcopy(workflow)
+    node_id = _template_id(workflow, node_id, graph)
+    target = _resolve_widget_write(workflow, graph, node_id, group)
+    if target.kind == "top" and target.redirected_from is None:
+        node = target.node
+        segments = [str(node.get("id"))]
+    elif target.kind == "interior" and target.redirected_from is None:
+        node = _promoted._navigate(workflow, target.segments, _promoted.defs_by_id(workflow))
+        segments = target.segments
+    else:
+        raise ValueError(
+            f"{group}: replace rows on the node that owns the DynamicGroup, not a promoted or linked address"
+        )
+    m = graph.node(node.get("type", ""))
+    port = next((p for p in m.inputs if p.name == group and p.is_dynamic_group), None) if m else None
+    if port is None:
+        raise ValueError(f"{group!r} is not a DynamicGroup on node {node_id}")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"{group}: rows must be a list of objects keyed by row field")
+    widgets = _engine._dynamic_group_widgets(port)
+    names = [widget.name for widget in widgets]
+    for i, row in enumerate(rows):
+        unknown = [key for key in row if key not in names]
+        if unknown:
+            raise ValueError(f"{group}: rows[{i}] has unknown field(s) {unknown}; row fields: {', '.join(names)}")
+        for widget in widgets:
+            if widget.name not in row and _engine._widget_default(widget) is None:
+                raise ValueError(f"{group}: field {widget.name!r} has no default; supply it in rows[{i}]")
+
+    entries = _engine._validate_dynamic_group_layout(node, m) or []
+    current = sum(1 for e in entries if e.owner == group) // len(widgets)
+    linked = set()
+    for inp in node.get("inputs") or []:
+        if isinstance(inp, dict) and inp.get("link") is not None:
+            widget = inp.get("widget")
+            linked.update(
+                name
+                for name in (inp.get("name"), widget.get("name") if isinstance(widget, dict) else None)
+                if isinstance(name, str)
+            )
+    fields = [field.name for field in _engine._dynamic_group_fields(port)]
+
+    def pin_reason(row: int) -> str | None:
+        # A link, or a promotion whose write lands on the host (a subgraph
+        # input or a legacy proxyWidgets entry), owns the row's value.
+        for name in fields:
+            address = f"{group}.{row}.{name}"
+            try:
+                target = _promoted.resolve_write(workflow, graph, segments, address)
+            except ValueError:  # fed by another interior node: a plain link
+                target = None
+            if target is not None and (target.redirected_from or target.kind not in ("top", "interior")):
+                return "is promoted to the parent subgraph; unpromote it first"
+            if address in linked:
+                return "is connected; disconnect it first"
+        return None
+
+    pinned = {r: reason for r in range(current) if (reason := pin_reason(r))}
+    last = max(pinned, default=None)
+    free_before_last = last + 1 - len(pinned) if pinned else 0
+    if len(rows) < free_before_last:
+        raise ValueError(
+            f"{group}.{last} keeps its position and is left out of rows; supply at least "
+            f"{free_before_last} row(s), or {group}.{last} {pinned[last]}"
+        )
+    maximum = port.options.max if port.options.max is not None else 20
+    if len(rows) + len(pinned) > maximum:
+        raise ValueError(
+            f"{group}: {len(rows)} row(s) plus {len(pinned)} connected or promoted row(s) exceed the maximum of {maximum}"
+        )
+    supplied = iter(rows)
+    plan = [None if index in pinned else next(supplied) for index in range(len(rows) + len(pinned))]
+    for index in range(current, len(plan)):
+        # A shrink can leave a link on an input it did not match by name.
+        if any(f"{group}.{index}.{name}" in linked for name in fields):
+            raise ValueError(f"{group}.{index} still has a link from an earlier row; disconnect it first")
+    address = "/".join(segments) if len(segments) > 1 else node_id
+    where = segments if len(segments) > 1 else str(node_id)
+    stamps = workflow.get("_widget_stamps") or {}
+    claimed = [group] + [
+        f"{group}.{i}.{w.name}"
+        for i in range(max(len(plan), current))
+        if i >= len(plan) or plan[i] is not None
+        for w in widgets
+    ]
+    for written in claimed:
+        prior = stamps.get(json.dumps(["widget", where, written]))
+        if prior is not None and list(prior[:2]) >= [base_version, actor]:
+            raise ValueError(
+                f"{group}: {written} is already written at stamp [{prior[0]}, {prior[1]}]; write the group once "
+                f"per batch (a stamp left by an earlier apply needs a higher base_version)"
+            )
+
+    # The address is resolved, so skip set_widget's retry on another node.
+    workflow, op = _set_widget_impl(workflow, graph, address, group, len(plan), actor=actor, base_version=base_version)
+    ops = [op]
+    for index, row in enumerate(plan):
+        if row is None:
+            continue
+        for widget in widgets:
+            value = row[widget.name] if widget.name in row else _engine._widget_default(widget)
+            workflow, op = _set_widget_impl(
+                workflow,
+                graph,
+                address,
+                f"{group}.{index}.{widget.name}",
+                value,
+                actor=actor,
+                base_version=base_version,
+            )
+            ops.append(op)
+    return workflow, ops
+
+
 def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     """The top-level ``insert:<op>:root:node:<id>`` node a bare template id means.
 
@@ -2865,6 +3007,7 @@ def apply_specs(
     pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
+    replaced: dict[tuple, bool] = {}
     input_targets: set[str] = set()
     try:
         for i, spec in enumerate(specs):
@@ -2928,6 +3071,19 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                elif kind == "set_dynamic_group_rows":
+                    workflow, row_ops = set_dynamic_group_rows(
+                        workflow,
+                        graph,
+                        resolve_ref(spec["node"], aliases),
+                        spec["group"],
+                        spec["rows"],
+                        actor=actor,
+                        base_version=base_version,
+                    )
+                    ops.extend(row_ops)
+                    replaced.update({_write_target(row_op): row_op is row_ops[0] for row_op in row_ops})
+                    continue
                 elif kind == "set_node_field":
                     workflow, op = set_node_field(
                         workflow,
@@ -2950,6 +3106,18 @@ def apply_specs(
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            # A later write at the batch's stamp would tie with the replacement
+            # and be settled by the random op_id.
+            target = _write_target(op) if op.get("op") == "set_widget" else None
+            if target in replaced:
+                raise ValueError(
+                    f"spec #{i}: {target[2]} was replaced earlier in this batch by set_dynamic_group_rows; "
+                    + (
+                        "change the number of rows in that spec instead"
+                        if replaced[target]
+                        else "put the value in its rows instead"
+                    )
+                )
             if kind in {"connect", "disconnect"}:
                 grow = op.get("grow")
                 if grow is not None and not grow.get("promoted"):
