@@ -1228,3 +1228,27 @@ v1.9.
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
 pinning this document by SHA move the SHA together with their comfy-cli pin.
+
+## 19. Amendment v1.10 — 2026-10-14 (later write in a batch wins)
+
+`apply_specs` stamps every op in a batch with the same `[base_version,
+actor]`, so two writes to one register in a batch tied on the stamp and the
+random uuid4 `op_id` picked the winner (the §11.1 batch caveat). The later
+write could be a silent no-op, and a write to a structural register (a
+dynamic-combo selector, a DynamicGroup count) could lose to an earlier one and
+make the specs that followed it fail.
+
+**The rule.** `_new_op` now mints `op_id` as 16 hex chars of a nanosecond
+clock that never repeats or goes backwards within the process, then 16 hex
+chars of random bits. Ops a writer mints later compare higher, so within one
+batch the later spec wins. This supersedes "uuid4 hex" in §§2 and 6 and the
+§11.1 batch caveat.
+
+**Wire shape unchanged.** `op_id` is still exactly 32 lowercase hex chars
+(§8.2), the stamp is still `[base_version, actor]`, and `_stamp_key` /
+`_lww_gate` are unchanged. Receivers never parse or regenerate an `op_id`, so
+ops minted before this amendment replay as before, and stamp order still
+converges in any apply order.
+
+**No change to §§3-5, 7, 8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
