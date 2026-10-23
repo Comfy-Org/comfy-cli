@@ -26,6 +26,7 @@ from comfy_cli.command.workflow import (
     _load_workflow_or_fail,
     _parse_value,
 )
+from comfy_cli.cql.engine import DynamicGroupBindingError
 from comfy_cli.output import get_renderer, rprint
 
 # Shared option aliases — the edit commands (add-node/set-widget/connect/
@@ -75,7 +76,12 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
             details={k: v for k, v in f.items() if k != "message"},
         )
         return
-    renderer.error(code="workflow_edit_invalid", message=str(e), hint=hint)
+    renderer.error(code=_edit_error_code(e), message=str(e), hint=hint)
+
+
+def _edit_error_code(e: Exception) -> str:
+    """A DynamicGroup refusal keeps its own code; every other edit failure is ``workflow_edit_invalid``."""
+    return e.code if isinstance(e, DynamicGroupBindingError) else "workflow_edit_invalid"
 
 
 def _split_addr(addr: str, renderer) -> tuple[Any, str]:
@@ -988,12 +994,12 @@ def apply_cmd(
                 "failed": {
                     "index": getattr(e, "spec_index", None),
                     "op": getattr(e, "spec_op", None),
-                    "code": "workflow_edit_invalid",
+                    "code": _edit_error_code(e),
                 },
                 # Specs applied before the abort — all discarded (atomic batch).
                 "applied_count": getattr(e, "applied_count", 0),
             }
-        renderer.error(code="workflow_edit_invalid", message=f"batch failed: {e}", details=details)
+        renderer.error(code=_edit_error_code(e), message=f"batch failed: {e}", details=details)
         raise typer.Exit(code=1) from e
 
     workflow_ops.strip_internal(workflow)
@@ -1166,7 +1172,7 @@ def foreach_cmd(
         # leaves the earlier files on disk. Surface them (in the hint AND machine-
         # readable details) so the caller isn't blind to the partial output.
         renderer.error(
-            code="workflow_edit_invalid",
+            code=_edit_error_code(e),
             message=f"foreach failed: {e}",
             hint=(
                 f"{len(written)} workflow(s) were written to {out} before the failure — "

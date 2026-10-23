@@ -260,7 +260,7 @@ def execute(
             workflow = convert_ui_to_api(raw_workflow, object_info)
         except WorkflowConversionError as e:
             renderer.error(
-                code="conversion_error",
+                code=e.code or "conversion_error",
                 message=f"Workflow conversion failed: {e}",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
             )
@@ -1101,7 +1101,7 @@ def execute_cloud(
             raw_workflow = convert_ui_to_api(raw_workflow, object_info)
         except WorkflowConversionError as e:
             renderer.error(
-                code="conversion_error",
+                code=e.code or "conversion_error",
                 message=f"Workflow conversion failed: {e}",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format and retry",
             )

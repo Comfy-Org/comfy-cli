@@ -82,7 +82,14 @@ _MAX_DYNAMIC_COMBO_DEPTH = 16
 
 
 class WorkflowConversionError(Exception):
-    """Raised when a workflow can't be converted to API format."""
+    """Raised when a workflow can't be converted to API format.
+
+    ``code`` is the refusal's own ``error.code`` when it has one (a DynamicGroup refusal), else None.
+    """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 def is_api_format(workflow: Any) -> bool:
@@ -198,7 +205,7 @@ def _convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
                 nodes_to_exclude=nodes_to_exclude,
             )
         except DynamicGroupBindingError as exc:
-            raise WorkflowConversionError(f"Node {node_id_str} ({node_type}): {exc}") from exc
+            raise WorkflowConversionError(f"Node {node_id_str} ({node_type}): {exc}", exc.code) from exc
         except Exception:
             # An individual malformed node should not torpedo the whole prompt.
             # The executor will fail loudly on missing nodes if this matters.
