@@ -2161,7 +2161,7 @@ def flush_proxy_migration(
 
 
 def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
-    """Every concrete ``(interior node path, widget)`` a promoted input feeds —
+    """Every concrete ``(interior node path, input)`` a promoted widget feeds —
     all of its boundary links, through nested instances. A repaired primitive
     fan-out has several; :func:`deepest_source` reports only the first."""
     cache = getattr(defs, "promotion_boundaries", None)
@@ -2343,14 +2343,15 @@ def _boundary_targets(
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
             marker = entry.get("widget")
-            if marker:
+            widget = marker.get("name") if isinstance(marker, dict) else None
+            name = widget or entry.get("name")
+            if name is not None:
                 _spend_traversal_budget(
                     _output_budget,
                     1,
                     "promoted widget boundary traversal exceeded its safe limit",
                 )
-                widget = marker.get("name") if isinstance(marker, dict) else None
-                out.append(([tid], str(widget or entry.get("name"))))
+                out.append(([tid], str(name)))
     _memo[memo_key] = out
     frozen_dependencies = frozenset(dependencies)
     _dependency_memo[memo_key] = frozen_dependencies

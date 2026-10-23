@@ -169,6 +169,9 @@ history.
 
 ### Fixed
 
+- Workflow conversion sends a promoted subgraph widget's value to every linked
+  input, including socket-only targets in direct and nested fan-outs.
+
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,

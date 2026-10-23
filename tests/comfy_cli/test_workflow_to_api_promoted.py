@@ -1364,3 +1364,156 @@ def test_promotion_traversal_limit_is_a_structured_conversion_failure(object_inf
         pytest.raises(workflow_to_api.WorkflowConversionError, match="promoted input traversal exceeded"),
     ):
         convert_ui_to_api(_load("audio_minimax_music_3.json"), object_info)
+
+
+def _promoted_fanout_workflow(nested=False):
+    inner_id = "00000000-0000-0000-0000-000000000001"
+    inner = {
+        "id": inner_id,
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1, 2]}],
+        "outputs": [],
+        "nodes": [
+            {
+                "id": 1,
+                "type": "WidgetText",
+                "inputs": [{"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1}],
+                "outputs": [],
+                "widgets_values": ["interior default"],
+            },
+            {
+                "id": 2,
+                "type": "SocketText",
+                "inputs": [{"name": "text", "type": "STRING", "link": 2}],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0, "type": "STRING"},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 2, "target_slot": 0, "type": "STRING"},
+        ],
+    }
+    definitions = [inner]
+    host_type = inner_id
+    prefix = "100"
+    if nested:
+        host_type = "00000000-0000-0000-0000-000000000002"
+        definitions.append(
+            {
+                "id": host_type,
+                "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [3]}],
+                "outputs": [],
+                "nodes": [
+                    {
+                        "id": 10,
+                        "type": inner_id,
+                        "inputs": [{"name": "prompt", "type": "STRING", "link": 3}],
+                        "outputs": [],
+                        "widgets_values": ["inner host default"],
+                    }
+                ],
+                "links": [
+                    {"id": 3, "origin_id": -10, "origin_slot": 0, "target_id": 10, "target_slot": 0, "type": "STRING"}
+                ],
+            }
+        )
+        prefix = "100:10"
+    workflow = {
+        "nodes": [
+            {
+                "id": 100,
+                "type": host_type,
+                "inputs": [{"name": "prompt", "type": "STRING", "link": None}],
+                "outputs": [],
+                "widgets_values": ["host prompt"],
+            }
+        ],
+        "links": [],
+        "definitions": {"subgraphs": definitions},
+    }
+    info = {
+        "WidgetText": {"input": {"required": {"text": ["STRING", {}]}}, "output": []},
+        "SocketText": {"input": {"required": {"text": ["STRING", {"forceInput": True}]}}, "output": []},
+    }
+    return workflow, info, prefix
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct", "nested"])
+@pytest.mark.parametrize("target", [1, 2], ids=["widget", "socket"])
+def test_promoted_host_value_reaches_all_boundary_targets(nested, target):
+    workflow, info, prefix = _promoted_fanout_workflow(nested)
+    api = convert_ui_to_api(workflow, info)
+    assert api[f"{prefix}:{target}"]["inputs"].get("text") == "host prompt"
+
+
+def test_external_link_reaches_widget_and_socket_fanout_targets():
+    workflow, info, prefix = _promoted_fanout_workflow()
+    workflow["nodes"][0]["inputs"][0]["link"] = 10
+    workflow["nodes"].append(
+        {
+            "id": 20,
+            "type": "PrimitiveString",
+            "inputs": [],
+            "outputs": [{"name": "STRING", "type": "STRING", "links": [10]}],
+            "widgets_values": ["external prompt"],
+        }
+    )
+    workflow["links"] = [[10, 20, 0, 100, 0, "STRING"]]
+    info["PrimitiveString"] = {"input": {"required": {"value": ["STRING", {}]}}, "output": ["STRING"]}
+    api = convert_ui_to_api(workflow, info)
+    for target in (1, 2):
+        assert api[f"{prefix}:{target}"]["inputs"]["text"] == ["20", 0]
+    assert api["20"]["inputs"]["value"] == "external prompt"
+
+
+def test_fanout_without_a_host_value_keeps_the_interior_default():
+    workflow, info, prefix = _promoted_fanout_workflow()
+    workflow["nodes"][0].pop("widgets_values")
+    api = convert_ui_to_api(workflow, info)
+    assert api[f"{prefix}:1"]["inputs"]["text"] == "interior default"
+    assert "text" not in api[f"{prefix}:2"]["inputs"]
+
+
+def test_stale_boundary_target_does_not_replace_an_internal_link():
+    workflow, info, prefix = _promoted_fanout_workflow()
+    inner = workflow["definitions"]["subgraphs"][0]
+    inner["nodes"][1]["inputs"][0]["link"] = 4
+    inner["nodes"].append(
+        {
+            "id": 3,
+            "type": "PrimitiveString",
+            "inputs": [],
+            "outputs": [{"name": "STRING", "type": "STRING", "links": [4]}],
+            "widgets_values": ["internal prompt"],
+        }
+    )
+    inner["links"].append(
+        {"id": 4, "origin_id": 3, "origin_slot": 0, "target_id": 2, "target_slot": 0, "type": "STRING"}
+    )
+    info["PrimitiveString"] = {"input": {"required": {"value": ["STRING", {}]}}, "output": ["STRING"]}
+    api = convert_ui_to_api(workflow, info)
+    assert api[f"{prefix}:1"]["inputs"]["text"] == "host prompt"
+    assert api[f"{prefix}:2"]["inputs"]["text"] == [f"{prefix}:3", 0]
+
+
+def test_socket_only_boundary_does_not_consume_a_host_widget_value():
+    workflow, info, prefix = _promoted_fanout_workflow()
+    workflow["definitions"]["subgraphs"][0]["inputs"][0]["linkIds"] = [2]
+    api = convert_ui_to_api(workflow, info)
+    assert "text" not in api[f"{prefix}:2"]["inputs"]
+
+
+def test_fanout_uses_the_widget_marker_name_when_it_differs_from_the_socket_name():
+    workflow, info, prefix = _promoted_fanout_workflow()
+    workflow["definitions"]["subgraphs"][0]["nodes"][0]["inputs"][0]["name"] = "ui_text"
+    api = convert_ui_to_api(workflow, info)
+    assert api[f"{prefix}:1"]["inputs"]["text"] == "host prompt"
+    assert "ui_text" not in api[f"{prefix}:1"]["inputs"]
+
+
+def test_fanout_skips_a_socket_without_an_input_name():
+    workflow, info, prefix = _promoted_fanout_workflow()
+    workflow["definitions"]["subgraphs"][0]["nodes"][1]["inputs"][0].pop("name")
+    api = convert_ui_to_api(workflow, info)
+    assert "None" not in api[f"{prefix}:2"]["inputs"]
+    assert api[f"{prefix}:1"]["inputs"]["text"] == "host prompt"
