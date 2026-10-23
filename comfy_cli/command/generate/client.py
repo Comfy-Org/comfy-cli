@@ -28,14 +28,11 @@ class ApiError(RuntimeError):
 def resolve_api_key(explicit: str | None = None) -> str:
     """Resolve a credential for the partner-API proxy.
 
-    OAuth-first: when a live OAuth session is present it is preferred over
-    ambient API keys (``COMFY_API_KEY`` env / stored key), because OAuth is
-    the CLI's primary auth path and API keys are on a deprecation path. The
-    only thing that outranks the session is an explicit ``--api-key`` flag —
-    a deliberate per-call override. Resolution order (shared chain in
-    ``comfy_cli.credentials``, ``purpose="partner"``):
-    explicit flag → live OAuth session (refreshed if near expiry) →
-    ``COMFY_API_KEY`` env → stored key. Raise if none resolve.
+    Resolution order (shared chain in ``comfy_cli.credentials``,
+    ``purpose="partner"``): explicit ``--api-key`` flag → ``COMFY_API_KEY`` env
+    (handed in for this run, so it outranks a stored sign-in, which is then not
+    refreshed) → live OAuth session (refreshed if near expiry) → stored key.
+    Empty or whitespace-only env values count as unset. Raise if none resolve.
 
     The proxy validates a non-``comfyui-`` bearer token as a Firebase JWT
     (see ``_auth_headers``), so the same session that powers
