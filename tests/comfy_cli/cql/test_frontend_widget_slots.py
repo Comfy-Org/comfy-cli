@@ -373,6 +373,23 @@ class TestDomWidgetInputs:
             512,
         ]
 
+    def test_load3d_advanced_single_marker_edit_and_convert_agree(self, graph: Graph):
+        # One marker is not a legacy prefix: it is the viewport's own value.
+        # Editing and converting must both read it that way, or a width edit
+        # lands in a slot the converter then reports as the viewport.
+        values = ["m.fbx", "upload3dmodel", 800, 600]
+        assert graph.widget_order_for_node("Load3DAdvanced", values) == [
+            "model_file",
+            "viewport_state",
+            "width",
+            "height",
+        ]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == ["m.fbx", "upload3dmodel", 512, 600]
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "upload3dmodel", "width": 512, "height": 600}
+
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
         # model_3d LINK, so its viewport slot follows nothing.
