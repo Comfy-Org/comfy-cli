@@ -3134,6 +3134,11 @@ def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
             if _apply_set_widget(workflow, op, graph) is False:
                 continue
             workflow.setdefault("_applied_ops", []).append(op_id)
+            # Bind the id to its canonical payload here too: a deferred write
+            # reaches ``_applied_ops`` through this loop and never through
+            # ``apply_op``'s tail, so without this the reuse gate would read it
+            # as a legacy list-only entry and silently no-op a changed retry.
+            workflow.setdefault("_applied_op_digests", {})[op_id] = _op_digest(op)
             pending.pop(op_id, None)
             progressed = True
         if not progressed:

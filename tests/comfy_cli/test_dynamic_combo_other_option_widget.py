@@ -565,3 +565,36 @@ def test_missing_nested_selector_uses_the_active_outer_options_default():
     assert "model.mode='quick'" in msg, msg
     assert "'detailed'" in msg, msg
     assert wf["nodes"][0]["widgets_values"] == before
+
+
+def test_a_deferred_write_is_bound_to_its_canonical_payload_once_applied(graph):
+    """A deferred write reaches ``_applied_ops`` through the retry loop, not
+    through ``apply_op``'s tail, so the op-id/payload binding (op-vocabulary
+    Amendment v1.6) has to be recorded there too. Without it the reuse gate
+    sees a list-only entry and silently no-ops a changed-payload retry."""
+    wf, node_id = _fresh(graph)
+    hidden_write = workflow_ops._new_op(
+        "set_widget",
+        "agent-a",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+    workflow_ops.apply_op(wf, hidden_write, graph)
+    assert hidden_write["op_id"] in wf["_deferred_widget_ops"]
+
+    wf, _ = workflow_ops.set_widget(wf, graph, node_id, "model", "MiniMax H3 Max", actor="agent-b")
+
+    assert hidden_write["op_id"] in wf["_applied_ops"]
+    assert wf["_applied_op_digests"][hidden_write["op_id"]] == workflow_ops._op_digest(hidden_write)
+
+    # An identical redelivery stays a no-op; the same id with a changed payload
+    # is refused rather than dropped.
+    assert workflow_ops.apply_op(wf, copy.deepcopy(hidden_write), graph) is wf
+    changed = copy.deepcopy(hidden_write)
+    changed["value"] = "balanced"
+    before = copy.deepcopy(wf)
+    with pytest.raises(ValueError, match="^op_id_reuse:"):
+        workflow_ops.apply_op(wf, changed, graph)
+    assert wf == before
