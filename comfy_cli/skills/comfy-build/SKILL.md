@@ -103,6 +103,11 @@ the one the situation calls for rather than guessing at its contents:
 All four converge on the same file, then the same `validate → push → release`
 tail.
 
+If the goal is one workflow running on Comfy Cloud ("Run on Cloud", or "put this
+workflow on Cloud") rather than an environment, read
+`comfy skills show comfy-run-on-cloud` first: stock Cloud or an existing Build
+may already run it, and a build it needs carries only what that workflow loads.
+
 ---
 
 ## Path A — from a ComfyUI install

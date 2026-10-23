@@ -69,6 +69,7 @@ class FixtureKind(Enum):
     REFS_BUILD_TARGETS = "refs build-targets"
     REFS_MODEL_DIRS = "refs model-dirs"
     BLOB_LS = "blob ls"
+    INVENTORY = "inventory"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,8 @@ BUILD_AUTH_CASES = (
     BuildAuthCase(FixtureKind.REFS_BUILD_TARGETS, "refs build-targets", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_MODEL_DIRS, "refs model-dirs", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.BLOB_LS, "blob ls", True, _ONE_PLUS),
+    # Reads only the workflow file; --cloud reads the node catalog, never the Builder.
+    BuildAuthCase(FixtureKind.INVENTORY, "inventory", False, _ZERO),
 )
 
 
@@ -199,6 +202,10 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
             return ["build", "refs", "model-dirs"]
         case FixtureKind.BLOB_LS:
             return ["build", "blob", "ls"]
+        case FixtureKind.INVENTORY:
+            workflow = root / "workflow.json"
+            workflow.write_text(json.dumps({"nodes": [{"id": 1, "type": "KSampler", "mode": 0}]}), encoding="utf-8")
+            return ["build", "inventory", str(workflow)]
         case unreachable:
             assert_never(unreachable)
 

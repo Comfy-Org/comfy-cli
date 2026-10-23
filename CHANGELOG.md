@@ -20,7 +20,36 @@ history.
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
-
+- A `comfy-run-on-cloud` skill, installed by default, takes one local workflow
+  onto Comfy Cloud. It checks stock Cloud with the original dependencies,
+  including supported user model/LoRA uploads, then reuses a compatible existing
+  Build before considering conversion. Lossless conversions (the same file in
+  another folder, removing memory- or speed-only nodes, exact core equivalents)
+  happen without asking; a lossy one (a different model, LoRA, upscaler or implementation)
+  needs the user's yes, with a custom build offered as the exact alternative and
+  its costs stated. It pre-flights every converted copy on the server, asks once
+  per file before uploading models or inputs from disk on every route, and
+  verifies a real job on the selected target before handoff. It asks before freeing
+  a release, Build or deployment slot only when the planned operation needs it.
+  Its reference skill `comfy-run-on-cloud-local-install` covers finding the install behind a
+  workflow, Comfy Desktop's split layout included.
+- `comfy build inventory <workflow>` (hidden while the skill above is its only
+  caller) reports what one workflow loads: active classes and the packs and
+  versions it recorded, model values with their subfolders, `embedding:`
+  references, input files, muted and bypassed nodes, and loaders that pull
+  weights no widget names. `--models-root` (repeatable), `--desktop` and
+  `--hash` find each model on disk; `--input-root` hashes each input file to the
+  name Cloud stores an upload of it under; `--server` joins a running ComfyUI's
+  classes. `--cloud` reports `covered`, `covered_after_lossless_fixes` (folder
+  remaps with a ready `set_widget`, removable memory-only nodes),
+  `covered_needs_check` or `needs_build_or_lossy_conversion`, compares each
+  local model's size with Cloud's same-named file (`weights: different_size` is
+  a different model; matching sizes still require identity verification), and
+  says whether each input is already on Cloud. Only active subgraph instances
+  contribute dependencies, each model use is checked against its loader, and
+  ambiguous input basenames are not guessed. API inventories include the exact
+  deployment asset-upload plan, including custom-node file inputs, so approvals
+  can cover every file before a smoke run.
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0

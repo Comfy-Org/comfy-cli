@@ -1,0 +1,314 @@
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from comfy_cli.workflow_inventory import inventory, join_cloud, join_inputs, join_local, join_server
+
+
+def _node(node_id, class_type, widgets=(), *, mode=0, **properties):
+    return {"id": node_id, "type": class_type, "mode": mode, "widgets_values": list(widgets), "properties": properties}
+
+
+def _workflow():
+    return {
+        "nodes": [
+            _node(1, "CheckpointLoaderSimple", ["sdxl\\base_v1.safetensors"], cnr_id="comfy-core", ver="0.3.60"),
+            _node(2, "LoraLoaderModelOnly", ["studio/hero_v5.safetensors", 0.8], cnr_id="comfy-core"),
+            _node(3, "CLIPTextEncode", ["a portrait, embedding:EasyNegative, sharp"], cnr_id="comfy-core"),
+            _node(4, "LoadImage", ["face.png", "image"], cnr_id="comfy-core"),
+            _node(5, "UpscaleModelLoader", ["4x_unused.pth"], mode=4, cnr_id="comfy-core"),
+            _node(6, "IPAdapterUnifiedLoader", ["PLUS (high strength)"], cnr_id="comfyui_ipadapter_plus", ver="2.0.0"),
+            _node(7, "Note", ["remember to swap the LoRA"]),
+            _node(8, "aaaaaaaa-0000-0000-0000-000000000001", []),
+            _node(
+                9,
+                "VAELoader",
+                ["sdxl_vae.safetensors"],
+                cnr_id="comfy-core",
+                models=[{"name": "sdxl_vae.safetensors", "directory": "vae", "url": "https://example.test/vae"}],
+            ),
+        ],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "aaaaaaaa-0000-0000-0000-000000000001",
+                    "nodes": [_node(20, "UltimateSDUpscale", [2, 42], cnr_id="comfyui_ultimatesdupscale", ver="1.6.0")],
+                }
+            ]
+        },
+        "extra": {"node_versions": {"comfy-core": "0.3.60"}},
+    }
+
+
+def test_inventory_scopes_to_active_nodes_and_keeps_subfolders():
+    report = inventory(_workflow())
+
+    assert report["format"] == "ui"
+    assert set(report["classes"]) == {
+        "CheckpointLoaderSimple",
+        "LoraLoaderModelOnly",
+        "CLIPTextEncode",
+        "LoadImage",
+        "IPAdapterUnifiedLoader",
+        "VAELoader",
+        "UltimateSDUpscale",
+    }
+    assert report["classes"]["IPAdapterUnifiedLoader"] == {
+        "count": 1,
+        "pack": "comfyui_ipadapter_plus",
+        "ver": ["2.0.0"],
+    }
+    paths = [m["path"] for m in report["models"]]
+    assert paths == ["sdxl/base_v1.safetensors", "studio/hero_v5.safetensors", "sdxl_vae.safetensors"]
+    assert report["models"][0]["subfolder"] == "sdxl"
+    assert any("Windows path" in w for w in report["warnings"])
+    assert report["embeddings"] == [{"name": "EasyNegative", "node": "CLIPTextEncode", "node_id": 3}]
+    assert report["inputs"] == [{"file": "face.png", "node": "LoadImage", "node_id": 4}]
+    assert report["skipped"] == [
+        {"id": 5, "class": "UpscaleModelLoader", "why": "bypassed", "models": ["4x_unused.pth"]}
+    ]
+    assert [i["class"] for i in report["implicit"]] == ["IPAdapterUnifiedLoader"]
+    assert report["node_versions"] == {"comfy-core": "0.3.60"}
+    assert report["packs"]["comfyui_ultimatesdupscale"] == ["UltimateSDUpscale"]
+
+
+def test_inventory_reads_api_exports():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
+        "2": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "seed": 1}},
+    }
+    report = inventory(api)
+
+    assert report["format"] == "api"
+    assert set(report["classes"]) == {"CheckpointLoaderSimple", "KSampler"}
+    assert [m["path"] for m in report["models"]] == ["base.safetensors"]
+
+
+def test_join_local_matches_by_basename_across_roots(tmp_path: Path):
+    first = tmp_path / "models"
+    shared = tmp_path / "shared"
+    (first / "checkpoints" / "sdxl").mkdir(parents=True)
+    (shared / "loras").mkdir(parents=True)
+    (first / "checkpoints" / "sdxl" / "base_v1.safetensors").write_bytes(b"BASE")
+    (shared / "loras" / "hero_v5.safetensors").write_bytes(b"HERO")
+    report = inventory(_workflow())
+
+    join_local(report, [str(first), str(shared)], hash_files=True)
+
+    base, lora, vae = report["models"]
+    assert base["local"][0]["rel"] == "checkpoints/sdxl/base_v1.safetensors"
+    assert base["local"][0]["type_dir"] == "checkpoints"
+    assert base["local"][0]["sha256"] == hashlib.sha256(b"BASE").hexdigest()
+    assert lora["local"][0]["root"] == str(shared)
+    assert vae["local"] == []
+    assert report["models_not_on_disk"] == ["sdxl_vae.safetensors"]
+
+
+def test_join_server_maps_classes_to_local_pack_dirs():
+    report = inventory(_workflow())
+    object_info = {
+        "CheckpointLoaderSimple": {"python_module": "nodes"},
+        "UltimateSDUpscale": {"python_module": "custom_nodes.ComfyUI_UltimateSDUpscale"},
+    }
+
+    section = join_server(report, object_info, {"system": {"comfyui_version": "0.3.60"}})
+
+    assert section["comfyui_version"] == "0.3.60"
+    assert section["classes_by_local_pack_dir"] == {
+        "core": ["CheckpointLoaderSimple"],
+        "ComfyUI_UltimateSDUpscale": ["UltimateSDUpscale"],
+    }
+    assert "IPAdapterUnifiedLoader" in section["classes_missing_locally"]
+
+
+def _catalog(**nodes):
+    return lambda class_type: nodes.get(class_type)
+
+
+def _combo(name, *choices, cloud_disabled=False):
+    return {"inputs": [{"name": name, "choices": list(choices)}], "cloud_disabled": cloud_disabled}
+
+
+def test_join_cloud_finds_remaps_and_blockers():
+    report = inventory(_workflow())
+    lookup = _catalog(
+        CheckpointLoaderSimple=_combo("ckpt_name", "base_v1.safetensors", "other.safetensors"),
+        LoraLoaderModelOnly=_combo("lora_name", "public.safetensors"),
+        CLIPTextEncode={"inputs": []},
+        LoadImage=_combo("image", "example.png"),
+        VAELoader=_combo("vae_name", "sdxl_vae.safetensors"),
+        UltimateSDUpscale={"inputs": []},
+        IPAdapterUnifiedLoader=_combo("preset", "PLUS (high strength)", cloud_disabled=True),
+    )
+
+    cloud = join_cloud(report, lookup)
+
+    statuses = {m["path"]: m for m in cloud["models"]}
+    remap = statuses["sdxl/base_v1.safetensors"]
+    assert remap["status"] == "remap"
+    assert remap["set_widget"] == "1.ckpt_name"
+    assert remap["to"] == "base_v1.safetensors"
+    assert statuses["studio/hero_v5.safetensors"]["status"] == "absent"
+    assert statuses["sdxl_vae.safetensors"]["status"] == "present"
+    assert cloud["cloud_disabled"] == ["IPAdapterUnifiedLoader"]
+    assert cloud["verdict"] == "needs_build_or_lossy_conversion"
+    assert cloud["blocking"] == ["IPAdapterUnifiedLoader", "studio/hero_v5.safetensors"]
+    assert any(u.startswith("embedding:EasyNegative") for u in cloud["unverified"])
+
+
+def test_join_cloud_verdicts_without_blockers():
+    plain = inventory({"nodes": [_node(1, "CheckpointLoaderSimple", ["base.safetensors"])]})
+    nested = inventory({"nodes": [_node(1, "CheckpointLoaderSimple", ["sdxl/base.safetensors"])]})
+    lookup = _catalog(CheckpointLoaderSimple=_combo("ckpt_name", "base.safetensors"))
+
+    assert join_cloud(plain, lookup)["verdict"] == "covered"
+    assert join_cloud(nested, lookup)["verdict"] == "covered_after_lossless_fixes"
+    assert join_cloud(plain, _catalog())["missing_classes"] == ["CheckpointLoaderSimple"]
+
+
+def test_join_cloud_treats_missing_perf_only_nodes_as_lossless():
+    workflow = {
+        "nodes": [
+            _node(1, "WanVideoModelLoader", ["wan.safetensors"]),
+            _node(2, "WanVideoBlockSwap", [10, False]),
+            _node(3, "WanVideoSetBlockSwap"),
+        ]
+    }
+    cloud = join_cloud(inventory(workflow), _catalog(WanVideoModelLoader=_combo("model", "wan.safetensors")))
+
+    assert cloud["missing_classes"] == []
+    assert [x["class"] for x in cloud["lossless_removable"]] == ["WanVideoBlockSwap", "WanVideoSetBlockSwap"]
+    assert cloud["verdict"] == "covered_after_lossless_fixes"
+
+
+def test_join_cloud_flags_a_same_named_file_with_different_weights(tmp_path: Path):
+    (tmp_path / "upscale_models").mkdir()
+    (tmp_path / "upscale_models" / "4x-UltraSharp.pth").write_bytes(b"x" * 10)
+    report = inventory({"nodes": [_node(1, "UpscaleModelLoader", ["4x-UltraSharp.pth"])]})
+    join_local(report, [str(tmp_path)])
+    lookup = _catalog(UpscaleModelLoader=_combo("model_name", "4x-UltraSharp.pth"))
+
+    differs = join_cloud(report, lookup, size_of=lambda name: 66_961_958)
+    same = join_cloud(report, lookup, size_of=lambda name: 10)
+
+    assert differs["models"][0]["weights"] == "different_size"
+    assert differs["verdict"] == "needs_build_or_lossy_conversion"
+    assert same["models"][0]["weights"] == "same_size"
+    assert same["verdict"] == "covered_needs_check"
+
+
+def test_join_inputs_names_the_cloud_upload_and_finds_it(tmp_path: Path):
+    (tmp_path / "face.png").write_bytes(b"PNG")
+    report = inventory({"nodes": [_node(4, "LoadImage", ["face.png", "image"])]})
+
+    join_inputs(report, [str(tmp_path)], lambda path: "blake3:abc123")
+    cloud = join_cloud(report, _catalog(LoadImage=_combo("image", "abc123.png")))
+
+    item = report["inputs"][0]
+    assert item["local_path"] == str(tmp_path / "face.png")
+    assert item["cloud_name"] == "abc123.png"
+    assert item["on_cloud"] is True
+    assert cloud["verdict"] == "covered"
+
+
+def test_inventory_only_expands_active_subgraph_instances():
+    workflow = {
+        "nodes": [_node(1, "active"), _node(2, "muted", mode=2), _node(3, "bypassed", mode=4)],
+        "definitions": {
+            "subgraphs": [
+                {"id": "active", "nodes": [_node(10, "VAELoader", ["used.safetensors"])]},
+                {"id": "muted", "nodes": [_node(10, "LoraLoader", ["private.safetensors"])]},
+                {"id": "bypassed", "nodes": [_node(10, "LoraLoader", ["bypassed.safetensors"])]},
+                {"id": "unused", "nodes": [_node(10, "LoraLoader", ["unrelated.safetensors"])]},
+            ]
+        },
+    }
+
+    report = inventory(workflow)
+
+    assert list(report["classes"]) == ["VAELoader"]
+    assert [m["path"] for m in report["models"]] == ["used.safetensors"]
+    assert report["models"][0]["node_id"] == "1/10"
+
+
+def test_inventory_checks_each_use_of_a_model_on_cloud():
+    report = inventory(
+        {"nodes": [_node(1, "UNETLoader", ["same.safetensors"]), _node(2, "LoraLoader", ["same.safetensors"])]}
+    )
+
+    cloud = join_cloud(
+        report,
+        _catalog(
+            UNETLoader=_combo("unet_name", "same.safetensors"), LoraLoader=_combo("lora_name", "other.safetensors")
+        ),
+    )
+
+    assert cloud["verdict"] == "needs_build_or_lossy_conversion"
+    assert [m["status"] for m in cloud["models"]] == ["present", "absent"]
+
+
+def test_join_inputs_respects_subfolders_and_rejects_ambiguous_basenames(tmp_path: Path):
+    for directory, data in [("first", b"WRONG"), ("second", b"RIGHT")]:
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "face.png").write_bytes(data)
+    report = inventory({"nodes": [_node(1, "LoadImage", ["second/face.png", "image"])]})
+    join_inputs(report, [str(tmp_path)], lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest())
+    assert report["inputs"][0]["local_path"] == str(tmp_path / "second" / "face.png")
+
+    ambiguous = inventory({"nodes": [_node(1, "LoadImage", ["face.png", "image"])]})
+    join_inputs(ambiguous, [str(tmp_path)], lambda path: "should-not-hash-an-ambiguous-file")
+    assert ambiguous["inputs"][0]["local_path"] is None
+    assert "cloud_name" not in ambiguous["inputs"][0]
+    assert any("ambiguous" in warning for warning in ambiguous["warnings"])
+
+
+def test_same_size_is_not_proof_of_identical_weights(tmp_path: Path):
+    (tmp_path / "same.safetensors").write_bytes(b"SAME LENGTH")
+    report = inventory({"nodes": [_node(1, "UNETLoader", ["same.safetensors"])]})
+    join_local(report, [str(tmp_path)])
+    cloud = join_cloud(report, _catalog(UNETLoader=_combo("unet_name", "same.safetensors")), lambda name: 11)
+
+    assert cloud["models"][0]["weights"] == "same_size"
+    assert cloud["verdict"] == "covered_needs_check"
+    assert any("identity" in note for note in cloud["unverified"])
+
+
+def test_api_input_files_are_selected_by_input_name_not_dict_order():
+    report = inventory(
+        {"1": {"class_type": "LoadImageMask", "inputs": {"channel": "red", "image": "private-mask.png"}}}
+    )
+    assert report["inputs"][0]["file"] == "private-mask.png"
+
+
+def test_dynamic_ui_bindings_cannot_be_reported_as_covered():
+    workflow = {
+        "nodes": [_node(1, "PrimitiveNode", ["private.png"]), _node(2, "LoadImage")],
+        "links": [[1, 1, 0, 2, 0, "STRING"]],
+    }
+    cloud = join_cloud(inventory(workflow), _catalog(LoadImage=_combo("image", "public.png")))
+    assert cloud["verdict"] == "covered_needs_check"
+    assert any("API" in note for note in cloud["unverified"])
+
+
+def test_download_hints_do_not_add_unselected_template_models_to_scope():
+    report = inventory(
+        {
+            "nodes": [
+                _node(
+                    1,
+                    "CheckpointLoaderSimple",
+                    ["active.safetensors"],
+                    models=[
+                        {
+                            "name": "template-default.safetensors",
+                            "directory": "checkpoints",
+                            "url": "https://example.test/old",
+                        }
+                    ],
+                )
+            ]
+        }
+    )
+    assert [model["path"] for model in report["models"]] == ["active.safetensors"]
+    assert report["model_hints"][0]["path"] == "template-default.safetensors"
