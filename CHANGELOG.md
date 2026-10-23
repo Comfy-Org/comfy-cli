@@ -169,6 +169,9 @@ history.
 
 ### Fixed
 
+- Converting a UI workflow to API format keeps a record widget's saved value,
+  such as `ImageCropV2.crop_region`, instead of replacing it with the schema
+  default.
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
