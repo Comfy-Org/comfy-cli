@@ -1013,8 +1013,8 @@ def strip_legacy_load_3d_buttons(m: Morphism, widgets: list[Any]) -> list[Any]:
     """Drop the LOAD_3D button constants a pre-#1031 comfy-cli wrote into a
     Load3DAdvanced node. The current frontend builds that node with four
     widgets and restores widgets_values by position, so the constants would
-    land in viewport_state/width/height. Same rule as the doc host's
-    normalizeLegacyPhantomSlots: a run of the exact constants at index 1,
+    land in viewport_state/width/height. Same rule the cloud doc host
+    applies to legacy slots: a run of the exact constants at index 1,
     at least two long (the two-marker rule load_3d_button_slots uses)."""
     if getattr(m, "id", "") != "Load3DAdvanced" or not load_3d_button_slots(m, widgets):
         return widgets

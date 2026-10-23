@@ -346,7 +346,7 @@ class TestDomWidgetInputs:
         ]
         # ...but the frontend builds this node with four widgets and restores
         # widgets_values by position, so an edit writes what the canvas would
-        # serialize (the cloud doc host's normalizeLegacyPhantomSlots rule).
+        # serialize (the cloud doc host normalizes legacy slots the same way).
         wf = _workflow(_node(1, "Load3DAdvanced", values))
         wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
         assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", "", 512, 600]
