@@ -169,6 +169,11 @@ history.
 
 ### Fixed
 
+- Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
+  (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
+  written `widgets_values` is the frontend's four-widget shape
+  (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
+  restored those values by position into viewport state, width and height.
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
