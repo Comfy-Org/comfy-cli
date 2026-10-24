@@ -338,15 +338,16 @@ local model can need it.
 
 * Every op carries `op_id`: uuid4 hex, minted by the **creator, before
   dispatch** (`_new_op`). Receivers never regenerate or rewrite an `op_id`.
-* `apply_op` records applied `op_id`s in `_applied_ops` and records `sha256(canonical_op)` in `_applied_op_digests`. An identical retry is a no-op; reuse with a different canonical payload rejects with `op_id_reuse`. Legacy documents with only the list retain their historical duplicate behavior. **Uniqueness scope is
+* `apply_op` records applied `op_id`s in the document's `_applied_ops` list and
+  their canonical digests in `_applied_op_digests`. An identical retry is a
+  no-op; the same `op_id` carrying a different canonical payload rejects with
+  `op_id_reuse`. A legacy document with only the list keeps its historical
+  duplicate behavior. See **Amendment v1.10** for the canonical form, the
+  bounds and the ledger contract. **Uniqueness scope is
   PER-WORKFLOW**: the same `op_id` can exist in two different workflow documents
   without interaction; within one document each op applies exactly once.
-* `_applied_ops` (and `_widget_stamps`) are apply-time bookkeeping, stripped
-  before serialization to disk (`strip_internal`).
-
-## Amendment v1.6 — canonical op identity
-
-`op_id` identifies one immutable semantic-op envelope. The canonical form is compact UTF-8 JSON over the whole envelope, with object keys sorted by Unicode code point at every depth and array order preserved. The replay ledger records its lowercase SHA-256 digest. Reusing an `op_id` with a different canonical payload rejects before mutation with `op_id_reuse`; an identical retry remains a no-op. Canonicalization is bounded to 64 levels, 4,096 entries per collection, and 262,144 approximate cost units. This mirrors comfy-multi-player schema Amendment A8. The asymmetric case is load-bearing: `{value: 25}` followed by the same `op_id` carrying `{value: 30}` rejects, while key insertion order is immaterial.
+* `_applied_ops`, `_applied_op_digests` (and `_widget_stamps`) are apply-time
+  bookkeeping, stripped before serialization to disk (`strip_internal`).
 
 ## 3. Conflict rules
 
@@ -1229,3 +1230,86 @@ v1.9.
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
 pinning this document by SHA move the SHA together with their comfy-cli pin.
+
+## 19. Amendment v1.10 — 2026-10-24 (canonical op identity: `op_id` binds one payload)
+
+**`op_id` identifies one immutable semantic-op envelope, not just one delivery.**
+Before this amendment `apply_op` dropped any op whose `op_id` was already in
+`_applied_ops` without looking at the payload, so a sender that reused an id
+with a changed payload had its second edit silently discarded — and two
+replicas that received the pair in different orders ended up with different
+documents and no error on either side. This mirrors comfy-multi-player schema
+**Amendment A8**; the two implementations must agree byte-for-byte on the
+canonical form, because the digest is the only thing that distinguishes an
+identical retry from reuse.
+
+### 19.1 The canonical form
+
+Compact JSON over the **whole envelope**:
+
+* object keys sorted by **Unicode code point** at every depth; array order
+  preserved; no insignificant whitespace (`,`/`:` separators, no spaces);
+* **numbers rendered as ECMAScript renders them** (`Number::toString`), not as
+  Python's float repr does. An integral float is `20`, not `20.0`; negative zero
+  is `0`; an exponent is `1e-7`, not `1e-07`. This is load-bearing rather than
+  cosmetic: the counterpart builds the canonical form with `JSON.stringify`, so
+  without it a FLOAT widget op relayed through JS digests differently on the two
+  sides and an identical redelivery is rejected as `op_id_reuse`;
+* **every non-finite number renders as `null`**, which is what `JSON.stringify`
+  does. The alternative — rejecting the op — made a widget whose *current* value
+  is `NaN`/`Infinity` impossible to overwrite, because the op captures that
+  value in `old` (and `json.load` accepts both spellings on the way in);
+* a **lone surrogate** renders as a `\udXXX` escape, matching ES2019
+  well-formed `JSON.stringify`. Emitted raw it cannot be UTF-8 encoded at all,
+  so the digest died with a bare `UnicodeEncodeError` outside the
+  `malformed_op:` prefix callers classify errors by.
+
+The ledger records the lowercase SHA-256 hex digest of that string.
+
+### 19.2 The ledger contract
+
+* `_applied_op_digests` maps `op_id` → digest, beside `_applied_ops`. Both are
+  stripped by `canonical()` and `strip_internal()`, and `reset_doc` clears both
+  as one history barrier.
+* **Rejects before mutation.** `op_id`, `_applied_ops` and `_applied_op_digests`
+  all arrive from untrusted JSON and are all validated before any handler runs:
+  a non-string `op_id`, or a ledger that is not an object/array, is
+  `malformed_op`. So is a payload canonicalization refuses. A document that
+  arrived without a ledger is never left carrying an empty one by a rejected op.
+* **A deferred op is already bound.** A `set_widget` waiting in
+  `_deferred_widget_ops` for a selector to reveal its target has not reached
+  `_applied_ops`, so the gate checks the deferred queue too; a second payload on
+  that `op_id` rejects instead of overwriting the pending entry.
+* **The enriched envelope is what is bound.** A promoted or `legacy_primitive`
+  `set_widget` only learns the host's materialized `host_widgets_values` by
+  reading back the document the write produced, so the ledger entry is corrected
+  to the envelope the caller actually broadcasts. If that enriched envelope is
+  not canonical the earlier digest stands: the document is already written, and
+  reporting failure for an applied op is worse than holding a digest a
+  redelivery will refuse in the pre-mutation branch.
+* **Legacy documents are untouched.** One carrying `_applied_ops` and no
+  `_applied_op_digests` keeps the historical drop-the-duplicate behavior, and
+  deliberately without digesting the replayed payload first — a non-canonical
+  replay must still be the documented no-op rather than a new error.
+
+### 19.3 Bounds
+
+Canonicalization is bounded to **64 levels of nesting**, **1,048,576 entries per
+collection** and **33,554,432 approximate cost units**. These exist only so a
+hostile or runaway payload cannot pin a replica inside canonicalization; every
+ordinary op has to pass, because the digest is computed on every apply and not
+only on a reuse comparison. The first pair of bounds (4,096 entries / 262,144
+units) was tight enough to reject real edits: `clear` and `reset_doc` enumerate
+every node id in `removed_nodes`, a `delete_node` on a hub node enumerates every
+incident link, and a prompt value — or the `old` value an op captures — runs
+past 256K characters routinely.
+
+The asymmetric case is the one to keep in mind: `{value: 25}` followed by the
+same `op_id` carrying `{value: 30}` rejects, while the same payload with its keys
+in a different insertion order is an ordinary no-op.
+
+**No change to §§1, 3-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. §2's identity
+bullet now cites this section. Downstream repos pinning this document by SHA
+move the SHA together with their comfy-cli pin, and must move their CMP A8 pin
+with it.

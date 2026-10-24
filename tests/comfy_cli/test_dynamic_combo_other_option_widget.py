@@ -570,7 +570,7 @@ def test_missing_nested_selector_uses_the_active_outer_options_default():
 def test_a_deferred_write_is_bound_to_its_canonical_payload_once_applied(graph):
     """A deferred write reaches ``_applied_ops`` through the retry loop, not
     through ``apply_op``'s tail, so the op-id/payload binding (op-vocabulary
-    Amendment v1.6) has to be recorded there too. Without it the reuse gate
+    Amendment v1.10) has to be recorded there too. Without it the reuse gate
     sees a list-only entry and silently no-ops a changed-payload retry."""
     wf, node_id = _fresh(graph)
     hidden_write = workflow_ops._new_op(
