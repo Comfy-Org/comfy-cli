@@ -58,6 +58,7 @@ import math
 import random
 import re
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from comfy_cli import layout
@@ -75,38 +76,157 @@ from comfy_cli.cql.engine import (
 _ID_FLOOR = 1 << 40
 
 _MAX_OP_PAYLOAD_DEPTH = 64
-_MAX_OP_COLLECTION_ENTRIES = 4096
-_MAX_OP_COST = 262_144
+# Bounded only so a hostile or runaway payload cannot pin a replica inside
+# canonicalization. Every ORDINARY op has to pass, because the digest is now
+# computed on every apply rather than only on a reuse comparison, and the first
+# bounds (4,096 entries / 262,144 cost units) were tight enough to reject real
+# edits: `clear` / `reset_doc` enumerate every node id in `removed_nodes`, a
+# `delete_node` on a hub node enumerates every incident link, and a prompt
+# widget value (or the `old` value an op captures) routinely runs past 256K
+# characters.
+_MAX_OP_COLLECTION_ENTRIES = 1_048_576
+_MAX_OP_COST = 33_554_432
+
+#: Any surrogate code point in a Python ``str`` is a LONE surrogate — astral
+#: characters are single code points there — so matching the whole block is
+#: enough to find the ones that cannot be UTF-8 encoded.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _es_number(value: float) -> str:
+    """Render a float exactly as ECMAScript ``Number::toString`` does.
+
+    The canonical form has to be byte-identical on both sides of the wire, and
+    the counterpart implementation (comfy-multi-player schema Amendment A8)
+    builds it with ``JSON.stringify``. Python's own float repr disagrees with
+    that on three shapes a FLOAT widget produces constantly — an integral float
+    (``20.0`` vs ``20``), negative zero (``-0.0`` vs ``0``) and an exponent
+    (``1e-07`` vs ``1e-7``) — so digesting Python's spelling would reject an
+    identical op that had merely been relayed through JS as ``op_id_reuse``, and
+    no float payload would ever digest the same on the two sides.
+
+    ``repr`` is still the input: it is the shortest round-tripping decimal, the
+    same digit string ECMAScript's algorithm starts from. Only the rendering of
+    that digit string differs, and this reimplements it (ECMA-262
+    ``Number::toString``, the ``k``/``n``/``s`` case analysis).
+    """
+    if value == 0:  # also folds -0.0, which ECMAScript renders as "0"
+        return "0"
+    if value < 0:
+        return "-" + _es_number(-value)
+    _, raw_digits, exponent = Decimal(repr(value)).as_tuple()
+    digits = list(raw_digits)
+    # ECMAScript picks the `s` that is NOT divisible by 10, so trailing zeros
+    # move into the exponent instead of into the digit string.
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    s = "".join(str(d) for d in digits)
+    k = len(s)
+    n = exponent + k
+    if k <= n <= 21:
+        return s + "0" * (n - k)
+    if 0 < n <= 21:
+        return f"{s[:n]}.{s[n:]}"
+    if -6 < n <= 0:
+        return "0." + "0" * -n + s
+    e = n - 1
+    mantissa = s if k == 1 else f"{s[0]}.{s[1:]}"
+    return f"{mantissa}e{'+' if e >= 0 else '-'}{abs(e)}"
+
+
+def _canonical_string(value: str) -> str:
+    """One JSON string literal, escaped the way ``JSON.stringify`` escapes it.
+
+    ``json.dumps`` already escapes exactly the code points ``JSON.stringify``
+    does, so the two agree on every well-formed string. They disagree on a lone
+    surrogate — which ``json.loads('"\\ud800"')`` happily produces: ES2019
+    well-formed stringify emits it as a ``\\udXXX`` escape, Python emits it raw.
+    A raw surrogate cannot be UTF-8 encoded at all, so leaving it would make the
+    digest die with a bare ``UnicodeEncodeError`` outside the ``malformed_op:``
+    contract callers classify errors by. Escaping it both matches ECMAScript and
+    keeps the encode in :func:`_op_digest` total.
+    """
+    literal = json.dumps(value, ensure_ascii=False)
+    if _LONE_SURROGATE.search(literal):
+        literal = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m.group()):04x}", literal)
+    return literal
+
+
+def _canonical_key(key: Any) -> str:
+    """An object key as its string form, matching ECMAScript property coercion."""
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bool):  # before int: bool is an int subclass
+        return "true" if key else "false"
+    if isinstance(key, int):
+        return str(key)
+    if isinstance(key, float):
+        if math.isnan(key):
+            return "NaN"
+        if math.isinf(key):
+            return "Infinity" if key > 0 else "-Infinity"
+        return _es_number(key)
+    if key is None:
+        return "null"
+    raise ValueError(f"malformed_op: object key of type {type(key).__name__} is not canonical JSON")
+
+
+def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
+    if depth > _MAX_OP_PAYLOAD_DEPTH:
+        raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
+    budget[0] += 1
+    if value is None:
+        budget[0] += 8
+        rendered = "null"
+    elif isinstance(value, bool):  # before int: bool is an int subclass
+        budget[0] += 8
+        rendered = "true" if value else "false"
+    elif isinstance(value, int):
+        budget[0] += 8
+        rendered = str(value)
+    elif isinstance(value, float):
+        budget[0] += 8
+        # ``JSON.stringify`` renders every non-finite number as ``null``, so
+        # doing the same is what makes the two canonical forms agree. It also
+        # un-breaks overwriting a widget whose CURRENT value is NaN/Infinity
+        # (Python's ``json.load`` accepts both, and the op captures it in
+        # ``old``), which the previous ``allow_nan=False`` rejected outright.
+        rendered = _es_number(value) if math.isfinite(value) else "null"
+    elif isinstance(value, str):
+        budget[0] += len(value)
+        rendered = _canonical_string(value)
+    elif isinstance(value, dict):
+        if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+            raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+        budget[0] += 4
+        members = []
+        for key in value:
+            name = _canonical_key(key)
+            budget[0] += len(name)
+            members.append((name, value[key]))
+        # Unicode code point order at every depth: Python sorts `str` that way.
+        members.sort(key=lambda member: member[0])
+        rendered = (
+            "{" + ",".join(f"{_canonical_string(n)}:{_canonical_value(v, depth + 1, budget)}" for n, v in members) + "}"
+        )
+    elif isinstance(value, list | tuple):
+        if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+            raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+        budget[0] += 4
+        rendered = "[" + ",".join(_canonical_value(child, depth + 1, budget) for child in value) + "]"
+    else:
+        raise ValueError(f"malformed_op: op payload is not canonical JSON: {type(value).__name__} is not serializable")
+    if budget[0] > _MAX_OP_COST:
+        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
+    return rendered
 
 
 def _canonical_op(op: dict) -> str:
-    cost = 0
-    stack: list[tuple[Any, int]] = [(op, 0)]
-    while stack:
-        value, depth = stack.pop()
-        if depth > _MAX_OP_PAYLOAD_DEPTH:
-            raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
-        cost += 1
-        if isinstance(value, str):
-            cost += len(value)
-        elif isinstance(value, dict):
-            if len(value) > _MAX_OP_COLLECTION_ENTRIES:
-                raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
-            cost += 4 + sum(len(str(key)) for key in value)
-            stack.extend((child, depth + 1) for child in value.values())
-        elif isinstance(value, list | tuple):
-            if len(value) > _MAX_OP_COLLECTION_ENTRIES:
-                raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
-            cost += 4
-            stack.extend((child, depth + 1) for child in value)
-        else:
-            cost += 8
-        if cost > _MAX_OP_COST:
-            raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
-    try:
-        return json.dumps(op, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"malformed_op: op payload is not canonical JSON: {exc}") from exc
+    """Compact JSON over the whole envelope: keys sorted by Unicode code point
+    at every depth, array order preserved, numbers rendered as ECMAScript
+    renders them so the digest matches the CMP A8 counterpart's."""
+    return _canonical_value(op, 0, [0])
 
 
 def _op_digest(op: dict) -> str:
