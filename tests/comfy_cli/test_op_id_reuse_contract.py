@@ -247,3 +247,81 @@ def test_a_malformed_applied_ops_list_is_refused_before_the_handler_runs(graph):
     with pytest.raises(ValueError, match="^malformed_op: _applied_ops must be an array"):
         ops.apply_op(workflow, _op(), graph)
     assert workflow == before
+
+
+# --- Amendment v1.10: the enriched envelope ---------------------------------
+
+
+def _primitive_canvas(value="old prompt") -> dict:
+    """A frontend-only ``PrimitiveNode``: no catalog entry, so ``set_widget``
+    takes the ``legacy_primitive`` path that enriches the op with the host's
+    positional array AFTER ``apply_op`` has already recorded a digest.
+    """
+    return {
+        "nodes": [
+            {
+                "id": 51,
+                "type": "PrimitiveNode",
+                "outputs": [{"name": "STRING", "type": "STRING", "links": [], "widget": {"name": "text"}}],
+                "widgets_values": [value],
+            }
+        ],
+        "links": [],
+    }
+
+
+def test_the_ledger_binds_the_enriched_envelope_the_caller_broadcasts(graph):
+    """``_set_widget_impl`` finishes the op after ``apply_op`` returns, because
+    ``host_widgets_values`` can only be read back out of the document the write
+    produced. If the ledger kept the pre-enrichment digest, a redelivery of the
+    payload that was actually broadcast would be rejected as ``op_id_reuse``.
+    """
+    workflow, op = ops.set_widget(_primitive_canvas(), graph, 51, "value", "a lighthouse at dusk")
+    assert op["promoted"]["host_widgets_values"] == ["a lighthouse at dusk"]
+    assert workflow["_applied_op_digests"][op["op_id"]] == ops._op_digest(op)
+    # The broadcast envelope round-trips as the documented no-op...
+    assert ops.apply_op(workflow, copy.deepcopy(op), graph) is workflow
+    # ...and the same id with a changed payload is still refused.
+    changed = copy.deepcopy(op)
+    changed["value"] = "a lighthouse at dawn"
+    with pytest.raises(ValueError, match="^op_id_reuse:"):
+        ops.apply_op(workflow, changed, graph)
+
+
+def test_a_nan_host_widget_no_longer_fails_an_op_that_already_applied(graph):
+    """The enriched digest runs after the write has committed, so raising there
+    reported failure for an op the document had already accepted: the caller
+    never got it back to broadcast and ``set_widget``'s ``ValueError`` fallback
+    could attempt a second write.
+    """
+    workflow, op = ops.set_widget(_primitive_canvas(float("nan")), graph, 51, "value", "lighthouse")
+    assert workflow["nodes"][0]["widgets_values"] == ["lighthouse"]
+    assert workflow["_applied_op_digests"][op["op_id"]] == ops._op_digest(op)
+
+
+def test_rebinding_a_digest_is_inert_when_the_entry_is_not_this_calls_own():
+    """The three cases ``_rebind_op_digest`` must leave alone: no ledger at all
+    (the op deferred, so nothing recorded it), an entry belonging to a different
+    payload (a duplicate), and an uncanonical enriched envelope (the document is
+    already written, so raising is worse than keeping the older digest).
+    """
+    op = _op()
+    applied = ops._op_digest(op)
+    enriched = dict(op, promoted={"host_widgets_values": ["x"]})
+
+    no_ledger: dict = {}
+    ops._rebind_op_digest(no_ledger, enriched, applied)
+    assert no_ledger == {}
+
+    someone_elses = {"_applied_op_digests": {op["op_id"]: "a" * 64}}
+    ops._rebind_op_digest(someone_elses, enriched, applied)
+    assert someone_elses["_applied_op_digests"][op["op_id"]] == "a" * 64
+
+    uncanonical = dict(enriched, promoted={"host_widgets_values": [object()]})
+    ours = {"_applied_op_digests": {op["op_id"]: applied}}
+    ops._rebind_op_digest(ours, uncanonical, applied)
+    assert ours["_applied_op_digests"][op["op_id"]] == applied
+
+    ours = {"_applied_op_digests": {op["op_id"]: applied}}
+    ops._rebind_op_digest(ours, enriched, applied)
+    assert ours["_applied_op_digests"][op["op_id"]] == ops._op_digest(enriched)

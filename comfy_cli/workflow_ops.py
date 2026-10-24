@@ -233,6 +233,50 @@ def _op_digest(op: dict) -> str:
     return hashlib.sha256(_canonical_op(op).encode("utf-8")).hexdigest()
 
 
+def _applied_digest(op: dict) -> str | None:
+    """The digest :func:`apply_op` would have recorded for ``op``, or ``None``
+    when the payload is not canonical, so nothing recorded one."""
+    try:
+        return _op_digest(op)
+    except ValueError:
+        return None
+
+
+def _rebind_op_digest(workflow: dict, op: dict, applied: str | None) -> None:
+    """Re-bind ``op_id`` to the digest of the *enriched* envelope.
+
+    ``_set_widget_impl`` finishes a promoted / legacy-primitive op AFTER
+    :func:`apply_op` returns — the host's materialized ``host_widgets_values``
+    can only be read back out of the document the write produced — so the ledger
+    otherwise holds the pre-enrichment digest while the caller broadcasts the
+    enriched payload, and a redelivery of what was actually sent is rejected as
+    ``op_id_reuse``.
+
+    Nothing happens in the two cases where correcting it would be wrong:
+
+    * the op was DEFERRED, or was a duplicate, so the ledger entry either does
+      not exist or belongs to a different payload. Detected by comparing against
+      the digest ``apply_op`` actually wrote for *this* call rather than by
+      trusting the key's presence.
+    * the enriched envelope is not canonical. ``host_widgets_values`` comes out
+      of the document, so it can carry a NaN/Infinity, a lone surrogate or a
+      volume the op payload never did. The document is ALREADY written here, so
+      raising would report failure for an op that was applied: the caller never
+      gets it back to broadcast and ``set_widget``'s ``ValueError`` fallback can
+      attempt a second write. The pre-enrichment digest stays instead, and a
+      redelivery of the uncanonical envelope is refused in :func:`apply_op`'s
+      duplicate branch — before it can mutate anything.
+    """
+    if applied is None:
+        return
+    digests = workflow.get("_applied_op_digests")
+    if not isinstance(digests, dict) or digests.get(op["op_id"]) != applied:
+        return
+    enriched = _applied_digest(op)
+    if enriched is not None:
+        digests[op["op_id"]] = enriched
+
+
 def mint_id() -> int:
     """A leaderless, collision-free, int-typed identity for a node or link."""
     return _ID_FLOOR | random.getrandbits(52)
@@ -1263,6 +1307,9 @@ def _set_widget_impl(
         if warnings:
             op["warnings"] = warnings
         workflow = apply_op(workflow, op, graph)
+        # Captured before the enrichment below mutates ``op``: it is how
+        # ``_rebind_op_digest`` recognizes the ledger entry as this call's own.
+        applied_digest = _applied_digest(op)
         if target.repair is not None:
             # The slot only exists after the repair (and the instance may sit
             # on a freshly forked definition): read it back from the document.
@@ -1277,7 +1324,7 @@ def _set_widget_impl(
         # resolution is the pre-fork sibling, not the written one.
         written = _engine._resolve_node_path(workflow, list(target.segments), _engine._subgraph_defs_by_id(workflow))
         op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
-        workflow["_applied_op_digests"][op["op_id"]] = _op_digest(op)
+        _rebind_op_digest(workflow, op, applied_digest)
         return workflow, op
     if target.kind == "legacy_primitive":
         # A frontend-only PrimitiveNode has no catalog entry, so every
@@ -1299,8 +1346,9 @@ def _set_widget_impl(
             **extra,
         )
         workflow = apply_op(workflow, op, graph)
+        applied_digest = _applied_digest(op)
         op["promoted"]["host_widgets_values"] = list(src.get("widgets_values") or [])
-        workflow["_applied_op_digests"][op["op_id"]] = _op_digest(op)
+        _rebind_op_digest(workflow, op, applied_digest)
         return workflow, op
     if target.kind == "top" and target.redirected_from is not None:
         node_id = target.node.get("id")
@@ -3291,14 +3339,23 @@ def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
                 pending.pop(op_id, None)
                 progressed = True
                 continue
-            if _apply_set_widget(workflow, op, graph) is False:
-                continue
-            workflow.setdefault("_applied_ops", []).append(op_id)
             # Bind the id to its canonical payload here too: a deferred write
             # reaches ``_applied_ops`` through this loop and never through
             # ``apply_op``'s tail, so without this the reuse gate would read it
             # as a legacy list-only entry and silently no-op a changed retry.
-            workflow.setdefault("_applied_op_digests", {})[op_id] = _op_digest(op)
+            # Digested BEFORE the write, so an uncanonical queued payload — only
+            # reachable from a hand-edited document, since ``apply_op``
+            # canonicalizes on the way in — is dropped like the non-dict entry
+            # above instead of raising half-way through its own apply.
+            digest = _applied_digest(op)
+            if digest is None:
+                pending.pop(op_id, None)
+                progressed = True
+                continue
+            if _apply_set_widget(workflow, op, graph) is False:
+                continue
+            workflow.setdefault("_applied_ops", []).append(op_id)
+            workflow.setdefault("_applied_op_digests", {})[op_id] = digest
             pending.pop(op_id, None)
             progressed = True
         if not progressed:
