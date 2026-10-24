@@ -19,11 +19,11 @@ contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
-Nine kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
+Ten kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
 that amendment; see §1.2.1. `set_node_field` is the eighth and is **PROPOSED**,
-not yet ratified; see §1.8 and §15. No other kind is valid in v1: `apply_op`
-rejects an unknown kind with `ValueError("unknown op ...")` — it never ignores
-one.
+not yet ratified; see §1.8 and §15. `define_subgraph` is the tenth; see §1.9.
+No other kind is valid in v1: `apply_op` rejects an unknown kind with
+`ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
@@ -35,6 +35,7 @@ one.
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
+| `define_subgraph` | yes | `comfy workflow define-subgraph` | Create one subgraph definition |
 | `insert_workflow` | no | `comfy workflow insert-workflow` | Merge a complete workflow template in one transaction |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
@@ -335,6 +336,33 @@ collision-free. A future reconciliation pass (once this amendment is
 ratified) should confirm comfy-multi-player's applier accepts an op that
 omits `node_incarnation` rather than requiring one only because its own
 local model can need it.
+
+### 1.9 `define_subgraph`
+
+Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
+The command performs envelope shape and JSON-serialization checks, assigns its
+id from `--id`, the definition's `id`, or a new UUID, and emits exactly one
+stamped op without modifying the local workflow:
+
+```json
+{
+  "op": "define_subgraph",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "subgraph_id": "<uuid>",
+  "subgraph_definition": {"id": "<uuid>", "nodes": [], "links": []}
+}
+```
+
+Only this op may carry `subgraph_id` or `subgraph_definition`; `definitions`
+is accepted only here and on `insert_workflow`. The CLI does not
+semantically validate, apply, replay, project, or resolve conflicts for the
+definition. cmp owns those operations: reusing an id with different content
+returns `definition_conflict`, and references to unknown ids follow cmp's
+unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
+interior edits use the existing id-addressed op scopes.
 
 ## 2. Idempotency and identity
 
