@@ -3158,16 +3158,56 @@ def apply_specs(
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
     op whose ``op_id`` was already applied is a no-op only for one payload."""
-    had_applied_ops = "_applied_ops" in workflow
-    applied = workflow.setdefault("_applied_ops", [])
-    if op["op_id"] in applied:
-        recorded = (workflow.get("_applied_op_digests") or {}).get(op["op_id"])
+    # Validate the replay bookkeeping BEFORE anything mutates. All three values
+    # arrive from untrusted JSON — ``_applied_op_digests`` and ``_applied_ops``
+    # are stripped on write but never checked on load, and ``op_id`` is whatever
+    # the envelope carried — and all three are indexed by the tail below. Left
+    # unchecked, a null/list/string ledger or a list-valued ``op_id`` raises
+    # ``TypeError``/``AttributeError`` AFTER the handler has written the
+    # document and appended to ``_applied_ops``, outside the rollback: a
+    # half-committed op whose deferred cleanup never ran.
+    op_id = op["op_id"]
+    if not isinstance(op_id, str):
+        raise ValueError(f"malformed_op: op_id must be a string, got {type(op_id).__name__}")
+    # Membership, not truthiness: an explicit ``null`` is PRESENT, and the
+    # ``setdefault`` in the tail below would hand back that ``None`` rather than
+    # a fresh dict.
+    if "_applied_op_digests" in workflow and not isinstance(workflow["_applied_op_digests"], dict):
+        raise ValueError("malformed_op: _applied_op_digests must be an object keyed by op_id")
+    if "_applied_ops" in workflow and not isinstance(workflow["_applied_ops"], list):
+        raise ValueError("malformed_op: _applied_ops must be an array of op_ids")
+    recorded_digests = workflow.get("_applied_op_digests")
+    recorded_ops = workflow.get("_applied_ops")
+    if op_id in (recorded_ops or ()):
+        recorded = (recorded_digests or {}).get(op_id)
         if recorded is None:
+            # A legacy list-only ledger keeps its historical duplicate
+            # behaviour, and deliberately WITHOUT digesting the payload first:
+            # a replay whose envelope is not canonical must still be the
+            # documented no-op rather than a ``malformed_op``.
             return workflow
         if recorded != _op_digest(op):
-            raise ValueError(f"op_id_reuse: op_id {op['op_id']!r} was already applied with a different payload")
+            raise ValueError(f"op_id_reuse: op_id {op_id!r} was already applied with a different payload")
         return workflow
+    # Digest BEFORE the ``setdefault`` below, so a first-seen op that
+    # canonicalization rejects leaves a document that had no ledger exactly as
+    # it found it — which is what the amendment's "rejects before mutation"
+    # wording promises.
     digest = _op_digest(op)
+    # A deferred ``set_widget`` never reached ``_applied_ops`` — it waits in
+    # ``_deferred_widget_ops`` until a selector reveals its target — so gating
+    # on the applied list alone lets a SECOND op carrying the same ``op_id`` and
+    # a different payload straight through: it overwrites the pending entry (or
+    # applies at once), and the tail's ``deferred.pop`` then drops the original.
+    # No ``op_id_reuse`` is raised, so two replicas that received the pair in
+    # different orders diverge silently.
+    queued = workflow.get("_deferred_widget_ops")
+    waiting = queued.get(op_id) if isinstance(queued, dict) else None
+    # Cannot raise: a queued op was canonicalized on the way in.
+    if isinstance(waiting, dict) and _op_digest(waiting) != digest:
+        raise ValueError(f"op_id_reuse: op_id {op_id!r} is already deferred with a different payload")
+    had_applied_ops = "_applied_ops" in workflow
+    workflow.setdefault("_applied_ops", [])
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
@@ -3225,11 +3265,11 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # binding above is stale for that kind and the reset's own op_id would be
     # written into a discarded list. Re-read, so a re-delivered reset_doc is a
     # no-op rather than a second wipe.
-    workflow.setdefault("_applied_ops", []).append(op["op_id"])
-    workflow.setdefault("_applied_op_digests", {})[op["op_id"]] = digest
+    workflow.setdefault("_applied_ops", []).append(op_id)
+    workflow.setdefault("_applied_op_digests", {})[op_id] = digest
     deferred = workflow.get("_deferred_widget_ops")
     if isinstance(deferred, dict):
-        deferred.pop(op["op_id"], None)
+        deferred.pop(op_id, None)
         if not deferred:
             workflow.pop("_deferred_widget_ops", None)
     if kind == "set_widget":

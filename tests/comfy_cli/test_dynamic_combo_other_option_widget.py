@@ -598,3 +598,38 @@ def test_a_deferred_write_is_bound_to_its_canonical_payload_once_applied(graph):
     with pytest.raises(ValueError, match="^op_id_reuse:"):
         workflow_ops.apply_op(wf, changed, graph)
     assert wf == before
+
+
+def test_a_second_payload_on_a_deferred_op_id_is_refused_rather_than_overwriting_it(graph):
+    """The reuse gate used to read ``_applied_ops`` only. A deferred write sits
+    in ``_deferred_widget_ops`` and nowhere else, so a second op carrying the
+    same ``op_id`` and a different payload went straight past the gate: it
+    overwrote the pending entry (or applied at once), and the tail's
+    ``deferred.pop`` then dropped the original. No ``op_id_reuse`` was raised,
+    so two replicas that received the pair in different orders diverged.
+    """
+    wf, node_id = _fresh(graph)
+    hidden_write = workflow_ops._new_op(
+        "set_widget",
+        "agent-a",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+    workflow_ops.apply_op(wf, hidden_write, graph)
+    assert hidden_write["op_id"] in wf["_deferred_widget_ops"]
+
+    changed = copy.deepcopy(hidden_write)
+    changed["value"] = "balanced"
+    before = copy.deepcopy(wf)
+    with pytest.raises(ValueError, match="^op_id_reuse:"):
+        workflow_ops.apply_op(wf, changed, graph)
+    assert wf == before
+    # The original is still the queued payload, so revealing the target applies
+    # what was actually sent first.
+    assert wf["_deferred_widget_ops"][hidden_write["op_id"]]["value"] == "quality"
+
+    # An identical redelivery while deferred stays a no-op on the queue.
+    workflow_ops.apply_op(wf, copy.deepcopy(hidden_write), graph)
+    assert wf["_deferred_widget_ops"][hidden_write["op_id"]]["value"] == "quality"

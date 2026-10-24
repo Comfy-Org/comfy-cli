@@ -176,3 +176,74 @@ def test_canonicalization_still_refuses_a_runaway_payload():
         ops._op_digest({"v": ["x" * 4096] * 16_384})
     with pytest.raises(ValueError, match="^malformed_op: op payload is not canonical JSON:"):
         ops._op_digest({"v": object()})
+
+
+# --- Amendment v1.10: rejecting before mutation -----------------------------
+
+
+def test_a_rejected_first_seen_op_leaves_no_ledger_behind(graph):
+    """ "Rejects before mutation" has to include the ledger itself: a document
+    that arrived without ``_applied_ops`` must not come back carrying an empty
+    one because canonicalization refused the op.
+    """
+    workflow = _workflow()
+    before = copy.deepcopy(workflow)
+    deep = _op()
+    deep["value"] = [["x"] * 1]
+    for _ in range(ops._MAX_OP_PAYLOAD_DEPTH + 2):
+        deep["value"] = [deep["value"]]
+    with pytest.raises(ValueError, match="^payload_too_deep:"):
+        ops.apply_op(workflow, deep, graph)
+    assert workflow == before
+    assert "_applied_ops" not in workflow
+
+
+@pytest.mark.parametrize(
+    ("ledger", "message"),
+    [
+        (None, "^malformed_op: _applied_op_digests must be an object"),
+        ([], "^malformed_op: _applied_op_digests must be an object"),
+        ("{}", "^malformed_op: _applied_op_digests must be an object"),
+    ],
+)
+def test_a_malformed_digest_ledger_is_refused_before_the_handler_runs(graph, ledger, message):
+    """The ledger is stripped on write but never checked on load. Indexing it in
+    ``apply_op``'s tail raised ``TypeError`` after the handler had already
+    written the document and appended to ``_applied_ops`` — outside the
+    rollback, so the op stayed half-committed.
+    """
+    workflow = _workflow()
+    workflow["_applied_op_digests"] = ledger
+    before = copy.deepcopy(workflow)
+    with pytest.raises(ValueError, match=message):
+        ops.apply_op(workflow, _op(), graph)
+    assert workflow == before
+
+
+def test_a_truthy_non_dict_ledger_is_refused_on_the_reuse_branch_too(graph):
+    workflow = _workflow()
+    applied = _op()
+    ops.apply_op(workflow, applied, graph)
+    workflow["_applied_op_digests"] = "not a mapping"
+    with pytest.raises(ValueError, match="^malformed_op: _applied_op_digests must be an object"):
+        ops.apply_op(workflow, applied, graph)
+
+
+@pytest.mark.parametrize("op_id", [["a"], {"a": 1}, 7, None])
+def test_a_non_string_op_id_is_refused_before_the_handler_runs(graph, op_id):
+    workflow = _workflow()
+    before = copy.deepcopy(workflow)
+    bad = _op()
+    bad["op_id"] = op_id
+    with pytest.raises(ValueError, match="^malformed_op: op_id must be a string"):
+        ops.apply_op(workflow, bad, graph)
+    assert workflow == before
+
+
+def test_a_malformed_applied_ops_list_is_refused_before_the_handler_runs(graph):
+    workflow = _workflow()
+    workflow["_applied_ops"] = {"not": "a list"}
+    before = copy.deepcopy(workflow)
+    with pytest.raises(ValueError, match="^malformed_op: _applied_ops must be an array"):
+        ops.apply_op(workflow, _op(), graph)
+    assert workflow == before
