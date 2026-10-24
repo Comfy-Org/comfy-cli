@@ -52,11 +52,13 @@ while the display order does not.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import random
 import re
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from comfy_cli import layout
@@ -72,6 +74,208 @@ from comfy_cli.cql.engine import (
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
+
+_MAX_OP_PAYLOAD_DEPTH = 64
+# Bounded only so a hostile or runaway payload cannot pin a replica inside
+# canonicalization. Every ORDINARY op has to pass, because the digest is now
+# computed on every apply rather than only on a reuse comparison, and the first
+# bounds (4,096 entries / 262,144 cost units) were tight enough to reject real
+# edits: `clear` / `reset_doc` enumerate every node id in `removed_nodes`, a
+# `delete_node` on a hub node enumerates every incident link, and a prompt
+# widget value (or the `old` value an op captures) routinely runs past 256K
+# characters.
+_MAX_OP_COLLECTION_ENTRIES = 1_048_576
+_MAX_OP_COST = 33_554_432
+
+#: Any surrogate code point in a Python ``str`` is a LONE surrogate — astral
+#: characters are single code points there — so matching the whole block is
+#: enough to find the ones that cannot be UTF-8 encoded.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _es_number(value: float) -> str:
+    """Render a float exactly as ECMAScript ``Number::toString`` does.
+
+    The canonical form has to be byte-identical on both sides of the wire, and
+    the counterpart implementation (comfy-multi-player schema Amendment A8)
+    builds it with ``JSON.stringify``. Python's own float repr disagrees with
+    that on three shapes a FLOAT widget produces constantly — an integral float
+    (``20.0`` vs ``20``), negative zero (``-0.0`` vs ``0``) and an exponent
+    (``1e-07`` vs ``1e-7``) — so digesting Python's spelling would reject an
+    identical op that had merely been relayed through JS as ``op_id_reuse``, and
+    no float payload would ever digest the same on the two sides.
+
+    ``repr`` is still the input: it is the shortest round-tripping decimal, the
+    same digit string ECMAScript's algorithm starts from. Only the rendering of
+    that digit string differs, and this reimplements it: the ECMAScript
+    ``Number::toString`` algorithm, including its ``k``/``n``/``s`` case
+    analysis for when to use fixed versus exponential notation.
+    """
+    if value == 0:  # also folds -0.0, which ECMAScript renders as "0"
+        return "0"
+    if value < 0:
+        return "-" + _es_number(-value)
+    _, raw_digits, exponent = Decimal(repr(value)).as_tuple()
+    digits = list(raw_digits)
+    # ECMAScript picks the `s` that is NOT divisible by 10, so trailing zeros
+    # move into the exponent instead of into the digit string.
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    s = "".join(str(d) for d in digits)
+    k = len(s)
+    n = exponent + k
+    if k <= n <= 21:
+        return s + "0" * (n - k)
+    if 0 < n <= 21:
+        return f"{s[:n]}.{s[n:]}"
+    if -6 < n <= 0:
+        return "0." + "0" * -n + s
+    e = n - 1
+    mantissa = s if k == 1 else f"{s[0]}.{s[1:]}"
+    return f"{mantissa}e{'+' if e >= 0 else '-'}{abs(e)}"
+
+
+def _canonical_string(value: str) -> str:
+    """One JSON string literal, escaped the way ``JSON.stringify`` escapes it.
+
+    ``json.dumps`` already escapes exactly the code points ``JSON.stringify``
+    does, so the two agree on every well-formed string. They disagree on a lone
+    surrogate — which ``json.loads('"\\ud800"')`` happily produces: ES2019
+    well-formed stringify emits it as a ``\\udXXX`` escape, Python emits it raw.
+    A raw surrogate cannot be UTF-8 encoded at all, so leaving it would make the
+    digest die with a bare ``UnicodeEncodeError`` outside the ``malformed_op:``
+    contract callers classify errors by. Escaping it both matches ECMAScript and
+    keeps the encode in :func:`_op_digest` total.
+    """
+    literal = json.dumps(value, ensure_ascii=False)
+    if _LONE_SURROGATE.search(literal):
+        literal = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m.group()):04x}", literal)
+    return literal
+
+
+def _canonical_key(key: Any) -> str:
+    """An object key as its string form, matching ECMAScript property coercion."""
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bool):  # before int: bool is an int subclass
+        return "true" if key else "false"
+    if isinstance(key, int):
+        return str(key)
+    if isinstance(key, float):
+        if math.isnan(key):
+            return "NaN"
+        if math.isinf(key):
+            return "Infinity" if key > 0 else "-Infinity"
+        return _es_number(key)
+    if key is None:
+        return "null"
+    raise ValueError(f"malformed_op: object key of type {type(key).__name__} is not canonical JSON")
+
+
+def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
+    if depth > _MAX_OP_PAYLOAD_DEPTH:
+        raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
+    budget[0] += 1
+    if value is None:
+        budget[0] += 8
+        rendered = "null"
+    elif isinstance(value, bool):  # before int: bool is an int subclass
+        budget[0] += 8
+        rendered = "true" if value else "false"
+    elif isinstance(value, int):
+        budget[0] += 8
+        rendered = str(value)
+    elif isinstance(value, float):
+        budget[0] += 8
+        # ``JSON.stringify`` renders every non-finite number as ``null``, so
+        # doing the same is what makes the two canonical forms agree. It also
+        # un-breaks overwriting a widget whose CURRENT value is NaN/Infinity
+        # (Python's ``json.load`` accepts both, and the op captures it in
+        # ``old``), which the previous ``allow_nan=False`` rejected outright.
+        rendered = _es_number(value) if math.isfinite(value) else "null"
+    elif isinstance(value, str):
+        budget[0] += len(value)
+        rendered = _canonical_string(value)
+    elif isinstance(value, dict):
+        if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+            raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+        budget[0] += 4
+        members = []
+        for key in value:
+            name = _canonical_key(key)
+            budget[0] += len(name)
+            members.append((name, value[key]))
+        # Unicode code point order at every depth: Python sorts `str` that way.
+        members.sort(key=lambda member: member[0])
+        rendered = (
+            "{" + ",".join(f"{_canonical_string(n)}:{_canonical_value(v, depth + 1, budget)}" for n, v in members) + "}"
+        )
+    elif isinstance(value, list | tuple):
+        if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+            raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+        budget[0] += 4
+        rendered = "[" + ",".join(_canonical_value(child, depth + 1, budget) for child in value) + "]"
+    else:
+        raise ValueError(f"malformed_op: op payload is not canonical JSON: {type(value).__name__} is not serializable")
+    if budget[0] > _MAX_OP_COST:
+        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
+    return rendered
+
+
+def _canonical_op(op: dict) -> str:
+    """Compact JSON over the whole envelope: keys sorted by Unicode code point
+    at every depth, array order preserved, numbers rendered as ECMAScript
+    renders them so the digest matches the CMP A8 counterpart's."""
+    return _canonical_value(op, 0, [0])
+
+
+def _op_digest(op: dict) -> str:
+    return hashlib.sha256(_canonical_op(op).encode("utf-8")).hexdigest()
+
+
+def _applied_digest(op: dict) -> str | None:
+    """The digest :func:`apply_op` would have recorded for ``op``, or ``None``
+    when the payload is not canonical, so nothing recorded one."""
+    try:
+        return _op_digest(op)
+    except ValueError:
+        return None
+
+
+def _rebind_op_digest(workflow: dict, op: dict, applied: str | None) -> None:
+    """Re-bind ``op_id`` to the digest of the *enriched* envelope.
+
+    ``_set_widget_impl`` finishes a promoted / legacy-primitive op AFTER
+    :func:`apply_op` returns — the host's materialized ``host_widgets_values``
+    can only be read back out of the document the write produced — so the ledger
+    otherwise holds the pre-enrichment digest while the caller broadcasts the
+    enriched payload, and a redelivery of what was actually sent is rejected as
+    ``op_id_reuse``.
+
+    Nothing happens in the two cases where correcting it would be wrong:
+
+    * the op was DEFERRED, or was a duplicate, so the ledger entry either does
+      not exist or belongs to a different payload. Detected by comparing against
+      the digest ``apply_op`` actually wrote for *this* call rather than by
+      trusting the key's presence.
+    * the enriched envelope is not canonical. ``host_widgets_values`` comes out
+      of the document, so it can carry a NaN/Infinity, a lone surrogate or a
+      volume the op payload never did. The document is ALREADY written here, so
+      raising would report failure for an op that was applied: the caller never
+      gets it back to broadcast and ``set_widget``'s ``ValueError`` fallback can
+      attempt a second write. The pre-enrichment digest stays instead, and a
+      redelivery of the uncanonical envelope is refused in :func:`apply_op`'s
+      duplicate branch — before it can mutate anything.
+    """
+    if applied is None:
+        return
+    digests = workflow.get("_applied_op_digests")
+    if not isinstance(digests, dict) or digests.get(op["op_id"]) != applied:
+        return
+    enriched = _applied_digest(op)
+    if enriched is not None:
+        digests[op["op_id"]] = enriched
 
 
 def mint_id() -> int:
@@ -1104,6 +1308,9 @@ def _set_widget_impl(
         if warnings:
             op["warnings"] = warnings
         workflow = apply_op(workflow, op, graph)
+        # Captured before the enrichment below mutates ``op``: it is how
+        # ``_rebind_op_digest`` recognizes the ledger entry as this call's own.
+        applied_digest = _applied_digest(op)
         if target.repair is not None:
             # The slot only exists after the repair (and the instance may sit
             # on a freshly forked definition): read it back from the document.
@@ -1118,6 +1325,7 @@ def _set_widget_impl(
         # resolution is the pre-fork sibling, not the written one.
         written = _engine._resolve_node_path(workflow, list(target.segments), _engine._subgraph_defs_by_id(workflow))
         op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
+        _rebind_op_digest(workflow, op, applied_digest)
         return workflow, op
     if target.kind == "legacy_primitive":
         # A frontend-only PrimitiveNode has no catalog entry, so every
@@ -1139,7 +1347,9 @@ def _set_widget_impl(
             **extra,
         )
         workflow = apply_op(workflow, op, graph)
+        applied_digest = _applied_digest(op)
         op["promoted"]["host_widgets_values"] = list(src.get("widgets_values") or [])
+        _rebind_op_digest(workflow, op, applied_digest)
         return workflow, op
     if target.kind == "top" and target.redirected_from is not None:
         node_id = target.node.get("id")
@@ -2996,11 +3206,57 @@ def apply_specs(
 
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
-    op whose ``op_id`` was already applied is a no-op."""
-    had_applied_ops = "_applied_ops" in workflow
-    applied = workflow.setdefault("_applied_ops", [])
-    if op["op_id"] in applied:
+    op whose ``op_id`` was already applied is a no-op only for one payload."""
+    # Validate the replay bookkeeping BEFORE anything mutates. All three values
+    # arrive from untrusted JSON — ``_applied_op_digests`` and ``_applied_ops``
+    # are stripped on write but never checked on load, and ``op_id`` is whatever
+    # the envelope carried — and all three are indexed by the tail below. Left
+    # unchecked, a null/list/string ledger or a list-valued ``op_id`` raises
+    # ``TypeError``/``AttributeError`` AFTER the handler has written the
+    # document and appended to ``_applied_ops``, outside the rollback: a
+    # half-committed op whose deferred cleanup never ran.
+    op_id = op["op_id"]
+    if not isinstance(op_id, str):
+        raise ValueError(f"malformed_op: op_id must be a string, got {type(op_id).__name__}")
+    # Membership, not truthiness: an explicit ``null`` is PRESENT, and the
+    # ``setdefault`` in the tail below would hand back that ``None`` rather than
+    # a fresh dict.
+    if "_applied_op_digests" in workflow and not isinstance(workflow["_applied_op_digests"], dict):
+        raise ValueError("malformed_op: _applied_op_digests must be an object keyed by op_id")
+    if "_applied_ops" in workflow and not isinstance(workflow["_applied_ops"], list):
+        raise ValueError("malformed_op: _applied_ops must be an array of op_ids")
+    recorded_digests = workflow.get("_applied_op_digests")
+    recorded_ops = workflow.get("_applied_ops")
+    if op_id in (recorded_ops or ()):
+        recorded = (recorded_digests or {}).get(op_id)
+        if recorded is None:
+            # A legacy list-only ledger keeps its historical duplicate
+            # behaviour, and deliberately WITHOUT digesting the payload first:
+            # a replay whose envelope is not canonical must still be the
+            # documented no-op rather than a ``malformed_op``.
+            return workflow
+        if recorded != _op_digest(op):
+            raise ValueError(f"op_id_reuse: op_id {op_id!r} was already applied with a different payload")
         return workflow
+    # Digest BEFORE the ``setdefault`` below, so a first-seen op that
+    # canonicalization rejects leaves a document that had no ledger exactly as
+    # it found it — which is what the amendment's "rejects before mutation"
+    # wording promises.
+    digest = _op_digest(op)
+    # A deferred ``set_widget`` never reached ``_applied_ops`` — it waits in
+    # ``_deferred_widget_ops`` until a selector reveals its target — so gating
+    # on the applied list alone lets a SECOND op carrying the same ``op_id`` and
+    # a different payload straight through: it overwrites the pending entry (or
+    # applies at once), and the tail's ``deferred.pop`` then drops the original.
+    # No ``op_id_reuse`` is raised, so two replicas that received the pair in
+    # different orders diverge silently.
+    queued = workflow.get("_deferred_widget_ops")
+    waiting = queued.get(op_id) if isinstance(queued, dict) else None
+    # Cannot raise: a queued op was canonicalized on the way in.
+    if isinstance(waiting, dict) and _op_digest(waiting) != digest:
+        raise ValueError(f"op_id_reuse: op_id {op_id!r} is already deferred with a different payload")
+    had_applied_ops = "_applied_ops" in workflow
+    workflow.setdefault("_applied_ops", [])
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
@@ -3058,10 +3314,11 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # binding above is stale for that kind and the reset's own op_id would be
     # written into a discarded list. Re-read, so a re-delivered reset_doc is a
     # no-op rather than a second wipe.
-    workflow.setdefault("_applied_ops", []).append(op["op_id"])
+    workflow.setdefault("_applied_ops", []).append(op_id)
+    workflow.setdefault("_applied_op_digests", {})[op_id] = digest
     deferred = workflow.get("_deferred_widget_ops")
     if isinstance(deferred, dict):
-        deferred.pop(op["op_id"], None)
+        deferred.pop(op_id, None)
         if not deferred:
             workflow.pop("_deferred_widget_ops", None)
     if kind == "set_widget":
@@ -3083,9 +3340,23 @@ def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
                 pending.pop(op_id, None)
                 progressed = True
                 continue
+            # Bind the id to its canonical payload here too: a deferred write
+            # reaches ``_applied_ops`` through this loop and never through
+            # ``apply_op``'s tail, so without this the reuse gate would read it
+            # as a legacy list-only entry and silently no-op a changed retry.
+            # Digested BEFORE the write, so an uncanonical queued payload — only
+            # reachable from a hand-edited document, since ``apply_op``
+            # canonicalizes on the way in — is dropped like the non-dict entry
+            # above instead of raising half-way through its own apply.
+            digest = _applied_digest(op)
+            if digest is None:
+                pending.pop(op_id, None)
+                progressed = True
+                continue
             if _apply_set_widget(workflow, op, graph) is False:
                 continue
             workflow.setdefault("_applied_ops", []).append(op_id)
+            workflow.setdefault("_applied_op_digests", {})[op_id] = digest
             pending.pop(op_id, None)
             progressed = True
         if not progressed:
@@ -3784,6 +4055,7 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     workflow["last_node_id"] = 0
     workflow["last_link_id"] = 0
     workflow["_applied_ops"] = []
+    workflow["_applied_op_digests"] = {}
     workflow["_widget_stamps"] = {}
 
 
@@ -3899,6 +4171,7 @@ def canonical(workflow: dict) -> dict:
     """
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
+    w.pop("_applied_op_digests", None)
     w.pop("_widget_stamps", None)
     w.pop("_pending_dynamic_connects", None)
     w.pop("_deferred_widget_ops", None)
@@ -4006,6 +4279,7 @@ def strip_internal(workflow: dict) -> dict:
     file writes, ``--stdout`` and batch output alike.
     """
     workflow.pop("_applied_ops", None)
+    workflow.pop("_applied_op_digests", None)
     workflow.pop("_widget_stamps", None)
     workflow.pop("_pending_dynamic_connects", None)
     workflow.pop("_deferred_widget_ops", None)
