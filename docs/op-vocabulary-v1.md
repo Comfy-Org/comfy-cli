@@ -1248,7 +1248,13 @@ identical retry from reuse.
 Compact JSON over the **whole envelope**:
 
 * object keys sorted by **Unicode code point** at every depth; array order
-  preserved; no insignificant whitespace (`,`/`:` separators, no spaces);
+  preserved; no insignificant whitespace (`,`/`:` separators, no spaces). The
+  same caveat as 8.1 applies: for ASCII, JS UTF-16 `<` agrees with code-point
+  order, but above the Basic Multilingual Plane it does not, so an
+  implementation must sort by code point and not rely on
+  `Object.keys(...).sort()`'s default comparator. Every key an op envelope
+  carries today is ASCII, so this only bites a dict widget whose own keys are
+  not;
 * **numbers rendered as ECMAScript renders them** (`Number::toString`), not as
   Python's float repr does. An integral float is `20`, not `20.0`; negative zero
   is `0`; an exponent is `1e-7`, not `1e-07`. This is load-bearing rather than

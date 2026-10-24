@@ -107,8 +107,9 @@ def _es_number(value: float) -> str:
 
     ``repr`` is still the input: it is the shortest round-tripping decimal, the
     same digit string ECMAScript's algorithm starts from. Only the rendering of
-    that digit string differs, and this reimplements it (ECMA-262
-    ``Number::toString``, the ``k``/``n``/``s`` case analysis).
+    that digit string differs, and this reimplements it: the ECMAScript
+    ``Number::toString`` algorithm, including its ``k``/``n``/``s`` case
+    analysis for when to use fixed versus exponential notation.
     """
     if value == 0:  # also folds -0.0, which ECMAScript renders as "0"
         return "0"

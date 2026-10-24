@@ -110,6 +110,17 @@ def test_numbers_are_rendered_the_way_ecmascript_renders_them():
     assert ops._canonical_op({"v": 5e-324}) == '{"v":5e-324}'
 
 
+def test_object_keys_sort_by_code_point_not_by_utf16_code_unit():
+    """§8.1's caveat applies to the key sort too: for ASCII, JS UTF-16 ``<``
+    agrees with code-point order, but above the Basic Multilingual Plane it does
+    not. ``Object.keys(...).sort()`` puts U+1F600 before U+FF00; code-point
+    order is the other way round, and code-point order is what the amendment
+    pins. Only a dict widget whose own keys are non-ASCII can reach this, since
+    every key an op envelope carries is ASCII.
+    """
+    assert ops._canonical_op({"\U0001f600": 1, "\uff00": 2}) == '{"\uff00":2,"\U0001f600":1}'
+
+
 def test_a_float_widget_relayed_through_js_digests_the_same(graph):
     """A FLOAT op whose value is integral comes back from a JS relay as an int.
     Both spellings have to digest identically, or the identical redelivery is
