@@ -1010,19 +1010,19 @@ def load_3d_button_slots(
 
 
 def strip_legacy_load_3d_buttons(m: Morphism, widgets: list[Any]) -> list[Any]:
-    """Drop the LOAD_3D button constants a pre-#1031 comfy-cli wrote into a
-    Load3DAdvanced node. The current frontend builds that node with four
-    widgets and restores widgets_values by position, so the constants would
-    land in viewport_state/width/height. Same rule the cloud doc host
-    applies to legacy slots: a run of the exact constants at index 1,
-    at least two long (the two-marker rule load_3d_button_slots uses)."""
-    if getattr(m, "id", "") != "Load3DAdvanced" or not load_3d_button_slots(m, widgets):
+    """Drop the LOAD_3D button slots a legacy save carries in a
+    Load3DAdvanced node (older frontend builds and pre-#1031 comfy-cli both
+    wrote them). The current frontend builds that node with four widgets and
+    restores widgets_values by position, so the constants would land in
+    viewport_state/width/height. Detection is the two-marker rule of
+    load_3d_button_slots, and exactly the slots that function names are
+    dropped, so the read and write layouts agree on where viewport_state is."""
+    if getattr(m, "id", "") != "Load3DAdvanced":
         return widgets
-    constants = [v for _n, v in _LOAD_3D_BUTTON_SLOTS]
-    run = 0
-    while run < len(constants) and 1 + run < len(widgets) and widgets[1 + run] == constants[run]:
-        run += 1
-    return widgets[:1] + widgets[1 + run :]
+    slots = load_3d_button_slots(m, widgets)
+    if not slots:
+        return widgets
+    return widgets[:1] + widgets[1 + len(slots) :]
 
 
 def frontend_extra_widget_names(m: Morphism) -> list[str]:
@@ -4973,7 +4973,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     # The canvas would load a legacy button run into viewport/width/height, so
     # an edit writes the node back in the frontend's four-widget shape.
+    legacy_widgets = widgets
     widgets = strip_legacy_load_3d_buttons(m, widgets)
+    if widgets is not legacy_widgets:
+        # The legacy order still names the button slots; refuse them with the
+        # same diagnostic a current node gives, not a generic "not found".
+        legacy_entries = _expand_widget_entries(m, legacy_widgets)
+        if any(e.frontend_injected and e.name == input_name for e in legacy_entries):
+            raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(legacy_entries))
     if extend:
         button_defaults = dict(load_3d_button_slots(m, widgets))
 

@@ -411,6 +411,26 @@ class TestDomWidgetInputs:
         wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
         assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", viewport, 512, 600]
 
+    def test_a_legacy_run_with_a_non_constant_clear_slot_strips_all_three(self, graph: Graph):
+        # Reads name slot 3 as ``clear`` once slots 1-2 hold the two markers,
+        # whatever it holds; the edit must drop that same slot so width is
+        # written where the read said it was.
+        viewport = {"cameraState": {"zoom": 2}}
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", None, viewport, 800, 600]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", viewport, 512, 600]
+        assert op["old"] == 800
+
+    def test_a_button_name_on_a_legacy_load3d_advanced_is_refused_as_injected(self, graph: Graph):
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        for name in _LOAD_3D_BUTTONS:
+            wf = _workflow(_node(1, "Load3DAdvanced", list(values)))
+            with pytest.raises(ValueError, match="frontend-injected") as ei:
+                workflow_ops.set_widget(wf, graph, 1, name, "x")
+            assert "not found" not in str(ei.value)
+            assert wf["nodes"][0]["widgets_values"] == values
+
     def test_load3d_advanced_catalog_entry_names_no_button(self, graph: Graph):
         # The exported catalog is what the cloud doc host projects saved
         # documents through, so it must carry the live node's shape too.
