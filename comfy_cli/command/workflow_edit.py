@@ -480,7 +480,7 @@ def disconnect_cmd(
 @tracking.track_command("workflow")
 def delete_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    node: Annotated[str, typer.Argument(help="Node id to delete.")],
+    node: Annotated[str, typer.Argument(help="Node id or interior path to delete (for example 70/22).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -517,7 +517,7 @@ def delete_cmd(
 @tracking.track_command("workflow")
 def delete_nodes_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    nodes: Annotated[list[str], typer.Argument(help="Node ids to delete (one or more).")],
+    nodes: Annotated[list[str], typer.Argument(help="Node ids or interior paths to delete (one or more).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
