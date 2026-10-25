@@ -411,6 +411,7 @@ def launch(
     background: bool = False,
     extra: list[str] | None = None,
     frontend_pr: str | None = None,
+    log_file: str | None = None,
 ):
     resolved_workspace = workspace_manager.workspace_path
 
@@ -451,12 +452,12 @@ def launch(
         extra = (extra or []) + manager_flags
 
     if background:
-        background_launch(extra, frontend_pr)
+        background_launch(extra, frontend_pr, log_file=log_file)
     else:
         launch_comfyui(extra, frontend_pr, python=python)
 
 
-def background_launch(extra, frontend_pr=None):
+def background_launch(extra, frontend_pr=None, log_file=None):
     renderer = get_renderer()
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
@@ -538,7 +539,7 @@ def background_launch(extra, frontend_pr=None):
 
     cmd.extend(extra)
 
-    log = asyncio.run(launch_and_monitor(cmd, listen, port))
+    log = asyncio.run(launch_and_monitor(cmd, listen, port, log_file=log_file))
 
     # Reaching here means the monitor returned without seeing the success line
     # (the success path emits its envelope and _hard_exit(0)s inside the monitor).
@@ -574,7 +575,7 @@ def background_launch(extra, frontend_pr=None):
     _hard_exit(1)
 
 
-def background_log_path(port, workspace: str | None = None) -> str:
+def background_log_path(port, workspace: str | None = None, override: str | None = None) -> str:
     """Path to the persisted background ComfyUI log for ``port``.
 
     ``<workspace>/user/comfyui_<port>.log`` — ``<port>`` disambiguates multiple
@@ -582,7 +583,17 @@ def background_log_path(port, workspace: str | None = None) -> str:
     (a fresh run starts a fresh log). ``workspace`` defaults to the current
     working directory, which ``launch`` has already ``chdir``'d to the resolved
     workspace by the time the background monitor runs.
+
+    ``override`` (the ``--log-file`` flag, or the ``COMFY_CLI_BACKGROUND_LOG``
+    env var a supervising process can set for its own children) replaces the
+    path verbatim: a supervisor that names the file owns the naming too, so the
+    ``<port>`` suffix logic does not apply. The chosen path is what gets recorded
+    under ``CONFIG_KEY_BACKGROUND_LOG``, so ``comfy logs`` and ``comfy stop``
+    resolve it like any other background log.
     """
+    override = override or os.environ.get("COMFY_CLI_BACKGROUND_LOG")
+    if override:
+        return os.path.abspath(override)
     if workspace is None:
         workspace = os.path.abspath(os.getcwd())
     return os.path.join(workspace, "user", f"comfyui_{port}.log")
@@ -604,7 +615,7 @@ def _open_log_for_write(log_path: str):
     return os.fdopen(fd, "w", encoding="utf-8")
 
 
-async def launch_and_monitor(cmd, listen, port):
+async def launch_and_monitor(cmd, listen, port, log_file=None):
     """
     Monitor the process during the background launch.
 
@@ -628,7 +639,7 @@ async def launch_and_monitor(cmd, listen, port):
     # promptly instead of sitting in a block buffer (stdout is a file, not a tty).
     env["PYTHONUNBUFFERED"] = "1"
 
-    log_path = background_log_path(port)
+    log_path = background_log_path(port, override=log_file)
 
     # Truncate-on-launch: each background launch starts a fresh log. The child
     # inherits its own dup of this fd, so writes continue after we (the monitor)

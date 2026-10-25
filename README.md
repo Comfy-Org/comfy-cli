@@ -200,6 +200,7 @@ Comfy provides commands that allow you to easily run the installed ComfyUI.
 
   - Instances launched with `--background` are displayed in the "Background ComfyUI" section of `comfy env`, providing management functionalities for a single background instance only.
   - Background-running ComfyUI can be stopped with `comfy stop`.
+  - Redirect the background log with `comfy launch --background --log-file /tmp/comfy.log` (or the `COMFY_CLI_BACKGROUND_LOG` env var), so supervising scripts keep it next to their own logs.
 
 - To point **every** command (not just one) at a ComfyUI on a non-default
   address — e.g. a server you started _outside_ comfy-cli on `:8189` — export

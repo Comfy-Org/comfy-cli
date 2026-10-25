@@ -2592,10 +2592,23 @@ def launch(
             help="Use a specific frontend PR. Supports formats: username:branch, #123, or PR URL",
         ),
     ] = None,
+    log_file: Annotated[
+        str | None,
+        typer.Option(
+            "--log-file",
+            show_default=False,
+            help=(
+                "Where the background server's log is written instead of "
+                "<workspace>/user/comfyui_<port>.log. Only used with --background. "
+                "The COMFY_CLI_BACKGROUND_LOG env var does the same for processes "
+                "comfy-cli cannot be edited to pass flags."
+            ),
+        ),
+    ] = None,
 ):
     from comfy_cli.command.launch import launch as launch_command
 
-    launch_command(background, extra, frontend_pr)
+    launch_command(background, extra, frontend_pr, log_file=log_file)
 
 
 @app.command(help="Show a captured ComfyUI log (from `comfy launch --background`, or ComfyUI-Manager's own logfile).")
