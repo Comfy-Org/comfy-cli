@@ -189,3 +189,51 @@ class TestRemoveBackground:
         # the key already gone; it must not raise.
         config_mgr.clear_background_process()
         assert config_mgr.background is None
+
+
+class TestConcurrentWrites:
+    # NOTE: _make_config_manager exits its get_config_path patch when it
+    # returns; every set() below must run while the patch is active, or it
+    # writes to the real user config instead of tmp_path.
+    def test_set_merges_with_a_write_from_another_process(self, tmp_path):
+        """Two comfy processes hold their own in-memory snapshot. Whoever
+        wrote last used to erase the other's keys — the recorded pid of a
+        live background server was the costly loss (comfy stop then finds
+        nothing). set() now merges into the on-disk state under the lock."""
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            first = _ConfigManagerCls()
+            first.set("first", "1")
+
+            # The other process: its own snapshot, written after ours loaded.
+            second = _ConfigManagerCls()
+            second.set("second", "2")
+
+            first.set("third", "3")
+
+            final = _ConfigManagerCls()
+
+        assert final.get("first") == "1"
+        assert final.get("second") == "2"
+        assert final.get("third") == "3"
+
+    def test_set_writes_whole_file_and_no_tmp_debris(self, tmp_path):
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            mgr = _ConfigManagerCls()
+            mgr.set("some_key", "some_value")
+
+            # os.replace swapped a whole file in: the ini is complete, and no
+            # .config-*.tmp survived the rename.
+            content = (config_dir / "config.ini").read_text()
+            assert "some_key = some_value" in content
+            leftovers = [p.name for p in config_dir.iterdir() if p.name.startswith(".config-")]
+            assert leftovers == []

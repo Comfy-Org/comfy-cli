@@ -1,8 +1,10 @@
 import configparser
+import io
 import os
+import tempfile
 from importlib.metadata import version
 
-from comfy_cli import constants, logging
+from comfy_cli import constants, locking, logging
 from comfy_cli.utils import get_os, is_running, singleton
 
 
@@ -21,20 +23,66 @@ class ConfigManager:
         return os.path.join(self.get_config_path(), "config.ini")
 
     def write_config(self):
-        config_file_path = os.path.join(self.get_config_path(), "config.ini")
-        dir_path = os.path.dirname(config_file_path)
-        if not os.path.exists(dir_path):
-            os.mkdir(dir_path)
+        config_file_path = self.get_config_file_path()
+        # config.ini is cross-process state: background server pid, consent,
+        # user id. Two failure modes meet on this one write:
+        # - a kill mid-write used to leave a truncated ini that configparser
+        #   chokes on for every later command;
+        # - two parallel comfy processes each hold their own in-memory
+        #   snapshot, and whoever wrote last silently erased the other's
+        #   keys — the recorded pid of a live background server was the
+        #   costly loss (`comfy stop` then finds nothing, the server is
+        #   orphaned). The lock serializes the writers; atomic_write_text
+        #   makes every committed state a whole file.
+        with locking.file_lock(config_file_path + ".lock"):
+            self._atomic_write(config_file_path, self._render())
 
-        with open(config_file_path, "w") as configfile:
-            self.config.write(configfile)
+    def _render(self) -> str:
+        return self._render_of(self.config)
+
+    @staticmethod
+    def _render_of(config: configparser.ConfigParser) -> str:
+        buf = io.StringIO()
+        config.write(buf)
+        return buf.getvalue()
+
+    @staticmethod
+    def _atomic_write(config_file_path: str, content: str) -> None:
+        """Replace ``config_file_path`` with ``content`` in one rename.
+
+        mkstemp in the destination directory keeps the rename on one
+        filesystem and the temp file owner-only (0600, like the config
+        itself). (Not file_utils.atomic_write_text: that module pulls in
+        ui, which pulls this module back in.)
+        """
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(config_file_path), prefix=".config-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, config_file_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def set(self, key, value):
         """
         Set a key-value pair in the config file.
         """
+        config_file_path = self.get_config_file_path()
+        with locking.file_lock(config_file_path + ".lock"):
+            # Merge into the on-disk state, not the snapshot this process
+            # loaded at startup: another comfy process may have written since.
+            # Keys this process changed in memory directly (without set())
+            # still win on the next write_config(), as before.
+            fresh = configparser.ConfigParser()
+            if os.path.exists(config_file_path):
+                fresh.read(config_file_path)
+            fresh["DEFAULT"][key] = value
+            self._atomic_write(config_file_path, self._render_of(fresh))
         self.config["DEFAULT"][key] = value
-        self.write_config()  # Write changes to file immediately
 
     def get(self, key):
         """
