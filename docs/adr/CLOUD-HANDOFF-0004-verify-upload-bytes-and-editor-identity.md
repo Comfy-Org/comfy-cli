@@ -2,15 +2,15 @@
 
 Date: 2026-10-25
 
+## Status
+
+Proposed
+
 Relation: Builds on [ADR-AUTOMATION-0003](AUTOMATION-0003-one-versioned-machine-output-dialect.md),
 [ADR-OPERATIONS-0002](OPERATIONS-0002-version-structured-workflow-operations.md), and
 [ADR-DEPENDENCIES-0001](DEPENDENCIES-0001-delegate-unified-resolution-to-comfyui-manager.md).
 The versioned output/error dialect, frozen operation vocabulary, and Manager's
 ownership of unified dependency resolution remain unchanged.
-
-## Status
-
-Proposed
 
 ## Context
 
