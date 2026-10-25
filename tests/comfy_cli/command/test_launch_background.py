@@ -8,6 +8,8 @@ implicit main-thread loop creation was removed. `background_launch` now uses
 
 from unittest.mock import AsyncMock, patch
 
+import os
+
 import pytest
 
 from comfy_cli.caller import Caller
@@ -167,3 +169,33 @@ def test_background_launch_refuses_when_already_running(mock_config_manager, moc
 
     with pytest.raises(typer.Exit):
         launch.background_launch(extra=[])
+
+
+@patch("comfy_cli.command.launch.os._exit")
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_threads_log_file_to_monitor(
+    mock_config_manager, mock_check_running, mock_monitor, mock_exit
+):
+    """#692: --log-file rides down to the monitor, which truncates and records
+    that path instead of the workspace default."""
+    mock_config_manager.return_value.background = None
+    mock_monitor.return_value = None
+
+    launch.background_launch(extra=[], log_file="/tmp/supervisor/comfy.log")
+
+    assert mock_monitor.call_args[1]["log_file"] == "/tmp/supervisor/comfy.log"
+
+
+def test_background_log_path_override_env_and_default(tmp_path, monkeypatch):
+    """#692: --log-file and COMFY_CLI_BACKGROUND_LOG replace the whole path
+    verbatim; with neither set, the workspace default is unchanged."""
+    monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG", raising=False)
+    assert launch.background_log_path(8188, str(tmp_path)) == str(tmp_path / "user" / "comfyui_8188.log")
+
+    monkeypatch.setenv("COMFY_CLI_BACKGROUND_LOG", "env-placed.log")
+    assert launch.background_log_path(8188, str(tmp_path)) == os.path.abspath("env-placed.log")
+
+    monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG")
+    assert launch.background_log_path(8188, str(tmp_path), override="given.log") == os.path.abspath("given.log")
