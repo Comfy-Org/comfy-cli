@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from comfy_cli.utils import get_os
 
 #: Desktop 2's Electron ``userData`` folder name.
 APP_DIR_NAME = "Comfy Desktop"
+MODERN_APP_DIR_NAME = "comfyui-desktop-2"
 #: Desktop 1's ``userData`` folder, which holds ``config.json`` → ``basePath``.
 LEGACY_APP_DIR_NAME = "ComfyUI"
 
@@ -123,6 +124,9 @@ class DesktopDetection:
     selected_reason: str | None = None
     #: Records that exist but could not be read, as ``"<file>: <reason>"``.
     problems: tuple[str, ...] = field(default_factory=tuple)
+    input_dir: str | None = None
+    output_dir: str | None = None
+    output_dir_source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The ``desktop`` block of ``comfy which`` / ``comfy env``.
@@ -145,6 +149,11 @@ class DesktopDetection:
             "installs": [install.summary(selected=install is chosen) for install in self.installs],
             "app_data_dir": self.app_data_dir,
         }
+        if self.input_dir is not None:
+            block["input_dir"] = self.input_dir
+        if self.output_dir is not None:
+            block["output_dir"] = self.output_dir
+            block["output_dir_source"] = self.output_dir_source
         return block
 
 
@@ -273,12 +282,179 @@ def _select(installs: tuple[DesktopInstall, ...]) -> tuple[DesktopInstall | None
     )
 
 
-def detect(app_data_dir: Path | None = None, legacy_dir: Path | None = None) -> DesktopDetection | None:
+def app_data_dirs() -> tuple[Path, ...]:
+    """Known registry folders, keeping an explicit/test override isolated."""
+    primary = desktop_app_data_dir()
+    if primary is None:
+        return ()
+    if primary.name not in (APP_DIR_NAME, MODERN_APP_DIR_NAME):
+        return (primary,)
+    return tuple(dict.fromkeys((primary, primary.parent / MODERN_APP_DIR_NAME, primary.parent / APP_DIR_NAME)))
+
+
+def _argv_values(argv: list[str], flag: str) -> list[str]:
+    values: list[str] = []
+    for index, item in enumerate(argv):
+        if item.startswith(flag + "="):
+            values.append(item.split("=", 1)[1])
+        elif item == flag and index + 1 < len(argv):
+            for value in argv[index + 1 :]:
+                if value.startswith("--"):
+                    break
+                values.append(value)
+                if flag != "--extra-model-paths-config":
+                    break
+    return values
+
+
+def server_launch_paths(stats: dict[str, Any]) -> dict[str, list[str]]:
+    """Return only known filesystem launch arguments, excluding unrelated credential flags."""
+    system = stats.get("system") or {}
+    argv = system.get("argv") if isinstance(system, dict) else None
+    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+        return {}
+    return {
+        name: values
+        for name in ("base_directory", "input_directory", "output_directory", "extra_model_paths_config")
+        if (values := _argv_values(argv, "--" + name.replace("_", "-")))
+    }
+
+
+def _for_server(found: DesktopDetection, stats: dict[str, Any]) -> DesktopDetection:
+    """Select using launch identity, never a remembered last-launched record."""
+    system = stats.get("system") or {}
+    if not isinstance(system, dict):
+        system = {}
+    argv = system.get("argv") or []
+    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+        argv = []
+    bases = _argv_values(argv, "--base-directory")
+    configs = _argv_values(argv, "--extra-model-paths-config")
+    scripts = [arg for arg in argv if Path(arg).is_absolute() and Path(arg).name == "main.py"]
+    matches = [
+        install
+        for install in found.installs
+        if install.exists
+        and (
+            any(_same_path(base, install.data_dir) for base in bases)
+            or any(_same_path(str(Path(script).parent), install.code_dir) for script in scripts)
+            or any(Path(config).stem == install.install_id for config in configs)
+        )
+    ]
+    if len(matches) != 1:
+        detail = "does not identify one recorded Desktop installation"
+        return replace(
+            found,
+            selected=None,
+            selected_reason=None,
+            problems=(*found.problems, f"running server {detail}; pass explicit model/input roots"),
+        )
+    chosen = matches[0]
+    outputs = _argv_values(argv, "--output-directory")
+    if any(
+        not Path(path).expanduser().is_absolute()
+        for path in (*bases, *_argv_values(argv, "--input-directory"), *outputs)
+    ):
+        return replace(
+            found,
+            selected=None,
+            selected_reason=None,
+            problems=(
+                *found.problems,
+                "running server uses relative data/input/output paths; verify its working directory",
+            ),
+        )
+    data_dir = str(Path(bases[-1]).expanduser()) if bases else chosen.data_dir
+    roots = [root for root in chosen.model_roots if root.source != "data"] if not configs else []
+    roots.insert(0, ModelRoot(str(Path(data_dir) / "models"), "data", (Path(data_dir) / "models").is_dir()))
+    problems = list(found.problems)
+    for config in configs:
+        config_path = Path(config).expanduser()
+        if not config_path.is_absolute():
+            problems.append(f"running server model config is relative: {config}; verify its working directory")
+            continue
+        try:
+            import yaml
+
+            contents = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if not isinstance(contents, dict):
+                raise ValueError("expected a mapping")
+            for row in contents.values():
+                if not isinstance(row, dict):
+                    continue
+                base = row.get("base_path")
+                base_path = None
+                if isinstance(base, str) and base:
+                    base_path = Path(os.path.expandvars(base)).expanduser()
+                    if not base_path.is_absolute():
+                        base_path = config_path.parent / base_path
+                    base_path = base_path.resolve()
+                paths = [base_path] if base_path is not None else []
+                for kind, value in row.items():
+                    if kind in ("base_path", "is_default"):
+                        continue
+                    if not isinstance(value, str):
+                        raise ValueError(f"{kind}: expected newline-separated model paths")
+                    for entry in value.splitlines():
+                        if not entry:
+                            continue
+                        path = Path(entry)
+                        if not path.is_absolute():
+                            path = (base_path or config_path.parent) / path
+                        path = path.resolve()
+                        # A base covers its descendant type folders. Keep a
+                        # separate root for absolute paths outside that base.
+                        if base_path is None or not path.is_relative_to(base_path):
+                            paths.append(path)
+                for path in paths:
+                    if not any(_same_path(str(path), root.path) for root in roots):
+                        roots.append(ModelRoot(str(path), "install", path.is_dir()))
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            problems.append(f"{config}: {error}")
+    python = system.get("python")
+    version = system.get("comfyui_version")
+    chosen = replace(
+        chosen,
+        comfyui_version=_as_tag(version) if isinstance(version, str) and version else chosen.comfyui_version,
+        data_dir=data_dir,
+        model_roots=tuple(roots),
+        python=python if isinstance(python, str) and Path(python).is_file() else chosen.python,
+    )
+    inputs = _argv_values(argv, "--input-directory")
+    input_dir = str(Path(inputs[-1]).expanduser()) if inputs else str(Path(data_dir) / "input")
+    return replace(
+        found,
+        selected=chosen,
+        selected_reason="matches the running server launch arguments",
+        installs=tuple(chosen if item is matches[0] else item for item in found.installs),
+        input_dir=input_dir,
+        output_dir=str(Path(outputs[-1]).expanduser()) if outputs else str(Path(data_dir) / "output"),
+        output_dir_source="server_argv" if outputs else "server_default",
+        problems=tuple(problems),
+    )
+
+
+def detect(
+    app_data_dir: Path | None = None, legacy_dir: Path | None = None, *, server_stats: dict[str, Any] | None = None
+) -> DesktopDetection | None:
     """Read Desktop 2's install records. ``None`` means Desktop 2 is not installed.
 
     The app-data dirs default to this OS's; tests pass fixture dirs instead.
     """
-    app_dir = app_data_dir if app_data_dir is not None else desktop_app_data_dir()
+    if app_data_dir is None:
+        detections = [found for directory in app_data_dirs() if (found := detect(directory, legacy_dir)) is not None]
+        if not detections:
+            return None
+        installs = tuple(install for found in detections for install in found.installs)
+        selected, reason = _select(installs)
+        origin = next(
+            (found.app_data_dir for found in detections if selected in found.installs), detections[0].app_data_dir
+        )
+        found = DesktopDetection(
+            origin, installs, selected, reason, tuple(problem for item in detections for problem in item.problems)
+        )
+        return _for_server(found, server_stats) if server_stats is not None else found
+    app_dir = app_data_dir
     if app_dir is None:
         return None
     installations_file = app_dir / "installations.json"
@@ -336,13 +512,14 @@ def detect(app_data_dir: Path | None = None, legacy_dir: Path | None = None) -> 
         if install is not None
     )
     selected, reason = _select(installs)
-    return DesktopDetection(
+    found = DesktopDetection(
         app_data_dir=str(app_dir),
         installs=installs,
         selected=selected,
         selected_reason=reason,
         problems=tuple(problems),
     )
+    return _for_server(found, server_stats) if server_stats is not None else found
 
 
 def install_for_dir(path: str | os.PathLike[str], detection: DesktopDetection | None = None) -> DesktopInstall | None:

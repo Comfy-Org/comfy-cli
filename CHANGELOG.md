@@ -158,6 +158,12 @@ history.
 
 ### Fixed
 
+- Desktop discovery reads both modern and legacy registries. Callers with
+  running-server launch metadata select that exact instance, resolve its model
+  YAML and effective data/input/output paths, and keep ambiguous or relative
+  runtime identities unresolved. The optional discovery fields are documented
+  in the which/env schemas; unrelated launch arguments are excluded.
+
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
