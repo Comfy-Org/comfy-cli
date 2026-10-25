@@ -168,10 +168,12 @@ def upload_cmd(
             query = urllib.parse.urlencode(
                 {"include_tags": "models", "name_contains": destination_name, "include_public": "true", "limit": 500}
             )
-            _, existing = request_json(target.url("assets") + "?" + query, target, max_bytes=5 * 1024 * 1024)
+            status, existing = request_json(target.url("assets") + "?" + query, target, max_bytes=5 * 1024 * 1024)
             if (
-                not isinstance(existing, dict)
+                status != 200
+                or not isinstance(existing, dict)
                 or not isinstance(existing.get("assets"), list)
+                or any(not isinstance(row, dict) for row in existing["assets"])
                 or existing.get("has_more") is not False
             ):
                 _refuse(

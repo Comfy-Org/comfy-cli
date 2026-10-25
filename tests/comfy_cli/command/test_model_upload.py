@@ -406,3 +406,29 @@ def test_actual_http_transport_streams_approved_snapshot_with_exact_length(tmp_p
     assert approved in body
     assert source.read_bytes() not in body
     renderer.error.assert_not_called()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["upload", "plan"])
+@pytest.mark.parametrize(
+    ("status", "rows"),
+    [(200, [None]), (200, ["malformed"]), (201, []), (503, [])],
+    ids=["null-row", "string-row", "non-ok-success", "non-ok-error"],
+)
+def test_unverified_public_collision_listing_never_plans_or_uploads(tmp_path, monkeypatch, dry_run, status, rows):
+    m, p, r, reads, sent = setup_upload(tmp_path, monkeypatch)
+    read = m.request_json
+    operations = []
+
+    def malformed_public_listing(url, target, **kwargs):
+        operations.append((url, kwargs.get("method", "GET")))
+        if "/assets?" in url:
+            return status, {"assets": rows, "has_more": False}
+        return read(url, target, **kwargs)
+
+    monkeypatch.setattr(m, "request_json", malformed_public_listing)
+    with pytest.raises(typer.Exit):
+        run_case(m, p, dry_run=dry_run)
+    assert sent == []
+    assert not any(method == "POST" for _, method in operations)
+    r.emit.assert_not_called()
+    assert r.error.call_args.kwargs["details"]["reason"] == "collision_unverified"
