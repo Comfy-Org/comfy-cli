@@ -231,11 +231,11 @@ class NoteTextNotWritable(ValueError):
         #: delete_node accepts (not the spelling the caller typed).
         self.node_id = node_id
         if interior:
-            # delete_node only removes top-level nodes, and insert_workflow only
-            # adds at the root, so there is no command route to replace it.
+            # insert_workflow only adds at the root, so even where delete_node
+            # can remove an interior note there is no command route to replace it.
             self.hint = (
-                f"{node_id} is a note inside a subgraph definition: delete-node only removes top-level nodes, "
-                "so its text can only be changed in the ComfyUI editor"
+                f"{node_id} is a note inside a subgraph definition: no command can insert a replacement inside "
+                "a subgraph, so its text can only be changed in the ComfyUI editor"
             )
         else:
             self.hint = (
@@ -1044,7 +1044,7 @@ def _set_widget_impl(
     from comfy_cli.cql import promoted as _promoted
 
     # Subgraph-aware. A promoted widget's value lives on the HOST instance
-    # (ADR 0009: the host value wins over the interior default at run time),
+    # (ADR-SUBGRAPH-PROMOTION-0009: the host value wins over the interior default at run time),
     # and when an outside node feeds the promoted input, on THAT node — never
     # on the interior node the legacy ``proxyWidgets`` route pointed at. So a
     # flat ``57.width``, the interior ``57/13.width`` it backs, and a primitive
@@ -1341,6 +1341,27 @@ def _navigate_subgraph_path(workflow: dict, segments: list[str]) -> dict:
         if node is None:
             raise ValueError(f"interior node {seg} not found in subgraph {sg.get('id')}")
     return node
+
+
+def _interior_path_deleted(workflow: dict, segments: list[str]) -> bool:
+    """True when ``segments`` stops at an interior node that is absent from an
+    existing definition — the shape an interior ``delete_node`` leaves behind,
+    as opposed to a path that was never valid."""
+    from comfy_cli.cql import engine as _engine
+
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    node = _find_by_str(workflow, segments[0])
+    for seg in segments[1:]:
+        sg = defs_by_id.get(str((node or {}).get("type", ""))) if isinstance(node, dict) else None
+        if sg is None:
+            return False
+        node = next(
+            (n for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("id", "")) == str(seg)),
+            None,
+        )
+        if node is None:
+            return True
+    return False
 
 
 def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
@@ -1771,6 +1792,76 @@ def _interior_disconnect_scope(workflow: dict, to_node: Any) -> dict | None:
     return {"path": [str(seg) for seg in path], "definition": definition, "dst": dst}
 
 
+def _interior_delete_scope(workflow: dict, node_id: Any) -> dict | None:
+    """Resolve an interior node delete to its owning single-instance definition."""
+    from comfy_cli.cql import engine as _engine
+
+    text = str(node_id)
+    if _find_by_str(workflow, text) is not None:
+        return None
+    if _engine._SUBGRAPH_PATH_SEP in text:
+        segments = _engine.split_node_path(workflow, text)
+    elif ":" in text:
+        segments = text.split(":")
+    else:
+        return None
+    if len(segments) < 2:
+        return None
+    path = segments[:-1]
+    try:
+        host = _navigate_subgraph_path(workflow, path)
+    except ValueError:
+        return None
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None:
+        return None
+    target = next(
+        (
+            node
+            for node in definition.get("nodes") or []
+            if isinstance(node, dict) and str(node.get("id")) == str(segments[-1])
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    instances = _definition_instance_count(workflow, str(host.get("type", "")))
+    if instances > 1:
+        raise ValueError(
+            f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
+            f"{instances} instances, so deleting a node inside it would mutate all {instances} at once — "
+            "delete-node refuses that; edit a single-instance copy (unpack or duplicate the subgraph in the editor)"
+        )
+    # A promoted widget's value lives positionally in the host's
+    # widgets_values (or, for a legacy promotion, in proxyWidgets order).
+    # Deleting its source would shift every later value onto the wrong input,
+    # and neither this CLI nor the shared applier realigns the host, so refuse.
+    from comfy_cli.cql import promoted as _promoted
+
+    target_id = str(target.get("id"))
+    backed = [
+        p.name
+        for p in _promoted.promoted_inputs(definition, _engine._subgraph_defs_by_id(workflow))
+        if p.is_widget and str(p.source_node) == target_id
+    ]
+    backed += [
+        str(entry[1])
+        for entry in (host.get("properties") or {}).get("proxyWidgets") or []
+        if isinstance(entry, list) and len(entry) >= 2 and str(entry[0]) == target_id
+    ]
+    if backed:
+        raise ValueError(
+            f"node {'/'.join([*path, target_id])} backs the promoted widget(s) {sorted(set(backed))} of subgraph "
+            f"{'/'.join(path)}; deleting it would shift the subgraph's remaining widget values onto the wrong "
+            "inputs — delete-node refuses that; remove the promotion in the editor first"
+        )
+    return {
+        "path": [str(seg) for seg in path],
+        "definition": definition,
+        "target": target,
+    }
+
+
 def _definition_instance_count(workflow: dict, def_id: str) -> int:
     """How many live instances of definition ``def_id`` the workflow holds.
 
@@ -2103,13 +2194,17 @@ def _slot_ref(node: dict, slots_key: str, index: Any, alias: str) -> str:
 
     Names are the canonical reference form and survive slot reordering; the
     index is the fallback for a node whose slot list the template omits.
-    ``_split_ref_slot`` partitions on the FIRST dot, so a name containing one
-    would resolve wrong — those fall back to the index too.
+    A dotted autogrow name (``images.image0``) is emitted verbatim: an alias
+    never contains a dot, and ``_split_ref_slot`` partitions on the FIRST one,
+    so the whole remainder — dots and all — is handed back as the slot. Falling
+    back to the index for those instead broke the §8.8 one-artifact/two-consumers
+    contract, because ``apply_specs`` re-mints each node from the catalog and a
+    fresh node has no grown slot at that index (Comfy-Org/comfy-cli#1034).
     """
     slots = node.get(slots_key)
     if isinstance(slots, list) and isinstance(index, int) and 0 <= index < len(slots):
         name = (slots[index] or {}).get("name") if isinstance(slots[index], dict) else None
-        if isinstance(name, str) and name and "." not in name:
+        if isinstance(name, str) and name:
             return f"${alias}.{name}"
     return f"${alias}.{index}"
 
@@ -2300,6 +2395,24 @@ def _delete_node_impl(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    interior = _interior_delete_scope(workflow, node_id)
+    if interior is not None:
+        target_id = interior["target"]["id"]
+        removed = [
+            _interior_link_id(link)
+            for link in interior["definition"].get("links") or []
+            if str(_interior_link_endpoints(link)[0]) == str(target_id)
+            or str(_interior_link_endpoints(link)[1]) == str(target_id)
+        ]
+        op = _new_op(
+            "delete_node",
+            actor,
+            base_version,
+            path=interior["path"],
+            node_id=target_id,
+            removed_links=removed,
+        )
+        return apply_op(workflow, op, graph), op
     _require(workflow, node_id)
     removed = [ln[0] for ln in workflow.get("links") or [] if ln[1] == node_id or ln[3] == node_id]
     op = _new_op("delete_node", actor, base_version, node_id=node_id, removed_links=removed)
@@ -3056,7 +3169,12 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         # Validate against the current definition before the mutating resolver
         # forks shared ancestors. Imported/replayed malformed ops must be
         # atomic: a rejected widget cannot leave an unreachable fork behind.
-        preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        try:
+            preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        except ValueError:
+            if _interior_path_deleted(workflow, [str(s) for s in path]):
+                return  # interior node concurrently deleted => no-op (delete wins)
+            raise
         preflight_warnings = _engine._write_widget(
             copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False
         )
@@ -3557,6 +3675,9 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
 
 
 def _apply_delete_node(workflow: dict, op: dict) -> None:
+    if op.get("path"):
+        _apply_interior_delete_node(workflow, op)
+        return
     node_id = str(op["node_id"])  # node identity is compared as a string (amendment v1.2)
     workflow["nodes"] = [n for n in workflow.get("nodes") or [] if str(n.get("id")) != node_id]
     removed = set(op.get("removed_links") or [])
@@ -3581,6 +3702,54 @@ def _apply_delete_node(workflow: dict, op: dict) -> None:
                 pending.pop(key, None)
         if not pending:
             workflow.pop("_pending_dynamic_connects", None)
+
+
+def _apply_interior_delete_node(workflow: dict, op: dict) -> None:
+    """Apply a path-scoped delete inside one single-instance definition."""
+    from comfy_cli.cql import engine as _engine
+
+    try:
+        host = _navigate_subgraph_path(workflow, [str(seg) for seg in op["path"]])
+    except ValueError:
+        return
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None or _definition_instance_count(workflow, str(host.get("type", ""))) > 1:
+        return
+    node_id = str(op["node_id"])
+    definition["nodes"] = [
+        node
+        for node in definition.get("nodes") or []
+        if not (isinstance(node, dict) and str(node.get("id")) == node_id)
+    ]
+    removed = {str(link_id) for link_id in op.get("removed_links") or []}
+    kept = []
+    for link in definition.get("links") or []:
+        origin_id, target_id, _ = _interior_link_endpoints(link)
+        if str(_interior_link_id(link)) in removed or str(origin_id) == node_id or str(target_id) == node_id:
+            removed.add(str(_interior_link_id(link)))
+            continue
+        kept.append(link)
+    definition["links"] = kept
+    kept_ids = {str(_interior_link_id(link)) for link in kept}
+    # Links from the input proxy / into the output proxy are also listed on the
+    # definition's boundary slots; a stale id there leaves the slot "connected"
+    # to a link that no longer exists.
+    for boundary in [*(definition.get("inputs") or []), *(definition.get("outputs") or [])]:
+        if isinstance(boundary, dict) and isinstance(boundary.get("linkIds"), list):
+            boundary["linkIds"] = [link_id for link_id in boundary["linkIds"] if str(link_id) not in removed]
+    for node in definition.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        for inp in node.get("inputs") or []:
+            if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) not in kept_ids:
+                inp["link"] = None
+        for out in node.get("outputs") or []:
+            if isinstance(out, dict) and isinstance(out.get("links"), list):
+                out["links"] = [link_id for link_id in out["links"] if str(link_id) in kept_ids]
+    if isinstance(definition.get("node_order"), list):
+        definition["node_order"] = [value for value in definition["node_order"] if str(value) != node_id]
+    if isinstance(definition.get("link_order"), list):
+        definition["link_order"] = [value for value in definition["link_order"] if str(value) in kept_ids]
 
 
 def _apply_clear(workflow: dict, op: dict) -> None:
@@ -3649,6 +3818,8 @@ def _write_target(op: dict) -> tuple:
         # neither collides with a same-named widget's register.
         return ("node_field", str(op["node_id"]), op["field"])
     if kind in ("add_node", "delete_node"):
+        if op.get("path"):
+            return ("node", tuple(str(s) for s in op["path"]), str(op["node_id"]))
         return ("node", str(op["node_id"]))
     if kind in ("connect", "disconnect"):
         grow = op.get("grow")

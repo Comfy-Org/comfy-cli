@@ -2520,13 +2520,14 @@ def _builder_client(renderer, builder_url: str | None):
     A caller that already holds a Cloud JWT, such as the Developer Platform agent
     service forwarding the request's token, injects it via ``COMFY_BUILDER_TOKEN``,
     and that explicit token comes first. Otherwise ``from_credentials`` uses a
-    workspace API key from ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the
-    stored sign-in.
+    Cloud JWT from ``COMFY_CLOUD_AUTH_TOKEN`` or a workspace API key from
+    ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the stored sign-in. Empty
+    or whitespace-only values count as unset.
     """
     from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
     base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
-    token = os.environ.get("COMFY_BUILDER_TOKEN")
+    token = (os.environ.get("COMFY_BUILDER_TOKEN") or "").strip()
     if token:
         return BuilderClient(base_url, token)
     try:

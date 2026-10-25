@@ -566,6 +566,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -579,6 +580,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.connect.side_effect = ConnectionError("Connection refused")
 
@@ -592,6 +594,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketException("Connection lost")
 
@@ -607,6 +610,7 @@ class TestExecuteErrorHandling:
             mock_progress = MagicMock()
             MockProgress.return_value = mock_progress
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -627,6 +631,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -697,6 +702,7 @@ class TestExecuteErrorHandling:
             mock_progress = MagicMock()
             MockProgress.return_value = mock_progress
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -723,8 +729,14 @@ class TestWaitStateFile:
 
     def _mock_exec(self, prompt_id):
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = prompt_id
         mock_exec.client_id = "cid-wait"
+        # Explicit, not the MagicMock default: an unconfigured attribute
+        # auto-vivifies as a truthy MagicMock(), which would make every test
+        # using this fixture look like a borrowed-client run to
+        # _reject_borrowed_wait.
+        mock_exec.borrowed_client_id = False
         mock_exec.outputs = []
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
@@ -1467,7 +1479,8 @@ class TestResolvePartnerCredential:
         self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
 
-    def test_a_live_session_outranks_the_forwarded_bearer(self, monkeypatch: pytest.MonkeyPatch):
+    def test_the_forwarded_bearer_outranks_a_live_session(self, monkeypatch: pytest.MonkeyPatch):
+        """The token handed in for this run wins; the stored session is not even read."""
         monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1477,8 +1490,10 @@ class TestResolvePartnerCredential:
         session.access_token = "live-session"
         session.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: session)
-        assert _resolve_partner_credential() == ("auth_token_comfy_org", "live-session")
+        refreshed = []
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw) or session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+        assert refreshed == []
 
     def test_the_forwarded_bearer_outranks_the_cloud_api_key(self, monkeypatch: pytest.MonkeyPatch):
         """Same order the `purpose="cloud"` chain uses: bearer, then env key."""
@@ -1740,6 +1755,7 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             # allow_spend=True: consent granted, so the spend gate is a no-op
@@ -1769,6 +1785,7 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -1827,6 +1844,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k", allow_spend=True)
@@ -1855,6 +1873,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
@@ -1879,6 +1898,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -2188,6 +2208,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             # A stored api_key means the missing-credential path is satisfied,
@@ -2213,6 +2234,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -2262,6 +2284,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k")
@@ -2405,6 +2428,7 @@ class TestExecuteUiWorkflow:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -2454,6 +2478,7 @@ class TestExecuteUiWorkflow:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -3090,6 +3115,7 @@ class TestRunStripsComposeMeta:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -3128,6 +3154,7 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
 
     def _mock_exec(self, prompt_id):
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = prompt_id
         mock_exec.client_id = "cid-local"
         mock_exec.outputs = []
@@ -3293,6 +3320,7 @@ class TestRunJournal:
     def test_local_submit_journals_inside_project(self, proj_dir):
         workflow_file = self._workflow_file(proj_dir)
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = "prompt-local-journal"
         mock_exec.client_id = "cid"
         mock_exec.outputs = []

@@ -1,5 +1,8 @@
 # Op vocabulary — v1 (frozen)
 
+The accepted architectural role of this frozen, versioned contract is recorded
+in [ADR-OPERATIONS-0002](adr/OPERATIONS-0002-version-structured-workflow-operations.md).
+
 Status: **FROZEN**. This document is the normative contract for the structured-edit
 op vocabulary in `comfy_cli/workflow_ops.py`: the op kinds, their argument shapes,
 their idempotency and conflict rules, and the batch protocol. Downstream
@@ -11,9 +14,8 @@ Machine-readable projection: `workflow_ops.FROZEN_OPS`, `workflow_ops.DEFERRED_O
 enforces that this document, those constants, and the `apply_op` / `apply_specs`
 dispatch tables agree. A change to any of the three without the others fails CI.
 
-This freeze describes the code on the **unmerged branch
-`fix/validate-lowers-ui-to-api`**. Until that branch merges to `master`, a SHA
-citation must point at a commit on that branch.
+This freeze describes code on `main`. A SHA citation points at the commit that
+contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
@@ -181,9 +183,19 @@ Spec form:
 ```
 
 Minted op fields: `node_id`, `removed_links` (ids of every link incident to the
-node at mint time). Replay removes the node, drops incident links (both the
-recorded ones and any link whose endpoint is the node), and scrubs dangling
-input/output references.
+node at mint time). An interior address such as `70/22` additionally carries
+the owner-instance `path` (`["70"]`); it is refused when the definition is
+shared by multiple live instances, or when the node is the source of a
+promoted widget (its host value would shift onto the wrong input). Replay
+removes the node, drops incident links (both the recorded ones and any link
+whose endpoint is the node), and scrubs dangling input/output references in
+that same graph scope — for an interior delete, including the definition's
+boundary `inputs[].linkIds` and `outputs[].linkIds`.
+
+An interior delete reuses the `delete_node` kind, so a consumer that predates
+`path` cannot reject it. comfy-multi-player 0.3.11 and earlier ignore `path`,
+remove the top-level node with the same id, and report the op `applied`. Send
+interior deletes only to a doc host on comfy-multi-player 0.3.12 or later.
 
 * Idempotency: `op_id` no-op; replaying a delete of an already-absent node is a
   no-op.
@@ -556,8 +568,14 @@ Current contract, pinned:
   a promoted-widget target is still rejected with "promoted widget (a value),
   not a link input". Both operations refuse a shared definition rather than
   silently rewiring every instance that uses it.
-* **`add_node` and `delete_node` cannot address interior nodes** at all; an
-  interior id fails as node-not-found against the top-level inventory.
+* **`delete_node` permits an interior node in one supported, single-instance
+  definition.** Its op carries the owner-instance `path`; its node-presence
+  identity is scoped by that path, and replay removes incident definition
+  links plus their endpoint references. It refuses a shared definition rather
+  than deleting from every instance, and refuses a node that backs a promoted
+  widget. A later interior `set_widget` on the deleted node is a no-op (delete
+  wins). `add_node` still cannot address an interior location from the CLI
+  authoring surface.
 * An interior **widget** write to a shared definition forks the definition at
   apply time (`engine._isolate_shared_subgraph`): the definition is deep-copied
   under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
@@ -890,7 +908,7 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 ## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
 
-The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+The frontend (ComfyUI_frontend ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted subgraph widget's
 value on the HOST instance — `widgets_values[i]` on the instance, positional
 over the definition's inputs that resolve to an interior widget — and runs
 that value over the interior default. Interior `path` writes (§8.7) therefore
