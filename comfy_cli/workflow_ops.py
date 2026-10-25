@@ -261,9 +261,8 @@ if not AUTHORABLE_VIRTUAL_NODE_TYPES <= UI_ONLY_NODE_TYPES:
     )
 
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
-# `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
-# mistake it for a class name. There is no instantiate-a-subgraph command, so
-# such an add can never succeed; say why instead of "unknown node type".
+# `ls-nodes` prints that verbatim. ``add_node`` can reuse that id only when the
+# current workflow contains both the definition and an instance to copy.
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -296,8 +295,8 @@ class UnknownNodeType(ValueError):
             )
         elif subgraph_id:
             msg = (
-                f"{class_type!r} is a subgraph INSTANCE id, not a node class. `ls-nodes` prints a subgraph "
-                "instance's definition uuid as its type; there is no command to instantiate a subgraph"
+                f"{class_type!r} looks like a subgraph definition id, not a node class, but this workflow "
+                "does not contain a matching definition and reusable instance"
             )
         else:
             msg = f"unknown node type {class_type!r}"
@@ -661,6 +660,57 @@ def _coerce_pos(pos: Any) -> Any:
     return out
 
 
+def _reusable_subgraph_instance(workflow: dict, definition_id: str) -> dict | None:
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if not isinstance(subgraphs, list) or not any(
+        isinstance(definition, dict) and definition.get("id") == definition_id for definition in subgraphs
+    ):
+        return None
+    for node in workflow.get("nodes") or []:
+        if isinstance(node, dict) and node.get("type") == definition_id:
+            return node
+    raise ValueError(
+        f"subgraph definition {definition_id!r} has no existing top-level instance to reuse; "
+        "add_node only copies an instance already present in the workflow"
+    )
+
+
+def _build_subgraph_instance(
+    node_id: int,
+    definition_id: str,
+    template: dict,
+    pos: list,
+    size: list,
+    *,
+    title: str | None,
+) -> dict:
+    node = {
+        "id": node_id,
+        "type": definition_id,
+        "pos": list(pos),
+        "size": list(size),
+        "flags": {},
+        "order": 0,
+        "mode": 0,
+        "inputs": copy.deepcopy(template.get("inputs") or []),
+        "outputs": copy.deepcopy(template.get("outputs") or []),
+        "properties": copy.deepcopy(template.get("properties") or {}),
+        "widgets_values": copy.deepcopy(template.get("widgets_values") or []),
+    }
+    for item in node["inputs"]:
+        if isinstance(item, dict):
+            item["link"] = None
+    for item in node["outputs"]:
+        if isinstance(item, dict):
+            item["links"] = []
+    if "widgets_values_form" in template:
+        node["widgets_values_form"] = copy.deepcopy(template["widgets_values_form"])
+    if title is not None:
+        node["title"] = title
+    return node
+
+
 def add_node(
     workflow: dict,
     graph,
@@ -691,6 +741,7 @@ def add_node(
     # executable node.
     is_note = class_type in AUTHORABLE_VIRTUAL_NODE_TYPES
     m = None if is_note else graph.node(class_type)
+    subgraph_template = None
     if is_note:
         if text is None:
             text = ""
@@ -700,12 +751,33 @@ def add_node(
     elif m is None:
         if class_type in UI_ONLY_NODE_TYPES:
             raise UnknownNodeType(class_type, ui_only=True)
-        if _UUID_RE.match(class_type.strip()):
+        subgraph_template = _reusable_subgraph_instance(workflow, class_type)
+        if subgraph_template is not None:
+            if text is not None:
+                raise ValueError("`text` is not valid for a subgraph instance; edit its promoted widgets by name")
+            template_size = subgraph_template.get("size")
+            size = (
+                list(template_size)
+                if isinstance(template_size, list)
+                and len(template_size) == 2
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    and value > 0
+                    for value in template_size
+                )
+                else [210, 80]
+            )
+        elif _UUID_RE.match(class_type.strip()):
             raise UnknownNodeType(class_type, subgraph_id=True)
-        import difflib
+        else:
+            import difflib
 
-        names = [n.id for n in graph.all_nodes()]
-        raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
+            names = [n.id for n in graph.all_nodes()]
+            raise UnknownNodeType(
+                class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6)
+            )
     else:
         if text is not None:
             raise ValueError(
@@ -746,7 +818,9 @@ def add_node(
         raise ValueError(f"node position must be two finite numbers, got {pos!r}")
     if title is not None and not isinstance(title, str):
         raise ValueError(f"node title must be a string, got {title!r}")
-    if m is None:
+    if subgraph_template is not None:
+        node = _build_subgraph_instance(mint_id(), class_type, subgraph_template, pos, size, title=title)
+    elif m is None:
         node = _build_note_node(mint_id(), class_type, pos, size, text or "", title=title)
     else:
         node = _build_node(mint_id(), class_type, m, graph, pos, size, title=title)

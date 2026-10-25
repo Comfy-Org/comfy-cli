@@ -73,15 +73,82 @@ def test_ui_only_node_is_rejected_with_a_specific_reason(patched_graph, tmp_path
 
 
 def test_uuid_class_type_is_named_as_a_subgraph_instance(patched_graph, tmp_path, capsys):
-    """A subgraph INSTANCE's `type` is its definition UUID, and ls-nodes passes
-    it through verbatim — so the agent sees a UUID that looks like a class name.
-    There is no instantiate command, so this can never succeed; say so."""
+    """An unknown UUID is still rejected as a missing subgraph definition."""
     env = _add(tmp_path, capsys, "2454ad83-157c-40dd-9f19-5daaf4041ce0")
     assert env["ok"] is False
     err = env["error"]
     assert err["code"] == "node_not_found"
     blob = json.dumps(err).lower()
     assert "subgraph" in blob, f"must explain the UUID is a subgraph instance id: {err}"
+
+
+def _workflow_with_subgraph_instance() -> tuple[dict, str]:
+    definition_id = "2454ad83-157c-40dd-9f19-5daaf4041ce0"
+    workflow = _base_workflow()
+    workflow["definitions"] = {
+        "subgraphs": [
+            {
+                "id": definition_id,
+                "name": "Prompt module",
+                "inputs": [],
+                "outputs": [],
+                "nodes": [],
+                "links": [],
+            }
+        ]
+    }
+    workflow["nodes"].append(
+        {
+            "id": 88,
+            "type": definition_id,
+            "pos": [400, 300],
+            "size": [240, 160],
+            "flags": {"collapsed": True},
+            "order": 3,
+            "mode": 2,
+            "inputs": [
+                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 51},
+                {"name": "clip", "type": "CLIP", "link": 52},
+            ],
+            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [53]}],
+            "properties": {"Node name for S&R": "Prompt module"},
+            "widgets_values": ["a photo of a pier", 7],
+            "widgets_values_form": {"order": ["text", "seed"]},
+            "title": "custom first instance",
+        }
+    )
+    workflow["last_node_id"] = 88
+    return workflow, definition_id
+
+
+def test_existing_subgraph_definition_can_be_reused_as_an_independent_instance(patched_graph, tmp_path, capsys):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    path = _write(tmp_path, workflow)
+
+    env = _run(["add-node", str(path), definition_id, "--at", "700,300"], capsys)
+
+    assert env["ok"] is True, env
+    op = env["data"]["op"]
+    saved = json.loads(path.read_text())
+    instances = [node for node in saved["nodes"] if node["type"] == definition_id]
+    assert len(instances) == 2
+    original, reused = instances
+    assert reused == op["node"]
+    assert reused["id"] != original["id"]
+    assert reused["pos"] == [700.0, 300.0]
+    assert reused["size"] == original["size"]
+    assert reused["widgets_values"] == original["widgets_values"]
+    assert reused["widgets_values_form"] == original["widgets_values_form"]
+    assert reused["properties"] == original["properties"]
+    assert [item["link"] for item in reused["inputs"]] == [None, None]
+    assert reused["outputs"][0]["links"] == []
+    assert reused["flags"] == {}
+    assert reused["order"] == 0
+    assert reused["mode"] == 0
+    assert "title" not in reused
+
+    reused["widgets_values"][0] = "second instance"
+    assert original["widgets_values"][0] == "a photo of a pier"
 
 
 def test_known_class_still_adds(patched_graph, tmp_path, capsys):
