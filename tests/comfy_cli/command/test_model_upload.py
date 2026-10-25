@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import blake3
 import pytest
 import typer
+from click import unstyle
 from typer.testing import CliRunner
 
 from comfy_cli.target import Target
@@ -20,8 +21,9 @@ def test_model_upload_is_a_discoverable_command():
 
     result = CliRunner().invoke(app, ["upload", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--dry-run" in result.output
-    assert "--expected-sha256" in result.output
+    help_text = unstyle(result.output)
+    assert "--dry-run" in help_text
+    assert "--expected-sha256" in help_text
 
 
 def setup_upload(tmp_path, monkeypatch, *, flags=None, current="ws-approved", rows=None):

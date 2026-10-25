@@ -9,6 +9,7 @@ from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from comfy_cli.command import workflow as cmd
@@ -31,9 +32,10 @@ META = {
 def test_cli_ui_command_exists():
     result = CliRunner().invoke(cmd.app, ["ui", "--help"])
     assert result.exit_code == 0, result.output
-    assert "--workspace" in result.output
-    assert "--environment" in result.output
-    assert "--deployment" in result.output
+    help_text = unstyle(result.output)
+    assert "--workspace" in help_text
+    assert "--environment" in help_text
+    assert "--deployment" in help_text
 
 
 @pytest.fixture
