@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,15 @@ def test_define_subgraph_can_assign_an_explicit_new_id():
 def test_define_subgraph_rejects_invalid_uuid_version_or_variant(subgraph_id):
     with pytest.raises(ValueError, match="valid UUID"):
         workflow_ops.define_subgraph({"nodes": [], "links": []}, _definition(), subgraph_id=subgraph_id)
+
+
+@pytest.mark.parametrize("non_finite", [math.nan, math.inf, -math.inf])
+def test_define_subgraph_rejects_non_finite_values(non_finite):
+    definition = _definition()
+    definition["nodes"][0]["value"] = non_finite
+
+    with pytest.raises(ValueError, match="JSON-serializable"):
+        workflow_ops.define_subgraph({"nodes": [], "links": []}, definition)
 
 
 def test_define_subgraph_command_emits_without_writing_workflow(tmp_path, monkeypatch):

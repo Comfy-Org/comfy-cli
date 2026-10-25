@@ -3110,7 +3110,7 @@ def define_subgraph(
         raise ValueError("subgraph definition id must match --id")
     definition["id"] = definition_id
     try:
-        json.dumps(definition)
+        json.dumps(definition, allow_nan=False)
     except (TypeError, ValueError, RecursionError) as error:
         raise ValueError("subgraph definition must be JSON-serializable") from error
     op = _new_op(
