@@ -16,9 +16,10 @@ without having to write a new adapter for each partner.
 
 from __future__ import annotations
 
+import base64
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, field
 from typing import Any
 
 import httpx
@@ -34,6 +35,11 @@ class PollResult:
     raw: dict[str, Any]  # last response body — full upstream payload
     image_urls: list[str]  # any image/video result URLs we could pluck out
     error: str | None = None
+    # Inline (mime, bytes) media answers. Some sync partners — GPT Image 2 on
+    # ``dalle`` — ship ``data[].b64_json`` instead of URLs; without this the
+    # response parsed as "no image URLs found" and ``--download`` saved nothing
+    # (GitHub #613).
+    blobs: list[tuple[str, bytes]] = field(default_factory=list)
 
 
 # Recognized result extensions when sniffing URLs out of a poll body.
@@ -61,6 +67,29 @@ _MEDIA_EXTS = (
 
 def _now() -> float:
     return time.monotonic()
+
+
+def _extract_inline_blobs(node: Any) -> list[tuple[str, bytes]]:
+    """Walk a JSON tree, decoding inline base64 media (``b64_json`` keys).
+
+    OpenAI-images-shaped answers carry ``data[].b64_json``; everything else
+    answers with URLs and stays on :func:`_extract_urls`. Returns
+    ``(mime, bytes)`` pairs — GPT Image models answer PNG today.
+    """
+    blobs: list[tuple[str, bytes]] = []
+    if isinstance(node, dict):
+        data_b64 = node.get("b64_json")
+        if isinstance(data_b64, str) and data_b64:
+            try:
+                blobs.append(("image/png", base64.b64decode(data_b64, validate=False)))
+            except (ValueError, TypeError):
+                pass
+        for v in node.values():
+            blobs.extend(_extract_inline_blobs(v))
+    elif isinstance(node, list):
+        for v in node:
+            blobs.extend(_extract_inline_blobs(v))
+    return blobs
 
 
 def _extract_urls(node: Any) -> list[str]:
@@ -404,4 +433,9 @@ def sync_result_from_response(resp: httpx.Response) -> PollResult:
         body = resp.json()
     except ValueError:
         return PollResult(status="succeeded", raw={"_text": resp.text}, image_urls=[])
-    return PollResult(status="succeeded", raw=body, image_urls=_extract_urls(body))
+    return PollResult(
+        status="succeeded",
+        raw=body,
+        image_urls=_extract_urls(body),
+        blobs=_extract_inline_blobs(body),
+    )

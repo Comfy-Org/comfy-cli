@@ -383,6 +383,8 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         saved: list[str] = []
         if download and result.image_urls:
             saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
+        if download and result.blobs and not result.image_urls:
+            saved = [str(p) for p in output.save_inline_blobs(result.blobs, download, request_id)]
         if renderer.is_json():
             # JSON/NDJSON modes (the global ``--output json``, a redirected
             # stdout, or the tail ``--json``) get the envelope/1 contract every
@@ -404,6 +406,14 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         saved = output.save_urls(result.image_urls, download, request_id)
         output.print_urls(result.image_urls, request_id=request_id)
         output.print_saved(saved)
+    elif result.blobs:
+        # Inline answers (GPT Image 2 ships data[].b64_json) — with --download
+        # they save like URLs; without it, point at --download instead of the
+        # misleading "no image URLs found" (GitHub #613).
+        if download:
+            output.print_saved(output.save_inline_blobs(result.blobs, download, request_id))
+        else:
+            rprint("[yellow]Image data returned inline. Pass --download <path> to save.[/yellow]")
     else:
         output.print_urls(result.image_urls, request_id=request_id)
         if download and not result.image_urls:
