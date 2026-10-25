@@ -41,6 +41,8 @@ from typing import Any
 
 import yaml
 
+from comfy_cli.file_utils import atomic_write_text
+
 
 class _YamlLoader(yaml.SafeLoader):
     """SafeLoader that strips YAML 1.1's bool aliases for ``on``/``off``/
@@ -289,8 +291,23 @@ def _select_spec_path() -> Path:
 @lru_cache(maxsize=1)
 def load_raw_spec() -> dict[str, Any]:
     path = _select_spec_path()
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.load(f, Loader=_YamlLoader)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.load(f, Loader=_YamlLoader)
+    except yaml.YAMLError:
+        if path == _BUNDLED_SPEC:
+            raise
+        # A truncated cache (killed refresh, full disk) used to poison every
+        # generate command until the 7-day TTL expired: _select_spec_path
+        # picks by mtime and nothing validated the body. Quarantine the cache
+        # and fall back to the vendored spec; the next refresh rewrites it.
+        try:
+            path.rename(path.with_suffix(path.suffix + ".corrupt"))
+        except OSError:
+            pass
+        load_raw_spec.cache_clear()
+        with _BUNDLED_SPEC.open("r", encoding="utf-8") as f:
+            return yaml.load(f, Loader=_YamlLoader)
 
 
 def base_url() -> str:
@@ -1273,8 +1290,7 @@ def validate_spec_text(text: str) -> dict[str, Any]:
 
 def write_cache(yaml_text: str) -> Path:
     """Write `yaml_text` to the user cache, ensuring the parent dir exists."""
-    _USER_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    _USER_CACHE.write_text(yaml_text, encoding="utf-8")
+    atomic_write_text(_USER_CACHE, yaml_text)
     # Invalidate in-process cache so the next load picks it up.
     load_raw_spec.cache_clear()
     _registry.cache_clear()
