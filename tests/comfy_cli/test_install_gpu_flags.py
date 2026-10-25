@@ -64,3 +64,14 @@ def test_nvidia_on_macos_exits_without_installing(stub_install_env):
 
     assert result.exit_code == 1
     stub_install_env.assert_not_called()
+
+
+def test_python_below_39_exits_without_installing(stub_install_env):
+    """The 3.9+ message printed and execution continued: the install ran,
+    exited 0, and only failed later at first launch. Exit at the check."""
+    with patch("comfy_cli.cmdline.EnvChecker") as checker:
+        checker.return_value.python_version = MagicMock(major=3, minor=8)
+        with patch("comfy_cli.cmdline.utils.get_os", return_value=constants.OS.LINUX):
+            result = runner.invoke(app, ["install", "--nvidia", "--skip-manager"])
+
+    assert result.exit_code == 1
