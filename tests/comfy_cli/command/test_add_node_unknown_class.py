@@ -210,6 +210,15 @@ def test_reused_host_preserves_object_form_size_as_a_list():
     assert op["node"]["size"] == [640.0, 360.0]
 
 
+def test_reused_host_rejects_string_size_instead_of_reading_characters():
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["size"] = "640,360"
+
+    _saved, op = workflow_ops.add_node(workflow, _graph(), definition_id, pos=[900, 300])
+
+    assert op["node"]["size"] == list(layout.DEFAULT_SIZE)
+
+
 def test_batch_layout_uses_reused_host_size_for_collision_avoidance():
     workflow, definition_id = _workflow_with_subgraph_instance()
     workflow["nodes"][-1]["size"] = {"0": 640, "1": 360}

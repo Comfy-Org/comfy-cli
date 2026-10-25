@@ -293,6 +293,8 @@ def _pair(value) -> tuple[float, float] | None:
             return float(value["0"]), float(value["1"])
         except (KeyError, TypeError, ValueError):
             return None
+    if not isinstance(value, (list, tuple)):
+        return None
     try:
         return float(value[0]), float(value[1])
     except (TypeError, ValueError, IndexError, KeyError):
