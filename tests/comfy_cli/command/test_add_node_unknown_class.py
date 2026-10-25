@@ -18,6 +18,7 @@ code == "node_not_found") never fired on this path.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -29,6 +30,7 @@ from test_workflow_edit import (  # type: ignore[import-not-found]
     reset_singleton,  # noqa: F401  (autouse fixture)
 )
 
+from comfy_cli import layout, workflow_ops
 from comfy_cli.command import workflow_edit
 
 
@@ -121,7 +123,9 @@ def _workflow_with_subgraph_instance() -> tuple[dict, str]:
     return workflow, definition_id
 
 
-def test_existing_subgraph_definition_can_be_reused_as_an_independent_instance(patched_graph, tmp_path, capsys):
+def test_existing_subgraph_definition_reuses_exact_host_schema_with_fresh_instance_state(
+    patched_graph, tmp_path, capsys
+):
     workflow, definition_id = _workflow_with_subgraph_instance()
     path = _write(tmp_path, workflow)
 
@@ -134,6 +138,10 @@ def test_existing_subgraph_definition_can_be_reused_as_an_independent_instance(p
     assert len(instances) == 2
     original, reused = instances
     assert reused == op["node"]
+    assert op["subgraph_reuse"] == {
+        "definition_id": definition_id,
+        "existing_instance_paths": [["88"]],
+    }
     assert reused["id"] != original["id"]
     assert reused["pos"] == [700.0, 300.0]
     assert reused["size"] == original["size"]
@@ -149,6 +157,95 @@ def test_existing_subgraph_definition_can_be_reused_as_an_independent_instance(p
 
     reused["widgets_values"][0] = "second instance"
     assert original["widgets_values"][0] == "a photo of a pier"
+
+
+def test_legacy_name_typed_host_is_resolved_by_definition_id(patched_graph, tmp_path, capsys):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["type"] = "Prompt module"
+    path = _write(tmp_path, workflow)
+
+    env = _run(["add-node", str(path), definition_id, "--at", "700,300"], capsys)
+
+    assert env["ok"] is True, env
+    assert env["data"]["op"]["node"]["type"] == definition_id
+    assert env["data"]["op"]["subgraph_reuse"]["existing_instance_paths"] == [["88"]]
+
+
+def test_definition_without_top_level_host_stays_node_not_found(patched_graph, tmp_path, capsys):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"].pop()
+    path = _write(tmp_path, workflow)
+
+    env = _run(["add-node", str(path), definition_id], capsys)
+
+    assert env["ok"] is False
+    assert env["error"]["code"] == "node_not_found"
+    assert "matching definition and reusable instance" in json.dumps(env["error"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("inputs", 1),
+        ("outputs", {}),
+        ("properties", []),
+        ("widgets_values", "not-a-container"),
+        ("widgets_values_form", []),
+    ],
+)
+def test_malformed_reusable_host_schema_fails_closed(field, value):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1][field] = value
+
+    with pytest.raises(ValueError, match=f"host field {field!r}"):
+        workflow_ops.add_node(workflow, _graph(), definition_id)
+
+
+def test_reused_host_preserves_object_form_size_as_a_list():
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["size"] = {"0": 640, "1": 360}
+
+    _saved, op = workflow_ops.add_node(workflow, _graph(), definition_id, pos=[900, 300])
+
+    assert op["node"]["size"] == [640.0, 360.0]
+
+
+def test_batch_layout_uses_reused_host_size_for_collision_avoidance():
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["size"] = {"0": 640, "1": 360}
+
+    saved, ops, _aliases = workflow_ops.apply_specs(
+        workflow,
+        _graph(),
+        [
+            {"op": "add_node", "class_type": definition_id, "as": "copy"},
+            {"op": "add_node", "class_type": "VAEDecode", "as": "decode"},
+        ],
+    )
+
+    copied, decode = (next(node for node in saved["nodes"] if node["id"] == op["node_id"]) for op in ops)
+    copied_rect = layout.occupied(copied["pos"], copied["size"])
+    decode_rect = layout.occupied(decode["pos"], decode["size"])
+    assert not layout._overlaps(copied_rect, decode_rect)
+
+
+def test_reuse_and_concurrent_interior_write_are_reported_as_a_conflict():
+    base, definition_id = _workflow_with_subgraph_instance()
+    inner = copy.deepcopy(next(node for node in _base_workflow()["nodes"] if node["type"] == "KSampler"))
+    inner["id"] = 27
+    base["definitions"]["subgraphs"][0]["nodes"] = [inner]
+
+    _with_copy, reuse = workflow_ops.add_node(copy.deepcopy(base), _graph(), definition_id, actor="copy")
+    _with_edit, interior = workflow_ops.set_widget(copy.deepcopy(base), _graph(), "88/27", "steps", 9, actor="edit")
+    copy_then_edit = workflow_ops.apply_op(
+        workflow_ops.apply_op(copy.deepcopy(base), reuse, _graph()), interior, _graph()
+    )
+    edit_then_copy = workflow_ops.apply_op(
+        workflow_ops.apply_op(copy.deepcopy(base), interior, _graph()), reuse, _graph()
+    )
+
+    assert workflow_ops.canonical(copy_then_edit) != workflow_ops.canonical(edit_then_copy)
+    assert workflow_ops.detect_conflict(reuse, interior) is True
 
 
 def test_known_class_still_adds(patched_graph, tmp_path, capsys):

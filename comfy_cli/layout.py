@@ -8,6 +8,8 @@ layout only chooses positions for nodes being minted in the current call.
 
 from __future__ import annotations
 
+import math
+
 COL_GAP = 80.0
 ROW_GAP = 40.0
 NODE_W = 240.0
@@ -297,6 +299,26 @@ def _pair(value) -> tuple[float, float] | None:
         return None
 
 
+def normalized_size(value) -> list[float]:
+    """Return a usable LiteGraph body size in its canonical list form.
+
+    Saved workflows legitimately contain either ``[width, height]`` or
+    ``{"0": width, "1": height}``.  A missing or malformed value falls back
+    to the same default the placement planner uses; finite positive dimensions
+    are required because a zero/NaN footprint defeats collision detection.
+    """
+    try:
+        raw_pair = (value.get("0"), value.get("1")) if isinstance(value, dict) else (value[0], value[1])
+    except (TypeError, IndexError, KeyError):
+        raw_pair = ()
+    if any(isinstance(item, bool) for item in raw_pair):
+        return list(DEFAULT_SIZE)
+    pair = _pair(value)
+    if pair is None or any(not math.isfinite(item) or item <= 0 for item in pair):
+        return list(DEFAULT_SIZE)
+    return [pair[0], pair[1]]
+
+
 def occupied(pos, size) -> tuple[float, float, float, float]:
     """The rectangle a node actually covers on the canvas, title bar included.
 
@@ -406,7 +428,7 @@ def rebase_template(existing_nodes: list, template: dict) -> None:
         group["bounding"] = [gx + dx, gy + dy, *bounding[2:]]
 
 
-def assign_positions(workflow: dict, graph, specs: list) -> list:
+def assign_positions(workflow: dict, graph, specs: list, *, unknown_size_resolver=None) -> list:
     """Fill `at` on every add_node spec that lacks one, using the batch's own
     connects for dataflow layering. Returns spec copies; non-add specs and
     explicit `at` values pass through untouched. Pure: same inputs → same output."""
@@ -450,7 +472,8 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 widget_labels=widget_names,
             )
         else:
-            size = list(DEFAULT_SIZE)  # unknown type: apply_specs will error later
+            resolved_size = unknown_size_resolver(class_type) if unknown_size_resolver is not None else None
+            size = resolved_size if resolved_size is not None else list(DEFAULT_SIZE)
         key = spec.get("as") or f"__new{i}"
         adds[key] = {"i": i, "size": size, "depth": 0, "pinned": spec.get("at")}
         order.append(key)

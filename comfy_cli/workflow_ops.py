@@ -660,20 +660,85 @@ def _coerce_pos(pos: Any) -> Any:
     return out
 
 
-def _reusable_subgraph_instance(workflow: dict, definition_id: str) -> dict | None:
+def _subgraph_definition_and_template(workflow: dict, definition_id: str) -> tuple[dict | None, dict | None]:
+    """Resolve an exact definition id and its first top-level host instance.
+
+    Older workflows may serialize a host's ``type`` as the definition name.
+    The engine's definition index already owns that compatibility rule, so use
+    object identity from the same resolver instead of duplicating an id-only
+    comparison here.  The CLI input remains the exact definition id.
+    """
     definitions = workflow.get("definitions")
     subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
-    if not isinstance(subgraphs, list) or not any(
-        isinstance(definition, dict) and definition.get("id") == definition_id for definition in subgraphs
-    ):
-        return None
-    for node in workflow.get("nodes") or []:
-        if isinstance(node, dict) and node.get("type") == definition_id:
-            return node
-    raise ValueError(
-        f"subgraph definition {definition_id!r} has no existing top-level instance to reuse; "
-        "add_node only copies an instance already present in the workflow"
+    definition = next(
+        (
+            candidate
+            for candidate in subgraphs or []
+            if isinstance(candidate, dict) and candidate.get("id") == definition_id
+        ),
+        None,
     )
+    if definition is None:
+        return None, None
+    from comfy_cli.cql import engine as _engine
+
+    definitions_by_key = _engine._subgraph_defs_by_id(workflow)
+    for node in workflow.get("nodes") or []:
+        if isinstance(node, dict) and definitions_by_key.get(str(node.get("type", ""))) is definition:
+            return definition, node
+    return definition, None
+
+
+def _reusable_subgraph_instance(workflow: dict, definition_id: str) -> dict | None:
+    definition, template = _subgraph_definition_and_template(workflow, definition_id)
+    if definition is None:
+        return None
+    if template is None:
+        raise UnknownNodeType(definition_id, subgraph_id=True)
+    return template
+
+
+def _subgraph_instance_paths(workflow: dict, target: dict) -> list[list[str]]:
+    """Every live path whose host resolves to ``target``, in document order.
+
+    The paths ride in a reused-subgraph ``add_node`` op so conflict detection
+    can identify a concurrent interior mutation without consulting mutable
+    workflow state. Cyclic definitions are malformed but possible; record the
+    cycle edge itself, then stop descending it.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    definitions_by_key = _engine._subgraph_defs_by_id(workflow)
+    paths: list[list[str]] = []
+
+    def walk(nodes: Any, prefix: list[str], ancestors: frozenset[int]) -> None:
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            definition = definitions_by_key.get(str(node.get("type", "")))
+            if definition is None:
+                continue
+            path = [*prefix, str(node.get("id"))]
+            if definition is target:
+                paths.append(path)
+            identity = id(definition)
+            if identity not in ancestors:
+                walk(definition.get("nodes"), path, ancestors | {identity})
+
+    walk(workflow.get("nodes"), [], frozenset())
+    return paths
+
+
+def _copy_host_field(template: dict, name: str, expected: type | tuple[type, ...], default: Any) -> Any:
+    value = template.get(name)
+    if value is None:
+        return copy.deepcopy(default)
+    if not isinstance(value, expected):
+        expected_names = (
+            "/".join(item.__name__ for item in expected) if isinstance(expected, tuple) else expected.__name__
+        )
+        raise ValueError(f"reusable subgraph host field {name!r} must be {expected_names}, got {type(value).__name__}")
+    return copy.deepcopy(value)
 
 
 def _build_subgraph_instance(
@@ -685,6 +750,12 @@ def _build_subgraph_instance(
     *,
     title: str | None,
 ) -> dict:
+    inputs = _copy_host_field(template, "inputs", list, [])
+    outputs = _copy_host_field(template, "outputs", list, [])
+    if any(not isinstance(item, dict) for item in inputs):
+        raise ValueError("reusable subgraph host field 'inputs' must contain only objects")
+    if any(not isinstance(item, dict) for item in outputs):
+        raise ValueError("reusable subgraph host field 'outputs' must contain only objects")
     node = {
         "id": node_id,
         "type": definition_id,
@@ -693,10 +764,10 @@ def _build_subgraph_instance(
         "flags": {},
         "order": 0,
         "mode": 0,
-        "inputs": copy.deepcopy(template.get("inputs") or []),
-        "outputs": copy.deepcopy(template.get("outputs") or []),
-        "properties": copy.deepcopy(template.get("properties") or {}),
-        "widgets_values": copy.deepcopy(template.get("widgets_values") or []),
+        "inputs": inputs,
+        "outputs": outputs,
+        "properties": _copy_host_field(template, "properties", dict, {}),
+        "widgets_values": _copy_host_field(template, "widgets_values", (list, dict), []),
     }
     for item in node["inputs"]:
         if isinstance(item, dict):
@@ -705,7 +776,7 @@ def _build_subgraph_instance(
         if isinstance(item, dict):
             item["links"] = []
     if "widgets_values_form" in template:
-        node["widgets_values_form"] = copy.deepcopy(template["widgets_values_form"])
+        node["widgets_values_form"] = _copy_host_field(template, "widgets_values_form", dict, {})
     if title is not None:
         node["title"] = title
     return node
@@ -755,20 +826,7 @@ def add_node(
         if subgraph_template is not None:
             if text is not None:
                 raise ValueError("`text` is not valid for a subgraph instance; edit its promoted widgets by name")
-            template_size = subgraph_template.get("size")
-            size = (
-                list(template_size)
-                if isinstance(template_size, list)
-                and len(template_size) == 2
-                and all(
-                    isinstance(value, (int, float))
-                    and not isinstance(value, bool)
-                    and math.isfinite(value)
-                    and value > 0
-                    for value in template_size
-                )
-                else [210, 80]
-            )
+            size = layout.normalized_size(subgraph_template.get("size"))
         elif _UUID_RE.match(class_type.strip()):
             raise UnknownNodeType(class_type, subgraph_id=True)
         else:
@@ -834,6 +892,15 @@ def add_node(
                 f"invalid node mode {mode!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
             )
         node["mode"] = mode
+    subgraph_reuse = None
+    if subgraph_template is not None:
+        definition, _template = _subgraph_definition_and_template(workflow, class_type)
+        if definition is None:  # guarded by the successful template lookup above
+            raise UnknownNodeType(class_type, subgraph_id=True)
+        subgraph_reuse = {
+            "definition_id": class_type,
+            "existing_instance_paths": _subgraph_instance_paths(workflow, definition),
+        }
     op = _new_op(
         "add_node",
         actor,
@@ -842,6 +909,7 @@ def add_node(
         class_type=class_type,
         pos=node["pos"],
         node=node,
+        **({"subgraph_reuse": subgraph_reuse} if subgraph_reuse is not None else {}),
         **({"mode": mode} if mode else {}),
         **({"title": title} if title is not None else {}),
     )
@@ -2933,7 +3001,14 @@ def apply_specs(
         else spec
         for spec in specs
     ]
-    specs = layout.assign_positions(workflow, graph, specs)
+
+    def unknown_size(class_type: Any) -> list[float] | None:
+        if not isinstance(class_type, str):
+            return None
+        _definition, template = _subgraph_definition_and_template(workflow, class_type)
+        return layout.normalized_size(template.get("size")) if template is not None else None
+
+    specs = layout.assign_positions(workflow, graph, specs, unknown_size_resolver=unknown_size)
     # Snapshot the inventory BEFORE any op mutates the graph — on failure the
     # caller discards everything below, so this is what actually survives.
     pre_batch_hint = _available_nodes_hint(workflow)
@@ -3936,6 +4011,36 @@ def detect_conflict(a: dict, b: dict) -> bool:
     the same base conflict here (their batch order is undecidable leaderlessly)
     even though :func:`apply_op` keeps both connections and ``canonical`` treats
     their order as immaterial."""
+
+    def mutated_definition_path(op: dict) -> list[str] | None:
+        path = op.get("path")
+        if isinstance(path, list) and path:
+            # set_widget's path includes the interior target node; the other
+            # path-scoped ops carry the owning host path directly.
+            return [str(item) for item in (path[:-1] if op.get("op") == "set_widget" else path)]
+        promoted = op.get("promoted")
+        if op.get("op") == "set_widget" and isinstance(promoted, dict) and promoted.get("repair"):
+            instance_path = promoted.get("instance_path")
+            if isinstance(instance_path, list) and instance_path:
+                return [str(item) for item in instance_path]
+        return None
+
+    def reuse_conflicts_with_mutation(reuse_op: dict, mutation_op: dict) -> bool:
+        metadata = reuse_op.get("subgraph_reuse")
+        mutation_path = mutated_definition_path(mutation_op)
+        if not isinstance(metadata, dict) or mutation_path is None:
+            return False
+        for raw_path in metadata.get("existing_instance_paths") or []:
+            if not isinstance(raw_path, list) or not raw_path:
+                continue
+            instance_path = [str(item) for item in raw_path]
+            if mutation_path[: len(instance_path)] == instance_path:
+                return True
+        return False
+
+    if reuse_conflicts_with_mutation(a, b) or reuse_conflicts_with_mutation(b, a):
+        return True
+
     target_a = _write_target(a)
     target_b = _write_target(b)
     if a["op"] == "set_widget" and b["op"] == "set_widget" and target_a[:-1] == target_b[:-1]:

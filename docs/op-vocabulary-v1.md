@@ -81,10 +81,14 @@ refused with `node_deprecated` unless it is `true`.
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.
-* Conflict: none — ids are minted leaderlessly (section 6), so two concurrent
-  `add_node` ops never target the same identity.
+* Conflict: ids are minted leaderlessly (section 6), so two concurrent
+  `add_node` ops never target the same identity. Amendment v1.10 adds one
+  explicit ordering conflict between a reused-subgraph add and a concurrent
+  mutation inside the definition it turns from single-instance to shared.
 * Invalid: an unknown `class_type` is rejected at mint time (`UnknownNodeType`,
-  rendered as `node_not_found` with close matches).
+  rendered as `node_not_found` with close matches), except for the exact id of
+  a definition already present with a reusable top-level host instance as
+  specified by amendment v1.10 (§19).
 
 ### 1.2 `connect`
 
@@ -1228,3 +1232,52 @@ v1.9.
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
 pinning this document by SHA move the SHA together with their comfy-cli pin.
+
+## 19. Amendment v1.10 — 2026-10-25 (`add_node` reuses an existing subgraph definition)
+
+An `add_node` spec may use the **exact definition id** of a subgraph already in
+the workflow when that definition also has at least one top-level host instance.
+This is an extension of the existing `add_node` kind, not a new operation kind.
+Unknown ids and definitions with no reusable top-level host still fail closed as
+`node_not_found`; definition names are not an authoring alias.
+
+The first matching top-level host in document order is the authoritative schema
+template. Legacy hosts whose `type` is the definition name are resolved through
+the same definition index as the rest of the engine. The fresh host copies the
+template's `inputs`, `outputs`, `properties`, `widgets_values`, optional
+`widgets_values_form`, and valid saved `size`. It clears every input/output link,
+resets `flags`, `order`, and `mode`, mints a fresh collision-free node id, and
+uses the requested position/title. Malformed host containers fail closed rather
+than emitting a partially shaped node. The copied host state is independent;
+the definition is deliberately shared.
+
+The minted op carries the complete authoritative `node` payload as before and
+adds:
+
+```json
+{
+  "subgraph_reuse": {
+    "definition_id": "2454ad83-157c-40dd-9f19-5daaf4041ce0",
+    "existing_instance_paths": [["88"]]
+  }
+}
+```
+
+`existing_instance_paths` is captured before the new host is applied and
+includes nested live paths that resolve to the reused definition. It is
+conflict metadata: `detect_conflict` flags this add against a concurrent
+interior `set_widget`, `connect`, `disconnect`, `delete_node`, or promoted-input
+repair whose mutated definition path is that instance path or a descendant.
+Without that flag, replaying the interior mutation before versus after the new
+shared instance can fork/refuse in different orders (§8.7) and silently diverge.
+The merge consumer must therefore ask for an order for such a pair; all other
+`add_node` identity/idempotency rules remain unchanged.
+
+Batch layout uses the same normalized saved host size as the emitted node,
+including LiteGraph's object form (`{"0": width, "1": height}`), so an
+unpinned sibling in the same batch is not placed through the reused host.
+
+No operation kind is added or removed. `FROZEN_OPS`, `DEFERRED_OPS`, and
+`BATCHABLE_OPS` are unchanged. Downstream consumers that move their pinned
+vocabulary SHA to v1.10 must preserve `subgraph_reuse` conflict metadata even
+though replay itself continues to insert `op.node` opaquely.
