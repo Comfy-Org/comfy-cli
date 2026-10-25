@@ -990,6 +990,7 @@ def install_deps(
 
     if deps is None and workflow is None:
         print("[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n")
+        raise typer.Exit(code=1)
 
     effective_uv_compile = _resolve_uv_compile(uv_compile)
 
