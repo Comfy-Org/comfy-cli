@@ -837,8 +837,9 @@ def set_dynamic_group_rows(
 
     The writes run on a copy, so ``workflow`` is unchanged when any is refused.
     The ops share one stamp, so an earlier write to the group at the same
-    stamp is refused rather than left to the ``op_id`` tiebreak, and replay
-    must apply them in order: the row writes address rows the count creates.
+    stamp is refused rather than left to the ``op_id`` tiebreak (revisit once
+    #1007 makes the later write in a batch win). ``apply_op`` must replay them
+    in order, because this workflow model materializes rows from the count.
     """
     from comfy_cli.cql import engine as _engine
     from comfy_cli.cql import promoted as _promoted
@@ -2994,7 +2995,8 @@ def apply_specs(
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
             # A later write at the batch's stamp would tie with the replacement
-            # and be settled by the random op_id.
+            # and be settled by the random op_id. Revisit once #1007 makes the
+            # later write in a batch win.
             target = _write_target(op) if op.get("op") == "set_widget" else None
             if target in replaced:
                 raise ValueError(

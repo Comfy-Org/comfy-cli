@@ -434,6 +434,8 @@ default (a combo without one takes its first option, so name the LoRA explicitly
 `"<field>.0"` in the row. A row with a connected or promoted field keeps its index and
 values; leave it out of `rows`, which fill the other positions in order, so the batch
 fails if that row would have to move. Do not write the same group elsewhere in the batch.
+Links are checked when the workflow is read: a link added to a row after that read is
+not rechecked, so the spec can rewrite that row under its link.
 
 ```json
 {"op":"set_dynamic_group_rows","node":12,"group":"loras",
