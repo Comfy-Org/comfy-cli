@@ -171,7 +171,9 @@ provisioning". Things to read correctly:
 - No `progress` at all is an older service, or a status other than the two above.
 
 Interrupting the wait leaves the deployment coming up on the service's side;
-`comfy deploy status --deployment <id> --watch` attaches again. A deploy API that
+read `comfy deploy show --deployment <id>` from any folder. To watch again,
+use `comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's
+verified spec. A deploy API that
 stops answering (a 5xx or a dropped connection, as during its own rollout) is
 retried for about a minute; if it is still down, the wait ends with
 `deploy_watch_lost` and **exit 75**, not 1. That is not a failed deployment:

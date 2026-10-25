@@ -104,7 +104,7 @@ _REFUSALS = {
     ),
     "PENDING_UPDATE_EXISTS": (
         "is waiting on an update, so the rollback was refused",
-        "wait until `comfy deploy status --deployment {id}` shows no update, then roll back",
+        "wait until `comfy deploy show --deployment {id}` shows no update, then roll back",
     ),
     "RELEASE_DELETED": (
         "cannot go back to that release, because it was deleted",

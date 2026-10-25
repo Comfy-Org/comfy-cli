@@ -421,7 +421,7 @@ def refuse_unmovable(target: JsonObject, command: str = "up") -> None:
             "deploy_conflict",
             f"deployment {deployment_id} is {status}, so `{command}` will not move it to another release",
             details={"deploymentId": deployment_id, "status": status},
-            hint=f"wait until `comfy deploy status --deployment {deployment_id}` shows it stopped, "
+            hint=f"wait until `comfy deploy show --deployment {deployment_id}` shows it stopped, "
             "running `comfy deploy stop` again if the stop failed",
         )
 

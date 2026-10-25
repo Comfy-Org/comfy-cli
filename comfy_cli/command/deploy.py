@@ -304,7 +304,7 @@ def _render_move_replaced(renderer, builder, error: MoveReplacedError) -> NoRetu
     renderer.error(
         code="deploy_update_replaced",
         message=replaced_message(error.deployment_id, error.release, replacing),
-        hint=f"run `comfy deploy status --deployment {error.deployment_id}` to see the update that replaced it",
+        hint=f"run `comfy deploy show --deployment {error.deployment_id}` to see the update that replaced it",
         details={
             "deployment_id": error.deployment_id,
             "release_id": error.release["id"],

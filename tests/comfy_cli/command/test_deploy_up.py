@@ -788,7 +788,10 @@ def test_a_deploy_api_that_stays_down_ends_the_watch_with_its_own_exit_code(tmp_
     error = _json_envelope(result)["error"]
     assert error["code"] == "deploy_watch_lost"
     assert "may still be coming up" in error["message"]
-    assert error["hint"] == "run `comfy deploy status --deployment dep-1 --watch` to watch it again"
+    assert error["hint"] == (
+        "run `comfy deploy show --deployment dep-1` to inspect it; watching requires "
+        "`comfy deploy status <spec-PATH> --deployment dep-1 --watch` with this Build's spec"
+    )
     assert error["details"]["deployment_id"] == "dep-1"
     assert result.stderr.count("deploy API is not answering") == 1
     assert sleeps == [2.0, 4.0, 8.0, 15.0, 15.0, 15.0]
@@ -854,7 +857,8 @@ def test_a_401_on_the_follow_read_with_the_sign_in_still_stored_ends_the_watch_n
     error = _json_envelope(result)["error"]
     assert error["code"] == "watch_auth_lost"
     assert "may still be coming up" in error["message"]
-    assert error["hint"].startswith("run `comfy deploy status --deployment dep-1 --watch` to watch it again")
+    assert error["hint"].startswith("run `comfy deploy show --deployment dep-1` to inspect it")
+    assert "deploy status <spec-PATH> --deployment dep-1 --watch" in error["hint"]
     assert "comfy cloud login" not in error["hint"]
     assert error["details"] == {"deployment_id": "dep-1"}
     assert sleeps == []

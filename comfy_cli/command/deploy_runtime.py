@@ -172,7 +172,10 @@ def _sign_in_refused(client: DeployUpClient, error: Exception) -> bool:
 
 def exit_watch_lost(renderer: Renderer, error: DeployWatchLostError, hint: str | None = None) -> NoReturn:
     """Say it is the watch that gave out, not the deployment, and how to pick it up again."""
-    hint = hint or f"run `{reattach_hint(error.deployment_id)}` to watch it again"
+    hint = hint or (
+        f"run `{reattach_hint(error.deployment_id)}` to inspect it; watching requires "
+        f"`comfy deploy status <spec-PATH> --deployment {error.deployment_id} --watch` with this Build's spec"
+    )
     if isinstance(error, DeployWatchAuthLostError):
         hint = f"{hint}; the stored sign-in was preserved"
     renderer.error(

@@ -1739,7 +1739,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "without it landing. Only the watch "
         "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
         "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
-        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
+        "read `comfy deploy show --deployment <id>` once the deploy service answers again; watching requires "
+        "`comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's spec; "
         "after a move, read `comfy deploy show --deployment <id>` instead: the move has landed once it shows no "
         "pendingUpdate and its releaseId is the release asked for",
     ),
@@ -1754,7 +1755,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "workspace API key, or with no refreshable sign-in remaining stays `build_not_signed_in` or "
         "`deploy_not_signed_in`.",
         "the stored sign-in was preserved: re-read the work with `comfy build "
-        "release show <releaseId>` or `comfy deploy status --deployment <deployment_id> --watch`",
+        "release show <releaseId>` or `comfy deploy show --deployment <deployment_id>`; deployment watching requires "
+        "`comfy deploy status <spec-PATH> --deployment <deployment_id> --watch` with this Build's spec",
     ),
     ErrorCode(
         "deploy_update_failed",
@@ -1773,7 +1775,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "deployment, and the service cancelled this one. The deployment keeps its id and URL. "
         "`details.release_id` names the release this move asked for and `details.replacing_release_id` the one "
         "the newer update moves to.",
-        "run `comfy deploy status --deployment <id>` to see the newer update, and, while it still waits, "
+        "run `comfy deploy show --deployment <id>` to see the newer update, and, while it still waits, "
         "`comfy deploy cancel --deployment <id>` to end it",
     ),
     ErrorCode(

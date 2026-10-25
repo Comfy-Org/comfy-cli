@@ -798,7 +798,7 @@ def test_a_watch_the_deploy_api_never_answers_ends_with_the_watch_lost_exit_code
     assert result.exit_code == 75, result.stderr
     error = _json_envelope(result)["error"]
     assert error["code"] == "deploy_watch_lost"
-    assert "comfy deploy status --deployment dep-status --watch" in error["hint"]
+    assert "comfy deploy show --deployment dep-status" in error["hint"]
     assert len(client.get_calls) == 7
 
 
@@ -824,7 +824,7 @@ def test_a_watch_refused_with_the_sign_in_still_stored_ends_as_watch_auth_lost(t
     assert result.exit_code == 75, result.stderr
     error = _json_envelope(result)["error"]
     assert error["code"] == "watch_auth_lost"
-    assert "comfy deploy status --deployment dep-status --watch" in error["hint"]
+    assert "comfy deploy show --deployment dep-status" in error["hint"]
     assert "comfy cloud login" not in error["hint"]
     assert client.get_calls == ["dep-status"]
     assert sleeps == []

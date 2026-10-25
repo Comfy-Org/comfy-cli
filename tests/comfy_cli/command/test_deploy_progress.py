@@ -581,7 +581,7 @@ def test_interrupting_a_status_watch_leaves_the_deployment_alone_and_says_how_to
     # Then
     assert result.exit_code == 130
     assert "keeps coming up on our side" in result.stderr
-    assert "comfy deploy status --deployment dep-status --watch" in result.stderr
+    assert "comfy deploy show --deployment dep-status" in result.stderr
     data = _envelope(result)["data"]
     assert data["deployment"]["status"] == "provisioning"
     assert data["progress"]["step"] == "staging_models"
@@ -655,7 +655,7 @@ def test_up_watch_streams_progress_and_interrupting_it_stops_nothing(tmp_path, m
     assert result.exit_code == 130
     events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
     assert [event["type"] for event in events] == [EVENT_PROGRESS]
-    assert "comfy deploy status --deployment dep-1 --watch" in result.stderr
+    assert "comfy deploy show --deployment dep-1" in result.stderr
     data = _envelope(result)["data"]
     assert data["deployment"]["status"] == "provisioning"
     assert data["progress"]["bytesDone"] == 3 * GB
