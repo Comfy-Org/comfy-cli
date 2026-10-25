@@ -819,7 +819,6 @@ def test_an_unloadable_supplement_falls_through_to_the_platform_roots(tmp_path, 
     monkeypatch.setitem(sys.modules, "certifi", types.SimpleNamespace(where=lambda: str(broken)))
 
     real = ssl.create_default_context
-    populated = len(pathlib.Path(certifi.where()).read_text().split("-----BEGIN CERTIFICATE-----")) - 1
 
     def platform_with_roots(*args, **kwargs):
         context = real(*args, **kwargs)
@@ -827,13 +826,15 @@ def test_an_unloadable_supplement_falls_through_to_the_platform_roots(tmp_path, 
             context.load_verify_locations(cafile=certifi.where())
         return context
 
+    expected_roots = set(platform_with_roots().get_ca_certs(binary_form=True))
+    assert expected_roots, "the platform fixture must contain trust roots"
     monkeypatch.setattr(ssl, "create_default_context", platform_with_roots)
 
     # When
     context = http_mod.ssl_context()
 
     # Then
-    assert context.cert_store_stats()["x509_ca"] == populated, (
+    assert set(context.get_ca_certs(binary_form=True)) == expected_roots, (
         "the platform roots must survive a supplement that would not load"
     )
 

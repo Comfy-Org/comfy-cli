@@ -834,11 +834,13 @@ class TestFillPrintTable:
 
         result = ws.fill_print_table()
 
-        assert len(result) == 3
+        assert len(result) == 4
         assert result[0][0] == "Current selected workspace"
         assert result[1][0] == "Manager"
         assert "Disabled" in result[1][1]
         assert result[2][0] == "UV Compile Default"
+        assert result[3][0] == "Warning"
+        assert "/fake/workspace" in result[3][1]
 
     @patch("comfy_cli.command.custom_nodes.cm_cli_util.resolve_manager_gui_mode", return_value="enable-gui")
     def test_fill_print_table_enable_gui_mode(self, mock_resolve, mock_workspace_config_manager):
@@ -1056,8 +1058,18 @@ class TestManagerModeReconciliation:
         with self._env(configured_mode=None, has_cm_cli=True, has_legacy_clone=False) as ws:
             data = ws.fill_data()
 
-        assert set(data) == {"path", "type", "manager_mode", "manager_detected", "uv_compile_default"}
+        assert set(data) == {
+            "path",
+            "type",
+            "manager_mode",
+            "manager_detected",
+            "uv_compile_default",
+            "exists",
+            "warnings",
+        }
         assert data["path"] == "/fake/workspace"
+        assert data["exists"] is False
+        assert data["warnings"]
         assert data["uv_compile_default"] is False
 
     def test_fill_print_table_reports_legacy_clone(self):

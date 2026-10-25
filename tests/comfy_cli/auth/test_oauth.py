@@ -726,6 +726,15 @@ class TestConcurrentRefresh:
         assert result.refresh_token == "RT1"
         assert result.access_token == "PEER_NEW"
 
+    def test_a_rejected_older_token_does_not_adopt_an_already_expired_peer_token(self, persisted, monkeypatch):
+        from comfy_cli.credentials import refreshed_access_token
+
+        self._persist_expired()
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **_: self._token_set(access="NEW", refresh="RT1"))
+
+        assert refreshed_access_token("BEFORE_OLD") == "NEW"
+        assert auth_store.get_cloud_session().refresh_token == "RT1"
+
     def _stale(self) -> auth_store.CloudSession:
         return auth_store.CloudSession(
             base_url="https://c",

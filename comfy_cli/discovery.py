@@ -22,6 +22,7 @@ from comfy_cli.output.renderer import ENVELOPE_SCHEMA, EVENT_SCHEMA
 # commands that already emit structured output. New commands should register
 # here as they migrate.
 COMMAND_SCHEMAS: dict[str, str] = {
+    "comfy model upload": "model_upload",
     "comfy env": "env",
     "comfy which": "which",
     "comfy run": "run",
@@ -63,6 +64,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy deploy status": "deploy_status",
     "comfy deploy ls": "deploy_ls",
     "comfy deploy show": "deploy_show",
+    "comfy deploy ui": "deploy_ui",
     "comfy deploy logs": "deploy_logs",
     "comfy deploy events": "deploy_events",
     "comfy deploy scale": "deploy_scale",
@@ -121,6 +123,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow foreach": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
+    "comfy workflow ui": "workflow_ui",
     "comfy workflow get": "workflow",
     "comfy workflow save": "workflow",
     "comfy preview": "preview",

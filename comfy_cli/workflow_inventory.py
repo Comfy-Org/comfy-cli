@@ -13,7 +13,7 @@ reports. The ``join_*`` functions add what is known elsewhere:
 - ``join_local``  — every local file a model value could be, across model roots;
 - ``join_server`` — the running ComfyUI's version and which pack directory provides
   each class;
-- ``join_cloud``  — whether stock Comfy Cloud runs the workflow as-is, with dropdown
+- ``join_cloud``  — whether Comfy Cloud's standard environment runs the workflow as-is, with dropdown
   remaps, or needs a build.
 
 The caller fetches; these functions only compare, so every one is testable offline.
@@ -59,6 +59,31 @@ SKIPPED_MODES = {2: "muted", 4: "bypassed"}
 # Canvas-only nodes. No object_info carries them and they load nothing.
 UI_ONLY_NODES = frozenset({"Note", "MarkdownNote", "Reroute", "PrimitiveNode", "GetNode", "SetNode"})
 
+# Prune only with evidence about execution roots. Unknown/custom classes may be
+# OUTPUT_NODEs even when they also return values; retain them conservatively.
+KNOWN_OUTPUT_NODES = frozenset({"SaveImage", "PreviewImage"})
+KNOWN_NON_OUTPUT_NODES = frozenset(
+    {
+        "CheckpointLoaderSimple",
+        "CheckpointLoader",
+        "LoraLoader",
+        "LoraLoaderModelOnly",
+        "VAELoader",
+        "UNETLoader",
+        "CLIPLoader",
+        "DualCLIPLoader",
+        "UpscaleModelLoader",
+        "CLIPTextEncode",
+        "KSampler",
+        "KSamplerAdvanced",
+        "VAEDecode",
+        "VAEEncode",
+        "EmptyLatentImage",
+        "LoadImage",
+        "LoadImageMask",
+    }
+)
+
 # Loaders known to load weights that no widget names. A build that misses these
 # fails at run time, not at build time. Extend as packs are learned.
 IMPLICIT_LOADERS = {
@@ -80,7 +105,7 @@ PERF_ONLY_NODES = {
     "WanVideoTorchCompileSettings": "torch.compile settings (speed only)",
 }
 
-_EMBEDDING_RE = re.compile(r"embedding:([^\s,()\[\]]+)", re.IGNORECASE)
+_EMBEDDING_RE = re.compile(r"embedding:([^\s,:()\[\]]+)", re.IGNORECASE)
 
 # Where Comfy Desktop keeps its settings, including `modelsDirs`. Only the macOS
 # location is confirmed; on other platforms callers pass `--models-root` instead.
@@ -88,7 +113,13 @@ DESKTOP_SETTINGS_MACOS = "~/Library/Application Support/Comfy Desktop/settings.j
 
 
 def is_model_value(value: Any) -> bool:
-    return isinstance(value, str) and value.lower().endswith(MODEL_EXTENSIONS)
+    return (
+        isinstance(value, str)
+        and value.lower().endswith(MODEL_EXTENSIONS)
+        and not _EMBEDDING_RE.search(value)
+        and "\n" not in value
+        and "\r" not in value
+    )
 
 
 def _posix(value: str) -> str:
@@ -109,6 +140,13 @@ def _widget_strings(node: Mapping[str, Any]) -> list[str]:
     return strings
 
 
+def _model_strings(node: Mapping[str, Any]) -> list[str]:
+    """Exclude known text widgets without rejecting filenames containing spaces."""
+    if str(node.get("type", "")).startswith("CLIPTextEncode"):
+        return []
+    return [value for value in _widget_strings(node) if is_model_value(value)]
+
+
 def is_api_format(workflow: Any) -> bool:
     return (
         isinstance(workflow, dict)
@@ -118,32 +156,100 @@ def is_api_format(workflow: Any) -> bool:
     )
 
 
+def _disconnected_nodes(nodes: list[Mapping[str, Any]], edges: Iterable[tuple[Any, Any]]) -> set[str]:
+    """Return provably unused nodes; an incomplete graph keeps its full scope."""
+    by_id = {str(node.get("id")): node for node in nodes}
+    parents: dict[str, set[str]] = {}
+    for source, target in edges:
+        if str(source) in by_id and str(target) in by_id:
+            parents.setdefault(str(target), set()).add(str(source))
+        else:
+            return set()
+    if not parents:
+        return set()
+    roots: set[str] = set()
+    has_output = False
+    for identifier, node in by_id.items():
+        if node.get("mode") == 2:
+            continue
+        kind = node.get("type")
+        explicit = node.get("output_node", (node.get("properties") or {}).get("output_node"))
+        # Workflow metadata is caller-controlled. A false marker cannot veto a
+        # known output or prove an unknown custom class has no execution effect.
+        output = explicit is True or kind in KNOWN_OUTPUT_NODES
+        has_output |= output
+        if output or kind not in KNOWN_NON_OUTPUT_NODES:
+            roots.add(identifier)
+    if not has_output:
+        return set()
+    pending = list(roots)
+    reachable: set[str] = set()
+    while pending:
+        identifier = pending.pop()
+        if identifier not in reachable:
+            reachable.add(identifier)
+            pending.extend(parents.get(identifier, ()))
+    return set(by_id) - reachable
+
+
 def _ui_nodes(workflow: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
     definitions = {sg["id"]: sg for sg in (workflow.get("definitions") or {}).get("subgraphs") or [] if sg.get("id")}
 
-    def visit(nodes, prefix="", ancestors=()):
+    def visit(nodes, links=(), prefix="", ancestors=()):
+        edges = []
+        for link in links:
+            if isinstance(link, dict):
+                edges.append((link.get("origin_id"), link.get("target_id")))
+            elif isinstance(link, (list, tuple)) and len(link) >= 4:
+                edges.append((link[1], link[3]))
+            else:
+                edges.append((None, None))  # Incomplete metadata cannot justify pruning.
+        disconnected = _disconnected_nodes(nodes, edges)
         for node in nodes:
             node_id = f"{prefix}/{node.get('id')}" if prefix else node.get("id")
             scoped = {**node, "id": node_id}
+            if str(node.get("id")) in disconnected:
+                yield {**scoped, "inventory_disconnected": True}
+                continue
             definition = definitions.get(node.get("type"))
             if definition is None or node.get("mode") in SKIPPED_MODES:
                 yield scoped
             elif node.get("type") not in ancestors:
                 yield scoped
-                yield from visit(definition.get("nodes") or [], str(node_id), (*ancestors, node.get("type")))
+                yield from visit(
+                    definition.get("nodes") or [],
+                    definition.get("links") or [],
+                    str(node_id),
+                    (*ancestors, node.get("type")),
+                )
             else:
                 raise ValueError(f"cyclic subgraph definition at node {node_id}")
 
-    yield from visit(workflow.get("nodes") or [])
+    yield from visit(workflow.get("nodes") or [], workflow.get("links") or [])
 
 
 def _api_nodes(workflow: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
+    nodes = [{**node, "id": node_id, "type": node.get("class_type")} for node_id, node in workflow.items()]
+    disconnected = _disconnected_nodes(
+        nodes,
+        (
+            (value[0], node_id)
+            for node_id, node in workflow.items()
+            for value in (node.get("inputs") or {}).values()
+            if isinstance(value, list)
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and isinstance(value[1], int)
+            and not isinstance(value[1], bool)
+        ),
+    )
     for node_id, node in workflow.items():
         inputs = node.get("inputs") or {}
         yield {
             "type": node.get("class_type"),
             "id": node_id,
             "mode": 0,
+            "inventory_disconnected": str(node_id) in disconnected,
             "named_inputs": inputs,
             # A list value is a link to another node's output, not a widget.
             "widgets_values": [v for v in inputs.values() if not isinstance(v, list)],
@@ -156,6 +262,11 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
     Muted and bypassed nodes are listed under ``skipped`` with the models they would
     have loaded, so a caller can say what was left out and why.
     """
+    if workflow.get("schema") == "envelope/1":
+        raise ValueError(
+            "This file is a CLI response envelope. Extract data.prompt as the API graph "
+            "(jq '.data.prompt' preview.json > api.json), then inventory api.json."
+        )
     api = is_api_format(workflow)
     if api:
         if any(not isinstance(n.get("inputs", {}), dict) for n in workflow.values()):
@@ -209,6 +320,16 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
 
     for node in _api_nodes(workflow) if api else _ui_nodes(workflow):
         class_type = node.get("type")
+        if node.get("inventory_disconnected") and node.get("mode", 0) not in SKIPPED_MODES:
+            report["skipped"].append(
+                {
+                    "id": node.get("id"),
+                    "class": class_type,
+                    "why": "disconnected",
+                    "models": [_posix(value) for value in _model_strings(node)],
+                }
+            )
+            continue
         if node.get("mode", 0) not in SKIPPED_MODES:
             if class_type in {"PrimitiveNode", "GetNode", "SetNode"}:
                 report["unverified"].append(
@@ -218,11 +339,9 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
                 report["unverified"].append(
                     f"subgraph #{node.get('id')}: host widget overrides need a local API export before inventory"
                 )
-        # A subgraph instance's type is its definition id; its interior nodes are walked separately.
-        if not class_type or class_type in UI_ONLY_NODES or class_type in subgraph_ids:
-            continue
         node_id = node.get("id")
         strings = _widget_strings(node)
+        model_strings = _model_strings(node)
         mode = node.get("mode", 0)
         if mode in SKIPPED_MODES:
             report["skipped"].append(
@@ -230,9 +349,12 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
                     "id": node_id,
                     "class": class_type,
                     "why": SKIPPED_MODES[mode],
-                    "models": [_posix(s) for s in strings if is_model_value(s)],
+                    "models": [_posix(s) for s in model_strings],
                 }
             )
+            continue
+        # A subgraph instance's type is its definition id; its interior nodes are walked separately.
+        if not class_type or class_type in UI_ONLY_NODES or class_type in subgraph_ids:
             continue
 
         properties = node.get("properties") or {}
@@ -244,7 +366,7 @@ def inventory(workflow: Mapping[str, Any]) -> dict[str, Any]:
         packs.setdefault(pack, set()).add(class_type)
 
         for value in strings:
-            if is_model_value(value):
+            if value in model_strings:
                 path = _posix(value)
                 if "\\" in value:
                     report["warnings"].append(
@@ -414,10 +536,14 @@ def _weights(model: Mapping[str, Any], cloud_name: str, size_of: Callable[[str],
         return "not_checked"
     if not local:
         return "no_local_copy"
+    if len(local) > 1:
+        digests = {match.get("sha256") for match in local}
+        if None in digests or len(digests) != 1:
+            return "ambiguous_local_copies"
     size = size_of(cloud_name) if size_of else None
     if size is None:
         return "unknown"
-    return "same_size" if any(match["bytes"] == size for match in local) else "different_size"
+    return "same_size" if local[0]["bytes"] == size else "different_size"
 
 
 def _combo_choices(node: Mapping[str, Any]) -> dict[str, str]:
@@ -435,7 +561,7 @@ def join_cloud(
     lookup: Callable[[str], Mapping[str, Any] | None],
     size_of: Callable[[str], int | None] | None = None,
 ) -> dict[str, Any]:
-    """Can stock Comfy Cloud run this workflow as-is, after lossless fixes, or not at all?
+    """Can Comfy Cloud's standard environment run this workflow as-is, after lossless fixes, or not at all?
 
     ``lookup(class_type)`` returns the Cloud catalog's ``nodes show`` payload for a class
     (``inputs[].choices``, ``cloud_disabled``), or ``None`` when Cloud lacks the class.
@@ -506,12 +632,27 @@ def join_cloud(
     for implicit in report["implicit"]:
         result["unverified"].append(f"{implicit['class']}: {implicit['note']}")
 
+    unresolved_inputs = []
     for item in report["inputs"]:
         if item.get("cloud_name"):
             item["on_cloud"] = item["cloud_name"] in choices_by_class.get(item["node"], {})
+        if not item.get("local_path") and not item.get("on_cloud"):
+            unresolved_inputs.append(
+                {
+                    "node_id": item.get("node_id"),
+                    "file": item["file"],
+                    "reason": "local file not found and target availability unverified",
+                }
+            )
+    # Dependency compatibility alone never establishes a successful run. Keep
+    # missing runtime inputs separate so callers cannot mistake `covered` for it.
+    result["readiness"] = {
+        "status": "needs_inputs" if unresolved_inputs else "not_run",
+        "unresolved_inputs": unresolved_inputs,
+    }
 
     for model in result["models"]:
-        if model.get("weights") in ("same_size", "unknown"):
+        if model.get("weights") in ("same_size", "unknown", "not_checked", "no_local_copy", "ambiguous_local_copies"):
             result["unverified"].append(
                 f"{model['path']}: model identity is unverified; matching names and sizes do not prove identical bytes"
             )

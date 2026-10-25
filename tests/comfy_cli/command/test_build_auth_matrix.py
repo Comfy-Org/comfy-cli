@@ -23,7 +23,9 @@ from build_tree_support import leaf_commands
 from deploy_auth_support import (
     DEPLOY_AUTH_CASES,
     DeployAuthCase,
+    DeployFixtureKind,
     DeployRecordingTransport,
+    EditorRecordingTransport,
     JobRecordingTransport,
     deploy_leaf_commands,
     invoke_deploy,
@@ -53,6 +55,7 @@ class FixtureKind(Enum):
     VALIDATE_REMOTE_LOOKUP = "validate --remote (lookupable)"
     PUSH = "push"
     PUSH_DRY_RUN = "push --dry-run"
+    PUSH_DRY_RUN_PINNED = "push --dry-run (public pins)"
     PULL = "pull"
     STATUS = "status"
     LS = "ls"
@@ -96,7 +99,10 @@ BUILD_AUTH_CASES = (
     BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 1),
     BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 2),
     BuildAuthCase(FixtureKind.PUSH, "push", True, _ONE_PLUS),
+    # A dry run asks the builder only to place the spec's public pins, the read the
+    # push makes before it saves, so a spec without one stays signed out and silent.
     BuildAuthCase(FixtureKind.PUSH_DRY_RUN, "push", False, _ZERO),
+    BuildAuthCase(FixtureKind.PUSH_DRY_RUN_PINNED, "push", True, _ONE_PLUS, 1),
     BuildAuthCase(FixtureKind.PULL, "pull", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.STATUS, "status", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.LS, "ls", True, _ONE_PLUS),
@@ -167,6 +173,15 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
             return ["build", "push", str(root)]
         case FixtureKind.PUSH_DRY_RUN:
             write_spec(root, models=[], nodes=[])
+            return ["build", "push", "--dry-run", str(root)]
+        case FixtureKind.PUSH_DRY_RUN_PINNED:
+            write_spec(
+                root,
+                models=[],
+                nodes=[
+                    {"name": "registry-node", "id": "registry-node", "registryVersion": "1.0.0", "source": "registry"}
+                ],
+            )
             return ["build", "push", "--dry-run", str(root)]
         case FixtureKind.PULL:
             write_spec(root, models=[], nodes=[])
@@ -282,11 +297,15 @@ def test_auth_matrix_covers_every_build_command() -> None:
 def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
     control = DeployRecordingTransport()
+    editor = EditorRecordingTransport()
     jobs = JobRecordingTransport()
     builder = RecordingTransport()
     monkeypatch.setattr("comfy_cli.deploy_api.request_json", control)
     monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", jobs)
     monkeypatch.setattr("comfy_cli.builder_api.request_json", builder)
+    monkeypatch.setattr(
+        "comfy_cli.comfy_client.Client._request", lambda client, *a, **kw: editor.request(client, *a, **kw)
+    )
     monkeypatch.setattr("comfy_cli.credentials.find_api_key", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "comfy_cli.credentials.get_session",
@@ -300,6 +319,7 @@ def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch:
     assert signed_out.exit_code == 1
     assert _error_code(signed_out) == "deploy_not_signed_in"
     assert control.calls == []
+    assert editor.calls == []
 
     # When
     signed_in = invoke_deploy(prepare_deploy(case.fixture, tmp_path / "signed-in"), "tok_test")
@@ -307,6 +327,11 @@ def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch:
     # Then
     assert signed_in.exit_code == 0, signed_in.stderr
     assert len(control.calls) >= 1
+    assert editor.calls == (
+        [("GET", ("workspaces", "current")), ("GET", ("workspaces", "workspace-matrix", "deployments"))]
+        if case.fixture is DeployFixtureKind.UI
+        else []
+    )
 
 
 def test_auth_matrix_covers_every_deploy_command() -> None:

@@ -5,8 +5,11 @@ description: "Reference skill cited by comfy-run-on-cloud. Read it with `comfy s
 
 # comfy-run-on-cloud-local-install
 
-`comfy which` can report a default path that does not exist, with `ok: true`. Confirm
-every path with `ls` before using it.
+Use `comfy --json which` / `comfy --json env` for verified paths and the `desktop`
+block (code/data directories, interpreter, model roots, selection reason and candidate
+installs). Older CLI versions can report a nonexistent default with `ok: true`;
+confirm paths on disk. Last-launched selection is a discovery hint, not evidence
+that it is the server running the workflow.
 
 ## Best source: the running server
 
@@ -32,12 +35,27 @@ Desktop splits one install across up to three places:
 
 | What | Where to read it |
 |---|---|
-| Data dir: `models/`, `custom_nodes/`, `.venv/`, `user/` | `~/Library/Application Support/ComfyUI/config.json` → `basePath` |
-| Code dir: the ComfyUI git checkout | `~/Library/Application Support/Comfy Desktop/installations.json` → `installPath` (code under `<installPath>/ComfyUI`). This file can list several installs. |
-| Extra or shared model roots | `~/Library/Application Support/Comfy Desktop/settings.json` → `modelsDirs` (a list, e.g. a shared models folder plus `<data>/models`), and `…/Comfy Desktop/instance-model-paths/<inst>.yaml`. The startup log `user/comfyui_<port>.log` prints every model search path. OSS installs use `extra_model_paths.yaml` beside ComfyUI. |
+| Data dir: `models/`, `custom_nodes/`, `.venv/`, `user/` | Selected install's `adoptedBaseDir` for adopted installs (legacy `ComfyUI/config.json` → `basePath` fallback); otherwise its code directory. The running server's `--base-directory` overrides these records. |
+| Code dir: the ComfyUI git checkout | Both `~/Library/Application Support/comfyui-desktop-2/installations.json` and the older `…/Comfy Desktop/installations.json` → `installPath` (usually `<installPath>/ComfyUI`). Each registry can list several installs. |
+| Extra or shared model roots | The selected registry's `settings.json` → `modelsDirs` and install record's `modelDirs`/`useSharedModels`. With a running server, use its `--extra-model-paths-config` YAML files and instance ID instead of stale settings. The startup log prints effective search paths. OSS installs use `extra_model_paths.yaml`. Keep libraries from different registries separate. |
 | ComfyUI version | `installations.json` → `comfyVersion.baseTag`. `git -C <code dir> describe --tags` works too. |
 
-`build inventory --desktop` reads `modelsDirs` for you. The input folder is `<data dir>/input`; pass it as `--input-root`.
+`build inventory --desktop --server <url>` matches the server's absolute `main.py`,
+base directory or instance YAML ID to one recorded install, reads its effective
+model roots, and uses `--input-directory` (default `<data>/input`) unless explicit
+`--input-root` values were supplied. It reports `desktop` and `input_roots`.
+The selected server's `--output-directory` (default `<data>/output`) is reported
+as `desktop.output_dir`, with `output_dir_source` distinguishing an explicit
+argument from the server default. That directory joins the exact deployment asset
+scan so a referenced prior output can be approved as an input; unrelated outputs
+are not included. Pass the reported `deployment_asset_roots` explicitly to the
+run's `--asset-root` values. `local_server.launch_paths` contains only known path
+arguments, without unrelated credentials or the raw process argument list.
+An unmatched server, relative launch paths with unknown working directory, or
+ambiguous installs require explicit verified roots. Missing roots produce
+`root_not_found` warnings; resolve them before claiming complete inventory.
+Without a server, `--desktop` uses one unambiguous install or one settings-only
+library. It does not combine several unrelated installations.
 
 If several installs are listed and their versions or data dirs differ, ask which one runs
 the workflow; the newest is not necessarily the one. If they agree, use it without asking.
@@ -56,7 +74,7 @@ Do not start it just to read it. Fall back to files:
 ## Consequences for the build
 
 - **Search every model root,** not just `<data>/models`. `--models-dir` takes one directory; pass every root to `build inventory` with `--models-root`.
-- **Never point a scan at a shared root.** Shared libraries hold weights for other workflows. Some may be private and must not travel. A model enters the build only because the workflow loads it.
-- **Pass `--python <data>/.venv/bin/python`** to any `comfy build` command that needs one.
+- **Keep shared-root inventory separate from upload scope.** Read-only inventory must search every active root, including shared libraries. A workflow-scoped build includes only selected dependencies. Whole-instance packaging includes a shared root only after the user approves that named root and its listed uploads.
+- **Pass the verified interpreter** from the selected install's `desktop.python` (or the running process's interpreter) to any `comfy build` command that needs one. Check it exists. Adopted installs may use `adoptedPythonPath`; do not assume every instance uses `<data>/.venv/bin/python`.
 - **A spec written with `-o` outside the install needs `--models-dir` and `--custom-nodes-dir`** on every later `validate`, `push` and `status`. Without them, local `localPath` entries fail to resolve.
 - **Do not use the Desktop snapshot path (`--from-snapshot`) as the definition source.** It can predate the installed packs and return an empty build with no warning.

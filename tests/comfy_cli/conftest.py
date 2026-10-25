@@ -68,6 +68,10 @@ def _isolate_config_path(tmp_path, monkeypatch):
     # whichever ``get_os()`` resolves to lands in our tmp dir.
     for k in list(constants.DEFAULT_CONFIG.keys()):
         monkeypatch.setitem(constants.DEFAULT_CONFIG, k, str(fake_root))
+    # Constants patched in this process do not reach CLI subprocesses. Give
+    # each test its own supported store override, also replacing any ambient
+    # override so credential writes cannot leak between tests or reach a user.
+    monkeypatch.setenv("COMFY_SECRETS_PATH", str(fake_root / "secrets.json"))
     # ConfigManager is a @singleton that reads the config dir once, at
     # construction — so repointing the dir alone leaves the FIRST test's
     # in-memory config serving every later one. Any test that runs the CLI
@@ -165,3 +169,83 @@ def pretty_no_stdout(capsys):
             "that to be empty (all output goes to stderr in pretty mode):\n"
             f"  stdout = {captured.out!r}\n"
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_comfy_desktop(tmp_path, monkeypatch):
+    """Point Comfy Desktop detection at an empty per-test dir.
+
+    ``comfy which`` / ``comfy env`` (and ``comfy build init``) read Desktop's
+    ``installations.json`` and ``settings.json`` from the real app-data dir.
+    On a developer machine with Desktop installed, every test touching those
+    commands would otherwise see that machine's installs. A test that wants a
+    Desktop install builds one with the ``comfy_desktop`` fixture.
+    """
+    from comfy_cli import desktop_install
+
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", lambda: tmp_path / "no-comfy-desktop")
+    monkeypatch.setattr(desktop_install, "legacy_config_dir", lambda: None)
+    yield
+
+
+@pytest.fixture
+def comfy_desktop(tmp_path, monkeypatch):
+    """A Comfy Desktop 2 install laid out the way the bug report found it.
+
+    An install adopted from Desktop 1: the ComfyUI checkout under
+    ``<installPath>/ComfyUI``, the data (models, custom_nodes, venv) in the
+    Desktop 1 base path (``config.json`` → ``basePath``, copied into the
+    record as ``adoptedBaseDir``), and a shared model library listed in
+    ``settings.json`` → ``modelsDirs`` alongside the data dir's own
+    ``models/``. Detection is pointed at it; the returned dict names each part.
+    """
+    import json
+
+    from comfy_cli import desktop_install
+
+    install_path = tmp_path / "ComfyUI-Installs" / "ComfyUI"
+    code = install_path / "ComfyUI"
+    code.mkdir(parents=True)
+    (code / "main.py").write_text("")
+    data = tmp_path / "Documents" / "ComfyUI"
+    for sub in ("models/checkpoints", "custom_nodes", "user"):
+        (data / sub).mkdir(parents=True)
+    python = data / ".venv" / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+    shared = tmp_path / "ComfyUI-Shared" / "models"
+    shared.mkdir(parents=True)
+    legacy = tmp_path / "Application Support" / "ComfyUI"
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(json.dumps({"basePath": str(data)}))
+    record = {
+        "id": "inst-adopted",
+        "name": "ComfyUI",
+        "sourceId": "standalone",
+        "installPath": str(install_path),
+        "adopted": True,
+        "adoptedBaseDir": str(data),
+        "adoptedPythonPath": str(python),
+        "comfyVersion": {"commit": "b53f77a7", "baseTag": "v0.34.2", "commitsAhead": 0},
+        "useSharedModels": True,
+        "status": "installed",
+        "lastLaunchedAt": 1792188627164,
+    }
+    cloud = {"id": "inst-cloud", "name": "Comfy Cloud", "sourceId": "cloud", "remoteUrl": "https://cloud.comfy.org/"}
+    app = tmp_path / "Application Support" / "Comfy Desktop"
+    app.mkdir(parents=True)
+    (app / "installations.json").write_text(json.dumps([record, cloud]))
+    (app / "settings.json").write_text(json.dumps({"modelsDirs": [str(shared), str(data / "models")]}))
+
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", lambda: app)
+    monkeypatch.setattr(desktop_install, "legacy_config_dir", lambda: legacy)
+    return {
+        "app": app,
+        "legacy": legacy,
+        "install_path": install_path,
+        "code": code,
+        "data": data,
+        "python": python,
+        "shared": shared,
+        "record": record,
+    }

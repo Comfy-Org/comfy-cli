@@ -19,9 +19,9 @@ Bundled skills — see ``comfy skills list`` for descriptions:
                           compute choice, worker bounds, submitting workflows,
                           and what keeps costing money
   - ``comfy-custom-nodes`` — authoring custom nodes
-  - ``comfy-run-on-cloud`` — one local workflow onto Comfy Cloud: stock Cloud
-                          first, an existing Build next, a workflow-scoped
-                          custom build last, with every disk upload gated
+  - ``comfy-run-on-cloud`` — one local workflow onto Comfy Cloud: the standard
+                          environment first, an existing custom environment
+                          next, a workflow-scoped new one last, with every disk upload gated
 
 Reference skills (``REFERENCE_SKILLS``) are the other half: ``show`` resolves
 them and no default install writes them, so a parent skill can cite one by name

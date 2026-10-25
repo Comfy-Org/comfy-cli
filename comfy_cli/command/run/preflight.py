@@ -110,6 +110,9 @@ def _preflight_validate(
 
     graph = Graph.from_object_info(object_info)
     validation = graph.validate_workflow(workflow)
+    from comfy_cli.cloud_model_validation import resolve_cloud_model_errors
+
+    validation = resolve_cloud_model_errors(validation, workflow, where=where)
     if not validation.get("valid", True):
         errors = validation.get("errors", [])
         hint_parts = []

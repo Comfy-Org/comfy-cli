@@ -731,3 +731,13 @@ class TestUppercaseHex:
         calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
         _run(["ensure", "--hash", _HEX.upper(), "--where", "cloud"], capsys)
         assert json.loads(calls[0]["body"])["hash"] == _HEX.upper()
+
+
+def test_ls_encodes_multiple_tags_as_the_cloud_nonexploded_parameter(cloud_target, monkeypatch, capsys):
+    from urllib.parse import parse_qs, urlsplit
+
+    calls = _patch_urlopen(monkeypatch, {"assets": [], "has_more": False, "total": 0})
+    result = _run(["ls", "--tags", " models, loras ", "--where", "cloud"], capsys)
+    assert result["ok"] is True
+    query = parse_qs(urlsplit(calls[0]["url"]).query)
+    assert query["include_tags"] == ["models,loras"]

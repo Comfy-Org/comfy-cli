@@ -27,7 +27,7 @@ class _SignIn:
         self.forced = forced
         self.forced_calls = 0
 
-    def __call__(self, *, refresh=True, force=False, allow_clear=True):
+    def __call__(self, *, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
         if force:
             self.forced_calls += 1
             if not self.forced:
@@ -181,7 +181,7 @@ def test_a_sign_in_to_another_environment_mid_run_is_never_sent_or_refreshed(mon
 
     refreshing: list[bool] = []
 
-    def get_session(*, refresh=True, force=False, allow_clear=True):
+    def get_session(*, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
         if refresh or force:
             refreshing.append(allow_clear)
         return stored

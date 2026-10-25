@@ -1,7 +1,8 @@
 """Tests for `comfy workflow list/get/save/delete` — saved workflows.
 
 The cloud path wraps the `/api/workflows` surface documented at
-docs.comfy.org/api-reference/cloud/workflow. The local path (`--where local`)
+docs.comfy.org/api-reference/cloud/workflow, except `save`, which writes the
+`/api/userdata` file the Cloud Workflows sidebar lists. The local path (`--where local`)
 wraps the running ComfyUI's `/userdata` file store under `workflows/`, mirroring
 the ComfyUI frontend's layout. All HTTP is mocked; the live round-trip is
 verified manually.
@@ -125,6 +126,8 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict):
         calls.append({"url": url, "method": method, "body": body, "headers": dict(req.headers)})
         for needle, payload in routes.items():
             if needle in url:
+                if callable(payload):
+                    payload = payload(req)
                 if isinstance(payload, Exception):
                     raise payload
                 if isinstance(payload, tuple):
@@ -412,6 +415,34 @@ class TestLocalSave:
         assert env["ok"] is False
         assert env["error"]["code"] == "server_not_running"
 
+    def test_no_overwrite_sends_overwrite_false(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        calls = _patch_urlopen(monkeypatch, {"/userdata/": {"path": "workflows/flux.json"}})
+        env = _run(["save", str(wf), "--name", "flux", "--no-overwrite", "--where", "local"], capsys)
+        assert env["ok"] is True
+        assert "overwrite=false" in calls[0]["url"]
+
+    def test_no_overwrite_collision_is_workflow_exists(self, local_target, tmp_path, monkeypatch, capsys):
+        # ComfyUI answers 409 when `overwrite=false` meets an existing file.
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        _patch_urlopen(monkeypatch, {"/userdata/": _http_error(409)})
+        env = _run(["save", str(wf), "--name", "flux", "--no-overwrite", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["where"] == "local"
+        assert env["error"]["code"] == "workflow_exists"
+        assert env["error"]["details"]["filename"] == "flux.json"
+
+    def test_refuses_the_favorites_index(self, local_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "src.json"
+        wf.write_text(json.dumps(_LOCAL_WORKFLOW))
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(wf), "--name", ".index.json", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
 
 class TestLocalDelete:
     def test_sends_delete(self, local_target, monkeypatch, capsys):
@@ -591,7 +622,8 @@ class TestHttpRequestCap:
         # Each of the four _http_request call sites must catch _ResponseTooLarge;
         # an uncaught one would surface as a traceback rather than an envelope.
         monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
-        _patch_urlopen(monkeypatch, {"/api/workflows": (b'{"data": []}', 200)})
+        # `save` writes through `/api/userdata/`; the other three read `/api/workflows`.
+        _patch_urlopen(monkeypatch, {"/api/workflows": (b'{"data": []}', 200), "/api/userdata/": (b'{"a": 1}', 200)})
         args = {
             "list": ["list"],
             "get": ["get", "wf-uuid"],
@@ -622,29 +654,295 @@ class TestHttpRequestCap:
 # ---------------------------------------------------------------------------
 
 
-class TestSave:
-    def test_posts_workflow_payload(self, cloud_target, tmp_path, monkeypatch, capsys):
-        wf_path = tmp_path / "wf.json"
-        wf_data = {"1": {"class_type": "KSampler", "inputs": {"steps": 20}}}
-        wf_path.write_text(json.dumps(wf_data))
+_MIRRORED_RECORD = {
+    "id": "33333333-3333-3333-3333-333333333333",
+    "name": "my workflow",
+    "default_view": "workflow",
+    "latest_version": 2,
+    "created_by": "user-uuid",
+    "created_at": "2026-05-23T00:00:00Z",
+    "updated_at": "2026-05-23T00:00:00Z",
+}
 
-        created = {
-            "id": "new-uuid",
-            "name": "my workflow",
-            "latest_version": 1,
-            "created_by": "user",
-            "created_at": "2026-05-23T00:00:00Z",
-            "updated_at": "2026-05-23T00:00:00Z",
-        }
-        calls = _patch_urlopen(monkeypatch, {"/api/workflows": created})
+# Cloud's `POST /api/userdata/{file}?full_info=true` receipt: a FileInfo dict.
+_USERDATA_SAVE_RESPONSE = {"path": "workflows/my workflow.json", "size": 64, "modified": 1700000003000}
+
+
+def _record_listing(*rows: dict) -> dict:
+    return {"data": list(rows), "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
+
+
+def _cloud_wf(tmp_path: Path) -> tuple[Path, dict]:
+    wf_path = tmp_path / "wf.json"
+    wf_path.write_text(json.dumps(_LOCAL_WORKFLOW))
+    return wf_path, _LOCAL_WORKFLOW
+
+
+def _http_409(url: str = "https://cloud.example.com/api/userdata/x"):
+    return urllib.error.HTTPError(url, 409, "Conflict", {}, io.BytesIO(b"File already exists"))
+
+
+class TestSave:
+    """Cloud `workflow save` writes the file the Cloud Workflows sidebar lists.
+
+    The sidebar lists `userdata/workflows/*.json`; a record created only through
+    `POST /api/workflows` has no file behind it and never shows there. So the save
+    is the frontend's own write, `POST /api/userdata/<encoded workflows/name.json>`,
+    which Cloud mirrors into its `/api/workflows` record store. The record id is
+    then read back by exact name.
+    """
+
+    def test_writes_the_sidebar_userdata_file(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, wf_data = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/content": {"workflow_json": _LOCAL_WORKFLOW},
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert env["where"] == "cloud"
+
+        write = calls[0]
+        assert write["method"] == "POST"
+        # The whole `workflows/<name>.json` path is one percent-encoded segment,
+        # exactly as the frontend's `encodeURIComponent(file)` sends it.
+        assert write["url"].startswith("https://cloud.example.com/api/userdata/workflows%2Fmy%20workflow.json?")
+        assert "overwrite=true" in write["url"]
+        assert "full_info=true" in write["url"]
+        # The body is the graph itself, not the `/api/workflows` {name, workflow_json} envelope.
+        assert json.loads(write["body"]) == wf_data
+
+        # No bare `/api/workflows` record write: Cloud creates the record from the file.
+        assert not [c for c in calls if c["method"] == "POST" and "/api/workflows" in c["url"]]
+
+        data = env["data"]
+        assert data["filename"] == "my workflow.json"
+        assert data["name"] == "my workflow"
+        assert data["workflow_id"] == _MIRRORED_RECORD["id"]
+        assert data["latest_version"] == 2
+        assert data["size"] == 64
+        assert data["source"] == str(wf_path)
+        assert "warnings" not in data
+
+    def test_record_is_read_back_by_exact_name(self, cloud_target, tmp_path, monkeypatch, capsys):
+        # Cloud's `name` filter is a case-insensitive substring match, so the
+        # listing can carry near-misses. Only the exact name is the mirror.
+        wf_path, _ = _cloud_wf(tmp_path)
+        near_miss = {**_MIRRORED_RECORD, "id": "44444444-4444-4444-4444-444444444444", "name": "my workflow (copy)"}
+        cased = {**_MIRRORED_RECORD, "id": "55555555-5555-5555-5555-555555555555", "name": "My Workflow"}
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/content": {"workflow_json": _LOCAL_WORKFLOW},
+                "/api/workflows?": _record_listing(near_miss, cased, _MIRRORED_RECORD),
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["data"]["workflow_id"] == _MIRRORED_RECORD["id"]
+        lookup = calls[1]
+        assert lookup["method"] == "GET"
+        assert "name=my+workflow" in lookup["url"]
+
+    def test_subdir_name_is_a_single_encoded_segment(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, _ = _cloud_wf(tmp_path)
+        record = {**_MIRRORED_RECORD, "name": "team/flux"}
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": {"path": "team/flux.json"},
+                "/content": {"workflow_json": _LOCAL_WORKFLOW},
+                "/api/workflows?": _record_listing(record),
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "team/flux", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert "/api/userdata/workflows%2Fteam%2Fflux.json?" in calls[0]["url"]
+        assert env["data"]["filename"] == "team/flux.json"
+        assert env["data"]["workflow_id"] == record["id"]
+
+    def test_json_ext_is_not_doubled(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, _ = _cloud_wf(tmp_path)
+        record = {**_MIRRORED_RECORD, "name": "flux"}
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": {},
+                "/content": {"workflow_json": _LOCAL_WORKFLOW},
+                "/api/workflows?": _record_listing(record),
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "flux.json", "--where", "cloud"], capsys)
+        assert "workflows%2Fflux.json?" in calls[0]["url"]
+        # The record name Cloud derives drops the `.json`.
+        assert env["data"]["name"] == "flux"
+        assert env["data"]["workflow_id"] == record["id"]
+
+    def test_uppercase_ext_still_gets_json_appended_on_cloud(self, cloud_target, tmp_path, monkeypatch, capsys):
+        # Cloud mirrors only names ending in a lowercase `.json` into a record,
+        # so `flux.JSON` is a stem, not an extension, on this route.
+        wf_path, _ = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(monkeypatch, {"/api/userdata/": {}, "/api/workflows?": _record_listing()})
+        env = _run(["save", str(wf_path), "--name", "flux.JSON", "--where", "cloud"], capsys)
+        assert "workflows%2Fflux.JSON.json?" in calls[0]["url"]
+        assert env["data"]["filename"] == "flux.JSON.json"
+
+    def test_no_overwrite_sends_overwrite_false(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, _ = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/content": {"workflow_json": _LOCAL_WORKFLOW},
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--no-overwrite", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert "overwrite=false" in calls[0]["url"]
+
+    def test_no_overwrite_collision_is_workflow_exists(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, _ = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(monkeypatch, {"/api/userdata/": _http_409()})
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--no-overwrite", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["where"] == "cloud"
+        assert env["error"]["code"] == "workflow_exists"
+        assert env["error"]["details"]["filename"] == "my workflow.json"
+        assert "--no-overwrite" in env["error"]["hint"]
+        # Nothing was written, so there is no record to look up.
+        assert len(calls) == 1
+
+    def test_unauthorized_write_is_cloud_unauthorized(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, _ = _cloud_wf(tmp_path)
+        denied = urllib.error.HTTPError(
+            "https://cloud.example.com/api/userdata/x", 401, "Unauthorized", {}, io.BytesIO(b"")
+        )
+        _patch_urlopen(monkeypatch, {"/api/userdata/": denied})
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_unauthorized"
+        assert env["error"]["details"]["operation"] == "save"
+
+    def test_unreachable_write_is_an_error(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path, _ = _cloud_wf(tmp_path)
+        _patch_urlopen(monkeypatch, {"/api/userdata/": urllib.error.URLError("refused")})
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    @pytest.mark.parametrize(
+        "listing",
+        [
+            pytest.param(_record_listing(), id="no-record"),
+            pytest.param(
+                _record_listing(_MIRRORED_RECORD, {**_MIRRORED_RECORD, "id": "66666666-6666-6666-6666-666666666666"}),
+                id="two-records-one-name",
+            ),
+            pytest.param(urllib.error.URLError("reset"), id="lookup-unreachable"),
+            pytest.param((b"<html>502</html>", 200), id="lookup-unparseable"),
+            pytest.param(
+                # A full page may be truncated: the exact match it holds may not be the only one.
+                _record_listing(
+                    _MIRRORED_RECORD,
+                    *[{**_MIRRORED_RECORD, "id": f"id-{i}", "name": f"my workflow {i}"} for i in range(99)],
+                ),
+                id="full-page",
+            ),
+        ],
+    )
+    def test_unresolved_record_keeps_the_save_and_warns(self, listing, cloud_target, tmp_path, monkeypatch, capsys):
+        # The file write has already landed when the record lookup runs, so a
+        # lookup that cannot name exactly one record must not fail the save (an
+        # agent would re-issue a save that already succeeded). It reports a null
+        # id and says why.
+        wf_path, _ = _cloud_wf(tmp_path)
+        _patch_urlopen(monkeypatch, {"/api/userdata/": _USERDATA_SAVE_RESPONSE, "/api/workflows?": listing})
         env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
         assert env["ok"] is True
-        assert env["data"]["workflow_id"] == "new-uuid"
-        # POSTed JSON carries the workflow_json + name.
-        assert calls[0]["method"] == "POST"
-        sent = json.loads(calls[0]["body"])
-        assert sent["name"] == "my workflow"
-        assert sent["workflow_json"] == wf_data
+        assert env["data"]["filename"] == "my workflow.json"
+        assert env["data"]["workflow_id"] is None
+        assert env["data"]["latest_version"] is None
+        assert [w["code"] for w in env["data"]["warnings"]] == ["workflow_record_unresolved"]
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            {"workflow_json": {"nodes": [], "links": []}},
+            urllib.error.URLError("mirror content unavailable"),
+        ],
+    )
+    def test_stale_or_unreadable_mirror_does_not_return_record_id(
+        self, content, cloud_target, tmp_path, monkeypatch, capsys
+    ):
+        # The best-effort mirror may fail while an older same-name record remains.
+        wf_path, _ = _cloud_wf(tmp_path)
+        _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/content": content,
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] is None
+        assert env["data"]["warnings"][0]["code"] == "workflow_record_unresolved"
+
+    @pytest.mark.parametrize("name", [".hidden", "team/.hidden/flow", ".json", "team/.json"])
+    def test_hidden_names_are_refused_before_cloud_write(self, name, cloud_target, tmp_path, monkeypatch, capsys):
+        # Cloud's userdata listing excludes every dot-prefixed component.
+        wf_path, _ = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(monkeypatch, {"/api/userdata/": {}, "/api/workflows?": _record_listing()})
+        env = _run(["save", str(wf_path), "--name", name, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    def test_description_is_ignored_with_a_warning(self, cloud_target, tmp_path, monkeypatch, capsys):
+        # The sidebar file has no description field; say so rather than drop it silently.
+        wf_path, wf_data = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/content": {"workflow_json": _LOCAL_WORKFLOW},
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+            },
+        )
+        env = _run(
+            ["save", str(wf_path), "--name", "my workflow", "--description", "hi", "--where", "cloud"],
+            capsys,
+        )
+        assert env["ok"] is True
+        assert [w["code"] for w in env["data"]["warnings"]] == ["description_ignored"]
+        assert json.loads(calls[0]["body"]) == wf_data
+
+    @pytest.mark.parametrize("name", ["../escape", "/abs", "a\\b", ".index", "sub/.index.json"])
+    def test_unsafe_or_reserved_names_are_refused_before_any_call(
+        self, name, cloud_target, tmp_path, monkeypatch, capsys
+    ):
+        # `.index.json` is the frontend's favorites file in the same folder; a
+        # save under that name would replace the user's bookmarks.
+        wf_path, _ = _cloud_wf(tmp_path)
+        calls = _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(wf_path), "--name", name, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    def test_non_utf8_file_surfaces_read_error(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf = tmp_path / "bin.json"
+        wf.write_bytes(b"\xff\xfe\x00")
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["save", str(wf), "--name", "x", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_read_error"
 
     def test_invalid_json_file_surfaces_workflow_invalid_json(self, cloud_target, tmp_path, monkeypatch, capsys):
         wf_path = tmp_path / "bad.json"
@@ -667,13 +965,200 @@ class TestSave:
 # ---------------------------------------------------------------------------
 
 
+def test_cloud_save_list_get_delete_round_trip(cloud_target, tmp_path, monkeypatch, capsys):
+    # Mirror the verified Cloud handler boundaries: file POST mirrors a record,
+    # file DELETE mirrors record removal, record DELETE alone removes only a record.
+    state = {"file": None, "record": False}
+
+    def file(req):
+        if req.get_method() == "POST":
+            state["file"] = json.loads(req.data)
+            state["record"] = True
+            return _USERDATA_SAVE_RESPONSE
+        if req.get_method() == "DELETE":
+            state["file"] = None
+            state["record"] = False
+            return (b"", 204)
+        return state["file"]
+
+    def record(req):
+        if not state["record"]:
+            return urllib.error.HTTPError(req.full_url, 404, "Not found", {}, io.BytesIO())
+        if req.full_url.endswith("/content"):
+            return {"id": "v2", "version": 2, "workflow_json": state["file"]}
+        if req.get_method() == "DELETE":
+            state["record"] = False
+            return (b"", 204)
+        return _MIRRORED_RECORD
+
+    def listing(req):
+        return _record_listing(_MIRRORED_RECORD) if state["record"] else _record_listing()
+
+    _patch_urlopen(
+        monkeypatch,
+        {
+            "/api/userdata/": file,
+            "/api/workflows?": listing,
+            "/api/workflows/": record,
+            "/api/user": {"id": "user-uuid"},
+        },
+    )
+    src, workflow_json = _cloud_wf(tmp_path)
+    saved = _run(["save", str(src), "--name", "my workflow", "--where", "cloud"], capsys)
+    workflow_id = saved["data"]["workflow_id"]
+    listed = _run(["list", "--where", "cloud"], capsys)
+    assert listed["data"]["workflows"][0]["id"] == workflow_id
+    out = tmp_path / "downloaded.json"
+    fetched = _run(["get", workflow_id, "--out", str(out), "--where", "cloud"], capsys)
+    assert fetched["ok"] is True
+    assert json.loads(out.read_text()) == workflow_json
+    deleted = _run(["delete", workflow_id, "--where", "cloud"], capsys)
+    assert deleted["ok"] is True
+    assert state == {"file": None, "record": False}
+    listed = _run(["list", "--where", "cloud"], capsys)
+    assert listed["data"]["count"] == 0
+
+
+class TestCloudDeleteFile:
+    @pytest.mark.parametrize(
+        ("content", "creator", "user"),
+        [
+            pytest.param({"nodes": []}, "user-uuid", {"id": "user-uuid"}, id="unrelated-file"),
+            pytest.param(_LOCAL_WORKFLOW, "other-user", {"id": "user-uuid"}, id="other-members-record"),
+            pytest.param(_LOCAL_WORKFLOW, None, {"id": "user-uuid"}, id="unknown-record-owner"),
+            pytest.param(_LOCAL_WORKFLOW, "user-uuid", {}, id="unknown-current-user"),
+        ],
+    )
+    def test_unverified_file_association_leaves_file_and_record_untouched(
+        self, content, creator, user, cloud_target, monkeypatch, capsys
+    ):
+        # A same-name record can be stale after a best-effort sync failure, or
+        # belong to a different workspace member. Neither authorizes file deletion.
+        record = {**_MIRRORED_RECORD, "created_by": creator}
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _LOCAL_WORKFLOW,
+                "/content": {"workflow_json": content},
+                "/api/workflows?": _record_listing(record),
+                "/api/workflows/": record,
+                "/api/user": user,
+            },
+        )
+        env = _run(["delete", record["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_filename_ambiguous"
+        assert all(call["method"] == "GET" for call in calls)
+
+    @pytest.mark.parametrize("dual_delete", [True, False])
+    def test_delete_removes_sidebar_file_and_record(self, dual_delete, cloud_target, monkeypatch, capsys):
+        # Cloud's userdata delete mirrors best-effort; record DELETE alone leaves the file behind.
+        state = {"file": True, "record": True}
+
+        def record(req):
+            if req.full_url.endswith("/content"):
+                return {"workflow_json": _LOCAL_WORKFLOW}
+            if req.get_method() == "GET":
+                return _MIRRORED_RECORD
+            if not state["record"]:
+                return urllib.error.HTTPError(req.full_url, 404, "Not found", {}, io.BytesIO())
+            state["record"] = False
+            return (b"", 204)
+
+        def file(req):
+            if req.get_method() == "DELETE":
+                state["file"] = False
+                if dual_delete:
+                    state["record"] = False
+                return (b"", 204)
+            return _LOCAL_WORKFLOW
+
+        _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": file,
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/api/workflows/": record,
+                "/api/user": {"id": "user-uuid"},
+            },
+        )
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert state == {"file": False, "record": False}
+        assert env["data"]["filename"] == "my workflow.json"
+
+    def test_duplicate_names_leave_file_and_records_untouched(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _LOCAL_WORKFLOW,
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD, {**_MIRRORED_RECORD, "id": "other-id"}),
+                "/api/workflows/": _MIRRORED_RECORD,
+            },
+        )
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_filename_ambiguous"
+        assert all(c["method"] == "GET" for c in calls)
+
+    @pytest.mark.parametrize("name", [" leading space", ".index", "../outside"])
+    def test_unsafe_record_name_cannot_delete_another_file(self, name, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _LOCAL_WORKFLOW,
+                "/api/workflows?": _record_listing({**_MIRRORED_RECORD, "name": name}),
+                "/api/workflows/": {**_MIRRORED_RECORD, "name": name},
+            },
+        )
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert all(c["method"] == "GET" for c in calls)
+
+    def test_partial_failure_reports_file_already_deleted(self, cloud_target, monkeypatch, capsys):
+        def record(req):
+            if req.full_url.endswith("/content"):
+                return {"workflow_json": _LOCAL_WORKFLOW}
+            if req.get_method() == "GET":
+                return _MIRRORED_RECORD
+            return urllib.error.HTTPError(req.full_url, 503, "Unavailable", {}, io.BytesIO())
+
+        def file(req):
+            return (b"", 204) if req.get_method() == "DELETE" else _LOCAL_WORKFLOW
+
+        _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": file,
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/api/workflows/": record,
+                "/api/user": {"id": "user-uuid"},
+            },
+        )
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_delete_incomplete"
+        assert env["error"]["details"]["file_deleted"] is True
+        assert env["error"]["details"]["workflow_id"] == _MIRRORED_RECORD["id"]
+
+    def test_record_only_workflow_still_deletes(self, cloud_target, monkeypatch, capsys):
+        def record(req):
+            return _MIRRORED_RECORD if req.get_method() == "GET" else (b"", 204)
+
+        missing = urllib.error.HTTPError("https://x/userdata/x", 404, "Not Found", {}, io.BytesIO())
+        calls = _patch_urlopen(monkeypatch, {"/api/userdata/": missing, "/api/workflows/": record})
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert [c["method"] for c in calls] == ["GET", "GET", "DELETE"]
+
+
 class TestDelete:
     def test_sends_delete_request(self, cloud_target, monkeypatch, capsys):
-        calls = _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid": (b"", 204)})
+        calls = _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid": {"id": "wf-uuid"}})
         env = _run(["delete", "wf-uuid", "--where", "cloud"], capsys)
         assert env["ok"] is True
         assert env["data"]["deleted"] is True
-        assert calls[0]["method"] == "DELETE"
+        assert [c["method"] for c in calls] == ["GET", "DELETE"]
 
     def test_404_surfaces_workflow_not_found(self, cloud_target, monkeypatch, capsys):
         err = urllib.error.HTTPError("https://x/workflows/g", 404, "Not Found", {}, io.BytesIO(b"{}"))
@@ -720,9 +1205,12 @@ class TestUnparseableResponse:
     def test_save_surfaces_error_not_null_id(self, cloud_target, tmp_path, monkeypatch, capsys, raw):
         wf_path = tmp_path / "wf.json"
         wf_path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}))
-        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        calls = _patch_urlopen(monkeypatch, {"/api/userdata/": (raw, 200)})
         env = _run(["save", str(wf_path), "--name", "x", "--where", "cloud"], capsys)
-        # Must NOT claim success with a null workflow_id.
+        # The save's write is the userdata POST; its receipt is what came back malformed.
+        assert "/api/userdata/workflows%2Fx.json" in calls[0]["url"]
+        # Must NOT claim success off a body it could not read (an HTML 200 can be a
+        # proxy page that never reached Cloud).
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_unparseable"
         assert env["error"]["details"]["operation"] == "save"

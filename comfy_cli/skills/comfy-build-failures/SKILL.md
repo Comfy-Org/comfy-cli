@@ -102,8 +102,13 @@ can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), fi
 - `resolves to a duplicate node directory` — two entries claim one folder, so one
   of them goes.
 - `build_registry_pin_missing` — the builder could not place a public pack.
-  The message names each identity; correct the `registryVersion` against a
-  registry search, or remove the pack.
+  `push --dry-run` refuses the same way, before anything is uploaded or saved.
+  The message names each identity but not why. A version the registry has
+  Flagged lands here: check its `status` at
+  `https://api.comfy.org/nodes/<id>/versions`, and pin a version that is not
+  `NodeVersionStatusFlagged`, or the pack's `repository` and a commit `gitRef`.
+  Otherwise correct the `registryVersion` against a registry search, or remove
+  the pack.
 - `build_spec_stale` — the remote moved under you, or `--id` names a Build the
   spec's `syncedRevision` does not belong to. See *Revising*.
 
@@ -152,6 +157,18 @@ several symptoms: three packs failing to import can be one wrong pin. Fix that
 cause completely, in one cut. Do not split its edits across cuts, and do not guess
 at a second cause in the same cut. Before each new cut, tell the user the cause,
 the exact edit, and which build this is, and wait.
+
+**A missing import needs an installation mechanism before another cut.** Read
+the selected pack's verified source and declared requirements, or establish a
+supported builder installation path. A `pipDependencies` constraint only pins a
+package installed by another mechanism; adding `PyYAML==<version>` does not by
+itself install a missing `yaml` import. First verify what will install the
+package, then select a compatible constraint if needed. A changed local source
+bundle also needs approval for its changed contents and bytes before upload.
+When no verified installation mechanism exists, report that blocker and ask for
+the missing source or supported installation choice. Do not propose or create a
+fresh paid cut merely to try an otherwise unsupported pin, even if the previous
+repair plan was approved.
 
 **Read in this order.**
 

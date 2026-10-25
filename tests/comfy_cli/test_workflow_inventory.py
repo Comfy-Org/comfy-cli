@@ -162,8 +162,9 @@ def test_join_cloud_verdicts_without_blockers():
     nested = inventory({"nodes": [_node(1, "CheckpointLoaderSimple", ["sdxl/base.safetensors"])]})
     lookup = _catalog(CheckpointLoaderSimple=_combo("ckpt_name", "base.safetensors"))
 
-    assert join_cloud(plain, lookup)["verdict"] == "covered"
-    assert join_cloud(nested, lookup)["verdict"] == "covered_after_lossless_fixes"
+    assert join_cloud(plain, lookup)["verdict"] == "covered_needs_check"
+    assert join_cloud(nested, lookup)["verdict"] == "covered_needs_check"
+    assert join_cloud(nested, lookup)["models"][0]["status"] == "remap"
     assert join_cloud(plain, _catalog())["missing_classes"] == ["CheckpointLoaderSimple"]
 
 
@@ -179,7 +180,7 @@ def test_join_cloud_treats_missing_perf_only_nodes_as_lossless():
 
     assert cloud["missing_classes"] == []
     assert [x["class"] for x in cloud["lossless_removable"]] == ["WanVideoBlockSwap", "WanVideoSetBlockSwap"]
-    assert cloud["verdict"] == "covered_after_lossless_fixes"
+    assert cloud["verdict"] == "covered_needs_check"  # Original model identity still needs verification.
 
 
 def test_join_cloud_flags_a_same_named_file_with_different_weights(tmp_path: Path):

@@ -209,3 +209,99 @@ def test_api_inventory_lists_the_deployment_scanners_complete_upload_plan(tmp_pa
         for asset in expected.assets
     ]
     assert envelope["data"]["deployment_asset_roots"] == [str(tmp_path)]
+
+
+@pytest.mark.parametrize("root_option", ["--models-root", "--input-root"])
+def test_inventory_reports_nonexistent_explicit_roots(tmp_path, root_option):
+    workflow = _write_workflow(tmp_path)
+    missing = tmp_path / "does-not-exist"
+    result, envelope = _invoke(str(workflow), root_option, str(missing))
+    assert result.exit_code == 0
+    assert any("root_not_found" in warning and str(missing) in warning for warning in envelope["data"]["warnings"])
+
+
+def test_desktop_inventory_uses_only_running_instance_models_and_input(tmp_path, monkeypatch):
+    from comfy_cli import desktop_install
+
+    app = tmp_path / "Comfy Desktop"
+    app.mkdir()
+    records = []
+    for name in ("running", "other"):
+        code = tmp_path / name / "ComfyUI"
+        code.mkdir(parents=True)
+        (code / "main.py").write_text("")
+        (code / "models").mkdir()
+        (code / "input").mkdir()
+        records.append({"id": name, "installPath": str(code.parent)})
+    (app / "installations.json").write_text(json.dumps(records))
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", lambda: app)
+
+    def fetch(url):
+        return (
+            {"system": {"argv": [str(tmp_path / "running" / "ComfyUI" / "main.py")]}}
+            if url.endswith("system_stats")
+            else {}
+        )
+
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    result, envelope = _invoke(str(_write_workflow(tmp_path)), "--desktop", "--server", "127.0.0.1:8000")
+    assert result.exit_code == 0
+    data = envelope["data"]
+    assert data["models_roots"] == [str(tmp_path / "running" / "ComfyUI" / "models")]
+    assert data["desktop"]["install_id"] == "running"
+    assert data["input_roots"] == [str(tmp_path / "running" / "ComfyUI" / "input")]
+
+
+def test_desktop_inventory_settings_only_modern_registry_is_supported(tmp_path, monkeypatch):
+    from comfy_cli import desktop_install
+
+    app = tmp_path / "comfyui-desktop-2"
+    app.mkdir()
+    models = tmp_path / "models"
+    models.mkdir()
+    (app / "settings.json").write_text(json.dumps({"modelsDirs": [str(models)]}))
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", lambda: app)
+    roots, warning = __import__("comfy_cli.command.build", fromlist=["_desktop_model_roots"])._desktop_model_roots()
+    assert roots == [str(models)]
+    assert warning is None
+
+
+def test_desktop_inventory_plans_only_referenced_file_from_effective_output_root(tmp_path, monkeypatch):
+    from comfy_cli import desktop_install
+
+    code = tmp_path / "ComfyUI"
+    for directory in (code, code / "models", code / "input"):
+        directory.mkdir(exist_ok=True)
+    (code / "main.py").write_text("")
+    app = tmp_path / "Comfy Desktop"
+    app.mkdir()
+    (app / "installations.json").write_text(json.dumps([{"id": "live", "installPath": str(code)}]))
+    output = tmp_path / "actual-output"
+    output.mkdir()
+    required = output / "generated.png"
+    required.write_bytes(b"one required synthetic input")
+    (output / "unrelated-private.png").write_bytes(b"do not plan this file")
+    workflow = tmp_path / "api.json"
+    workflow.write_text(json.dumps({"1": {"class_type": "FaceReference", "inputs": {"reference": "generated.png"}}}))
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", lambda: app)
+
+    def fetch(url):
+        return (
+            {
+                "system": {
+                    "argv": [str(code / "main.py"), "--output-directory", str(output), "--api-token", "secret-not-path"]
+                }
+            }
+            if url.endswith("system_stats")
+            else {}
+        )
+
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    result, envelope = _invoke(str(workflow), "--desktop", "--server", "127.0.0.1:8000")
+    assert result.exit_code == 0, result.output
+    data = envelope["data"]
+    assert data["desktop"]["output_dir"] == str(output)
+    assert str(output) in data["deployment_asset_roots"]
+    assert [entry["local_path"] for entry in data["deployment_assets"]] == [str(required)]
+    assert data["local_server"]["launch_paths"]["output_directory"] == [str(output)]
+    assert "secret-not-path" not in result.output

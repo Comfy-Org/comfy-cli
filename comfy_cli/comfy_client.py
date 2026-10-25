@@ -337,6 +337,14 @@ class Client:
                 retry_after=_parse_retry_after(getattr(e, "headers", None)),
             ) from e
 
+    def get_current_workspace(self) -> Any:
+        """Read the authenticated Cloud workspace from the server."""
+        return self._request("GET", ("workspaces", "current"))
+
+    def list_workspace_deployments(self, workspace_id: str) -> Any:
+        """Read the server-gated editor deployment listing for one workspace."""
+        return self._request("GET", ("workspaces", urllib.parse.quote(workspace_id, safe=""), "deployments"))
+
     # ----- submit -----
 
     def submit_prompt(

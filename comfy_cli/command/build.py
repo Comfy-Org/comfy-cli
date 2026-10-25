@@ -1878,6 +1878,37 @@ def _write_spec(renderer, path: Path, spec: dict) -> None:
         raise typer.Exit(code=1) from error
 
 
+def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
+    """Ask the builder's importer to place every public pack, and refuse with
+    ``build_registry_pin_missing`` naming each identity it could not place: a
+    registry version it does not publish (a Flagged one among them), or a
+    repository it cannot normalize.
+
+    The importer reads the snapshot and writes nothing, which is what lets
+    ``push --dry-run`` make the same call and refuse the same way. A lookup that
+    itself fails exits through ``_builder_call`` rather than passing the pins."""
+    imported = _builder_call(
+        renderer,
+        lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
+    )
+    checked = (imported.get("definition") or {}).get("customNodes") or []
+    try:
+        missing = public_node_identities(public_nodes) - public_node_identities(
+            public_node_projection({"customNodes": checked})
+        )
+    except BuildSpecInvalidError as error:
+        renderer.error(code=error.code, message=str(error), details={"path": str(spec_file)})
+        raise typer.Exit(code=1) from error
+    if missing:
+        labels = sorted(f"{identity.kind}:{identity.value}@{identity.version or '-'}" for identity in missing)
+        renderer.error(
+            code="build_registry_pin_missing",
+            message="the builder could not resolve these custom node identities: " + ", ".join(labels),
+            hint="edit the spec to name a published registry version or normalized repository, or remove the node",
+        )
+        raise typer.Exit(code=1)
+
+
 @app.command("push", help="Push the local comfy-build spec to the builder.")
 @tracking.track_command("build")
 def push_cmd(
@@ -1911,7 +1942,13 @@ def push_cmd(
             help="With --release, cut the release even though the save warned about a model link.",
         ),
     ] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Compute uploads locally; send no HTTP requests.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Compute uploads locally and check public custom node pins with the builder; upload and save nothing.",
+        ),
+    ] = False,
     models_dir: Annotated[
         str | None,
         typer.Option("--models-dir", help="Models folder used to resolve model localPath values."),
@@ -1926,7 +1963,7 @@ def push_cmd(
     if release and dry_run:
         renderer.error(
             code="build_missing_input",
-            message="--release cuts a release from a real push, and --dry-run sends nothing.",
+            message="--release cuts a release from a real push, and --dry-run saves nothing.",
             hint="drop --dry-run to cut the release, or drop --release to preview the push",
             details={"conflict": ["--release", "--dry-run"]},
         )
@@ -2007,15 +2044,30 @@ def push_cmd(
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The pin check is the one question a dry run asks the builder: it is a
+            # read, it costs nothing, and it is the refusal a push otherwise meets
+            # only after the plan was disclosed. A spec without a public pin asks
+            # nothing, so it needs no sign-in.
+            public_nodes = public_node_projection(preparation.definition)
+            if public_nodes:
+                _require_public_pins(renderer, _builder_client(renderer, builder_url), public_nodes, paths.spec_file)
             # The envelope is the whole answer and prints nothing in pretty mode, so a
             # person gets the real push's opening line and word that nothing moved.
             # "Already held" is what the spec records; the builder, never asked,
             # may hold more.
             if renderer.is_pretty():
                 renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
-                renderer.info(
-                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
-                )
+                if public_nodes:
+                    count = len(public_nodes)
+                    renderer.info(f"The builder resolved {count} public custom node pin{'' if count == 1 else 's'}.")
+                    renderer.info(
+                        "--dry-run: nothing was uploaded or saved; the builder may already hold more of these "
+                        "than the spec records."
+                    )
+                else:
+                    renderer.info(
+                        "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                    )
                 if _has_models(spec):
                     renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
@@ -2032,26 +2084,7 @@ def push_cmd(
 
         public_nodes = public_node_projection(preparation.definition)
         if public_nodes:
-            imported = _builder_call(
-                renderer,
-                lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
-            )
-            checked = (imported.get("definition") or {}).get("customNodes") or []
-            try:
-                missing = public_node_identities(public_nodes) - public_node_identities(
-                    public_node_projection({"customNodes": checked})
-                )
-            except BuildSpecInvalidError as error:
-                renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-                raise typer.Exit(code=1) from error
-            if missing:
-                labels = sorted(f"{identity.kind}:{identity.value}@{identity.version or '-'}" for identity in missing)
-                renderer.error(
-                    code="build_registry_pin_missing",
-                    message="the builder could not resolve these custom node identities: " + ", ".join(labels),
-                    hint="edit the spec to name a published registry version or normalized repository, or remove the node",
-                )
-                raise typer.Exit(code=1)
+            _require_public_pins(renderer, client, public_nodes, paths.spec_file)
 
         # Said before the first byte moves, and said even when nothing will: a
         # multi-GB upload is otherwise silent until it ends, and "0 files" is
@@ -3133,9 +3166,43 @@ def _selected_release_id(renderer, client, scope: _BuildScope, release: str | No
     return _newest_release_id(renderer, client, _resolve_build_id(renderer, client, scope))
 
 
+#: The exit a watch that lost its sign-in ends with, as `comfy deploy`'s watches do
+#: (``deploy_runtime.EXIT_WATCH_LOST``): only the watch ended, so it must not exit 1,
+#: which says the release failed. 75 is EX_TEMPFAIL in sysexits.h.
+_EXIT_WATCH_LOST: Final = 75
+
+
+def _watched_release(renderer, client, release_id: str) -> dict:
+    """One read of a release this command has already cut.
+
+    The builder accepted the cut with this sign-in, so a 401 session recovery did
+    not clear ends the watch while a refreshable sign-in remains stored. The
+    release may continue remotely. A key, a handed token, or a sign-in without
+    a refresh token keeps ``build_not_signed_in``.
+    """
+    from comfy_cli import credentials
+    from comfy_cli.builder_api import BuilderCredentialRefused
+
+    try:
+        return client.get_release(release_id)
+    except BuilderCredentialRefused as error:
+        if not credentials.sign_in_still_stored(getattr(client, "sign_in_base_url", None)):
+            raise
+        renderer.error(
+            code="watch_auth_lost",
+            message=f"the builder refused the sign-in (401) after attempting session recovery; "
+            f"release {release_id} may still be building on the server",
+            hint=f"read it with `comfy build release show {release_id}` until its status is complete; "
+            "the stored sign-in was preserved",
+            details={"releaseId": release_id},
+            exit_code=_EXIT_WATCH_LOST,
+        )
+        raise typer.Exit(code=_EXIT_WATCH_LOST) from error
+
+
 def _poll_release(renderer, client, release_id: str) -> dict:
     while True:
-        release = _builder_call(renderer, lambda: client.get_release(release_id))
+        release = _builder_call(renderer, lambda: _watched_release(renderer, client, release_id))
         status = release.get("status")
         if renderer.is_pretty():
             renderer.info(f"release {release_id}: {status}")
@@ -3430,7 +3497,7 @@ def _inventory_fetch_json(url: str) -> Any:
         return json.loads(read_capped(resp, url, max_bytes=_INVENTORY_MAX_BYTES))
 
 
-def _inventory_local_server(report: dict[str, Any], server: str) -> dict[str, Any]:
+def _inventory_local_server(report: dict[str, Any], server: str, stats: dict[str, Any] | None = None) -> dict[str, Any]:
     from comfy_cli.local_address import parse_local_url
     from comfy_cli.workflow_inventory import join_server
 
@@ -3439,13 +3506,18 @@ def _inventory_local_server(report: dict[str, Any], server: str) -> dict[str, An
     base = f"http://{netloc}:{port or 8188}"
     section: dict[str, Any] = {"server": base}
     try:
-        stats = _inventory_fetch_json(f"{base}/system_stats")
+        stats = stats if stats is not None else _inventory_fetch_json(f"{base}/system_stats")
         object_info = _inventory_fetch_json(f"{base}/object_info")
     except (OSError, ValueError) as error:
         # The server only adds detail; the workflow's own report stands without it.
         section["error"] = f"{type(error).__name__}: {error}"
         return section
     section.update(join_server(report, object_info, stats))
+    from comfy_cli.desktop_install import server_launch_paths
+
+    paths = server_launch_paths(stats)
+    if paths:
+        section["launch_paths"] = paths
     return section
 
 
@@ -3480,16 +3552,26 @@ def _check_server_option(value: str | None) -> str | None:
     return value
 
 
-def _desktop_model_roots() -> tuple[list[str], str | None]:
-    from comfy_cli.workflow_inventory import DESKTOP_SETTINGS_MACOS
+def _desktop_model_roots(server_stats: dict[str, Any] | None = None) -> tuple[list[str], str | None]:
+    from comfy_cli import desktop_install
 
-    settings = Path(DESKTOP_SETTINGS_MACOS).expanduser()
-    if not settings.is_file():
-        return [], f"--desktop: no Comfy Desktop settings at {settings}; pass each models folder with --models-root"
+    found = desktop_install.detect(server_stats=server_stats)
+    if found is not None:
+        if found.selected is None or (server_stats is None and sum(item.exists for item in found.installs) > 1):
+            return [], "--desktop: select the actual install with --server or explicit --models-root; " + "; ".join(
+                found.problems
+            )
+        return [root.path for root in found.selected.model_roots], "; ".join(found.problems) or None
+    # Earlier Desktop releases keep only settings.json. Never combine libraries
+    # from different app registries or infer that one belongs to a supplied server.
+    candidates = list(desktop_install.app_data_dirs())
+    settings = list(dict.fromkeys(path / "settings.json" for path in candidates if (path / "settings.json").is_file()))
+    if len(settings) != 1 or server_stats is not None:
+        return [], "--desktop: cannot identify one Desktop model library; pass each verified folder with --models-root"
     try:
-        dirs = json.loads(settings.read_text(encoding="utf-8")).get("modelsDirs") or []
+        dirs = json.loads(settings[0].read_text(encoding="utf-8")).get("modelsDirs") or []
     except (OSError, ValueError, AttributeError) as error:
-        return [], f"--desktop: could not read {settings}: {error}"
+        return [], f"--desktop: could not read {settings[0]}: {error}"
     return [d for d in dirs if isinstance(d, str)], None
 
 
@@ -3498,8 +3580,8 @@ def _desktop_model_roots() -> tuple[list[str], str | None]:
     hidden=True,
     help=(
         "Report what one workflow loads (classes, models with subfolders, embeddings, input files, recorded "
-        "pack versions), which of those files are on this machine, and whether stock Comfy Cloud already runs "
-        "it. Read-only; reads the Cloud node catalog only with --cloud."
+        "pack versions), which of those files are on this machine, and whether Comfy Cloud's standard "
+        "environment already runs it. Read-only; reads the Cloud node catalog only with --cloud."
     ),
 )
 @tracking.track_command("build")
@@ -3507,7 +3589,9 @@ def inventory_cmd(
     workflow: Annotated[str, typer.Argument(help="Workflow JSON, UI or API format.")],
     cloud: Annotated[
         bool,
-        typer.Option("--cloud", help="Check the workflow against stock Comfy Cloud's node catalog. Needs sign-in."),
+        typer.Option(
+            "--cloud", help="Check the workflow against Comfy Cloud's standard-environment node catalog. Needs sign-in."
+        ),
     ] = False,
     server: Annotated[
         str | None,
@@ -3524,7 +3608,10 @@ def inventory_cmd(
     ] = None,
     desktop: Annotated[
         bool,
-        typer.Option("--desktop", help="Also search Comfy Desktop's model folders (settings.json modelsDirs, macOS)."),
+        typer.Option(
+            "--desktop",
+            help="Search the selected Desktop install and model library. Use --server to identify a running instance.",
+        ),
     ] = False,
     hash_files: Annotated[
         bool,
@@ -3583,17 +3670,49 @@ def inventory_cmd(
         raise typer.Exit(code=1) from error
     report["workflow"] = str(path)
     roots = list(models_root or [])
+    inputs = list(input_root or [])
+    outputs: list[str] = []
+    server_stats = None
     if desktop:
-        desktop_roots, warning = _desktop_model_roots()
+        from comfy_cli import desktop_install
+
+        if server:
+            from comfy_cli.local_address import parse_local_url
+
+            host, port = parse_local_url(server)
+            netloc = f"[{host}]" if ":" in host else host
+            try:
+                server_stats = _inventory_fetch_json(f"http://{netloc}:{port or 8188}/system_stats")
+            except (OSError, ValueError) as error:
+                report["warnings"].append(f"--desktop: cannot verify running server: {error}; pass explicit roots")
+        # A supplied but unreachable server must not fall back to an unrelated install.
+        desktop_roots, warning = _desktop_model_roots(
+            server_stats if server_stats is not None else ({} if server else None)
+        )
         roots += [r for r in desktop_roots if r not in roots]
         if warning:
             report["warnings"].append(warning)
+        found = desktop_install.detect(
+            server_stats=server_stats if server_stats is not None else ({} if server else None)
+        )
+        if found is not None:
+            report["desktop"] = found.to_dict()
+            if found.selected is not None and desktop_roots:
+                if not input_root:
+                    inputs = [found.input_dir or str(Path(found.selected.data_dir) / "input")]
+                if found.output_dir is not None:
+                    outputs = [found.output_dir]
+    for kind, paths in (("models", roots), ("input", inputs), ("output", outputs)):
+        for root in paths:
+            if not Path(root).expanduser().is_dir():
+                report["warnings"].append(f"root_not_found: {kind} root is not a directory: {root}")
     # Local files first: the Cloud join compares their sizes with Cloud's same-named files.
     if roots:
         report["models_roots"] = roots
         join_local(report, roots, hash_files=hash_files)
-    if input_root:
-        join_inputs(report, input_root, lambda path: blake3_file(Path(path)))
+    if inputs:
+        report["input_roots"] = inputs
+        join_inputs(report, inputs, lambda path: blake3_file(Path(path)))
     if report["format"] == "api":
         from comfy_cli.command.deploy_workflow import (
             DeployWorkflowAssetError,
@@ -3604,7 +3723,7 @@ def inventory_cmd(
         # Use the run command's scanner, not a loader allowlist: custom nodes
         # can reference files too. Run from the same spec folder and pass the
         # same --input-root directories as deploy run's --asset-root values.
-        asset_roots = resolve_asset_roots(extra_roots=tuple(Path(root) for root in input_root or []))
+        asset_roots = resolve_asset_roots(extra_roots=tuple(Path(root) for root in (*inputs, *outputs)))
         try:
             plan = scan_workflow_inputs(data, asset_roots=asset_roots)
             report["deployment_assets"] = [
@@ -3638,7 +3757,7 @@ def inventory_cmd(
 
         report["cloud"] = join_cloud(report, lookup, size_of if roots else None)
     if server:
-        report["local_server"] = _inventory_local_server(report, server)
+        report["local_server"] = _inventory_local_server(report, server, server_stats)
 
     if renderer.is_pretty():
         renderer.print(
@@ -3646,7 +3765,7 @@ def inventory_cmd(
         )
         if "cloud" in report:
             blocking = ", ".join(report["cloud"]["blocking"]) or "nothing"
-            renderer.print(f"Stock Comfy Cloud: {report['cloud']['verdict']} (blocking: {blocking})")
+            renderer.print(f"Comfy Cloud standard environment: {report['cloud']['verdict']} (blocking: {blocking})")
         for model in report["models"]:
             found = "" if "local" not in model else f"  [{len(model['local'])} local]"
             renderer.print(f"  {model['path']}  ({model['node']}){found}")

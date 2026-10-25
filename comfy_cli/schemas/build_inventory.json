@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_inventory.json",
   "title": "comfy build inventory --json data payload",
-  "description": "What one workflow loads, which of those files are on this machine, and whether stock Comfy Cloud runs it. `cloud`, `local_server`, `models_roots` and `models_not_on_disk` appear only when --cloud, --server and --models-root/--desktop ask for them.",
+  "description": "What one workflow loads, which of those files are on this machine, and whether Comfy Cloud's standard environment runs it. `cloud`, `local_server`, `models_roots` and `models_not_on_disk` appear only when --cloud, --server and --models-root/--desktop ask for them.",
   "type": "object",
   "required": [
     "workflow",
@@ -221,7 +221,19 @@
       }
     },
     "local_server": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "launch_paths": {
+          "type": "object",
+          "description": "Known path-only launch arguments; unrelated argv flags and credentials are excluded.",
+          "properties": {
+            "base_directory": {"type": "array", "items": {"type": "string"}},
+            "input_directory": {"type": "array", "items": {"type": "string"}},
+            "output_directory": {"type": "array", "items": {"type": "string"}},
+            "extra_model_paths_config": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      }
     },
     "cloud": {
       "type": "object",
@@ -284,9 +296,10 @@
                   "different_size",
                   "no_local_copy",
                   "unknown",
-                  "not_checked"
+                  "not_checked",
+                  "ambiguous_local_copies"
                 ],
-                "description": "Local copy vs Cloud's same-named file. different_size proves a mismatch; same_size is not proof of model identity and leaves the match unverified."
+                "description": "Local copy vs Cloud's same-named file. different_size proves a mismatch. All other states leave model identity unverified; ambiguous_local_copies means multiple local candidates were not proved identical by SHA256."
               }
             }
           }
@@ -295,6 +308,26 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "description": "Runtime inputs are checked separately from dependency compatibility. Neither status establishes a successful job.",
+          "required": ["status", "unresolved_inputs"],
+          "properties": {
+            "status": {"enum": ["needs_inputs", "not_run"]},
+            "unresolved_inputs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["node_id", "file", "reason"],
+                "properties": {
+                  "node_id": {},
+                  "file": {"type": "string"},
+                  "reason": {"type": "string"}
+                }
+              }
+            }
           }
         },
         "lossless_removable": {

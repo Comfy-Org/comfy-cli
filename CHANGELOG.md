@@ -17,16 +17,26 @@ history.
 
 ### Added
 
+- `comfy model upload` previews an import into the standard environment and
+  uploads only the approved file digest to the approved workspace. It verifies
+  model-folder capabilities, collisions and returned content identity, and sends
+  a private snapshot of the approved bytes.
+- Read-only `comfy deploy ui` and `comfy workflow ui` return editor links only
+  after checking the workspace, supported capability and exact saved target.
+  Workflow links require a matching normal saved document and explicitly select
+  the requested standard or custom environment. Canvas validation follows the
+  frontend schemas and WHATWG URL semantics for model metadata.
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
 - A `comfy-run-on-cloud` skill, installed by default, takes one local workflow
-  onto Comfy Cloud. It checks stock Cloud with the original dependencies,
-  including supported user model/LoRA uploads, then reuses a compatible existing
-  Build before considering conversion. Lossless conversions (the same file in
-  another folder, removing memory- or speed-only nodes, exact core equivalents)
-  happen without asking; a lossy one (a different model, LoRA, upscaler or implementation)
-  needs the user's yes, with a custom build offered as the exact alternative and
+  onto Comfy Cloud. It checks Comfy Cloud's standard environment with the
+  original dependencies, including supported user model/LoRA uploads, then
+  reuses a compatible existing custom environment (a workspace Build) before
+  considering conversion. Lossless conversions (the same file in another folder,
+  removing memory- or speed-only nodes, exact core equivalents) happen without
+  asking; a lossy one (a different model, LoRA, upscaler or implementation)
+  needs the user's yes, with a custom environment offered as the exact alternative and
   its costs stated. It pre-flights every converted copy on the server, asks once
   per file before uploading models or inputs from disk on every route, and
   verifies a real job on the selected target before handoff. It asks before freeing
@@ -164,6 +174,17 @@ history.
 
 ### Fixed
 
+- Run-on-Cloud inventories resolve the selected Desktop instance's effective
+  paths, retain uncertain dependencies, distinguish runtime inputs from model
+  coverage, and report missing or conflicting model identity. Verified private
+  models now pass Cloud model-enum preflight without relaxing other validation.
+- Run-on-Cloud guidance reuses compatible Builds before conversion, binds file
+  approval to the reviewed bytes and destination, and stops build repair when
+  the proposed package has no verified installation mechanism. The installed
+  wheel now includes the skill's prompt template.
+- Successful previews using bundled ffmpeg no longer report a false trust error.
+  Cloud asset listings encode multiple tags using the server's supported query
+  format, and CLI subprocess tests isolate their credential stores.
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING

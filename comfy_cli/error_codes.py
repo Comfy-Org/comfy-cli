@@ -37,6 +37,19 @@ class ErrorCode:
 # ---------------------------------------------------------------------------
 
 REGISTRY: tuple[ErrorCode, ...] = (
+    ErrorCode(
+        "model_upload_refused",
+        "A model import was refused before uploading: missing exact-file approval, changed bytes, "
+        "wrong workspace, unavailable capability, unsupported type, or a destination-name collision. "
+        "`details.reason` names the condition; `details.uploaded` is false.",
+        "preview the import with `comfy model upload --dry-run` and approve the exact file, SHA256 and workspace",
+    ),
+    ErrorCode(
+        "model_upload_failed",
+        "A model import request or its verification failed. A file may already have reached Cloud; "
+        "`details.uploaded` is true or unknown. Do not assume retrying is free of effects.",
+        "inspect the selected workspace's model library before retrying",
+    ),
     # --- output / cancellation / lifecycle -----------------------------------
     ErrorCode(
         "cancelled",
@@ -64,6 +77,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "not_in_workspace",
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
+    ),
+    ErrorCode(
+        "workspace_not_found",
+        "The workspace reported by `comfy which` does not exist on disk; details.path names the missing directory.",
+        "run `comfy install`, or pass `--workspace /path/to/ComfyUI`",
+    ),
+    ErrorCode(
+        "desktop_config_unreadable",
+        "Comfy Desktop installation records or settings could not be read; discovery may be incomplete.",
+        "check the Desktop configuration file named in the warning",
     ),
     # --- launch / stop lifecycle ---------------------------------------------
     ErrorCode(
@@ -142,8 +165,37 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the saved workflow is unexpectedly large; inspect it directly on the server",
     ),
     ErrorCode(
+        "workflow_exists",
+        "`comfy workflow save --no-overwrite` found a saved workflow file with that name already (HTTP 409 "
+        "from the `/userdata` write), so nothing was written. `details.filename` is the file under "
+        "`workflows/`.",
+        "pass a different `--name`, or drop `--no-overwrite` to replace it",
+    ),
+    ErrorCode(
+        "workflow_record_unresolved",
+        "`comfy workflow save --where cloud` saved the file the Workflows sidebar lists, but could not read "
+        "back exactly one Cloud workflow record with that name and matching content (none yet, two sharing it, "
+        "stale mirrored content, or the `/api/workflows` read failed), so `workflow_id` is null. "
+        "Surfaced in `data.warnings[]`, not as an "
+        "error envelope: the save succeeded, so do not re-run it.",
+        "find the record with `comfy --json workflow list --name <name>`",
+    ),
+    ErrorCode(
+        "workflow_filename_ambiguous",
+        "Cloud `workflow delete` found a sidebar file but could not safely associate it with the requested "
+        "record (duplicate names or an unresolved lookup). Nothing was deleted.",
+        "inspect same-name records; remove the intended file in the Cloud sidebar before deleting its record",
+    ),
+    ErrorCode(
+        "workflow_delete_incomplete",
+        "Cloud `workflow delete` removed the sidebar file, but could not confirm cleanup of its workflow "
+        "record. `details.file_deleted` is true; `details.workflow_id` identifies the record to check.",
+        "check `comfy --json workflow list`, then retry deleting the record if it remains",
+    ),
+    ErrorCode(
         "workflow_unparseable",
-        "A cloud `/api/workflows` call returned a non-empty 200 body that couldn't be decoded as JSON "
+        "A cloud `/api/workflows` call, or the cloud `/userdata` write `workflow save` makes, returned a "
+        "non-empty 200 body that couldn't be decoded as JSON "
         "(non-UTF-8 bytes or a non-JSON body such as an HTML proxy/error page). Distinct from an empty "
         "body (legitimately no data): the malformed body is surfaced as a hard error rather than a "
         "misleading empty list / null id. `details.operation` carries the verb.",
@@ -853,10 +905,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "description_ignored",
-        "`comfy workflow save --where local --description` was given a description, but the local "
-        "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
-        "(not as an error envelope) so the save still succeeds.",
-        "descriptions are a Comfy Cloud feature; drop `--description` on the local path",
+        "`comfy workflow save --description` was given a description, but the saved workflow is a "
+        "`/userdata` file (on Cloud, the one the Workflows sidebar lists) with nowhere to keep it. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) so the save still succeeds.",
+        "drop `--description`; put notes in the workflow itself, e.g. a Note node",
     ),
     ErrorCode(
         "cql_query_invalid",
@@ -1338,7 +1390,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "build_registry_pin_missing",
         "`comfy build push` sent its identity-keyed public-node subset to the builder's snapshot importer, "
         "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
-        "reconstruct every requested public node.",
+        "reconstruct every requested public node. `push --dry-run` makes the same read-only check and "
+        "refuses the same way, uploading and saving nothing. A version the registry has Flagged "
+        "is refused here too, though the message does not say so.",
         "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(
@@ -1577,6 +1631,23 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check the deployment id with `comfy deploy ls --workspace`",
     ),
     ErrorCode(
+        "cloud_model_asset_verified",
+        "An informational workflow-validation warning: a model absent from the static enum was verified as "
+        "an exact accessible authenticated model asset, including folder and content hash. It is not an inference result.",
+        "compare the recorded asset identity to approved original weights before submitting the workflow",
+    ),
+    ErrorCode(
+        "workflow_ui_unavailable",
+        "A private saved-workflow URL could not be verified: disabled release capability, wrong workspace, "
+        "inaccessible or mismatched record/sidebar file, or unavailable custom target. No link or mutation occurred.",
+        "use Cloud Workflows only after sidebar read-back; otherwise retain the local file or verified deployment API fallback",
+    ),
+    ErrorCode(
+        "deploy_ui_unavailable",
+        "The authenticated Cloud editor cannot verify this workspace's ready deployment and served release.",
+        "run `comfy cloud login`, verify the workspace and ready deployment, or use `comfy deploy run`",
+    ),
+    ErrorCode(
         "deploy_forbidden",
         "The signed-in workspace is not allowed to perform the requested deployment operation.",
         "verify the deployment belongs to this workspace and that the account has deploy access",
@@ -1637,6 +1708,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
         "after a move, read `comfy deploy show --deployment <id>` instead: the move has landed once it shows no "
         "pendingUpdate and its releaseId is the release asked for",
+    ),
+    ErrorCode(
+        "watch_auth_lost",
+        "A watch over work the server had already accepted (`comfy build release create --watch`, `comfy deploy "
+        "up`, `promote` and `rollback`, `comfy deploy status --watch`) was refused with HTTP 401 despite "
+        "serialized session recovery and at most one retry, while a refreshable sign-in remains stored. "
+        "Only the watch ended: the release may still be building and the deployment may still be coming up. "
+        "The exit code is 75, not 1. `details.releaseId` (build) or "
+        "`details.deployment_id` (deploy) names what is still running. A 401 before anything was accepted, on a "
+        "workspace API key, or with no refreshable sign-in remaining stays `build_not_signed_in` or "
+        "`deploy_not_signed_in`.",
+        "the stored sign-in was preserved: re-read the work with `comfy build "
+        "release show <releaseId>` or `comfy deploy status --deployment <deployment_id> --watch`",
     ),
     ErrorCode(
         "deploy_update_failed",
