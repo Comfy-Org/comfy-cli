@@ -242,6 +242,16 @@ history.
   names the command that reads the release or deployment again. A 401 before
   anything was accepted, on a workspace API key, or when no refreshable sign-in
   remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
+- `comfy build push --dry-run` now runs the push's registry-pin check, so a
+  pin the builder cannot place fails the dry run with the push's own
+  `build_registry_pin_missing` error instead of passing it. A version the
+  registry has Flagged was the common case: the dry run passed, and the push
+  was refused only after the plan had been disclosed. The check asks the
+  builder's snapshot importer to place each public pack, a read that writes
+  nothing, and the dry run still uploads and saves nothing. A spec that pins
+  a public pack now needs sign-in for its dry run (`build_not_signed_in`
+  otherwise); a spec whose packs are all local still sends no request.
+
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
