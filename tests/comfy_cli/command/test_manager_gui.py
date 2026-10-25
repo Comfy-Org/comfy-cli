@@ -839,8 +839,7 @@ class TestFillPrintTable:
         assert result[1][0] == "Manager"
         assert "Disabled" in result[1][1]
         assert result[2][0] == "UV Compile Default"
-        assert result[3][0] == "Warning"
-        assert "/fake/workspace" in result[3][1]
+        assert result[3] == ("Warning", "Workspace directory does not exist: /fake/workspace")
 
     @patch("comfy_cli.command.custom_nodes.cm_cli_util.resolve_manager_gui_mode", return_value="enable-gui")
     def test_fill_print_table_enable_gui_mode(self, mock_resolve, mock_workspace_config_manager):
@@ -1068,9 +1067,9 @@ class TestManagerModeReconciliation:
             "warnings",
         }
         assert data["path"] == "/fake/workspace"
-        assert data["exists"] is False
-        assert data["warnings"]
         assert data["uv_compile_default"] is False
+        assert data["exists"] is False
+        assert data["warnings"][0]["code"] == "workspace_not_found"
 
     def test_fill_print_table_reports_legacy_clone(self):
         """The table view matches the JSON view for the legacy-clone case."""

@@ -269,6 +269,11 @@ history.
   lists. Cloud deletion now removes the sidebar file as well as its record;
   ambiguous same-name records are refused before deletion, and partial cleanup
   reports `workflow_delete_incomplete` with the file's deletion state.
+- `comfy which` and `comfy env` report Desktop's split code, data and model
+  roots without changing launch/install selection. A nonexistent selected
+  workspace no longer succeeds in `which`; discovery reports malformed Desktop
+  configuration and marks inferred data roots as unverified.
+
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
