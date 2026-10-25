@@ -119,10 +119,16 @@ def test_env_json_validates():
     assert envelope["ok"] is True
 
 
-def test_which_json_validates():
-    envelope = _run_cli(["--json", "which"])
+def test_which_json_validates(tmp_path):
+    workspace = tmp_path / "ComfyUI"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("")
+    envelope = _run_cli(["--json", "--workspace", str(workspace), "which"])
     _validator_for("envelope.json").validate(envelope)
+    assert envelope["ok"] is True
     _validator_for("which.json").validate(envelope["data"])
+    assert envelope["data"]["workspace_path"] == str(workspace)
+    assert envelope["data"]["exists"] is True
 
 
 def test_help_json_validates():
