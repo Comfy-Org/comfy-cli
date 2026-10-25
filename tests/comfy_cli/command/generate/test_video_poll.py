@@ -200,3 +200,11 @@ def test_existing_bfl_poller_still_works(no_sleep, monkeypatch):
     result = poll.get_poller("bfl")({"polling_url": "https://x"}, api_key="k")
     assert result.status == "succeeded"
     assert "https://cdn/b.png" in result.image_urls
+
+
+def test_poll_bfl_refuses_plain_http_polling_url():
+    """client.get attaches the API key to every poll; the polling_url comes
+    verbatim from the partner's response. Plain http must not carry it."""
+    with pytest.raises(Exception) as exc_info:
+        poll.poll_bfl({"polling_url": "http://evil.example/poll"}, api_key="key", timeout=1.0)
+    assert "plain-http polling_url" in str(exc_info.value)

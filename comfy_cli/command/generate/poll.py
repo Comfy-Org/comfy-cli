@@ -141,6 +141,11 @@ def poll_bfl(
     url = initial.get("polling_url")
     if not url:
         raise client.ApiError(0, "", "BFL response missing polling_url")
+    if not url.startswith("https://"):
+        # client.get attaches the API key to every poll; a plain-http
+        # polling_url would ship it in cleartext to whatever host the
+        # response named. BFL serves https polling URLs.
+        raise client.ApiError(0, "", f"refusing to poll a plain-http polling_url with the API key attached: {url}")
     deadline = _now() + timeout
     last_body: dict[str, Any] = {}
     while _now() < deadline:
