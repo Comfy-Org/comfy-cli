@@ -79,7 +79,7 @@ class ConfigManager:
             # still win on the next write_config(), as before.
             fresh = configparser.ConfigParser()
             if os.path.exists(config_file_path):
-                fresh.read(config_file_path)
+                fresh.read(config_file_path, encoding="utf-8")
             fresh["DEFAULT"][key] = value
             self._atomic_write(config_file_path, self._render_of(fresh))
         self.config["DEFAULT"][key] = value
@@ -126,7 +126,7 @@ class ConfigManager:
         config_file_path = self.get_config_file_path()
         if os.path.exists(config_file_path):
             self.config = configparser.ConfigParser()
-            self.config.read(config_file_path)
+            self.config.read(config_file_path, encoding="utf-8")
 
         # TODO: We need a policy for clearing the tmp directory.
         tmp_path = os.path.join(self.get_config_path(), "tmp")
