@@ -825,3 +825,31 @@ def test_write_cache_is_atomic_and_loadable(tmp_path, monkeypatch):
         assert spec.load_raw_spec()["openapi"] == "3.1.0"
     finally:
         spec.load_raw_spec.cache_clear()
+
+
+def test_load_raw_spec_recovers_from_an_empty_cache(tmp_path, monkeypatch):
+    """An interrupted write can leave a zero-byte cache: yaml.load returns
+    None without raising, so the None/shape guard must quarantine it too."""
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_text("", encoding="utf-8")
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    try:
+        parsed = spec.load_raw_spec()
+        assert isinstance(parsed.get("paths"), dict), "vendored spec won"
+        assert cache.with_suffix(cache.suffix + ".corrupt").exists()
+    finally:
+        spec.load_raw_spec.cache_clear()
+
+
+def test_load_raw_spec_recovers_from_invalid_utf8(tmp_path, monkeypatch):
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_bytes(b"paths: \xff\xfe\x80 truncated")
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    try:
+        parsed = spec.load_raw_spec()
+        assert isinstance(parsed.get("paths"), dict), "vendored spec won"
+        assert cache.with_suffix(cache.suffix + ".corrupt").exists()
+    finally:
+        spec.load_raw_spec.cache_clear()

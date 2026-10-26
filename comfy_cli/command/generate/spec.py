@@ -291,16 +291,20 @@ def _select_spec_path() -> Path:
 @lru_cache(maxsize=1)
 def load_raw_spec() -> dict[str, Any]:
     path = _select_spec_path()
-    try:
+    if path == _BUNDLED_SPEC:
         with path.open("r", encoding="utf-8") as f:
             return yaml.load(f, Loader=_YamlLoader)
-    except yaml.YAMLError:
-        if path == _BUNDLED_SPEC:
-            raise
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            parsed = yaml.load(f, Loader=_YamlLoader)
+    except (yaml.YAMLError, UnicodeDecodeError, ValueError):
         # A truncated cache (killed refresh, full disk) used to poison every
         # generate command until the 7-day TTL expired: _select_spec_path
-        # picks by mtime and nothing validated the body. Quarantine the cache
-        # and fall back to the vendored spec; the next refresh rewrites it.
+        # picks by mtime and nothing validated the body. An empty file parses
+        # to None without raising, a cut inside a UTF-8 sequence raises
+        # UnicodeDecodeError, a structural break raises YAMLError. Quarantine
+        # the cache and fall back to the vendored spec; the next refresh
+        # rewrites it.
         try:
             path.rename(path.with_suffix(path.suffix + ".corrupt"))
         except OSError:
@@ -308,6 +312,17 @@ def load_raw_spec() -> dict[str, Any]:
         load_raw_spec.cache_clear()
         with _BUNDLED_SPEC.open("r", encoding="utf-8") as f:
             return yaml.load(f, Loader=_YamlLoader)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("paths"), dict):
+        # syntactically valid but unusable (an interrupted write that happened
+        # to land on a document boundary, or a stranger kind of truncation)
+        try:
+            path.rename(path.with_suffix(path.suffix + ".corrupt"))
+        except OSError:
+            pass
+        load_raw_spec.cache_clear()
+        with _BUNDLED_SPEC.open("r", encoding="utf-8") as f:
+            return yaml.load(f, Loader=_YamlLoader)
+    return parsed
 
 
 def base_url() -> str:
