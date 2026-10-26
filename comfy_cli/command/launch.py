@@ -869,7 +869,7 @@ def candidate_log_paths(port: int | None = None) -> list[tuple[str, str]]:
         ]
 
     cfg = ConfigManager()
-    recorded = (cfg.get(constants.CONFIG_KEY_BACKGROUND_LOG) or "").replace("%%", "%") or None
+    recorded = cfg.get(constants.CONFIG_KEY_BACKGROUND_LOG) or None
 
     if not workspace:
         # Nothing local to prefer it over, and nothing else to check.
