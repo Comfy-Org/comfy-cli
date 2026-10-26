@@ -1434,6 +1434,39 @@ def test_an_editor_answer_that_leaves_the_value_out_is_read_again(tmp_path, monk
     assert _json_envelope(result)["changed"] is True
 
 
+@pytest.mark.parametrize(("had", "flag"), [(True, "--no-editor"), (False, "--editor")], ids=["off", "on"])
+@pytest.mark.parametrize("status", ["ready", "stop_failed"])
+def test_an_editor_read_that_confirms_the_value_outranks_the_edits_answer(
+    tmp_path, monkeypatch, had, flag, status
+) -> None:
+    """The read is the later of the two, so the editor edit's own answer never overrules it."""
+    # Given a deployment whose editor edit answers with the value it had, though a read after it has the one asked
+    client = FakeDeploy([deployment("dep-live", status=status, editor=had)])
+    original = client.set_deployment_editor
+
+    def set_editor(deployment_id: str, editor: bool) -> JsonObject:
+        reply = original(deployment_id, editor)
+        reply["editor"] = had
+        return reply
+
+    client.set_deployment_editor = set_editor
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, flag)
+
+    # Then the edit is made, and confirmed
+    envelope = _json_envelope(result)
+    assert envelope["changed"] is True
+    assert "deploy_editor_unchanged" not in result.stdout
+    assert "did not confirm" not in " ".join(result.stderr.split())
+    if status == "ready":
+        assert result.exit_code == 0, result.stderr
+        assert envelope["ok"] is True
+    else:
+        assert result.exit_code == 1, result.stderr
+        assert envelope["error"]["code"] == "deploy_status_terminal"
+
+
 def _reads_after(client: FakeDeploy, made, *replies: str) -> None:
     """Each read once ``made()`` holds, in turn: "fails" answers 503, "omits" leaves `editor` out."""
     original = client.get_deployment

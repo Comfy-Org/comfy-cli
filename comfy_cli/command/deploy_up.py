@@ -708,17 +708,20 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         check = _confirmed_editor(client, deployment_id, _editor_check(request.editor, existing, turns=turns))
     edited = check is not None and check.made
     release = _release_summary(request.release)
+    # ``check`` has read the edit's answer and any read after it, so only an
+    # answer to a request made after them is observed on top.
     if status in {"stopped", "failed"}:
         started = client.start_deployment(deployment_id)
-        result = UpResult(started, release, compute, supersedes, False, True, dropped, editor=check)
-    elif status == "stop_failed":
-        result = UpResult(existing, release, compute, supersedes, False, edited, dropped, editor=check)
-    elif (desired := _merged_bounds(request, compute)) != compute:
+        return observe_editor(
+            UpResult(started, release, compute, supersedes, False, True, dropped, editor=check), started
+        )
+    if status == "stop_failed":
+        return UpResult(existing, release, compute, supersedes, False, edited, dropped, editor=check)
+    desired = _merged_bounds(request, compute)
+    if desired != compute:
         updated = client.update_deployment(deployment_id, desired)
-        result = UpResult(updated, release, desired, supersedes, False, True, editor=check)
-    else:
-        result = UpResult(existing, release, compute, supersedes, False, edited, editor=check)
-    return observe_editor(result, result.deployment)
+        return observe_editor(UpResult(updated, release, desired, supersedes, False, True, editor=check), updated)
+    return UpResult(existing, release, compute, supersedes, False, edited, editor=check)
 
 
 def move_line(result: UpResult, deployment_id: str) -> str | None:
