@@ -157,9 +157,21 @@ def _auth_for_url(url: str, auth_hdrs: dict[str, str], base_url: str) -> dict[st
     """
     if not auth_hdrs:
         return auth_hdrs
-    url_parts = urllib.parse.urlsplit(url)
-    base_parts = urllib.parse.urlsplit(base_url)
-    if (url_parts.scheme, url_parts.hostname) == (base_parts.scheme, base_parts.hostname):
+    try:
+        url_parts = urllib.parse.urlsplit(url)
+        base_parts = urllib.parse.urlsplit(base_url)
+        default_ports = {"http": 80, "https": 443}
+        url_port = url_parts.port if url_parts.port is not None else default_ports.get(url_parts.scheme)
+        base_port = base_parts.port if base_parts.port is not None else default_ports.get(base_parts.scheme)
+    except ValueError:
+        # malformed URL (bad port, bracketed garbage): never a reason to
+        # attach credentials
+        return {}
+    if (url_parts.scheme, url_parts.hostname, url_port) == (
+        base_parts.scheme,
+        base_parts.hostname,
+        base_port,
+    ):
         return auth_hdrs
     return {}
 
