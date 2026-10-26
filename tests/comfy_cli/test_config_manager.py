@@ -237,3 +237,29 @@ class TestConcurrentWrites:
             assert "some_key = some_value" in content
             leftovers = [p.name for p in config_dir.iterdir() if p.name.startswith(".config-")]
             assert leftovers == []
+
+
+class TestStateAdoption:
+    def test_adopted_foreign_keys_survive_a_later_write_config(self, tmp_path):
+        """After set() merges foreign state into the file, this instance's
+        later write_config() must not delete it (CodeRabbit round 2)."""
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            first = _ConfigManagerCls()
+            first.set("mine", "1")
+
+            other = _ConfigManagerCls()
+            other.set("theirs", "2")
+
+            # a direct in-memory mutation + write_config, the launch.py pattern
+            first.config["DEFAULT"]["pending"] = "3"
+            first.write_config()
+
+            final = _ConfigManagerCls()
+        assert final.get("theirs") == "2", "foreign key survived"
+        assert final.get("pending") == "3", "pending in-memory mutation survived"
+        assert final.get("mine") == "1"

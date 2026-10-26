@@ -79,7 +79,8 @@ class ConfigManager:
             # still win on the next write_config(), as before.
             fresh = configparser.ConfigParser()
             if os.path.exists(config_file_path):
-                fresh.read(config_file_path, encoding="utf-8")
+                with open(config_file_path, encoding="utf-8") as f:
+                    fresh.read_file(f)
             fresh["DEFAULT"][key] = value
             self._atomic_write(config_file_path, self._render_of(fresh))
         self.config["DEFAULT"][key] = value
