@@ -665,8 +665,10 @@ async def launch_and_monitor(cmd, listen, port, log_file=None):
     # when startup fails before the success marker below (where the running
     # background info is recorded). A fresh ConfigManager re-reads this on the
     # success path.
+    # %% escapes ConfigParser interpolation: a --log-file like
+    # /tmp/run%20.log would otherwise raise on every later read of the key.
     cfg = ConfigManager()
-    cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path
+    cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path.replace("%", "%%")
     cfg.write_config()
 
     try:
@@ -703,7 +705,7 @@ async def launch_and_monitor(cmd, listen, port, log_file=None):
             # we add the running background info now that startup succeeded.
             cfg = ConfigManager()
             cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] = f"{(listen, port, process.pid)}"
-            cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path
+            cfg.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND_LOG] = log_path.replace("%", "%%")
             cfg.write_config()
 
             _emit_launch_success(listen, port, process.pid)
@@ -867,7 +869,7 @@ def candidate_log_paths(port: int | None = None) -> list[tuple[str, str]]:
         ]
 
     cfg = ConfigManager()
-    recorded = cfg.get(constants.CONFIG_KEY_BACKGROUND_LOG)
+    recorded = (cfg.get(constants.CONFIG_KEY_BACKGROUND_LOG) or "").replace("%%", "%") or None
 
     if not workspace:
         # Nothing local to prefer it over, and nothing else to check.
