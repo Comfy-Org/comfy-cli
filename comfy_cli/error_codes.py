@@ -52,6 +52,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "fix the invocation; `details.command` plus `--help`, or `comfy --json discover`, gives the exact surface",
     ),
     ErrorCode(
+        "install_deps_missing_argument",
+        "`comfy node install-deps` was called without --deps or --workflow.",
+        "pass one of --deps <file> or --workflow <file>",
+    ),
+    ErrorCode(
         "internal_error",
         "The command crashed on an exception it did not handle (a comfy-cli bug, not a bad input the command "
         "recognised). `details.exception` names the exception type and the message carries its text; the full "
