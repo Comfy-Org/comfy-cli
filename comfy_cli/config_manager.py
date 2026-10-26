@@ -13,6 +13,9 @@ class ConfigManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
         self.background: tuple[str, int, int] | None = None
+        # keys this process explicitly removed in-memory; write_config() must
+        # not re-adopt them from disk while the removal is still pending
+        self._removed_keys: set[str] = set()
         self.load()
 
     @staticmethod
@@ -25,16 +28,41 @@ class ConfigManager:
     def write_config(self):
         config_file_path = self.get_config_file_path()
         # config.ini is cross-process state: background server pid, consent,
-        # user id. Two failure modes meet on this one write:
+        # user id. Three failure modes meet on this one write:
         # - a kill mid-write used to leave a truncated ini that configparser
         #   chokes on for every later command;
         # - two parallel comfy processes each hold their own in-memory
         #   snapshot, and whoever wrote last silently erased the other's
         #   keys — the recorded pid of a live background server was the
         #   costly loss (`comfy stop` then finds nothing, the server is
-        #   orphaned). The lock serializes the writers; atomic_write_text
-        #   makes every committed state a whole file.
+        #   orphaned). Keys other processes added since this instance
+        #   loaded are adopted below, so a stale snapshot can no longer
+        #   delete them; keys this process changed in memory keep their
+        #   values (pending direct mutations, the launch.py pattern);
+        # - the read below uses read_file, not read(): read() silently
+        #   skips a file it cannot open, and the adoption would then render
+        #   an almost-empty config over the real one. The OSError propagates
+        #   before anything is written.
+        # The lock serializes the writers; _atomic_write makes every
+        # committed state a whole file.
         with locking.file_lock(config_file_path + ".lock"):
+            if os.path.exists(config_file_path):
+                disk = configparser.ConfigParser()
+                with open(config_file_path, encoding="utf-8") as f:
+                    disk.read_file(f)
+                for section_name in disk.sections():
+                    if not self.config.has_section(section_name):
+                        self.config.add_section(section_name)
+                    for option, value in disk.items(section_name):
+                        if not self.config.has_option(section_name, option):
+                            # escape % so the storage interpolation convention
+                            # holds for values this process did not load
+                            self.config.set(section_name, option, value.replace("%", "%%"))
+                for option, value in disk["DEFAULT"].items():
+                    if option in self._removed_keys:
+                        continue
+                    if option not in self.config["DEFAULT"]:
+                        self.config["DEFAULT"][option] = value.replace("%", "%%")
             self._atomic_write(config_file_path, self._render())
 
     def _render(self) -> str:
@@ -71,19 +99,9 @@ class ConfigManager:
         """
         Set a key-value pair in the config file.
         """
-        config_file_path = self.get_config_file_path()
-        with locking.file_lock(config_file_path + ".lock"):
-            # Merge into the on-disk state, not the snapshot this process
-            # loaded at startup: another comfy process may have written since.
-            # Keys this process changed in memory directly (without set())
-            # still win on the next write_config(), as before.
-            fresh = configparser.ConfigParser()
-            if os.path.exists(config_file_path):
-                with open(config_file_path, encoding="utf-8") as f:
-                    fresh.read_file(f)
-            fresh["DEFAULT"][key] = value
-            self._atomic_write(config_file_path, self._render_of(fresh))
+        self._removed_keys.discard(key)
         self.config["DEFAULT"][key] = value
+        self.write_config()  # Write changes to file immediately
 
     def get(self, key):
         """
@@ -243,6 +261,7 @@ class ConfigManager:
         instead of enforced by deleting the pointer.
         """
         self.config["DEFAULT"].pop(constants.CONFIG_KEY_BACKGROUND, None)
+        self._removed_keys.add(constants.CONFIG_KEY_BACKGROUND)
         self.write_config()
         self.background = None
 
