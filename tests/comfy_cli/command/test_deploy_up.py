@@ -1388,6 +1388,70 @@ def test_an_editor_edit_on_a_stop_failed_deployment_is_a_change(tmp_path, monkey
     assert envelope["changed"] is True
 
 
+def _start_fails(client: FakeDeploy) -> None:
+    def start(deployment_id: str) -> JsonObject:
+        client.start_calls.append(deployment_id)
+        raise DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
+
+    client.start_deployment = start
+
+
+def test_a_start_that_fails_after_an_editor_edit_says_the_edit_was_made(tmp_path, monkeypatch) -> None:
+    """The editor server bills on its own, so a failed start never hides that it was turned on."""
+    # Given a stopped deployment with the server off, whose start fails
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=False)])
+    _start_fails(client)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor")
+
+    # Then it fails as the start did, and says the server was turned on first
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["details"] == {"status": 503}
+    assert error["message"] == (
+        "the editor server was turned on for deployment dep-live, but the start failed: Service Unavailable"
+    )
+    assert client.editor_calls == [("dep-live", True)]
+
+
+@pytest.mark.parametrize("status", [503, 409], ids=["unanswered", "refused"])
+def test_a_bounds_edit_that_fails_after_an_editor_edit_says_the_edit_was_made(tmp_path, monkeypatch, status) -> None:
+    # Given a live deployment with the server on, whose bounds edit fails
+    client = FakeDeploy([deployment("dep-live", editor=True)])
+    client.update_error = DeployAPIError("deploy_server_error", "Service Unavailable", status=status)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor", "--min", "1", "--max", "2")
+
+    # Then it fails as the bounds edit did, and says the server was turned off first
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["message"] == (
+        "the editor server was turned off for deployment dep-live, but the --min/--max edit failed: Service Unavailable"
+    )
+    assert client.update_calls == ["dep-live"]
+
+
+@pytest.mark.parametrize("flags", [(), ("--editor",)], ids=["no_flag", "editor_already_on"])
+def test_a_start_that_fails_with_no_editor_change_fails_as_it_did(tmp_path, monkeypatch, flags) -> None:
+    # Given a stopped deployment with the server on, whose start fails
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=True)])
+    _start_fails(client)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, *flags)
+
+    # Then
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["message"] == "Service Unavailable"
+    assert client.start_calls == ["dep-live"]
+
+
 @pytest.mark.parametrize(
     ("rows", "flags", "deployment_id"),
     [

@@ -611,6 +611,23 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, o
     return observe_editor(replace(result, deployment=updated, compute_config=bounds), updated)
 
 
+def _after_editor_edit(error: DeployAPIError, deployment_id: str, editor: bool, what: str) -> DeployAPIError:
+    """``error`` from the request after an editor edit that was made, saying the edit was made.
+
+    The editor server bills apart from the workers, so a failure after it
+    never leaves the change unsaid, refused or not: `up` fails as it would
+    have without the flag.
+    """
+    turned = "on" if editor else "off"
+    return DeployAPIError(
+        error.code,
+        f"the editor server was turned {turned} for deployment {deployment_id}, but {what} failed: {error}",
+        status=error.status,
+        details=error.details,
+        hint=error.hint,
+    )
+
+
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
     if request.name is not None:
         valid_name(request.name)
@@ -711,7 +728,12 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     # ``check`` has read the edit's answer and any read after it, so only an
     # answer to a request made after them is observed on top.
     if status in {"stopped", "failed"}:
-        started = client.start_deployment(deployment_id)
+        try:
+            started = client.start_deployment(deployment_id)
+        except DeployAPIError as error:
+            if not edited:
+                raise
+            raise _after_editor_edit(error, deployment_id, request.editor, "the start") from error
         return observe_editor(
             UpResult(started, release, compute, supersedes, False, True, dropped, editor=check), started
         )
@@ -719,7 +741,12 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         return UpResult(existing, release, compute, supersedes, False, edited, dropped, editor=check)
     desired = _merged_bounds(request, compute)
     if desired != compute:
-        updated = client.update_deployment(deployment_id, desired)
+        try:
+            updated = client.update_deployment(deployment_id, desired)
+        except DeployAPIError as error:
+            if not edited:
+                raise
+            raise _after_editor_edit(error, deployment_id, request.editor, "the --min/--max edit") from error
         return observe_editor(UpResult(updated, release, desired, supersedes, False, True, editor=check), updated)
     return UpResult(existing, release, compute, supersedes, False, edited, editor=check)
 
