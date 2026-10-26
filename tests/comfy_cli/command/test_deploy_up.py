@@ -1285,3 +1285,69 @@ def test_a_switched_off_estimate_prints_nothing_and_adds_nothing(tmp_path, monke
     assert as_json.exit_code == 0, as_json.stderr
     assert "estimate" not in _json_envelope(as_json)["data"]
     assert as_json.stderr.strip() == ""
+
+
+def _up_json(tmp_path, monkeypatch, client: FakeDeploy, *args: str):
+    monkeypatch.setattr(_deploy(), "_command_clients", lambda: (FakeBuilder(), client))
+    return CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--no-watch", *args])
+
+
+@pytest.mark.parametrize(
+    ("flags", "sent"),
+    [((), None), (("--no-editor",), False), (("--editor",), True)],
+    ids=["omitted", "no_editor", "editor"],
+)
+def test_a_create_sends_editor_only_when_a_flag_says(tmp_path, monkeypatch, flags, sent) -> None:
+    """Omitted, nothing is sent, so comfy-deploy's default decides as before."""
+    # Given a Build with no deployment
+    client = FakeDeploy()
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--gpu", "l4", "--region", "US-MO-2", *flags)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.create_editors == [sent]
+    assert client.editor_calls == []
+
+
+def test_editor_on_a_bounds_edit_goes_in_a_request_of_its_own(tmp_path, monkeypatch) -> None:
+    """comfy-deploy refuses `editor` beside computeConfig, so the compute edit never carries it."""
+    # Given a live deployment on the release
+    client = FakeDeploy([deployment("dep-live", minimum=0, maximum=1)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--min", "1", "--max", "2", "--editor")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.editor_calls == [("dep-live", True)]
+    assert client.update_calls == ["dep-live"]
+    assert client.create_keys == [] and client.move_calls == []
+
+
+def test_editor_alone_on_a_deployment_with_nothing_else_to_change(tmp_path, monkeypatch) -> None:
+    # Given a live deployment already serving the release at the asked bounds
+    client = FakeDeploy([deployment("dep-live")])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor")
+
+    # Then the one edit is the editor's, and it is reported as a change
+    assert result.exit_code == 0, result.stderr
+    assert client.editor_calls == [("dep-live", False)]
+    assert client.update_calls == [] and client.start_calls == [] and client.create_keys == []
+    assert _json_envelope(result)["changed"] is True
+
+
+def test_an_update_without_a_flag_sends_no_editor(tmp_path, monkeypatch) -> None:
+    # Given a live deployment on the release
+    client = FakeDeploy([deployment("dep-live", minimum=0, maximum=1)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--min", "1", "--max", "2")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.update_calls == ["dep-live"]
+    assert client.editor_calls == []

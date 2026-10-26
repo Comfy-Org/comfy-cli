@@ -21,6 +21,7 @@ class DeployUpClient(Protocol):
         *,
         idempotency_key: str | None = None,
         name: str | None = None,
+        editor: bool | None = None,
     ) -> JsonObject: ...
 
     def get_deployment(self, deployment_id: str) -> JsonObject: ...
@@ -29,7 +30,11 @@ class DeployUpClient(Protocol):
 
     def start_deployment(self, deployment_id: str) -> JsonObject: ...
 
-    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject: ...
+    def set_deployment_editor(self, deployment_id: str, editor: bool) -> JsonObject: ...
+
+    def move_deployment(
+        self, deployment_id: str, base_revision: int, release_id: str, *, editor: bool | None = None
+    ) -> JsonObject: ...
 
     def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> JsonObject: ...
 
@@ -59,6 +64,9 @@ class UpRequest:
     # `--name`: the name a created deployment gets, where comfy-deploy would
     # otherwise pick one.
     name: str | None = None
+    # `--editor/--no-editor`: whether the deployment keeps an editor CPU server.
+    # ``None`` is "flag omitted", and sends nothing, so comfy-deploy's default decides.
+    editor: bool | None = None
     # Whether the caller follows the deployment once the request is accepted.
     # A move cannot carry new worker bounds, so they are applied after it lands,
     # and only a watch is there to see it land.

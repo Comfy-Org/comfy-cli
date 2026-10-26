@@ -185,7 +185,8 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-watch]
+                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-editor]
+                       [--no-watch]
 comfy deploy rename [PATH] <name> [--deployment <name|id>]
 ```
 
@@ -206,6 +207,10 @@ comfy deploy rename [PATH] <name> [--deployment <name|id>]
   finds the deployment holding that name. `up` refuses `--name` when it would
   update a deployment holding another name: `comfy deploy rename` names an
   existing one, and without `--deployment` renames the Build's only one.
+- **Pass `--no-editor` for a deployment only called through the API**, never
+  opened in the editor: without it comfy-deploy keeps a CPU server for the
+  editor running beside it. On an existing deployment it goes with the move, or
+  alone, starting no new copy; `--editor` turns the server back on.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an

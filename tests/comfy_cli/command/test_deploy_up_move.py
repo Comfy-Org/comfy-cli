@@ -80,6 +80,21 @@ def test_up_moves_the_one_deployment_onto_the_new_release(tmp_path, monkeypatch)
     jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
 
 
+@pytest.mark.parametrize(("flags", "sent"), [((), None), (("--editor",), True), (("--no-editor",), False)])
+def test_a_move_carries_editor_only_when_a_flag_says(tmp_path, monkeypatch, flags, sent) -> None:
+    # Given one deployment on v4 in a workspace with deployment updates on
+    client = FakeDeploy([_live("dep-1")])
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", *flags)
+
+    # Then the value rides on the move, with no edit of its own
+    assert result.exit_code == 0, result.stderr
+    assert client.move_calls == [("dep-1", 3, "release-5")]
+    assert client.move_editors == [sent]
+    assert client.editor_calls == []
+
+
 def test_up_outside_the_rollout_still_creates_a_deployment_for_the_new_release(tmp_path, monkeypatch) -> None:
     # Given the same deployment, read without a revision
     client = FakeDeploy([_live("dep-1", revision=None)])
@@ -699,8 +714,8 @@ def test_a_move_reply_without_a_revision_is_followed_not_failed(tmp_path, monkey
     )
     original = client.move_deployment
 
-    def move(*args) -> JsonObject:
-        reply = original(*args)
+    def move(*args, **kwargs) -> JsonObject:
+        reply = original(*args, **kwargs)
         reply.pop("revision")
         reply.pop("pendingUpdate")
         return reply

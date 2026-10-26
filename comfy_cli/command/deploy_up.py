@@ -230,6 +230,7 @@ def _create_live_deployment(
                 compute,
                 idempotency_key=key,
                 name=request.name,
+                editor=request.editor,
             )
         except DeployAPIError as error:
             # Concurrent creates in the Build took the default name, and comfy-deploy
@@ -528,7 +529,7 @@ def _move(
             hint="drop --no-watch, or run `comfy deploy scale` once the update lands",
         )
     previous = _release_of(builder, releases, _required_string(target, "releaseId"))
-    moved = client.move_deployment(deployment_id, base_revision, release_id)
+    moved = client.move_deployment(deployment_id, base_revision, release_id, editor=request.editor)
     changed = _move_changed(moved, base_revision, release_id, previous["id"])
     result = UpResult(
         moved,
@@ -659,16 +660,21 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     deployment_id = _required_string(existing, "id")
     status = _required_string(existing, "status")
     dropped = _dropped_bounds(request, compute)
+    # No move here to carry it, and comfy-deploy refuses `editor` beside a
+    # compute edit, so it goes alone: no new running copy, no compute touched.
+    edited = request.editor is not None and existing.get("editor") != request.editor
+    if request.editor is not None:
+        existing = client.set_deployment_editor(deployment_id, request.editor)
     if status in {"stopped", "failed"}:
         started = client.start_deployment(deployment_id)
         return UpResult(started, _release_summary(request.release), compute, supersedes, False, True, dropped)
     if status == "stop_failed":
-        return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False, dropped)
+        return UpResult(existing, _release_summary(request.release), compute, supersedes, False, edited, dropped)
     desired = _merged_bounds(request, compute)
     if desired != compute:
         updated = client.update_deployment(deployment_id, desired)
         return UpResult(updated, _release_summary(request.release), desired, supersedes, False, True)
-    return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False)
+    return UpResult(existing, _release_summary(request.release), compute, supersedes, False, edited)
 
 
 def move_line(result: UpResult, deployment_id: str) -> str | None:

@@ -358,6 +358,14 @@ def up_cmd(
             help="Name the deployment this creates. Default: production for a Build's first, else deployment-N.",
         ),
     ] = None,
+    editor: Annotated[
+        bool | None,
+        typer.Option(
+            "--editor/--no-editor",
+            help="Keep a CPU server for opening the deployment in the editor. Use --no-editor for one only called "
+            "through the API. Default: comfy-deploy's, on.",
+        ),
+    ] = None,
     # Watching is what someone who just asked for a deployment wants: the command
     # that starts a several-minute wait should say how the wait is going. Ctrl-C
     # and --no-watch both leave the deploy running and print how to re-attach.
@@ -382,6 +390,7 @@ def up_cmd(
             deployment_id=deployment_id,
             create=create,
             name=name,
+            editor=editor,
             watch=watch,
         )
         try:
