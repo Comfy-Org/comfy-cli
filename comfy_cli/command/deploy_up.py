@@ -611,21 +611,28 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, o
     return observe_editor(replace(result, deployment=updated, compute_config=bounds), updated)
 
 
-def _after_editor_edit(error: DeployAPIError, deployment_id: str, editor: bool, what: str) -> DeployAPIError:
+def _after_editor_edit(
+    error: DeployAPIError | ResponseTooLarge | OSError | http.client.HTTPException,
+    deployment_id: str,
+    editor: bool,
+    what: str,
+) -> Exception:
     """``error`` from the request after an editor edit that was made, saying the edit was made.
 
     The editor server bills apart from the workers, so a failure after it
     never leaves the change unsaid, refused or not: `up` fails as it would
-    have without the flag.
+    have without the flag. A dropped connection or cut-short answer, which the
+    client does not map, still ends as the crash it was, its type named.
     """
     turned = "on" if editor else "off"
-    return DeployAPIError(
-        error.code,
-        f"the editor server was turned {turned} for deployment {deployment_id}, but {what} failed: {error}",
-        status=error.status,
-        details=error.details,
-        hint=error.hint,
-    )
+    said = f"the editor server was turned {turned} for deployment {deployment_id}, but {what} failed"
+    if isinstance(error, DeployAPIError):
+        return DeployAPIError(
+            error.code, f"{said}: {error}", status=error.status, details=error.details, hint=error.hint
+        )
+    if isinstance(error, ResponseTooLarge):
+        return ResponseTooLarge(f"{said}: {error}")
+    return RuntimeError(f"{said}: {type(error).__name__}: {error}")
 
 
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
@@ -730,7 +737,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     if status in {"stopped", "failed"}:
         try:
             started = client.start_deployment(deployment_id)
-        except DeployAPIError as error:
+        except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
             if not edited:
                 raise
             raise _after_editor_edit(error, deployment_id, request.editor, "the start") from error
@@ -743,7 +750,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     if desired != compute:
         try:
             updated = client.update_deployment(deployment_id, desired)
-        except DeployAPIError as error:
+        except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
             if not edited:
                 raise
             raise _after_editor_edit(error, deployment_id, request.editor, "the --min/--max edit") from error

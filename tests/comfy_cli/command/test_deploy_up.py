@@ -1388,10 +1388,10 @@ def test_an_editor_edit_on_a_stop_failed_deployment_is_a_change(tmp_path, monkey
     assert envelope["changed"] is True
 
 
-def _start_fails(client: FakeDeploy) -> None:
+def _start_fails(client: FakeDeploy, error: Exception | None = None) -> None:
     def start(deployment_id: str) -> JsonObject:
         client.start_calls.append(deployment_id)
-        raise DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
+        raise error or DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
 
     client.start_deployment = start
 
@@ -1433,6 +1433,88 @@ def test_a_bounds_edit_that_fails_after_an_editor_edit_says_the_edit_was_made(tm
         "the editor server was turned off for deployment dep-live, but the --min/--max edit failed: Service Unavailable"
     )
     assert client.update_calls == ["dep-live"]
+
+
+# What the client lets through unmapped, and the error `up` ends with for each:
+# a dropped connection crashes, an oversized answer is a server error.
+_UNMAPPED_FAILURES = [
+    pytest.param(
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        "internal_error",
+        "RemoteDisconnected: Remote end closed connection without response",
+        id="dropped",
+    ),
+    pytest.param(
+        ResponseTooLarge("response exceeded 1048576 bytes"),
+        "deploy_server_error",
+        "response exceeded 1048576 bytes",
+        id="too_large",
+    ),
+]
+
+
+def _unmapped_message(code: str, said: str, text: str) -> str:
+    return f"RuntimeError: {said}: {text}" if code == "internal_error" else f"{said}: {text}"
+
+
+@pytest.mark.parametrize(("failure", "code", "text"), _UNMAPPED_FAILURES)
+def test_a_start_cut_off_after_an_editor_edit_says_the_edit_was_made(
+    tmp_path, monkeypatch, failure, code, text
+) -> None:
+    """A failure the client does not map still names the editor server it turned on."""
+    # Given a stopped deployment with the server off, whose start fails unmapped
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=False)])
+    _start_fails(client, failure)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor")
+
+    # Then it fails as that failure does, and says the server was turned on first
+    assert result.exit_code == 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == code
+    said = "the editor server was turned on for deployment dep-live, but the start failed"
+    assert error["message"] == _unmapped_message(code, said, text)
+    assert client.editor_calls == [("dep-live", True)]
+
+
+@pytest.mark.parametrize(("failure", "code", "text"), _UNMAPPED_FAILURES)
+def test_a_bounds_edit_cut_off_after_an_editor_edit_says_the_edit_was_made(
+    tmp_path, monkeypatch, failure, code, text
+) -> None:
+    # Given a live deployment with the server off, whose bounds edit fails unmapped
+    client = FakeDeploy([deployment("dep-live", editor=False)])
+    client.update_error = failure
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor", "--min", "1", "--max", "2")
+
+    # Then it fails as that failure does, and says the server was turned on first
+    assert result.exit_code == 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == code
+    said = "the editor server was turned on for deployment dep-live, but the --min/--max edit failed"
+    assert error["message"] == _unmapped_message(code, said, text)
+    assert client.update_calls == ["dep-live"]
+
+
+@pytest.mark.parametrize(("failure", "code", "text"), _UNMAPPED_FAILURES)
+def test_a_start_cut_off_with_no_editor_change_fails_as_it_did(tmp_path, monkeypatch, failure, code, text) -> None:
+    # Given a stopped deployment with the server on, whose start fails unmapped
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=True)])
+    _start_fails(client, failure)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor")
+
+    # Then
+    assert result.exit_code == 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == code
+    assert error["message"] == text
+    if code == "internal_error":
+        assert error["details"]["exception"] == type(failure).__name__
+    assert client.start_calls == ["dep-live"]
 
 
 @pytest.mark.parametrize("flags", [(), ("--editor",)], ids=["no_flag", "editor_already_on"])

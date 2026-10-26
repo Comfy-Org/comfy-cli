@@ -133,7 +133,7 @@ class FakeDeploy:
         # Each deployment's revisions, oldest first, as the service lists them.
         self.revisions: dict[str, list[JsonObject]] = {}
         # Raised by the next worker-bounds edit, when set.
-        self.update_error: DeployAPIError | None = None
+        self.update_error: Exception | None = None
         # Merged into the row on each read after a move, one per read.
         self.get_patches = list(get_patches or [])
         self.get_ids: list[str] = []
