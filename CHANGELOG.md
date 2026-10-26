@@ -30,8 +30,9 @@ history.
 - `comfy deploy up --no-editor` makes or keeps a deployment without the CPU
   server comfy-deploy runs beside it for the editor, for one only called
   through the API; `--editor` turns it back on, and with neither nothing is
-  sent. A value comfy-deploy does not confirm exits 1 with
-  `deploy_editor_unchanged`, the rest of the result kept. `comfy deploy ls`
+  sent. A value comfy-deploy does not confirm, a failed read to confirm it
+  included, exits 1 with `deploy_editor_unchanged`, the rest of the result
+  kept. `comfy deploy ls`
   shows each deployment's `editor` where comfy-deploy answers it, blank where
   it does not.
 - `comfy deploy up --create --name staging` names the deployment it creates,

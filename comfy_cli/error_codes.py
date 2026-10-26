@@ -1662,10 +1662,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_editor_unchanged",
-        "`comfy deploy up --editor` or `--no-editor` reached a deployment whose editor server comfy-deploy did not "
-        "set as asked: its answer, and a read after it, showed the other value or none. Whatever else `up` did "
-        "stands (a create, a move, a start, a bounds edit), so `data` carries the full payload and `changed` says "
-        "whether it changed anything; `details.requested` is the value asked for.",
+        "`comfy deploy up --editor` or `--no-editor` reached a deployment whose editor server was not read as asked: "
+        "the latest answer that showed one had the other value, or none did, or the read to confirm it failed "
+        "(`details.read_error` says why). Whatever else `up` did stands (a create, a move, a start, a bounds edit), "
+        "so `data` carries the full payload and `changed` says whether it changed anything; `details.requested` is "
+        "the value asked for.",
         "run the same `comfy deploy up` again; until it is confirmed the editor server may still be on, and billing",
     ),
     ErrorCode(

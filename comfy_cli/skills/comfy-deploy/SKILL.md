@@ -212,8 +212,9 @@ comfy deploy rename [PATH] <name> [--deployment <name|id>]
   server for the editor, running beside it. With neither flag an existing
   deployment keeps what it has, on or off. On an existing deployment the flag
   goes with the move, or alone, starting no new copy; `--editor` turns the
-  server back on. A value comfy-deploy does not confirm exits 1 with
-  `deploy_editor_unchanged`, and the rest of what `up` did stands.
+  server back on. A value comfy-deploy does not confirm, a failed read to
+  confirm it included, exits 1 with `deploy_editor_unchanged`, and the rest of
+  what `up` did stands: `data` and `changed` still say what it did.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Protocol
 
 from comfy_cli.command.build_spec import JsonObject, JsonValue
@@ -75,6 +75,41 @@ class UpRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class EditorCheck:
+    """Where `--editor/--no-editor` stands, judged apart from what else `up` did.
+
+    comfy-deploy keeps a move it took when the editor write fails, and leaves
+    `editor` out of an answer where its lookup of it fails, so neither ever
+    undoes the change it is judged beside.
+    """
+
+    requested: bool
+    # The value the latest answer that had one showed; None while none has.
+    seen: bool | None = None
+    # Set on an edit of the editor alone, of a deployment that had the other
+    # value: the value confirmed is then the change.
+    turns: bool = False
+    # Why the read made to confirm the value failed, until an answer shows it.
+    read_error: str | None = None
+
+    def observe(self, answer: JsonObject) -> EditorCheck:
+        """The check with the editor value ``answer`` shows, where it shows one."""
+        seen = answer.get("editor")
+        if not isinstance(seen, bool):
+            return self
+        return replace(self, seen=seen, read_error=None)
+
+    @property
+    def held(self) -> bool:
+        return self.seen is self.requested
+
+    @property
+    def made(self) -> bool:
+        """Whether the edit of the editor alone changed the deployment."""
+        return self.turns and self.held
+
+
+@dataclass(frozen=True, slots=True)
 class UpResult:
     deployment: JsonObject
     release: JsonObject
@@ -100,9 +135,8 @@ class UpResult:
     pending_bounds: JsonObject | None = None
     # The name `--name` asked a create for, to say so where comfy-deploy took none.
     requested_name: str | None = None
-    # The `--editor/--no-editor` value the deployment did not take, to say so:
-    # comfy-deploy keeps a move it took when the editor write fails.
-    unheld_editor: bool | None = None
+    # `--editor/--no-editor` as asked and as last read; None when neither was passed.
+    editor: EditorCheck | None = None
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]

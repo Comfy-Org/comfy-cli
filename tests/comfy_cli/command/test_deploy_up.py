@@ -1432,3 +1432,66 @@ def test_an_editor_answer_that_leaves_the_value_out_is_read_again(tmp_path, monk
     # Then
     assert result.exit_code == 0, result.stderr
     assert _json_envelope(result)["changed"] is True
+
+
+def _reads_after(client: FakeDeploy, made, *replies: str) -> None:
+    """Each read once ``made()`` holds, in turn: "fails" answers 503, "omits" leaves `editor` out."""
+    original = client.get_deployment
+    queue = list(replies)
+
+    def read(deployment_id: str) -> JsonObject:
+        if not made() or not queue:
+            return original(deployment_id)
+        reply = queue.pop(0)
+        if reply == "fails":
+            raise DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
+        row = original(deployment_id)
+        row.pop("editor", None)
+        return row
+
+    client.get_deployment = read
+
+
+def test_a_create_whose_editor_read_fails_keeps_the_create(tmp_path, monkeypatch) -> None:
+    """The create was taken and bills, so a read that cannot confirm the editor never loses it."""
+    # Given a create whose read for the deployment it made leaves `editor` out, and a read after it answering 503
+    client = FakeDeploy()
+    _reads_after(client, lambda: client.create_keys, "omits", "fails")
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--gpu", "l4", "--region", "US-MO-2", "--no-editor")
+
+    # Then the deployment is reported as made, and the editor as not confirmed
+    assert result.exit_code == 1, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["data"]["deployment"]["id"] == "dep-1"
+    assert envelope["data"]["deployment"]["created"] is True
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["error"]["details"]["read_error"] == "Service Unavailable"
+
+
+def test_an_editor_edit_a_watch_read_confirms_is_a_change(tmp_path, monkeypatch) -> None:
+    # Given a deployment with the server on, whose editor edit and the read after it leave `editor` out
+    client = FakeDeploy([deployment("dep-live", editor=True)])
+    original = client.set_deployment_editor
+
+    def set_editor(deployment_id: str, editor: bool) -> JsonObject:
+        reply = original(deployment_id, editor)
+        reply.pop("editor")
+        return reply
+
+    client.set_deployment_editor = set_editor
+    _reads_after(client, lambda: client.editor_calls, "omits")
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    monkeypatch.setattr(module, "_sleep", lambda _: None)
+
+    # When the watch reads the server off
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--no-editor"])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["ok"] is True
+    assert envelope["changed"] is True

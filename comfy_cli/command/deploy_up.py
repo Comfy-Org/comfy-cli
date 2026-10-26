@@ -27,6 +27,7 @@ from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
 from comfy_cli.command.deploy_types import (
     ComputeRequiredError,
     DeployUpClient,
+    EditorCheck,
     MoveResult,
     UpRequest,
     UpResult,
@@ -271,14 +272,31 @@ def _create_live_deployment(
     raise AssertionError("bounded create loop exhausted without returning or raising")
 
 
-def _unheld_editor(client: DeployUpClient, deployment_id: str, editor: bool | None, answer: JsonObject) -> bool | None:
-    """The `--editor/--no-editor` value the deployment did not take, else ``None``.
+def _editor_check(requested: bool | None, answer: JsonObject, *, turns: bool = False) -> EditorCheck | None:
+    """`--editor/--no-editor` as asked, judged by the answer to the request that carried it."""
+    return None if requested is None else EditorCheck(requested, turns=turns).observe(answer)
 
-    An answer that says otherwise, or nothing, is read again before it is called a failure.
+
+def _confirmed_editor(client: DeployUpClient, deployment_id: str, check: EditorCheck | None) -> EditorCheck | None:
+    """``check`` read again where the answer did not show the value asked for, the other value or none.
+
+    The request it rode on is already accepted, so the read only confirms: one
+    that fails leaves the value unconfirmed, saying why, and the change as made.
     """
-    if editor is None or answer.get("editor") is editor:
-        return None
-    return None if client.get_deployment(deployment_id).get("editor") is editor else editor
+    if check is None or check.held:
+        return check
+    try:
+        return check.observe(client.get_deployment(deployment_id))
+    except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
+        return replace(check, read_error=str(error))
+
+
+def observe_editor(result: UpResult, answer: JsonObject) -> UpResult:
+    """``result`` with the editor value a later answer shows: the latest read that shows one decides."""
+    if result.editor is None:
+        return result
+    editor = result.editor.observe(answer)
+    return replace(result, editor=editor, changed=result.changed or editor.made)
 
 
 def _deployment_holding_name(request: UpRequest, candidates: list[JsonObject]) -> UpRequest:
@@ -541,7 +559,6 @@ def _move(
     previous = _release_of(builder, releases, _required_string(target, "releaseId"))
     moved = client.move_deployment(deployment_id, base_revision, release_id, editor=request.editor)
     changed = _move_changed(moved, base_revision, release_id, previous["id"])
-    unheld = _unheld_editor(client, deployment_id, request.editor, moved)
     result = UpResult(
         moved,
         _release_summary(request.release),
@@ -551,8 +568,10 @@ def _move(
         changed,
         previous_release=previous,
         pending_bounds=pending_bounds,
-        unheld_editor=unheld,
+        editor=_editor_check(request.editor, moved),
     )
+    # The move is taken and kept as answered; the read after it only confirms the editor.
+    result = replace(result, editor=_confirmed_editor(client, deployment_id, result.editor))
     # The service answers at the same revision when the deployment already
     # serves the release, so there is nothing to wait for before the bounds.
     if changed:
@@ -570,7 +589,7 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, o
     deployment_id = _required_string(watched, "id")
     raise_unless_landed(watched, result.release, result.previous_release or {}, outcomes)
     bounds = result.pending_bounds
-    result = replace(result, deployment=watched, pending_bounds=None)
+    result = observe_editor(replace(result, deployment=watched, pending_bounds=None), watched)
     if bounds is None:
         return result
     try:
@@ -589,7 +608,7 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, o
         live = result.compute_config
         dropped = tuple(flag for flag, key in (("--min", "min"), ("--max", "max")) if bounds.get(key) != live.get(key))
         return replace(result, dropped_bounds=dropped)
-    return replace(result, deployment=updated, compute_config=bounds)
+    return observe_editor(replace(result, deployment=updated, compute_config=bounds), updated)
 
 
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
@@ -656,9 +675,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         estimate = _deploy_estimate(client, release_id, compute)
         made = _deployments_made(deployments, releases)
         snapshot = _create_live_deployment(client, request, compute, deployments, made)
-        # A replay of the key answers with the deployment it made, editor as it has it.
-        unheld = _unheld_editor(client, _required_string(snapshot, "id"), request.editor, snapshot)
-        return UpResult(
+        result = UpResult(
             snapshot,
             _release_summary(request.release),
             compute,
@@ -667,8 +684,10 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             True,
             estimate=estimate,
             requested_name=request.name,
-            unheld_editor=unheld,
+            # A replay of the key answers with the deployment it made, editor as it has it.
+            editor=_editor_check(request.editor, snapshot),
         )
+        return replace(result, editor=_confirmed_editor(client, _required_string(snapshot, "id"), result.editor))
 
     compute = _compute_config(existing)
     _refuse_compute_change(request, existing, compute)
@@ -677,7 +696,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     dropped = _dropped_bounds(request, compute)
     # No move here to carry it, and comfy-deploy refuses `editor` beside a
     # compute edit, so it goes alone: no new running copy, no compute touched.
-    edited, unheld = False, None
+    check: EditorCheck | None = None
     if request.editor is not None:
         before = existing.get("editor")
         if not isinstance(before, bool):
@@ -685,19 +704,21 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             # no value: the change is judged against a read of the deployment.
             before = client.get_deployment(deployment_id).get("editor")
         existing = client.set_deployment_editor(deployment_id, request.editor)
-        unheld = _unheld_editor(client, deployment_id, request.editor, existing)
-        edited = unheld is None and before is not request.editor
+        turns = before is not request.editor
+        check = _confirmed_editor(client, deployment_id, _editor_check(request.editor, existing, turns=turns))
+    edited = check is not None and check.made
     release = _release_summary(request.release)
     if status in {"stopped", "failed"}:
         started = client.start_deployment(deployment_id)
-        return UpResult(started, release, compute, supersedes, False, True, dropped, unheld_editor=unheld)
-    if status == "stop_failed":
-        return UpResult(existing, release, compute, supersedes, False, edited, dropped, unheld_editor=unheld)
-    desired = _merged_bounds(request, compute)
-    if desired != compute:
+        result = UpResult(started, release, compute, supersedes, False, True, dropped, editor=check)
+    elif status == "stop_failed":
+        result = UpResult(existing, release, compute, supersedes, False, edited, dropped, editor=check)
+    elif (desired := _merged_bounds(request, compute)) != compute:
         updated = client.update_deployment(deployment_id, desired)
-        return UpResult(updated, release, desired, supersedes, False, True, unheld_editor=unheld)
-    return UpResult(existing, release, compute, supersedes, False, edited, unheld_editor=unheld)
+        result = UpResult(updated, release, desired, supersedes, False, True, editor=check)
+    else:
+        result = UpResult(existing, release, compute, supersedes, False, edited, editor=check)
+    return observe_editor(result, result.deployment)
 
 
 def move_line(result: UpResult, deployment_id: str) -> str | None:
@@ -775,7 +796,7 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             "or use its id wherever a command takes a deployment",
         )
     warn_status(renderer, deployment_id, status, watch=watch)
-    editor_error = _editor_error(renderer, deployment_id, result.unheld_editor)
+    editor_error = _editor_error(renderer, deployment_id, result.editor)
     if result.dropped_bounds:
         joined = " and ".join(result.dropped_bounds)
         renderer.warn(
@@ -805,23 +826,24 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
         raise typer.Exit(code=1)
 
 
-def _editor_error(renderer, deployment_id: str, unheld: bool | None) -> JsonObject | None:
-    """Warn of an `--editor/--no-editor` value the deployment did not take, and return the error block saying so.
+def _editor_error(renderer, deployment_id: str, check: EditorCheck | None) -> JsonObject | None:
+    """Warn of an `--editor/--no-editor` value the deployment was not read holding, and return the error block saying so.
 
     What else `up` did stands, so ``data`` still carries the whole payload.
     """
-    if unheld is None:
+    if check is None or check.held:
         return None
-    flag = "--editor" if unheld else "--no-editor"
-    message = (
-        f"comfy-deploy did not confirm {flag} on deployment {deployment_id}; "
-        f"its editor server may still be {'off' if unheld else 'on'}"
+    requested = check.requested
+    flag = "--editor" if requested else "--no-editor"
+    unconfirmed = (
+        f"comfy-deploy did not confirm {flag} on deployment {deployment_id}"
+        if check.read_error is None
+        else f"the read to confirm {flag} on deployment {deployment_id} failed ({check.read_error})"
     )
+    message = f"{unconfirmed}; its editor server may still be {'off' if requested else 'on'}"
     hint = f"run `comfy deploy up --deployment {deployment_id} {flag}` again"
     renderer.warn(f"{message}.", hint=hint)
-    return {
-        "code": "deploy_editor_unchanged",
-        "message": message,
-        "hint": hint,
-        "details": {"deployment_id": deployment_id, "requested": unheld},
-    }
+    details: JsonObject = {"deployment_id": deployment_id, "requested": requested}
+    if check.read_error is not None:
+        details["read_error"] = check.read_error
+    return {"code": "deploy_editor_unchanged", "message": message, "hint": hint, "details": details}
