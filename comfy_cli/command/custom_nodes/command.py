@@ -989,7 +989,12 @@ def install_deps(
     validate_mode(mode)
 
     if deps is None and workflow is None:
-        print("[bold red]One of --deps or --workflow must be provided as an argument.[/bold red]\n")
+        # --json callers need a registered envelope, not a red line that dies
+        # outside the error contract
+        get_renderer().error(
+            code="install_deps_missing_argument",
+            message="One of --deps or --workflow must be provided as an argument.",
+        )
         raise typer.Exit(code=1)
 
     effective_uv_compile = _resolve_uv_compile(uv_compile)
