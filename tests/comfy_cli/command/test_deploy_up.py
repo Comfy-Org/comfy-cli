@@ -1351,3 +1351,84 @@ def test_an_update_without_a_flag_sends_no_editor(tmp_path, monkeypatch) -> None
     assert result.exit_code == 0, result.stderr
     assert client.update_calls == ["dep-live"]
     assert client.editor_calls == []
+
+
+@pytest.mark.parametrize(
+    ("had", "flag", "changed"),
+    [(False, "--no-editor", False), (True, "--editor", False), (True, "--no-editor", True)],
+    ids=["off_again", "on_again", "turned_off"],
+)
+def test_an_editor_edit_is_a_change_only_when_the_deployment_had_the_other_value(
+    tmp_path, monkeypatch, had, flag, changed
+) -> None:
+    """comfy-deploy's list answers no `editor`, so the value before the edit is read, not taken as unknown."""
+    # Given a live deployment on the release whose editor server is on or off
+    client = FakeDeploy([deployment("dep-live", editor=had)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, flag)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["changed"] is changed
+
+
+def test_an_editor_edit_on_a_stop_failed_deployment_is_a_change(tmp_path, monkeypatch) -> None:
+    # Given a deployment that could not stop, its editor server on
+    client = FakeDeploy([deployment("dep-live", status="stop_failed", editor=True)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor")
+
+    # Then it is reported as stop_failed, and the edit as made
+    assert result.exit_code == 1, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["error"]["code"] == "deploy_status_terminal"
+    assert client.editor_calls == [("dep-live", False)]
+    assert envelope["changed"] is True
+
+
+@pytest.mark.parametrize(
+    ("rows", "flags", "deployment_id"),
+    [
+        # A create comfy-deploy answers with a deployment that keeps the server, as a replay of its key does.
+        ([], ("--gpu", "l4", "--region", "US-MO-2"), "dep-1"),
+        ([deployment("dep-live", editor=True)], (), "dep-live"),
+    ],
+    ids=["create", "edit"],
+)
+def test_an_editor_value_comfy_deploy_did_not_keep_is_not_ok(tmp_path, monkeypatch, rows, flags, deployment_id) -> None:
+    # Given a comfy-deploy whose editor write fails, answering with the server still on
+    client = FakeDeploy(rows, keeps_editor=True)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, *flags, "--no-editor")
+
+    # Then the deployment is still reported, beside the failure
+    assert result.exit_code == 1, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["error"]["details"] == {"deployment_id": deployment_id, "requested": False}
+    assert envelope["data"]["deployment"]["id"] == deployment_id
+    assert "its editor server may still be on" in " ".join(result.stderr.split())
+
+
+def test_an_editor_answer_that_leaves_the_value_out_is_read_again(tmp_path, monkeypatch) -> None:
+    # Given a live deployment whose editor edit answers without `editor`, though a read has it
+    client = FakeDeploy([deployment("dep-live", editor=True)])
+    original = client.set_deployment_editor
+
+    def set_editor(deployment_id: str, editor: bool) -> JsonObject:
+        reply = original(deployment_id, editor)
+        reply.pop("editor")
+        return reply
+
+    client.set_deployment_editor = set_editor
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["changed"] is True

@@ -95,6 +95,25 @@ def test_a_move_carries_editor_only_when_a_flag_says(tmp_path, monkeypatch, flag
     assert client.editor_calls == []
 
 
+def test_a_move_that_lands_without_the_editor_value_asked_is_not_ok_and_keeps_the_move(tmp_path, monkeypatch) -> None:
+    """comfy-deploy keeps a move it took when the editor write fails, and answers the server as it is."""
+    # Given one deployment on v4 whose editor server comfy-deploy cannot turn off
+    client = FakeDeploy([_live("dep-1", editor=True)], keeps_editor=True)
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", "--no-editor")
+
+    # Then the move is reported as made, and the editor as not
+    assert result.exit_code == 1, result.stderr
+    envelope = _envelope(result)
+    assert envelope["ok"] is False
+    assert envelope["changed"] is True
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["data"]["deployment"]["revision"] == 4
+    assert envelope["data"]["previousRelease"] == {"id": "release-4", "version": 4}
+    assert client.move_calls == [("dep-1", 3, "release-5")]
+
+
 def test_up_outside_the_rollout_still_creates_a_deployment_for_the_new_release(tmp_path, monkeypatch) -> None:
     # Given the same deployment, read without a revision
     client = FakeDeploy([_live("dep-1", revision=None)])

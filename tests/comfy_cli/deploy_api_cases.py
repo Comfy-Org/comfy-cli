@@ -88,6 +88,15 @@ WIRES = [
     ),
     Wire(
         "move",
+        "move_deployment",
+        "PATCH",
+        f"{BASE}/v1/deployments/dep-1",
+        args=("dep-1", 3, "v2"),
+        kwargs={"editor": False},
+        body={"baseRevision": 3, "releaseId": "v2", "editor": False},
+    ),
+    Wire(
+        "move",
         "promote_deployment",
         "PATCH",
         f"{BASE}/v1/deployments/dep-1",

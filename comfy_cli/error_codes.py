@@ -1661,6 +1661,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
     ),
     ErrorCode(
+        "deploy_editor_unchanged",
+        "`comfy deploy up --editor` or `--no-editor` reached a deployment whose editor server comfy-deploy did not "
+        "set as asked: its answer, and a read after it, showed the other value or none. Whatever else `up` did "
+        "stands (a create, a move, a start, a bounds edit), so `data` carries the full payload and `changed` says "
+        "whether it changed anything; `details.requested` is the value asked for.",
+        "run the same `comfy deploy up` again; until it is confirmed the editor server may still be on, and billing",
+    ),
+    ErrorCode(
         "deploy_watch_lost",
         "The deploy control plane left the reads of a watch (`comfy deploy up`, `promote`, `rollback`, "
         "`comfy deploy status --watch`) unanswered, with an HTTP 5xx or no response, for the whole retry window "

@@ -65,7 +65,8 @@ class UpRequest:
     # otherwise pick one.
     name: str | None = None
     # `--editor/--no-editor`: whether the deployment keeps an editor CPU server.
-    # ``None`` is "flag omitted", and sends nothing, so comfy-deploy's default decides.
+    # ``None`` is "flag omitted" and sends nothing: a create gets comfy-deploy's
+    # default, and an existing deployment keeps what it has.
     editor: bool | None = None
     # Whether the caller follows the deployment once the request is accepted.
     # A move cannot carry new worker bounds, so they are applied after it lands,
@@ -99,6 +100,9 @@ class UpResult:
     pending_bounds: JsonObject | None = None
     # The name `--name` asked a create for, to say so where comfy-deploy took none.
     requested_name: str | None = None
+    # The `--editor/--no-editor` value the deployment did not take, to say so:
+    # comfy-deploy keeps a move it took when the editor write fails.
+    unheld_editor: bool | None = None
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]

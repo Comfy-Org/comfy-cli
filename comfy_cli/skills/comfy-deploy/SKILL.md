@@ -208,9 +208,12 @@ comfy deploy rename [PATH] <name> [--deployment <name|id>]
   update a deployment holding another name: `comfy deploy rename` names an
   existing one, and without `--deployment` renames the Build's only one.
 - **Pass `--no-editor` for a deployment only called through the API**, never
-  opened in the editor: without it comfy-deploy keeps a CPU server for the
-  editor running beside it. On an existing deployment it goes with the move, or
-  alone, starting no new copy; `--editor` turns the server back on.
+  opened in the editor: without it comfy-deploy gives a new deployment a CPU
+  server for the editor, running beside it. With neither flag an existing
+  deployment keeps what it has, on or off. On an existing deployment the flag
+  goes with the move, or alone, starting no new copy; `--editor` turns the
+  server back on. A value comfy-deploy does not confirm exits 1 with
+  `deploy_editor_unchanged`, and the rest of what `up` did stands.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an

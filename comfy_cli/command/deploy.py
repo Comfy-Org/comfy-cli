@@ -363,7 +363,8 @@ def up_cmd(
         typer.Option(
             "--editor/--no-editor",
             help="Keep a CPU server for opening the deployment in the editor. Use --no-editor for one only called "
-            "through the API. Default: comfy-deploy's, on.",
+            "through the API. Omitted, a new deployment gets comfy-deploy's default, on, and an existing one keeps "
+            "what it has.",
         ),
     ] = None,
     # Watching is what someone who just asked for a deployment wants: the command
