@@ -376,21 +376,20 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
             output.print_json(result.raw)
         raise typer.Exit(code=1)
     if renderer.is_json() or as_json:
-        # Honor --download in machine modes too. Previously this returned
-        # before saving, so `--json --download` printed the URL but wrote no
-        # file, forcing callers to curl the URL by hand. Save first, then
-        # surface the local path alongside the response.
+        # Honor --download in machine modes too. Save first, then surface the
+        # local paths alongside the response.
         saved: list[str] = []
         try:
             if download and result.image_urls:
-                saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
-            if download and result.blobs and not result.image_urls:
-                saved = [str(p) for p in output.save_inline_blobs(result.blobs, download, request_id)]
+                saved.extend(str(p) for p in output.save_urls(result.image_urls, download, request_id))
+            if download and result.blobs:
+                saved.extend(str(p) for p in output.save_inline_blobs(result.blobs, download, request_id))
         except OSError as save_error:
             _bail(
                 track_error,
                 save_error,
                 code="internal_error",
+                kind="emit",
                 message=f"Failed to save the downloaded output: {save_error}",
                 hint="check the --download destination is writable",
             )
@@ -411,46 +410,32 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         else:
             output.print_json(result.raw)
         return
+
+    saved: list[Path] = []
+    has_media = bool(result.image_urls or result.blobs)
     try:
         if download and result.image_urls:
-            saved = output.save_urls(result.image_urls, download, request_id)
-            output.print_urls(result.image_urls, request_id=request_id)
-            output.print_saved(saved)
-            blobs_saved = True
-        elif result.blobs:
-            # Inline answers (GPT Image 2 ships data[].b64_json) — with --download
-            # they save like URLs; without it, point at --download instead of the
-            # misleading "no image URLs found" (GitHub #613).
-            if download:
-                output.print_saved(output.save_inline_blobs(result.blobs, download, request_id))
-            else:
-                rprint("[yellow]Image data returned inline. Pass --download <path> to save.[/yellow]")
-            blobs_saved = True
-        else:
-            blobs_saved = False
+            saved.extend(output.save_urls(result.image_urls, download, request_id))
+        if download and result.blobs:
+            saved.extend(output.save_inline_blobs(result.blobs, download, request_id))
     except OSError as save_error:
         _bail(
             track_error,
             save_error,
             code="internal_error",
+            kind="emit",
             message=f"Failed to save the downloaded output: {save_error}",
             hint="check the --download destination is writable",
         )
-    if not blobs_saved:
-        output.print_urls(result.image_urls, request_id=request_id)
-        if download and not result.image_urls and not result.blobs:
-            rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
-        # Inline answers (GPT Image 2 ships data[].b64_json) — with --download
-        # they save like URLs; without it, point at --download instead of the
-        # misleading "no image URLs found" (GitHub #613).
-        if download:
-            output.print_saved(output.save_inline_blobs(result.blobs, download, request_id))
-        else:
-            rprint("[yellow]Image data returned inline. Pass --download <path> to save.[/yellow]")
-    else:
-        output.print_urls(result.image_urls, request_id=request_id)
-        if download and not result.image_urls:
-            rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
+
+    if has_media:
+        # URL answers list their URLs; inline answers were already saved, so
+        # print what landed on disk instead of a misleading "no URLs" line.
+        if result.image_urls:
+            output.print_urls(result.image_urls, request_id=request_id)
+        output.print_saved(saved)
+    elif download:
+        rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
 
 
 class SpendNotConfirmed(RuntimeError):

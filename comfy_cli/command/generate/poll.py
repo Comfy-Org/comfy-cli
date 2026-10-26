@@ -69,6 +69,17 @@ def _now() -> float:
     return time.monotonic()
 
 
+def _sniff_image_mime(data: bytes) -> str:
+    """MIME from magic bytes: OpenAI image generation answers PNG, JPEG or WebP."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
 def _extract_inline_blobs(node: Any) -> list[tuple[str, bytes]]:
     """Walk a JSON tree, decoding inline base64 media (``b64_json`` keys).
 
@@ -83,9 +94,12 @@ def _extract_inline_blobs(node: Any) -> list[tuple[str, bytes]]:
             try:
                 # validate=True: garbage-only input must skip the blob, not
                 # decode to b"" and get written as an empty "image" (#613 review)
-                blobs.append(("image/png", base64.b64decode(data_b64, validate=True)))
+                raw = base64.b64decode(data_b64, validate=True)
             except (ValueError, TypeError):
                 pass
+            else:
+                if raw:
+                    blobs.append((_sniff_image_mime(raw), raw))
         for v in node.values():
             blobs.extend(_extract_inline_blobs(v))
     elif isinstance(node, list):

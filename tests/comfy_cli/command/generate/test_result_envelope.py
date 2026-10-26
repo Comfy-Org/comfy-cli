@@ -84,7 +84,7 @@ def pinned_renderer():
 
 def test_success_emits_envelope_in_json_mode(pinned_renderer):
     _, machine, _ = pinned_renderer(OutputMode.JSON)
-    generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=True)
+    generate_app._emit_result(_succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True)
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     assert envelope["schema"] == "envelope/1"
     assert envelope["type"] == "envelope"
@@ -101,7 +101,7 @@ def test_download_variant_lists_saved_paths_in_data(pinned_renderer, tmp_path):
     original = gen_output.save_urls
     gen_output.save_urls = lambda urls, d, rid: [saved]
     try:
-        generate_app._emit_result(_succeeded(), request_id="req1", download=str(tmp_path), as_json=True)
+        generate_app._emit_result(_succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=str(tmp_path), as_json=True)
     finally:
         gen_output.save_urls = original
     data = json.loads(machine.getvalue().splitlines()[-1])["data"]
@@ -113,7 +113,7 @@ def test_payload_validates_against_registered_schema(pinned_renderer):
         "`comfy generate` must advertise its result schema via `comfy discover`"
     )
     _, machine, _ = pinned_renderer(OutputMode.JSON)
-    generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=True)
+    generate_app._emit_result(_succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True)
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     _validator_for("generate_result.json").validate(envelope["data"])
     _validator_for("envelope.json").validate(envelope)
@@ -121,7 +121,7 @@ def test_payload_validates_against_registered_schema(pinned_renderer):
 
 def test_ndjson_final_line_is_the_envelope(pinned_renderer):
     _, machine, _ = pinned_renderer(OutputMode.NDJSON)
-    generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=True)
+    generate_app._emit_result(_succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True)
     lines = [json.loads(x) for x in machine.getvalue().splitlines()]
     assert lines[-1]["schema"] == "envelope/1"
     assert all(line.get("type") != "envelope" for line in lines[:-1])
@@ -136,7 +136,7 @@ def test_pretty_mode_tail_json_keeps_legacy_raw_blob(pinned_renderer, capsys):
     # print_json bypasses the renderer and writes builtin sys.stdout, so
     # capture via capsys rather than the renderer's stream overrides.
     pinned_renderer(OutputMode.PRETTY)
-    generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=True)
+    generate_app._emit_result(_succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True)
     doc = json.loads(capsys.readouterr().out)
     assert doc["status"] == "succeeded"
 
@@ -165,7 +165,7 @@ def test_failed_job_is_an_ok_false_envelope_and_exit_1_in_json_mode(pinned_rende
 
     _, machine, _ = pinned_renderer(OutputMode.JSON)
     with pytest.raises(typer.Exit) as e:
-        generate_app._emit_result(_failed(), request_id="req1", download=None, as_json=True)
+        generate_app._emit_result(_failed(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True)
     assert e.value.exit_code == 1
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     assert envelope["ok"] is False
@@ -177,7 +177,7 @@ def test_output_json_alone_gets_the_envelope_not_colored_text(pinned_renderer, c
     """``comfy --output json generate …`` (no tail ``--json``) must emit the
     envelope on the machine stream, never ANSI-colored URLs on stdout."""
     _, machine, _ = pinned_renderer(OutputMode.JSON)
-    generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=False)
+    generate_app._emit_result(_succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=False)
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     assert envelope["schema"] == "envelope/1" and envelope["ok"] is True
     assert envelope["data"]["result"] == {"status": "succeeded", "urls": ["https://cdn.example/img.png"]}
