@@ -81,7 +81,9 @@ def _extract_inline_blobs(node: Any) -> list[tuple[str, bytes]]:
         data_b64 = node.get("b64_json")
         if isinstance(data_b64, str) and data_b64:
             try:
-                blobs.append(("image/png", base64.b64decode(data_b64, validate=False)))
+                # validate=True: garbage-only input must skip the blob, not
+                # decode to b"" and get written as an empty "image" (#613 review)
+                blobs.append(("image/png", base64.b64decode(data_b64, validate=True)))
             except (ValueError, TypeError):
                 pass
         for v in node.values():
