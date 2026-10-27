@@ -3226,6 +3226,25 @@ class TestOutputNodeIdsLocal:
         body = json.loads(mock_open.call_args[0][0].data)
         assert body["partial_execution_targets"] == ["2"]
 
+    @pytest.mark.parametrize("output_node_ids", [None, []])
+    def test_queue_omits_partial_execution_targets_without_targets(self, simple_workflow, output_node_ids):
+        """Without targets the local body must stay exactly what it was before the flag existed."""
+        ex = WorkflowExecution(
+            workflow=simple_workflow,
+            host="127.0.0.1",
+            port=8188,
+            verbose=False,
+            progress=None,
+            local_paths=False,
+            timeout=5,
+            output_node_ids=output_node_ids,
+        )
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert "partial_execution_targets" not in body
+
 
 class TestOutputNodeIdsFlag:
     def test_parse_splits_strips_and_dedupes(self):
