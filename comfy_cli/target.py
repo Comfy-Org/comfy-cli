@@ -89,8 +89,9 @@ def resolve_target(
         from comfy_cli.cloud import get_base_url
         from comfy_cli.credentials import resolve_cloud_credential
 
-        # OAuth-first: a live session is preferred over API keys (which are on
-        # a deprecation path). Precedence: OAuth session > env var > stored key.
+        # Precedence: a credential handed in by env (COMFY_CLOUD_AUTH_TOKEN,
+        # then COMFY_CLOUD_API_KEY) > OAuth session > stored key. With an env
+        # credential set the session is not read or refreshed at all.
         # ``base_url=`` arms the replay-guard: a session minted for a different
         # base_url (or expired) is ignored so credentials are never replayed to
         # a host the user didn't authenticate against; the API-key fallback or

@@ -427,6 +427,21 @@ comfy --json workflow apply wf.json --ops ops.json $CAT   # or --ops - to read s
 # → data.ops[] (all minted ids), data.aliases{ckpt,ks}. Atomic: nothing writes if any spec fails.
 ```
 
+**Adding, removing or reordering DynamicGroup rows** (e.g. a LoRA stack's `loras`):
+send the desired row list in one `set_dynamic_group_rows` spec instead of
+editing the count and numbered fields separately. Omitted fields take the template
+default (a combo without one takes its first option, so name the LoRA explicitly; a field with no default at all must be supplied); a seed field's control mode is
+`"<field>.0"` in the row. A row with a connected or promoted field keeps its index and
+values; leave it out of `rows`, which fill the other positions in order, so the batch
+fails if that row would have to move. Do not write the same group elsewhere in the batch.
+Links are checked when the workflow is read: a link added to a row after that read is
+not rechecked, so the spec can rewrite that row under its link.
+
+```json
+{"op":"set_dynamic_group_rows","node":12,"group":"loras",
+ "rows":[{"lora_name":"style.safetensors","strength":0.8},{"lora_name":"detail.safetensors"}]}
+```
+
 **Reusable recipes (the reuse path — prefer this over fragments/compose).** A recipe
 is an ops file with a `params` header and `${param}` holes:
 
@@ -483,10 +498,14 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   in place.
 - **`delete-node` ≠ `delete`:** `delete-node` removes a *node from the graph file*;
   `comfy workflow delete` deletes a *saved workflow from Comfy Cloud*. Do not confuse them.
-- `add-node`/`connect`/`delete-node` operate on **top-level** nodes only.
-  `set-widget` additionally resolves values **inside a subgraph** directly — use
-  the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
-  form (`57/27.text`); no decompose needed.
+- `add-node` operates on **top-level** nodes only. `connect` (between two
+  nodes of the same subgraph) and `delete-node`/`delete-nodes` also accept the
+  interior addresses `workflow print` shows (e.g. `70/22`), but only inside a
+  subgraph definition used by a single instance; a shared definition is
+  refused rather than edited in every instance. `set-widget` additionally
+  resolves values **inside a subgraph** directly — use the flat promoted
+  address `slots` advertises (e.g. `57.text`) or the nested form
+  (`57/27.text`); no decompose needed.
 - **`set-node-field` writes one durable, per-node scalar field** — `title`,
   `mode`, `flags.collapsed` or `flags.pinned` — (or `--clear`s it back to
   absent). It needs no catalog — none of those four is a widget — and is the
@@ -521,7 +540,7 @@ codes, and capabilities. Everything below flows from it.
 ```bash
 comfy --json env             # what's installed locally
 comfy --json which           # workspace path
-comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), base_url, api_key_source
+comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), credential_source, base_url, api_key_source
 comfy --json cloud status    # cloud_workspace, balance, tier, max_concurrent_jobs, upgrade_suggestion
 comfy --json auth list       # all credentials (redacted)
 ```

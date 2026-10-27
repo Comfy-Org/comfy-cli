@@ -373,6 +373,39 @@ class TestDomWidgetInputs:
             512,
         ]
 
+    def test_load3d_advanced_catalog_entry_names_no_button(self, graph: Graph):
+        # The exported catalog is what the cloud doc host projects saved
+        # documents through, so it must carry the live node's shape too.
+        from comfy_cli.cql.widget_catalog import build_types
+
+        types = build_types(graph)
+        assert types["Load3DAdvanced"]["widget_order"] == ["model_file", "viewport_state", "width", "height"]
+        # Plain Load3D keeps them: its LOAD_3D slot IS built by the button factory.
+        assert types["Load3D"]["widget_order"] == ["model_file", *_LOAD_3D_BUTTONS, "image", "width", "height"]
+
+    def test_a_fresh_load3d_advanced_serializes_the_frontends_exact_shape(self, graph: Graph):
+        wf, _ = workflow_ops.add_node(_empty_workflow(), graph, "Load3DAdvanced")
+        assert wf["nodes"][0]["widgets_values"] == ["none", "", 1024, 1024]
+
+    def test_a_button_name_is_not_a_widget_of_a_fresh_load3d_advanced(self, graph: Graph):
+        wf, op = workflow_ops.add_node(_empty_workflow(), graph, "Load3DAdvanced")
+        nid = op["node_id"]
+        for name in _LOAD_3D_BUTTONS:
+            with pytest.raises(ValueError, match=name):
+                workflow_ops.set_widget(wf, graph, nid, name, "x")
+        wf, _ = workflow_ops.set_widget(wf, graph, nid, "width", 640)
+        assert wf["nodes"][0]["widgets_values"] == ["none", "", 640, 1024]
+
+    def test_an_edited_legacy_load3d_advanced_still_converts(self, graph: Graph):
+        # A file saved with the old button layout, edited by name and then
+        # converted: the edit must not shift width into a button slot, and
+        # the conversion must not read a button value as an input.
+        legacy = ["m.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024]
+        wf = _workflow(_node(1, "Load3DAdvanced", legacy))
+        wf, _ = workflow_ops.set_widget(wf, graph, 1, "width", 640)
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "", "width": 640, "height": 1024}
+
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
         # model_3d LINK, so its viewport slot follows nothing.
@@ -440,6 +473,44 @@ class TestFrontendShapesFit:
 
 
 class TestConverter:
+    def test_webcam_capture_slot_is_consumed_before_its_controls(self):
+        info = _object_info()
+        info["WebcamCapture"] = {
+            "input": {
+                "required": {
+                    "image": ["WEBCAM", {}],
+                    "width": ["INT", {"default": 0}],
+                    "height": ["INT", {"default": 0}],
+                    "capture_on_queue": ["BOOLEAN", {"default": True}],
+                }
+            },
+            "input_order": {"required": ["image", "width", "height", "capture_on_queue"]},
+            "output": ["IMAGE"],
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "WebcamCapture",
+                    "inputs": [],
+                    "outputs": [],
+                    # Matches the frontend's saved WebcamCapture fixture.
+                    "widgets_values": ["webcam/capture.png [temp]", 640, 480, True],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+
+        result = convert_ui_to_api(workflow, info)
+
+        assert result["1"]["inputs"] == {
+            "image": "webcam/capture.png [temp]",
+            "width": 640,
+            "height": 480,
+            "capture_on_queue": True,
+        }
+
     def test_load3d_viewport_slot_is_consumed_in_place(self):
         workflow = {
             "nodes": [
