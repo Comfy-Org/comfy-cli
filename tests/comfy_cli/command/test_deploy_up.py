@@ -1376,3 +1376,392 @@ def test_a_switched_off_estimate_prints_nothing_and_adds_nothing(tmp_path, monke
     assert as_json.exit_code == 0, as_json.stderr
     assert "estimate" not in _json_envelope(as_json)["data"]
     assert as_json.stderr.strip() == ""
+
+
+def _up_json(tmp_path, monkeypatch, client: FakeDeploy, *args: str):
+    monkeypatch.setattr(_deploy(), "_command_clients", lambda: (FakeBuilder(), client))
+    return CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--no-watch", *args])
+
+
+@pytest.mark.parametrize(
+    ("flags", "sent"),
+    [((), None), (("--no-editor",), False), (("--editor",), True)],
+    ids=["omitted", "no_editor", "editor"],
+)
+def test_a_create_sends_editor_only_when_a_flag_says(tmp_path, monkeypatch, flags, sent) -> None:
+    """Omitted, nothing is sent, so comfy-deploy's default decides as before."""
+    # Given a Build with no deployment
+    client = FakeDeploy()
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--gpu", "l4", "--region", "US-MO-2", *flags)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.create_editors == [sent]
+    assert client.editor_calls == []
+
+
+def test_editor_on_a_bounds_edit_goes_in_a_request_of_its_own(tmp_path, monkeypatch) -> None:
+    """comfy-deploy refuses `editor` beside computeConfig, so the compute edit never carries it."""
+    # Given a live deployment on the release
+    client = FakeDeploy([deployment("dep-live", minimum=0, maximum=1)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--min", "1", "--max", "2", "--editor")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.editor_calls == [("dep-live", True)]
+    assert client.update_calls == ["dep-live"]
+    assert client.create_keys == [] and client.move_calls == []
+
+
+def test_editor_alone_on_a_deployment_with_nothing_else_to_change(tmp_path, monkeypatch) -> None:
+    # Given a live deployment already serving the release at the asked bounds
+    client = FakeDeploy([deployment("dep-live")])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor")
+
+    # Then the one edit is the editor's, and it is reported as a change
+    assert result.exit_code == 0, result.stderr
+    assert client.editor_calls == [("dep-live", False)]
+    assert client.update_calls == [] and client.start_calls == [] and client.create_keys == []
+    assert _json_envelope(result)["changed"] is True
+
+
+def test_an_update_without_a_flag_sends_no_editor(tmp_path, monkeypatch) -> None:
+    # Given a live deployment on the release
+    client = FakeDeploy([deployment("dep-live", minimum=0, maximum=1)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--min", "1", "--max", "2")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.update_calls == ["dep-live"]
+    assert client.editor_calls == []
+
+
+@pytest.mark.parametrize(
+    ("had", "flag", "changed"),
+    [(False, "--no-editor", False), (True, "--editor", False), (True, "--no-editor", True)],
+    ids=["off_again", "on_again", "turned_off"],
+)
+def test_an_editor_edit_is_a_change_only_when_the_deployment_had_the_other_value(
+    tmp_path, monkeypatch, had, flag, changed
+) -> None:
+    """comfy-deploy's list answers no `editor`, so the value before the edit is read, not taken as unknown."""
+    # Given a live deployment on the release whose editor server is on or off
+    client = FakeDeploy([deployment("dep-live", editor=had)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, flag)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["changed"] is changed
+
+
+def test_an_editor_edit_on_a_stop_failed_deployment_is_a_change(tmp_path, monkeypatch) -> None:
+    # Given a deployment that could not stop, its editor server on
+    client = FakeDeploy([deployment("dep-live", status="stop_failed", editor=True)])
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor")
+
+    # Then it is reported as stop_failed, and the edit as made
+    assert result.exit_code == 1, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["error"]["code"] == "deploy_status_terminal"
+    assert client.editor_calls == [("dep-live", False)]
+    assert envelope["changed"] is True
+
+
+def _start_fails(client: FakeDeploy, error: Exception | None = None) -> None:
+    def start(deployment_id: str) -> JsonObject:
+        client.start_calls.append(deployment_id)
+        raise error or DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
+
+    client.start_deployment = start
+
+
+def test_a_start_that_fails_after_an_editor_edit_says_the_edit_was_made(tmp_path, monkeypatch) -> None:
+    """The editor server bills on its own, so a failed start never hides that it was turned on."""
+    # Given a stopped deployment with the server off, whose start fails
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=False)])
+    _start_fails(client)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor")
+
+    # Then it fails as the start did, and says the server was turned on first
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["details"] == {"status": 503}
+    assert error["message"] == (
+        "the editor server was turned on for deployment dep-live, but the start failed: Service Unavailable"
+    )
+    assert client.editor_calls == [("dep-live", True)]
+
+
+@pytest.mark.parametrize("status", [503, 409], ids=["unanswered", "refused"])
+def test_a_bounds_edit_that_fails_after_an_editor_edit_says_the_edit_was_made(tmp_path, monkeypatch, status) -> None:
+    # Given a live deployment with the server on, whose bounds edit fails
+    client = FakeDeploy([deployment("dep-live", editor=True)])
+    client.update_error = DeployAPIError("deploy_server_error", "Service Unavailable", status=status)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor", "--min", "1", "--max", "2")
+
+    # Then it fails as the bounds edit did, and says the server was turned off first
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["message"] == (
+        "the editor server was turned off for deployment dep-live, but the --min/--max edit failed: Service Unavailable"
+    )
+    assert client.update_calls == ["dep-live"]
+
+
+# What the client lets through unmapped, and the error `up` ends with for each:
+# a dropped connection crashes, an oversized answer is a server error.
+_UNMAPPED_FAILURES = [
+    pytest.param(
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        "internal_error",
+        "RemoteDisconnected: Remote end closed connection without response",
+        id="dropped",
+    ),
+    pytest.param(
+        ResponseTooLarge("response exceeded 1048576 bytes"),
+        "deploy_server_error",
+        "response exceeded 1048576 bytes",
+        id="too_large",
+    ),
+]
+
+
+def _unmapped_message(code: str, said: str, text: str) -> str:
+    return f"RuntimeError: {said}: {text}" if code == "internal_error" else f"{said}: {text}"
+
+
+@pytest.mark.parametrize(("failure", "code", "text"), _UNMAPPED_FAILURES)
+def test_a_start_cut_off_after_an_editor_edit_says_the_edit_was_made(
+    tmp_path, monkeypatch, failure, code, text
+) -> None:
+    """A failure the client does not map still names the editor server it turned on."""
+    # Given a stopped deployment with the server off, whose start fails unmapped
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=False)])
+    _start_fails(client, failure)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor")
+
+    # Then it fails as that failure does, and says the server was turned on first
+    assert result.exit_code == 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == code
+    said = "the editor server was turned on for deployment dep-live, but the start failed"
+    assert error["message"] == _unmapped_message(code, said, text)
+    assert client.editor_calls == [("dep-live", True)]
+
+
+@pytest.mark.parametrize(("failure", "code", "text"), _UNMAPPED_FAILURES)
+def test_a_bounds_edit_cut_off_after_an_editor_edit_says_the_edit_was_made(
+    tmp_path, monkeypatch, failure, code, text
+) -> None:
+    # Given a live deployment with the server off, whose bounds edit fails unmapped
+    client = FakeDeploy([deployment("dep-live", editor=False)])
+    client.update_error = failure
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor", "--min", "1", "--max", "2")
+
+    # Then it fails as that failure does, and says the server was turned on first
+    assert result.exit_code == 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == code
+    said = "the editor server was turned on for deployment dep-live, but the --min/--max edit failed"
+    assert error["message"] == _unmapped_message(code, said, text)
+    assert client.update_calls == ["dep-live"]
+
+
+@pytest.mark.parametrize(("failure", "code", "text"), _UNMAPPED_FAILURES)
+def test_a_start_cut_off_with_no_editor_change_fails_as_it_did(tmp_path, monkeypatch, failure, code, text) -> None:
+    # Given a stopped deployment with the server on, whose start fails unmapped
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=True)])
+    _start_fails(client, failure)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--editor")
+
+    # Then
+    assert result.exit_code == 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == code
+    assert error["message"] == text
+    if code == "internal_error":
+        assert error["details"]["exception"] == type(failure).__name__
+    assert client.start_calls == ["dep-live"]
+
+
+@pytest.mark.parametrize("flags", [(), ("--editor",)], ids=["no_flag", "editor_already_on"])
+def test_a_start_that_fails_with_no_editor_change_fails_as_it_did(tmp_path, monkeypatch, flags) -> None:
+    # Given a stopped deployment with the server on, whose start fails
+    client = FakeDeploy([deployment("dep-live", status="stopped", editor=True)])
+    _start_fails(client)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, *flags)
+
+    # Then
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["message"] == "Service Unavailable"
+    assert client.start_calls == ["dep-live"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "flags", "deployment_id"),
+    [
+        # A create comfy-deploy answers with a deployment that keeps the server, as a replay of its key does.
+        ([], ("--gpu", "l4", "--region", "US-MO-2"), "dep-1"),
+        ([deployment("dep-live", editor=True)], (), "dep-live"),
+    ],
+    ids=["create", "edit"],
+)
+def test_an_editor_value_comfy_deploy_did_not_keep_is_not_ok(tmp_path, monkeypatch, rows, flags, deployment_id) -> None:
+    # Given a comfy-deploy whose editor write fails, answering with the server still on
+    client = FakeDeploy(rows, keeps_editor=True)
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, *flags, "--no-editor")
+
+    # Then the deployment is still reported, beside the failure
+    assert result.exit_code == 1, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["error"]["details"] == {"deployment_id": deployment_id, "requested": False}
+    assert envelope["data"]["deployment"]["id"] == deployment_id
+    assert "its editor server may still be on" in " ".join(result.stderr.split())
+
+
+def test_an_editor_answer_that_leaves_the_value_out_is_read_again(tmp_path, monkeypatch) -> None:
+    # Given a live deployment whose editor edit answers without `editor`, though a read has it
+    client = FakeDeploy([deployment("dep-live", editor=True)])
+    original = client.set_deployment_editor
+
+    def set_editor(deployment_id: str, editor: bool) -> JsonObject:
+        reply = original(deployment_id, editor)
+        reply.pop("editor")
+        return reply
+
+    client.set_deployment_editor = set_editor
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--no-editor")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["changed"] is True
+
+
+@pytest.mark.parametrize(("had", "flag"), [(True, "--no-editor"), (False, "--editor")], ids=["off", "on"])
+@pytest.mark.parametrize("status", ["ready", "stop_failed"])
+def test_an_editor_read_that_confirms_the_value_outranks_the_edits_answer(
+    tmp_path, monkeypatch, had, flag, status
+) -> None:
+    """The read is the later of the two, so the editor edit's own answer never overrules it."""
+    # Given a deployment whose editor edit answers with the value it had, though a read after it has the one asked
+    client = FakeDeploy([deployment("dep-live", status=status, editor=had)])
+    original = client.set_deployment_editor
+
+    def set_editor(deployment_id: str, editor: bool) -> JsonObject:
+        reply = original(deployment_id, editor)
+        reply["editor"] = had
+        return reply
+
+    client.set_deployment_editor = set_editor
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, flag)
+
+    # Then the edit is made, and confirmed
+    envelope = _json_envelope(result)
+    assert envelope["changed"] is True
+    assert "deploy_editor_unchanged" not in result.stdout
+    assert "did not confirm" not in " ".join(result.stderr.split())
+    if status == "ready":
+        assert result.exit_code == 0, result.stderr
+        assert envelope["ok"] is True
+    else:
+        assert result.exit_code == 1, result.stderr
+        assert envelope["error"]["code"] == "deploy_status_terminal"
+
+
+def _reads_after(client: FakeDeploy, made, *replies: str) -> None:
+    """Each read once ``made()`` holds, in turn: "fails" answers 503, "omits" leaves `editor` out."""
+    original = client.get_deployment
+    queue = list(replies)
+
+    def read(deployment_id: str) -> JsonObject:
+        if not made() or not queue:
+            return original(deployment_id)
+        reply = queue.pop(0)
+        if reply == "fails":
+            raise DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
+        row = original(deployment_id)
+        row.pop("editor", None)
+        return row
+
+    client.get_deployment = read
+
+
+def test_a_create_whose_editor_read_fails_keeps_the_create(tmp_path, monkeypatch) -> None:
+    """The create was taken and bills, so a read that cannot confirm the editor never loses it."""
+    # Given a create whose read for the deployment it made leaves `editor` out, and a read after it answering 503
+    client = FakeDeploy()
+    _reads_after(client, lambda: client.create_keys, "omits", "fails")
+
+    # When
+    result = _up_json(tmp_path, monkeypatch, client, "--gpu", "l4", "--region", "US-MO-2", "--no-editor")
+
+    # Then the deployment is reported as made, and the editor as not confirmed
+    assert result.exit_code == 1, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["data"]["deployment"]["id"] == "dep-1"
+    assert envelope["data"]["deployment"]["created"] is True
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["error"]["details"]["read_error"] == "Service Unavailable"
+
+
+def test_an_editor_edit_a_watch_read_confirms_is_a_change(tmp_path, monkeypatch) -> None:
+    # Given a deployment with the server on, whose editor edit and the read after it leave `editor` out
+    client = FakeDeploy([deployment("dep-live", editor=True)])
+    original = client.set_deployment_editor
+
+    def set_editor(deployment_id: str, editor: bool) -> JsonObject:
+        reply = original(deployment_id, editor)
+        reply.pop("editor")
+        return reply
+
+    client.set_deployment_editor = set_editor
+    _reads_after(client, lambda: client.editor_calls, "omits")
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    monkeypatch.setattr(module, "_sleep", lambda _: None)
+
+    # When the watch reads the server off
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--no-editor"])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["ok"] is True
+    assert envelope["changed"] is True

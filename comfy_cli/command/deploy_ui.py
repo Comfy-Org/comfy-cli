@@ -35,6 +35,8 @@ def _ready_release(deployment: JsonObject, deployment_id: str) -> str:
         or deployment.get("deletedAt") is not None
     ):
         raise EditorUnavailableError("the selected deployment is not a verified ready target")
+    if "editor" in deployment and deployment["editor"] is not True:
+        raise EditorUnavailableError("the selected deployment's editor is disabled or could not be verified")
     return required_string(deployment, "releaseId")
 
 

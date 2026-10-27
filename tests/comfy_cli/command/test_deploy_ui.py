@@ -80,6 +80,26 @@ def test_deploy_ui_returns_verified_workspace_target_release_link(editor):
     assert "secret-token" not in result.output
 
 
+def test_deploy_ui_accepts_explicitly_enabled_editor(editor):
+    state, _ = editor
+    state["deployment"]["editor"] = True
+    result, envelope = invoke()
+    assert result.exit_code == 0, result.output
+    assert envelope["data"]["deploymentId"] == DEPLOYMENT_ID
+    assert envelope["changed"] is False
+
+
+@pytest.mark.parametrize("enabled", [False, None, 0, "true", {}, []])
+def test_deploy_ui_refuses_explicitly_disabled_or_invalid_editor(editor, enabled):
+    state, calls = editor
+    state["deployment"]["editor"] = enabled
+    result, envelope = invoke()
+    assert result.exit_code == 1
+    assert envelope["data"] is None
+    assert envelope["error"]["code"] == "deploy_ui_unavailable"
+    assert calls == [("deploy", DEPLOYMENT_ID)]
+
+
 @pytest.mark.parametrize("status", ["stopped", "provisioning", "unhealthy", "failed"])
 def test_deploy_ui_refuses_nonready_control_record(editor, status):
     state, calls = editor

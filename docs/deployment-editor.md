@@ -10,6 +10,8 @@ https://cloud.comfy.org/?workspace=<workspace-id>&deployment=<deployment-id>
 
 The command checks both the ready, nondeleted deployment control record and the authenticated Cloud workspace's editor deployment listing. The exact deployment and served release must agree. The Cloud listing owns rollout eligibility, current membership and workspace access. A ready deployment API endpoint alone does not establish editor access.
 
+An explicit `editor: false` (as set by `deploy up --no-editor`) or malformed editor value refuses the link, even if the deployment listing says ready. Older control-plane releases that omit the field still require the same authenticated listing verification. URL discovery never turns the editor server back on; enabling it is a separate deployment change. The same check applies to custom-environment saved-workflow links.
+
 A Cloud sign-in is required. API keys can run deployment API jobs, but do not establish a browser session or permission to select an editor environment. Refused, missing or inconsistent capability data returns `deploy_ui_unavailable` without a guessed URL. Opening a successful link still requires the browser to sign in as an account with access; no credential is embedded in the URL.
 
 The frontend switches to the named workspace, asks the backend to select the exact deployment for that browser and reloads onto the selected release's node catalog. The backend rechecks access at selection and execution time. Discovery is a point-in-time check; a deployment can change or be deleted before a link is opened.

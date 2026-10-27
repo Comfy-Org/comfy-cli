@@ -279,7 +279,7 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
         deploy_insecure_url deploy_unrelated_deployment deploy_workflow_empty
         deploy_workflow_not_api_format deploy_status_terminal deploy_workflow_too_large deploy_watch_lost
         deploy_update_failed deploy_update_replaced deploy_updates_unavailable deploy_name_not_found deploy_invalid_name deploy_name_taken
-        deploy_names_unavailable
+        deploy_names_unavailable deploy_editor_unchanged
         deploy_build_not_found deploy_ambiguous_build deploy_ui_unavailable""".split()
     )
 
@@ -287,7 +287,7 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
     actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
 
     # Then
-    assert len(actual) == 46
+    assert len(actual) == 47
     assert actual == expected
 
 

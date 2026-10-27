@@ -251,7 +251,7 @@ def test_cli_environment_is_a_real_parser_choice(monkeypatch):
     action.assert_not_called()
 
 
-@pytest.mark.parametrize("change", ["stopped", "wrong-release", "missing", "duplicate"])
+@pytest.mark.parametrize("change", ["stopped", "wrong-release", "missing", "duplicate", "editor-disabled"])
 def test_custom_link_uses_real_shared_deployment_verification(server, monkeypatch, change):
     ui, _, _, target = server
     control = Mock()
@@ -260,6 +260,8 @@ def test_custom_link_uses_real_shared_deployment_verification(server, monkeypatc
         "releaseId": "release-1",
         "status": "stopped" if change == "stopped" else "ready",
     }
+    if change == "editor-disabled":
+        control.get_deployment.return_value["editor"] = False
     monkeypatch.setattr(ui, "_deployment_client", lambda: control)
     row = {
         "deployment_id": DEPLOYMENT,
