@@ -1368,9 +1368,9 @@ def parse_disable_config(data: bytes) -> set[str]:
 
 
 # Above this many pruned nodes, report them as ONE warning. A canvas that keeps
-# finished branches around (an 8-scene film: 76 nodes, 66 of them pruned) got
-# 66 near-identical warnings, ~12 KB per validate call, and an agent re-reads
-# that on every later round of its turn. A handful still get one entry each.
+# finished branches around (an 8-scene film workflow, 76 nodes) got up to 66
+# warnings per validate call, one per pruned node, and an agent re-reads every
+# one on each later round of its turn. A handful still get one entry each.
 _UNREACHABLE_PER_NODE_MAX = 3
 
 
