@@ -176,3 +176,71 @@ def test_a_save_matching_the_current_option_order_is_unchanged():
     assert inputs["model.auto_upscale"] is True
     assert inputs["seed"] == 7
     assert inputs["watermark"] is True
+
+
+# --------------------------------------------------------------------------- #
+# A nested selector's own descendants are ordered by the recursive walk, with
+# the nested selector as their parent. They must not disable the saved order
+# for their siblings one level up.
+# --------------------------------------------------------------------------- #
+
+
+def _nested_object_info() -> dict:
+    """``model`` whose option reveals a nested ``variant`` selector."""
+    variant = {
+        "key": "wide",
+        "inputs": {"required": {"width": ["INT", {"default": 512}]}},
+    }
+    option = {
+        "key": "Seedance 2.0",
+        "inputs": {
+            "required": {
+                "prompt": ["STRING", {"default": ""}],
+                "variant": ["COMFY_DYNAMICCOMBO_V3", {"options": [variant]}],
+            },
+            "optional": {"auto_downscale": ["BOOLEAN", {"default": True}]},
+        },
+    }
+    return {
+        "N": {
+            "input": {
+                "required": {
+                    "model": ["COMFY_DYNAMICCOMBO_V3", {"options": [option]}],
+                    "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                }
+            },
+            "input_order": {"required": ["model", "seed"]},
+        }
+    }
+
+
+def test_a_nested_selectors_descendants_do_not_disable_the_parents_saved_order():
+    """The saved order here DIFFERS from the option's current order, so a
+    fallback to schema order is detectable: ``auto_downscale`` was saved first.
+    """
+    node = {
+        "id": 1,
+        "type": "N",
+        "widgets_values": ["Seedance 2.0", True, "a prompt", "wide", 512, 4242, "randomize"],
+        "inputs": [
+            {"name": n, "widget": {"name": n}}
+            for n in (
+                "model",
+                "model.auto_downscale",
+                "model.prompt",
+                "model.variant",
+                "model.variant.width",
+                "seed",
+            )
+        ],
+    }
+    inputs = _convert(node, _nested_object_info())
+    # `model.variant.width` is the nested selector's own slot, ordered by the
+    # recursive walk with `model.variant` as its parent. Seeing it must not make
+    # the walk abandon the saved order for `model`'s direct children, which the
+    # current option declares as prompt, variant, auto_downscale.
+    assert inputs["model.auto_downscale"] is True
+    assert inputs["model.prompt"] == "a prompt"
+    assert inputs["model.variant"] == "wide"
+    assert inputs["model.variant.width"] == 512
+    assert inputs["seed"] == 4242

@@ -2139,6 +2139,16 @@ def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]
         if not isinstance(name, str) or not name.startswith(prefix) or name in seen:
             continue
         if name not in by_name:
+            # A DESCENDANT of a nested selector among these subs
+            # (``model.variant.width`` under ``model.variant``). It is not this
+            # level's slot, and the recursive ``consume`` orders it with the
+            # nested selector as its own parent, so skip it rather than
+            # abandoning the saved order for every sibling at this level.
+            head = name[len(prefix) :].split(".", 1)[0]
+            if f"{prefix}{head}" in by_name:
+                continue
+            # A sub this option no longer declares at all: the layouts disagree
+            # beyond repair from here.
             return subs
         seen.add(name)
         saved.append((name, by_name[name]))
