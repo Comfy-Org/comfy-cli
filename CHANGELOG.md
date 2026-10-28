@@ -22,7 +22,8 @@ history.
   (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
   The key is optional: a row omits it when its interior widget does not
   resolve, when its value comes from an interior PrimitiveNode, or when the
-  input is backed only by a legacy `proxyWidgets` entry.
+  input is a plain legacy `proxyWidgets` fallback (a legacy entry that will be
+  repaired into a linked input does carry it).
   The row's `address` is unchanged and stays the one to edit.
 - `comfy build init`, `update` and `validate` carry `data.warnings[]` as
   `{code, message}` under `--json`. `build_comfy_version_missing` means the
