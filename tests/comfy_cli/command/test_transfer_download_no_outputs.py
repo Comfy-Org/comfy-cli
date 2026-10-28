@@ -95,8 +95,9 @@ def test_fetched_record_wins_over_a_stale_state_file(fake_target, capsys):
 
 
 def test_failed_job_does_not_say_wait(fake_target, capsys):
+    # The record carries no verdict, so the local state file decides.
     _write_state(fake_target, "error")
-    err = _download_error(fake_target, capsys, None)
+    err = _download_error(fake_target, capsys, {"status": {"completed": False}, "outputs": {}})
     assert "ended without completing" in err["message"]
     assert "wait" not in err["hint"]
 
