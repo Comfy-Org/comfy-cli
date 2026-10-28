@@ -1366,6 +1366,54 @@ def parse_disable_config(data: bytes) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+
+# Above this many pruned nodes, report them as ONE warning. A canvas that keeps
+# finished branches around (an 8-scene film: 76 nodes, 66 of them pruned) got
+# 66 near-identical warnings, ~12 KB per validate call, and an agent re-reads
+# that on every later round of its turn. A handful still get one entry each.
+_UNREACHABLE_PER_NODE_MAX = 3
+
+
+def _unreachable_warnings(dangling: list[tuple[str, Any]]) -> list[dict]:
+    hint = (
+        "wire its output into the chain that reaches a save/preview node, or delete it; "
+        "a node that reaches no output is skipped entirely"
+    )
+    if len(dangling) <= _UNREACHABLE_PER_NODE_MAX:
+        return [
+            {
+                "node_id": node_id,
+                "field": None,
+                "code": "node_not_reachable_from_output",
+                "message": (
+                    f"node {node_id} ({class_type}) feeds no output node — the server prunes it, "
+                    f"so it will not run and has no effect on the result"
+                ),
+                "hint": hint,
+            }
+            for node_id, class_type in dangling
+        ]
+    by_class: dict[str, int] = {}
+    for _, class_type in dangling:
+        key = str(class_type)
+        by_class[key] = by_class.get(key, 0) + 1
+    classes = ", ".join(f"{name} x{n}" for name, n in sorted(by_class.items(), key=lambda kv: (-kv[1], kv[0])))
+    node_ids = [node_id for node_id, _ in dangling]
+    return [
+        {
+            "node_id": node_ids[0],
+            "node_ids": node_ids,
+            "count": len(node_ids),
+            "field": None,
+            "code": "node_not_reachable_from_output",
+            "message": (
+                f"{len(node_ids)} nodes feed no output node — the server prunes them, so they will not run "
+                f"and have no effect on the result ({classes})"
+            ),
+            "hint": hint.replace("its output", "each one's output").replace("delete it", "delete them"),
+        }
+    ]
+
 class Graph:
     """Indexed compatibility graph over ComfyUI node classes."""
 
@@ -2474,6 +2522,7 @@ class Graph:
         # Advisory, not an error: a scratch node parked mid-build is legitimate,
         # and the server does run the graph. It only has to be VISIBLE.
         if has_output_node:
+            dangling: list[tuple[str, Any]] = []
             for node_id, node_data in workflow.items():
                 if node_id == "_meta" or node_id in reachable:
                     continue
@@ -2484,21 +2533,8 @@ class Graph:
                 # Note-style nodes legitimately feed nothing.
                 if m is not None and not m.outputs:
                     continue
-                warnings.append(
-                    {
-                        "node_id": node_id,
-                        "field": None,
-                        "code": "node_not_reachable_from_output",
-                        "message": (
-                            f"node {node_id} ({class_type}) feeds no output node — the server prunes it, "
-                            f"so it will not run and has no effect on the result"
-                        ),
-                        "hint": (
-                            "wire its output into the chain that reaches a save/preview node, or delete it; "
-                            "a node that reaches no output is skipped entirely"
-                        ),
-                    }
-                )
+                dangling.append((node_id, class_type))
+            warnings.extend(_unreachable_warnings(dangling))
 
         return {
             "valid": len(errors) == 0,
