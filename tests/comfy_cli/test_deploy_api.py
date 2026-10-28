@@ -149,7 +149,7 @@ def test_base_url_resolution_prefers_explicit_then_environment_then_default(monk
 def test_from_session_refreshes_and_uses_the_resolved_url(monkeypatch):
     # Given
     seen: list[bool] = []
-    session = type("Session", (), {"access_token": "fresh-jwt"})()
+    session = type("Session", (), {"access_token": "fresh-jwt", "base_url": "https://cloud.comfy.org"})()
     monkeypatch.setattr(
         "comfy_cli.deploy_api.credentials.get_session", lambda *, refresh: seen.append(refresh) or session
     )
@@ -545,3 +545,17 @@ def test_public_pagination_primitives_do_not_expose_the_raw_cursor():
 
     # Then
     assert all("after" not in signature.parameters for signature in signatures)
+
+
+def test_a_stale_revision_keeps_the_server_code_beside_deploy_conflict(monkeypatch):
+    # Given
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", _HTTPFailure(409, "the deployment changed"))
+    client = DeployClient(_BASE_URL, "jwt-token")
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        client.move_deployment("dep-1", 3, "v2")
+
+    # Then
+    assert exc_info.value.code == "deploy_conflict"
+    assert exc_info.value.details["server_code"] == "SERVER_CODE"

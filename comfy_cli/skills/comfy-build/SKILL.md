@@ -54,7 +54,7 @@ update    Rescan the local install and rewrite the spec's definition.
 push      Push the local spec to the builder.
 pull      Replace the local spec with a fetched Build, keeping local asset identities.
 status    Report how far the spec is from the remote Build and from the install.
-ls        List the workspace's builds.
+ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
 validate  Validate the local spec without contacting the builder.
 delete    Delete a Build (soft-delete).
@@ -310,9 +310,16 @@ user which links fail and how, and pass `--release-despite-warnings` only after 
 yes; a fixed link needs no option. `comfy build release create` cuts without this
 check.
 
-**Three other refusals block rather than ask — `--yes` does nothing for them.**
+**Four other refusals block rather than ask: `--yes` does nothing for them.**
 Each is cleared by deleting something, and each exits 1:
 
+- **`build_limit`**: `comfy build push` could not create the build because the
+  workspace already holds as many builds as its limit allows. The limit counts
+  every member's builds, and `comfy build ls` lists only your own outside the
+  enterprise plan, so the list can look short or empty. The `message` is the
+  builder's own wording. Deleting a build frees a slot but takes its releases
+  with it, so ask the user first, or ask them to have a teammate delete one;
+  then push again.
 - **`build_release_limit`** — the cut was refused because the workspace already
   holds as many releases as its limit allows. Free a slot, then cut again.
 - **`build_release_in_use`** — `comfy build release delete` was refused because a

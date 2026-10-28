@@ -24,6 +24,7 @@ from build_push_support import (
     write_spec,
 )
 
+from comfy_cli import error_codes
 from comfy_cli.builder_api import BuilderClient
 from comfy_cli.command import build
 from comfy_cli.command.build_package import package_node
@@ -1024,3 +1025,122 @@ def test_a_refused_release_names_each_model_the_push_saved(workspace: Path, monk
         None,
     ]
     assert "s3cr3t" not in result.output
+
+
+#: The builder's refusal at the build limit, which counts every member's builds.
+WORKSPACE_FULL = (
+    "workspace holds 50 builds against its build limit of 50; "
+    "builds by every member count, including any your own build list does not show"
+)
+
+
+def _create_refused(monkeypatch: pytest.MonkeyPatch, client: RecordingBuilder, status: int, body: JsonObject) -> None:
+    def refused(name: str, definition: JsonObject, description: str | None = None) -> JsonObject:
+        raise urllib.error.HTTPError(
+            "https://builder.test/v1/builds", status, "Conflict", {}, io.BytesIO(json.dumps(body).encode())
+        )
+
+    monkeypatch.setattr(client, "create_build_response", refused)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param(WORKSPACE_FULL, id="builder-naming-the-count"),
+        pytest.param("workspace has reached its build limit (50)", id="builder-naming-only-the-limit"),
+    ],
+)
+def test_a_push_refused_at_the_build_limit_gets_its_own_code(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    """A full workspace is a state the member can clear, by deleting a build or
+    asking a teammate to, so it reaches them as its own code carrying the
+    builder's words, whichever builder sent them, rather than as a builder failure."""
+    # Given
+    write_spec(workspace, nodes=[])
+    client = RecordingBuilder()
+    _create_refused(monkeypatch, client, 409, {"error": "BUILD_LIMIT", "message": message})
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    error = envelope(result)["error"]
+    assert (result.exit_code, error["code"], error["message"], error["hint"]) == (
+        1,
+        "build_limit",
+        message,
+        error_codes.get("build_limit").hint,
+    )
+    # The uploads landed before the create, so a retry once there is room
+    # sends nothing twice: their ids are already in the spec on disk.
+    assert all("blobId" in model for model in reloaded(workspace)["definition"]["models"])
+
+
+def test_a_member_at_the_build_limit_sees_the_code_and_the_remedy_in_the_terminal(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The terminal shows the hint and not the catalog, so the hint alone has to
+    say that teammates' builds count while the list shows only your own."""
+    # Given
+    write_spec(workspace, nodes=[])
+    client = RecordingBuilder()
+    _create_refused(monkeypatch, client, 409, {"error": "BUILD_LIMIT", "message": WORKSPACE_FULL})
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, agentic=False)
+
+    # Then
+    shown = " ".join(result.output.split())
+    assert (
+        result.exit_code,
+        "build_limit" in shown,
+        "teammates' builds count" in shown,
+        "comfy build delete --id" in shown,
+    ) == (
+        1,
+        True,
+        True,
+        True,
+    )
+
+
+def test_a_build_limit_refusal_with_no_message_still_explains_itself(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, nodes=[])
+    client = RecordingBuilder()
+    _create_refused(monkeypatch, client, 409, {"error": "BUILD_LIMIT"})
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == (
+        "build_limit",
+        "the workspace already holds as many builds as its limit allows, counting every member's builds",
+    )
+
+
+def test_build_limit_under_another_status_keeps_the_generic_envelope(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the builder sends BUILD_LIMIT, and only under a 409, so the code under
+    any other status came from something else and gets no build-limit remedy."""
+    # Given
+    write_spec(workspace, nodes=[])
+    client = RecordingBuilder()
+    _create_refused(monkeypatch, client, 500, {"error": "BUILD_LIMIT", "message": WORKSPACE_FULL})
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", 500)

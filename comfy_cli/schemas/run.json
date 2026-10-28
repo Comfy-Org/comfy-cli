@@ -24,6 +24,11 @@
       "description": "--wait only (both targets): the same artifact URLs grouped by the node id that produced them.",
       "additionalProperties": {"type": "array", "items": {"type": "string"}}
     },
+    "partial_execution_targets": {
+      "type": "array",
+      "description": "--print-prompt with --output-node-ids only (both targets, status \"preview\"): the output node ids the submit would send as partial_execution_targets.",
+      "items": {"type": "string"}
+    },
     "outputs_by_item": {
       "type": "object",
       "description": "--wait only (both targets): artifact URLs grouped by blueprint foreach item (via the compose item_map). Empty object when no item_map exists.",
@@ -31,7 +36,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Cloud --wait only: non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch). Empty when none.",
+      "description": "Cloud --wait only: non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch, partial_execution_targets_ignored when an --output-node-ids run also ran untargeted nodes). Empty when none.",
       "items": {
         "type": "object",
         "required": ["code", "message"],

@@ -112,15 +112,20 @@ can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), fi
   each link and how its host refused; in text mode the tool printed each just above. Fix the link, or ask the user before passing
   `--release-despite-warnings`.
 
-Two refusals are the workspace being full rather than the definition being wrong,
-and neither is fixed by editing anything:
+Three refusals are the workspace being full rather than the definition being wrong,
+and none is fixed by editing anything:
 
+- **`build_limit`**: the workspace holds its maximum number of builds, counting
+  every member's, though `comfy build ls` lists only your own outside the
+  enterprise plan. Deleting a build clears it, or a teammate deletes one of
+  theirs. A delete takes the build's releases with it, so ask the user first;
+  `comfy skills show comfy-build` carries the rules for it.
 - **`build_release_limit`** — the workspace holds its maximum number of releases.
   A retry does not clear it; deleting one does. `comfy build release delete` is the
   procedure, and `comfy skills show comfy-build` carries the rules for it.
 - **`429 CONCURRENCY_LIMIT`**, which arrives as `build_builder_error` with the
   builder's own message — too many builds running at once. Transient, unlike the
-  one above. Wait for one to finish, or say which are running.
+  two above. Wait for one to finish, or say which are running.
 
 ## A cut that failed after the request went out
 

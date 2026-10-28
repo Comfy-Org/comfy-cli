@@ -23,10 +23,11 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,26 @@ MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
+MAX_AUTHORING_SLICE_BYTES = 8192
+MAX_AUTHORING_METADATA_BYTES = 2048
+# The producer's vocabulary, not ours: every value here is a `retrieval_classes`
+# entry declared by a slice in comfy-knowledge's `custom-node-authoring`
+# playbook. A class absent from this tuple makes `_index_custom_node_authoring`
+# skip the slice that declares it, so the producer's content stays unreachable
+# until the class is added here. Last reconciled against comfy-knowledge
+# `7a3574e3deeae860f46901c39e3606f7a3acfc96`, which added `execution-caching`.
+AUTHORING_CLASSES = (
+    "invocation",
+    "ecosystem-reference",
+    "api-schema",
+    "validation",
+    "dependencies-capabilities",
+    "troubleshooting",
+    "packaging-publishing",
+    "frontend-extension",
+    "v1-to-v3-migration",
+    "execution-caching",
+)
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 # `knowledge pick --check-local` reasons, kept short: each flagged pick repeats one.
@@ -113,13 +134,16 @@ class Bundle:
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
     model_capabilities: dict[str, list[str]]  # model id -> capability ids that rank it
+    custom_node_authoring: tuple[dict[str, Any], ...]
     # _normalize(alias) -> id. A key two ids would share is left out, so only the
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
-    # (word set, normalized key, capability id) for every capability id and alias,
-    # so an intent phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
-    capability_tokens: tuple[tuple[frozenset[str], str, str], ...] = ()
+    # (word multiset, normalized key, capability id) for every capability id and alias,
+    # so an intent phrase reaches the row its own wording names. A multiset, not a set,
+    # so a key that repeats a word is not fully matched by one of it. See
+    # :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[tuple[tuple[str, int], ...], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
@@ -224,16 +248,47 @@ def _tokens(s: str) -> frozenset[str]:
     return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
 
 
+def _counts(s: str) -> Counter[str]:
+    """:func:`_tokens` as a multiset, so a key that says a word twice needs it twice.
+
+    A set collapses "Video to Video" to ``{video}``, which makes the key a full
+    match for any query carrying the bare word - and a full match skips the
+    description test in :func:`_resolve_tokens` entirely, so one generic noun
+    turns its capability into a catch-all.
+    """
+    return Counter(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
+
+
 def _short_key(key: str) -> bool:
     """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
     raw = {w for w in _split(key) if _stem(w) not in _FILLER_STEMS}
     return len(raw) == 1 and len(next(iter(raw))) < MIN_SINGLE_TOKEN_CHARS
 
 
-def _query_tokens(s: str) -> frozenset[str]:
-    """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
+def _query_counts(s: str) -> Counter[str]:
+    """:func:`_counts` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``.
+
+    The pair joins are single-counted: they are spelling aids, not words the
+    caller wrote twice.
+    """
     words = _split(s)
-    return _tokens(s) | frozenset(_stem(a + b) for a, b in zip(words, words[1:]))
+    counts = _counts(s)
+    counts.update(frozenset(_stem(a + b) for a, b in zip(words, words[1:])) - set(counts))
+    return counts
+
+
+def _contains_normalized_word_span(query: str, key_norm: str) -> bool:
+    """Whether complete adjacent query words normalize exactly to ``key_norm``."""
+    words = _split(query)
+    for start in range(len(words)):
+        span = ""
+        for word in words[start:]:
+            span += word
+            if span == key_norm:
+                return True
+            if len(span) >= len(key_norm):
+                break
+    return False
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -506,6 +561,89 @@ def _append_unique(index: dict[str, list[str]], key: str, model_id: str) -> None
         ids.append(model_id)
 
 
+def _heading_section(content: str, heading: str) -> str | None:
+    """Return one Markdown section named by producer slice metadata."""
+    lines = content.splitlines(keepends=True)
+    heading_pattern = re.compile(r"^(?P<marks>#+)\s+(?P<title>.*?)\s*$")
+    fence_pattern = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<tail>.*)$")
+    start = level = None
+    fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        fence_match = fence_pattern.match(line)
+        if fence_match:
+            marker = fence_match.group("marker")
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif marker[0] == fence[0] and len(marker) >= fence[1] and not fence_match.group("tail").strip():
+                fence = None
+            continue
+        match = heading_pattern.match(line) if fence is None else None
+        if match and start is None and match.group("title") == heading:
+            start, level = index, len(match.group("marks"))
+        elif match and start is not None and len(match.group("marks")) <= level:
+            return "".join(lines[start:index]).rstrip() + "\n"
+    return None if start is None else "".join(lines[start:]).rstrip() + "\n"
+
+
+def _utf8_size(value: str) -> int | None:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
+def _index_custom_node_authoring(data: dict) -> tuple[dict[str, Any], ...]:
+    """Validate and index the canonical producer's bounded playbook slices."""
+    playbooks = data.get("playbooks")
+    playbook = playbooks.get("custom-node-authoring") if isinstance(playbooks, dict) else None
+    if not isinstance(playbook, dict) or not isinstance(playbook.get("content"), str):
+        return ()
+    slices = playbook.get("slices")
+    if not isinstance(slices, list):
+        return ()
+
+    indexed: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in slices:
+        if not isinstance(item, dict) or set(item) != {"id", "heading", "retrieval_classes", "api_generations"}:
+            continue
+        slice_id, heading = item["id"], item["heading"]
+        classes, generations = item["retrieval_classes"], item["api_generations"]
+        if (
+            not isinstance(slice_id, str)
+            or not isinstance(heading, str)
+            or not slice_id
+            or slice_id in seen_ids
+            or not isinstance(classes, list)
+            or not classes
+            or not all(isinstance(value, str) and value in AUTHORING_CLASSES for value in classes)
+            or len(set(classes)) != len(classes)
+            or not isinstance(generations, list)
+            or not generations
+            or not all(value in ("v1", "v3") for value in generations)
+            or len(set(generations)) != len(generations)
+        ):
+            continue
+        metadata_size = _utf8_size(json.dumps(item))
+        if metadata_size is None or metadata_size > MAX_AUTHORING_METADATA_BYTES:
+            continue
+        content = _heading_section(playbook["content"], heading)
+        content_size = _utf8_size(content) if content is not None else None
+        if content is None or not content.strip() or content_size is None or content_size > MAX_AUTHORING_SLICE_BYTES:
+            continue
+        seen_ids.add(slice_id)
+        indexed.append(
+            {
+                "id": slice_id,
+                "heading": heading,
+                "retrieval_classes": tuple(classes),
+                "api_generations": tuple(generations),
+                "content": content,
+            }
+        )
+    return tuple(indexed)
+
+
 def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path: str, mtime: float) -> Bundle:
     models = {mid: row for mid, row in data["models"].items() if isinstance(mid, str) and isinstance(row, dict)}
 
@@ -529,6 +667,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         if isinstance(caps_raw, dict)
         else {}
     )
+    custom_node_authoring = _index_custom_node_authoring(data)
     deps_raw = data.get("deprecations")
     deprecations = (
         {d["id"]: d for d in deps_raw if isinstance(d, dict) and isinstance(d.get("id"), str)}
@@ -574,13 +713,13 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
                 capability_keys.setdefault(alias, cid)
 
     capability_tokens = tuple(
-        (words, _normalize(key), cid)
+        (tuple(sorted(counts.items())), _normalize(key), cid)
         for key, cid in capability_keys.items()
-        if (words := _tokens(key)) and not _short_key(key)
+        if (counts := _counts(key)) and not _short_key(key)
     )
     key_words: dict[str, set[str]] = defaultdict(set)
-    for words, _, cid in capability_tokens:
-        key_words[cid] |= words
+    for count_items, _, cid in capability_tokens:
+        key_words[cid] |= {word for word, _ in count_items}
     capability_context = {
         cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
@@ -603,6 +742,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         templates=templates,
         nodes=nodes,
         model_capabilities=model_capabilities,
+        custom_node_authoring=custom_node_authoring,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
         capability_tokens=capability_tokens,
@@ -638,6 +778,23 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
     return models, caps
 
 
+@lru_cache(maxsize=4096)
+def _key_counter(count_items: tuple[tuple[str, int], ...]) -> Counter:
+    """Counter for a capability key's word multiset, built once per distinct key.
+
+    :data:`Bundle.capability_tokens` stores the multiset as a sorted tuple so the
+    frozen dataclass stays hashable, which means a ``Counter`` cannot live in the
+    field itself. Rebuilding one per capability *per lookup* made each lookup about
+    13x slower than it needs to be (comfy-cli owner review, 2026-10-07): the keys do
+    not change between calls, only the query does.
+
+    The returned Counter is SHARED across callers, so treat it as read-only.
+    :func:`_resolve_tokens` only ever uses ``-`` and ``&``, which return new Counters
+    and leave the operand untouched.
+    """
+    return Counter(dict(count_items))
+
+
 def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
 
@@ -653,23 +810,40 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     out literally in the query wins ("text to image" over ``text-in-image``),
     then the one whose description the query echoes.
 
+    Repeated words in a key count only when that key is literally present in the
+    query. Otherwise each query word contributes at most once, so a phrase that
+    happens to repeat a generic noun cannot satisfy a repeated-word alias.
+
     Ambiguity resolves to nothing rather than to a guess, matching
     :func:`_normalized_map`: a tie between two capabilities is not an answer.
     """
-    words = _query_tokens(query)
-    if not words:
+    counts = _query_counts(query)
+    if not counts:
         return None
+    words = frozenset(counts)
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
-    for key_words, key_norm, cid in bundle.capability_tokens:
-        hit = key_words & words
+    for count_items, key_norm, cid in bundle.capability_tokens:
+        key_counts = _key_counter(count_items)
+        # Normalization intentionally ignores punctuation, but a normalized key
+        # may also be a prefix of a longer word ("video to videogame").  A
+        # repeated-word key is literal only when the query contains enough
+        # distinct word tokens to satisfy its multiplicity.
+        literal_hit = (
+            key_norm in literal and _contains_normalized_word_span(query, key_norm) and not (key_counts - counts)
+        )
+        query_counts = counts if literal_hit else Counter(words)
+        overlap = key_counts & query_counts
+        hit = sum(overlap.values())
         if not hit:
             continue
         context = len(bundle.capability_context.get(cid, frozenset()) & words)
-        missing = len(key_words) - len(hit)
+        missing = sum(key_counts.values()) - hit
         if missing and context <= missing:
             continue
-        score = (len(hit) / len(key_words), len(hit), len(key_norm) if key_norm in literal else 0, context)
+        # Distinct overlap breaks ties: repeating one generic word must not tie a
+        # specialist key that matched two different words.
+        score = (hit / (hit + missing), len(overlap), len(key_norm) if literal_hit else 0, context)
         if score > scored.get(cid, (0.0, 0, 0, 0)):
             scored[cid] = score
     if not scored:

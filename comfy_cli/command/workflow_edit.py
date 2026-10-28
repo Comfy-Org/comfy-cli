@@ -199,6 +199,14 @@ def add_node_cmd(
             "--allow-deprecated", show_default=False, help="Add the node even though the catalog marks it deprecated."
         ),
     ] = False,
+    text: Annotated[
+        str | None,
+        typer.Option(
+            "--text",
+            show_default=False,
+            help="Body text for a Note / MarkdownNote (annotation nodes; no catalog entry). Invalid for other classes.",
+        ),
+    ] = None,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -232,6 +240,7 @@ def add_node_cmd(
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
+            text=text,
         )
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
@@ -245,12 +254,16 @@ def add_node_cmd(
         # Same envelope shape as `nodes show` so a caller can self-correct from
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
-        if e.ui_only and e.class_type in workflow_ops.NOTE_NODE_TYPES:
-            hint = workflow_ops.note_insert_hint(e.class_type)
-        elif e.ui_only:
-            hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
+        if e.ui_only:
+            hint = (
+                "use a real node class; to annotate the graph, add a `Note` or `MarkdownNote` with --text "
+                "(the only UI-only classes this surface can mint)"
+            )
         elif e.subgraph_id:
-            hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
+            hint = (
+                "reuse the exact definition id from `comfy workflow ls-nodes <file>` only in the workflow that "
+                "already contains that definition and an instance, or pick a node class with `comfy nodes search <text>`"
+            )
         elif e.close_matches:
             hint = f"did you mean: {', '.join(e.close_matches)}?"
         else:
@@ -427,6 +440,42 @@ def connect_cmd(
 
 
 # ---------------------------------------------------------------------------
+# disconnect
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def disconnect_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    target: Annotated[str, typer.Argument(help="Target `<node_id>.<input_slot>` (slot name or index).")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
+):
+    renderer = get_renderer()
+    renderer.command = "workflow disconnect"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    graph = _graph_or_exit(input_path, host, port, renderer, where)
+    to_node, to_slot = _split_addr(target, renderer)
+    try:
+        workflow, op = workflow_ops.disconnect(
+            workflow, graph, to_node, to_slot, actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to inspect current links and input addresses",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow disconnect")
+
+
+# ---------------------------------------------------------------------------
 # delete
 # ---------------------------------------------------------------------------
 
@@ -434,7 +483,7 @@ def connect_cmd(
 @tracking.track_command("workflow")
 def delete_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    node: Annotated[str, typer.Argument(help="Node id to delete.")],
+    node: Annotated[str, typer.Argument(help="Node id or interior path to delete (for example 70/22).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -458,7 +507,9 @@ def delete_cmd(
             "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
-    _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete")
+    # `workflow delete-node`, matching renderer.command above and the error path.
+    # `workflow delete` is the unrelated cloud/local CRUD verb (workflow.py).
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete-node")
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +520,7 @@ def delete_cmd(
 @tracking.track_command("workflow")
 def delete_nodes_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    nodes: Annotated[list[str], typer.Argument(help="Node ids to delete (one or more).")],
+    nodes: Annotated[list[str], typer.Argument(help="Node ids or interior paths to delete (one or more).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -674,14 +725,23 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
+    from comfy_cli.cql.engine import _subgraph_defs_by_id
+
+    nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
+    node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
+    # Use the editor's exact id/legacy-name resolver. Reimplementing only part
+    # of its conflict analysis made listing disagree with path navigation.
+    definitions = workflow.get("definitions")
+    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    resolved_subgraphs = _subgraph_defs_by_id(workflow) if isinstance(raw_subgraphs, list) else {}
+    subgraph_ids = {node_type for node_type in node_types if node_type in resolved_subgraphs}
     rows = []
-    for n in workflow.get("nodes") or []:
-        if not isinstance(n, dict):
-            continue
+    for n in nodes:
+        properties = n.get("properties")
         row = {
             "id": n.get("id"),
             "type": n.get("type"),
-            "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
+            "title": n.get("title") or (properties.get("Node name for S&R") if isinstance(properties, dict) else None),
         }
         # ComfyUI disables a node without deleting it: mode 4 = bypass (input
         # passes through), mode 2 = mute/never (dropped from execution). Both are
@@ -689,30 +749,46 @@ def ls_nodes_cmd(
         # from a live one — and would "repair" a graph that is merely bypassed,
         # or call a workflow runnable while a required node is muted.
         # Emitted only when set, so a normal node stays a single clean row.
-        if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
+        mode = n.get("mode")
+        if (
+            isinstance(mode, int | float)
+            and not isinstance(mode, bool)
+            and (label := _MODE_LABELS.get(mode)) is not None
+        ):
             row["mode"] = label
         # A row's `type` reads like an addable class. Two kinds are not: a
         # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
         # instance, whose `type` is its definition uuid. Both stay listed (the
-        # graph must still be understood); the flag says `add-node` / `nodes
-        # show` cannot take that type. Only set when true, like `mode`.
+        # graph must still be understood); the flag distinguishes them from
+        # catalog classes. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
-            if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
-                row["ui_only"] = True
-            elif workflow_ops._UUID_RE.match(node_type):
+            if workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
                 row["subgraph"] = True
+            elif node_type in workflow_ops.UI_ONLY_NODE_TYPES:
+                row["ui_only"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():
         from rich.table import Table
+        from rich.text import Text
 
         tbl = Table(show_header=True, header_style="bold")
         tbl.add_column("id", no_wrap=True)
         tbl.add_column("type")
         tbl.add_column("title", style="dim")
+        tbl.add_column("state", style="yellow")
         for r in rows:
-            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""))
+            state = ", ".join(
+                value
+                for value in (
+                    r.get("mode"),
+                    "ui-only" if r.get("ui_only") else None,
+                    "subgraph" if r.get("subgraph") else None,
+                )
+                if value
+            )
+            tbl.add_row(Text(str(r["id"])), Text(str(r["type"])), Text(str(r["title"] or "")), state)
         renderer.console().print(tbl)
     renderer.emit(payload, command="workflow ls-nodes")
 

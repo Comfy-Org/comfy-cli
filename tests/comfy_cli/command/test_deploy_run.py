@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -191,7 +192,7 @@ def test_deploy_run_is_registered_with_the_complete_option_surface() -> None:
     } <= option_names("run")
 
 
-def test_deploy_tree_is_exactly_the_twelve_designed_commands() -> None:
+def test_deploy_tree_is_exactly_the_seventeen_designed_commands() -> None:
     # Given / When
     command = typer.main.get_command(deploy.app)
     assert hasattr(command, "commands"), command
@@ -200,6 +201,11 @@ def test_deploy_tree_is_exactly_the_twelve_designed_commands() -> None:
     # Then
     assert command_names == {
         "up",
+        "promote",
+        "rollback",
+        "rename",
+        "history",
+        "cancel",
         "status",
         "ls",
         "show",
@@ -507,3 +513,187 @@ def test_an_oversize_workflow_is_refused_after_its_assets_are_uploaded(
     message = str(error["message"])
     assert "nothing was sent" not in message
     assert "the job was not submitted, so no job was created" in message
+
+
+def test_the_release_version_the_gateway_names_is_printed_and_emitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    install_run(
+        monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient({**job(), "release_version": 7})
+    )
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+    pretty = invoke(workflow, "--deployment", "dep-id", "--no-wait", agentic=False)
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    data = envelope_data(agentic)
+    assert data["job"] == {"id": "job-1", "status": "queued", "releaseVersion": 7}
+    published_validator().validate(data)
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "Deployment job job-1 (release v7) is queued" in pretty.output
+
+
+def test_a_waited_run_names_the_release_version_of_the_finished_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    watched = JobWatchResult({**job("succeeded"), "release_version": 7}, [])
+    install_run(monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient(job()), watched=watched)
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id")
+    pretty = invoke(workflow, "--deployment", "dep-id", agentic=False)
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    data = envelope_data(agentic)
+    assert data["job"] == {"id": "job-1", "status": "succeeded", "releaseVersion": 7}
+    published_validator().validate(data)
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "Deployment job job-1 (release v7) is succeeded" in pretty.output
+
+
+def test_a_waited_run_keeps_the_submit_answers_version_when_the_finished_job_names_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    watched = JobWatchResult(job("succeeded"), [])
+    install_run(
+        monkeypatch,
+        FakeControl("https://dep-id.run.comfy.app"),
+        FakeJobClient({**job(), "release_version": 7}),
+        watched=watched,
+    )
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id")
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    assert envelope_data(agentic)["job"] == {"id": "job-1", "status": "succeeded", "releaseVersion": 7}
+
+
+@pytest.mark.parametrize("version", [None, "7", 7.5, True, 0])
+def test_a_missing_or_unusable_release_version_leaves_the_result_as_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: JsonValue,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    submitted = job() if version is None else {**job(), "release_version": version}
+    install_run(monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient(submitted))
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+    pretty = invoke(workflow, "--deployment", "dep-id", "--no-wait", agentic=False)
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    assert envelope_data(agentic)["job"] == {"id": "job-1", "status": "queued"}
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "Deployment job job-1 is queued" in pretty.output
+
+
+# --- the sign-in token expiring during a run ------------------------------------
+
+
+class _RotatingSignIn:
+    """The stored sign-in, whose token the test swaps as if it had been refreshed."""
+
+    def __init__(self) -> None:
+        self.token = "token-at-start"
+
+    def __call__(self, *, refresh=True, force=False, allow_clear=True):
+        return SimpleNamespace(access_token=self.token, base_url="https://cloud.comfy.org")
+
+
+@pytest.mark.parametrize("refreshes", [True, False], ids=["sign-in", "token-handed-directly"])
+def test_a_waited_run_reads_the_sign_in_afresh_after_submitting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refreshes: bool
+) -> None:
+    """Given a sign-in that rotates while the job runs, When the run waits and downloads,
+    Then the watch and the download carry the rotated token, not the one the run started with.
+
+    The token lasts fifteen minutes; a run that sent the starting token for the
+    whole job was refused (401) after the job succeeded, and lost its outputs.
+    A token the client was handed directly is never swapped.
+    """
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    output: JsonObject = {"node_id": "9", "name": "a.png", "type": "image", "id": "o-1", "url": "https://x"}
+    control = FakeControl("https://dep-id.run.comfy.app")
+    control.sign_in_base_url = "https://cloud.comfy.org" if refreshes else None  # type: ignore[attr-defined]
+    install_run(monkeypatch, control, FakeJobClient(job()))
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: None)
+    sign_in = _RotatingSignIn()
+    monkeypatch.setattr("comfy_cli.credentials.get_session", sign_in)
+    seen: dict[str, str] = {}
+
+    def watch(request, *_args, **_kwargs):
+        sign_in.token = "token-after-expiry"
+        seen["watch"] = request.current_target().auth_token
+        return JobWatchResult(job("succeeded", outputs=[output]), [output])
+
+    def download(request, _renderer):
+        seen["download"] = request.token.current()
+        return []
+
+    monkeypatch.setattr(deploy_run, "watch_job", watch)
+    monkeypatch.setattr(deploy_run, "download_job_outputs", download)
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id")
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    expected = "token-after-expiry" if refreshes else "cloud-secret"
+    assert seen == {"watch": expected, "download": expected}
+
+
+def test_an_unreadable_sign_in_at_cancel_still_cancels_with_the_token_the_run_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given a waited run interrupted while the sign-in store cannot be read,
+    When it cancels the job, Then it still sends the cancel and reports the interrupt."""
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    control = FakeControl("https://dep-id.run.comfy.app")
+    control.sign_in_base_url = "https://cloud.comfy.org"  # type: ignore[attr-defined]
+    install_run(monkeypatch, control, FakeJobClient(job()))
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: None)
+    store = {"readable": True}
+
+    def get_session(*, refresh=True, force=False, allow_clear=True):
+        if not store["readable"]:
+            raise OSError("auth store lock unavailable")
+        return SimpleNamespace(access_token="cloud-secret", base_url="https://cloud.comfy.org")
+
+    monkeypatch.setattr("comfy_cli.credentials.get_session", get_session)
+
+    def interrupted_watch(*_args, **_kwargs):
+        store["readable"] = False
+        raise KeyboardInterrupt
+
+    cancels: list[str | None] = []
+    monkeypatch.setattr(deploy_run, "watch_job", interrupted_watch)
+    monkeypatch.setattr(
+        deploy_run, "request_json", lambda _url, target, **_kwargs: cancels.append(target.auth_token) or (202, {})
+    )
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id")
+
+    # Then
+    assert result.exit_code == 130, result.stdout
+    assert cancels == ["cloud-secret"]
+    assert envelope_error(result)["details"] == {"job_id": "job-1", "cancel_requested": True}

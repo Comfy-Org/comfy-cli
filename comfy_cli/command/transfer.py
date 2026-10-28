@@ -20,13 +20,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import typer
 
 from comfy_cli import jobs_state
-from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
+from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries, extract_text_outputs
+from comfy_cli.credentials import DataPlaneToken
 from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 from comfy_cli.http import target_auth_headers as _auth_headers
@@ -799,6 +801,39 @@ def _download_one_url(
     return entry
 
 
+_FAILED_STATUSES = frozenset({"error", "failed", "cancelled", "canceled", "interrupted"})
+
+
+def _job_outcome(state: Any, record: Any) -> str | None:
+    """``"completed"``, ``"failed"``, or ``None`` when not known to have ended.
+
+    The fetched history record wins over the local state file, which can be
+    stale. Reads both status shapes the codebase sees (``status`` or
+    ``execution_status``; a dict with ``status_str``/``completed`` or a plain
+    string), as ``comfy_client._looks_done`` does.
+    """
+    if isinstance(record, dict):
+        status = record.get("status") or record.get("execution_status")
+        if isinstance(status, dict):
+            status_str = str(status.get("status_str") or "").lower()
+            if status_str in _FAILED_STATUSES:
+                return "failed"
+            if status_str == "success" or status.get("completed") is True:
+                return "completed"
+        elif isinstance(status, str):
+            lowered = status.lower()
+            if lowered in _FAILED_STATUSES:
+                return "failed"
+            if lowered in {"success", "completed"}:
+                return "completed"
+    local = getattr(state, "status", None)
+    if local == "completed":
+        return "completed"
+    if local in _FAILED_STATUSES:
+        return "failed"
+    return None
+
+
 def execute_download(
     prompt_id: str | None = None,
     *,
@@ -867,6 +902,16 @@ def execute_download(
         raise typer.Exit(code=1)
 
     target = resolve_target(where=where)
+    # The sign-in token expires fifteen minutes after it was minted, so a
+    # download of many outputs re-reads it before each one rather than sending
+    # the token the first file started with. Decided right after resolving, so
+    # the stored sign-in it is compared with is the one just read. An observer:
+    # a failed refresh must not clear the shared session.
+    sign_in = (
+        DataPlaneToken.for_target_token(target.auth_token, base_url=target.base_url, allow_clear=False)
+        if target.is_cloud and target.auth_token
+        else None
+    )
     # Stamp the routed target for direct callers (comfy-mcp); `cmdline.download`
     # already stamped its own before calling us, which is what gives the
     # stdin-parsing errors above a non-null `where` on the CLI path.
@@ -877,6 +922,7 @@ def execute_download(
     # `item_map` (when present) drive item-aware file naming below.
     state = jobs_state.read(prompt_id)
     output_urls: list[str] = []
+    record = None
 
     if piped_urls:
         output_urls = list(piped_urls)
@@ -911,12 +957,34 @@ def execute_download(
                 raise typer.Exit(code=1) from exc
 
     if not output_urls:
-        renderer.error(
-            code="download_no_outputs",
-            message=f"Job {prompt_id} has no outputs yet",
-            hint="wait for the job to complete before downloading",
-            details={"prompt_id": prompt_id},
-        )
+        # A job that has ENDED with nothing to fetch is not "not ready yet".
+        # Telling the caller to wait sends an agent into re-runs of a job that
+        # will never produce a file, and it reads the silence as an outage: the
+        # cloud agent told a user an audio service was down when its runs had
+        # completed with no new outputs. Same code, so callers matching on it
+        # keep working; the message, hint and details say which case this is.
+        outcome = _job_outcome(state, record)
+        text_nodes = extract_text_outputs(record) if isinstance(record, dict) else {}
+        if outcome == "completed" and text_nodes:
+            message = f"Job {prompt_id} completed with text output only — there are no files to download"
+            hint = f"read the text with `comfy jobs status {prompt_id}`"
+        elif outcome == "completed":
+            message = f"Job {prompt_id} completed but produced no output files"
+            hint = (
+                "waiting will not produce files. Check that the workflow has a save/preview node and look for an "
+                f"execution error with `comfy jobs status {prompt_id}`. If both are fine, nothing new ran because "
+                "the graph matched an earlier run; change an input or the seed to force a fresh run"
+            )
+        elif outcome == "failed":
+            message = f"Job {prompt_id} ended without completing, so it has no outputs"
+            hint = f"see why with `comfy jobs status {prompt_id}`, fix the cause, then run it again"
+        else:
+            message = f"Job {prompt_id} has no outputs yet"
+            hint = "wait for the job to complete before downloading"
+        error_details: dict[str, Any] = {"prompt_id": prompt_id}
+        if outcome is not None:
+            error_details["job_status"] = outcome
+        renderer.error(code="download_no_outputs", message=message, hint=hint, details=error_details)
         raise typer.Exit(code=1)
 
     # -- URL-only mode: emit URLs without downloading --------------------------
@@ -953,6 +1021,8 @@ def execute_download(
     is_local_job = state is not None and getattr(state, "where", None) == "local"
 
     for idx, url in enumerate(output_urls):
+        if idx and sign_in is not None:
+            auth_hdrs = _auth_headers(replace(target, auth_token=sign_in.current()))
         entry = _download_one_url(
             url,
             idx,

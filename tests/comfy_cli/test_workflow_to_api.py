@@ -121,6 +121,16 @@ def _node(node_id, node_type, *, inputs=None, outputs=None, widgets=None, mode=0
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("spec", [{"type": "STRING"}, 7, []])
+def test_named_widget_survives_non_sequence_input_spec(object_info, spec):
+    object_info["CLIPTextEncode"]["input"]["required"]["text"] = spec
+    workflow = {"nodes": [_node(1, "CLIPTextEncode", widgets={"text": "keep this text"})], "links": []}
+
+    prompt = convert_ui_to_api(workflow, object_info)
+
+    assert prompt["1"]["inputs"] == {"text": "keep this text"}
+
+
 class TestIsApiFormat:
     def test_recognizes_api(self):
         assert is_api_format({"1": {"class_type": "Foo", "inputs": {}}})
@@ -798,6 +808,31 @@ class TestMalformedInputHardening:
                     },
                 },
             ),
+            (
+                "subgraph_linkIds_scalar",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "11111111-2222-3333-4444-555555555555",
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ],
+                    "links": [],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": "11111111-2222-3333-4444-555555555555",
+                                "nodes": [],
+                                "links": [],
+                                "inputs": [{"name": "x", "linkIds": 1}],
+                                "outputs": [],
+                            }
+                        ]
+                    },
+                },
+            ),
         ]
         for _label, workflow in cases:
             # Should not raise — each malformed link is silently skipped.
@@ -900,6 +935,58 @@ class TestMalformedInputHardening:
         # Should not raise.
         convert_ui_to_api(workflow, object_info)
 
+    def test_overlay_accepts_scalar_definition_nodes_and_instance_inputs(self, object_info):
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": 1, "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [{"id": sg_uuid, "nodes": 1, "links": [], "inputs": []}]},
+        }
+
+        assert convert_ui_to_api(workflow, object_info) == {}
+
+    def test_definition_expansion_metrics_are_computed_once_per_definition(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {"id": sg_uuid, "nodes": [0, 0, 0], "links": [0, 0], "inputs": [], "outputs": []}
+        calls = 0
+        original = converter._definition_expansion_metrics
+
+        def counted(candidate):
+            nonlocal calls
+            calls += 1
+            return original(candidate)
+
+        monkeypatch.setattr(converter, "_definition_expansion_metrics", counted)
+        converter._expand_subgraphs(
+            [{"id": index, "type": sg_uuid, "inputs": [], "outputs": []} for index in range(20)],
+            [],
+            {sg_uuid: definition},
+        )
+
+        assert calls == 1
+
+    def test_promoted_overlay_has_one_per_conversion_visit_budget(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {
+            "id": sg_uuid,
+            "nodes": [{"id": 1, "type": "Foo"}, {"id": 2, "type": "Foo"}],
+            "links": [],
+            "inputs": [],
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": [], "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [definition]},
+        }
+        monkeypatch.setattr(converter, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 2)
+
+        with pytest.raises(WorkflowConversionError, match="overlay exceeded"):
+            converter._overlay_promoted_host_values({}, workflow, {sg_uuid: definition})
+
     def test_v3_combo_option_with_non_dict_inputs_keeps_node(self):
         # A V3 dynamic combo option whose ``inputs`` field is malformed
         # (string / list / etc., not the expected INPUT_TYPES-shaped dict)
@@ -938,6 +1025,45 @@ class TestMalformedInputHardening:
         # Node emitted, no crash, no silently-dropped node.
         assert result["1"]["class_type"] == "Foo"
         assert result["1"]["inputs"]["shape"] == "square"
+
+    def test_v3_combo_conversion_matches_server_boolean_numeric_equality(self):
+        object_info = {
+            "Foo": {
+                "input": {
+                    "required": {
+                        "shape": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": 1, "inputs": {"required": {"number": ["INT", {}]}}},
+                                    {"key": True, "inputs": {"required": {"boolean": ["INT", {}]}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["shape"]},
+                "output_node": True,
+                "display_name": "Foo",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "Foo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [True, 7],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"shape": True, "shape.number": 7}
 
     def test_malformed_schema_input_does_not_crash(self):
         # Several helpers do ``schema.get("input") or {}`` then ``.get(section)``.
@@ -996,6 +1122,22 @@ class TestMalformedInputHardening:
             }
             result = convert_ui_to_api(workflow, object_info)
             assert "1" in result
+
+    @pytest.mark.parametrize("bad_section", [None, [], "malformed"])
+    @pytest.mark.parametrize("valid_section", ["required", "optional"])
+    def test_widget_conversion_keeps_valid_sibling_section(self, object_info, bad_section, valid_section):
+        schema = object_info["EmptyLatentImage"]
+        fields = schema["input"]["required"]
+        schema["input"] = {
+            valid_section: fields,
+            "optional" if valid_section == "required" else "required": bad_section,
+        }
+        schema["input_order"] = {valid_section: ["width", "height", "batch_size"]}
+        workflow = {"nodes": [_node(1, "EmptyLatentImage", widgets=[640, 480, 2])], "links": []}
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"width": 640, "height": 480, "batch_size": 2}
 
     def test_single_bad_node_does_not_abort_conversion(self, object_info, caplog):
         # We can't easily induce _build_api_node to throw on real input, so
@@ -2873,6 +3015,19 @@ class TestLoad3DInjectedButtonSlots:
         )
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_current_advanced_variant_maps_without_legacy_buttons(self, object_info_3d):
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_truncated_legacy_advanced_variant_keeps_its_viewport_input(self, object_info_3d):
+        # A legacy save cut off after the button markers still describes a
+        # LOAD_3D slot; omitting viewport_state would leave a required input
+        # missing. The engine pads the same shape before a named edit.
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources"])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 1024, "height": 1024}
 
     def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
         # No model_file widget -> no injected buttons. Skipping three slots

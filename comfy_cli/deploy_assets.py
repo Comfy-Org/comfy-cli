@@ -10,11 +10,12 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Final
 
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.credentials import DataPlaneToken
 from comfy_cli.deploy_api_errors import DeployAPIError, assert_safe_deploy_url
 from comfy_cli.hashing import blake3_file
 from comfy_cli.http import (
@@ -177,10 +178,18 @@ def _invalid_response(operation: str, status: int) -> DeployAPIError:
 
 
 class DeployAssetClient:
-    def __init__(self, base_url: str, token: str) -> None:
+    def __init__(self, base_url: str, token: str | DataPlaneToken) -> None:
         resolved_url = base_url.rstrip("/")
         assert_safe_deploy_url(resolved_url, source="the deployment endpointUrl")
-        self.target = Target(kind="cloud", base_url=resolved_url, path_prefix="/api/v2", auth_token=token)
+        self._token = token
+        self._target = Target(kind="cloud", base_url=resolved_url, path_prefix="/api/v2")
+
+    @property
+    def target(self) -> Target:
+        """The endpoint with the bearer as of now: hashing and uploading many
+        inputs can outlast the sign-in token the run started with."""
+        token = self._token if isinstance(self._token, str) else self._token.current()
+        return replace(self._target, auth_token=token)
 
     def resolve_asset(self, request: AssetResolveRequest) -> AssetResolveResult:
         expected_hash = blake3_file(request.local_path)

@@ -1407,3 +1407,82 @@ class TestDownloadExtensionSanitized:
         result = transfer._sanitize_ext("." + "a" * 5000)
         assert len(result) <= transfer._MAX_EXT_LEN
         assert not self._has_control_bytes(result)
+
+
+class TestSignInTokenPerOutput:
+    """A download of many outputs outlives the sign-in token the first one started with.
+
+    The token lasts fifteen minutes, so when the download runs on the stored
+    sign-in each output after the first re-reads it (refreshing it near expiry).
+    A token injected through COMFY_CLOUD_AUTH_TOKEN, or a key, is sent unchanged
+    even with a sign-in stored beside it.
+    """
+
+    _BASE = "https://cloud.example.com"
+
+    class _StoredSignIn:
+        """Each refreshing read hands out the next token, as if it had just been refreshed."""
+
+        def __init__(self, base_url: str, first: str) -> None:
+            self.base_url = base_url
+            self.token = first
+            self.refreshing_reads: list[bool] = []
+
+        def __call__(self, *, refresh=True, force=False, allow_clear=True):
+            from types import SimpleNamespace
+
+            if refresh:
+                self.refreshing_reads.append(allow_clear)
+                self.token = f"t{len(self.refreshing_reads)}"
+            return SimpleNamespace(access_token=self.token, base_url=self.base_url)
+
+    def _download(self, target, stored, monkeypatch, tmp_path) -> list[str | None]:
+        sent: list[str | None] = []
+
+        def fake_open(req, timeout=None):
+            sent.append(req.get_header("Authorization") or req.get_header("X-api-key"))
+            return _FakeResp()
+
+        monkeypatch.setattr("comfy_cli.credentials.get_session", stored)
+        _write_state(target)
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=fake_open),
+        ):
+            transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+        return sent
+
+    def _target(self, token: str) -> Target:
+        return Target(kind="cloud", base_url=self._BASE, path_prefix="/api", auth_token=token)
+
+    def test_each_output_after_the_first_carries_the_freshly_read_sign_in(self, monkeypatch, tmp_path):
+        stored = self._StoredSignIn(self._BASE, "t0")
+
+        sent = self._download(self._target("t0"), stored, monkeypatch, tmp_path)
+
+        assert sent == ["Bearer t0", "Bearer t1", "Bearer t2", "Bearer t3"]
+        assert stored.refreshing_reads == [False, False, False]
+
+    def test_an_injected_token_is_sent_unchanged_beside_a_stored_sign_in(self, monkeypatch, tmp_path):
+        stored = self._StoredSignIn(self._BASE, "stored-sign-in")
+
+        sent = self._download(self._target("injected"), stored, monkeypatch, tmp_path)
+
+        assert sent == ["Bearer injected"] * 4
+        assert stored.refreshing_reads == []
+
+    def test_a_sign_in_to_another_environment_is_never_picked_up(self, monkeypatch, tmp_path):
+        stored = self._StoredSignIn("https://other.example.com", "t0")
+
+        sent = self._download(self._target("t0"), stored, monkeypatch, tmp_path)
+
+        assert sent == ["Bearer t0"] * 4
+
+    def test_a_key_is_sent_unchanged(self, fake_target, monkeypatch, tmp_path):
+        stored = self._StoredSignIn(self._BASE, "stored-sign-in")
+
+        sent = self._download(fake_target, stored, monkeypatch, tmp_path)
+
+        assert sent == ["test-api-key"] * 4
+        assert stored.refreshing_reads == []

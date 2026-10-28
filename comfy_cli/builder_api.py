@@ -116,7 +116,14 @@ class BuilderClient:
     ``X-API-Key``, via the shared authed HTTP path (HTTPS-enforced, no credential
     replay on redirect, response-size capped)."""
 
-    def __init__(self, base_url: str, token: str | None = None, *, api_key: Credential | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        token: str | None = None,
+        *,
+        api_key: Credential | None = None,
+        token_env_var: str = "COMFY_BUILDER_TOKEN",
+    ):
         # kind="cloud" is what makes the shared http layer attach the credential;
         # path_prefix carries the /v1 base so target.url("builds") is right.
         self.target = Target(
@@ -127,18 +134,27 @@ class BuilderClient:
             api_key=api_key.value if api_key is not None else None,
         )
         # Only a client built from the stored sign-in may swap its token; one
-        # handed a token (COMFY_BUILDER_TOKEN) or a key keeps it and lets a 401 surface.
+        # handed a token (COMFY_BUILDER_TOKEN, COMFY_CLOUD_AUTH_TOKEN) or a key keeps
+        # it and lets a 401 surface.
         self._refreshes_on_401 = False
         # What to replace once the builder refuses this client's credential.
         self._refused_hint = (
             credentials.refused_key_hint(api_key)
             if api_key is not None
-            else "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
+            else f"replace {token_env_var} with a fresh Cloud JWT"
         )
 
     @classmethod
     def from_credentials(cls, base_url: str) -> BuilderClient:
-        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        """Build a client from a credential handed in by env when one is set, else from the sign-in.
+
+        ``COMFY_CLOUD_AUTH_TOKEN``, then ``COMFY_CLOUD_API_KEY``, outrank the
+        stored sign-in, which is then not refreshed; the saved set-key key comes
+        only after the sign-in.
+        """
+        token = credentials.platform_env_token()
+        if token:
+            return cls(base_url, token, token_env_var=credentials.CLOUD_BEARER_ENV_VAR)
         key = credentials.platform_api_key()
         if key is None:
             try:
@@ -329,7 +345,10 @@ class BuilderClient:
         list ``versions``, so both spellings parse."""
         releases: list[dict] = []
         pages = cursor_pages(
-            lambda cursor: self._get(("builds", build_id, "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}),
+            # A Build id a person typed reaches here unchecked, so it goes as one segment.
+            lambda cursor: self._get(
+                ("builds", urllib.parse.quote(build_id, safe=""), "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}
+            ),
             "releases",
         )
         for page in pages:

@@ -844,15 +844,20 @@ def _resolve_template_models(wf: Any, input_path: str | None) -> dict[str, Any]:
     """
     if not isinstance(wf, dict) or not (input_path or os.environ.get("COMFY_OBJECT_INFO_FILE")):
         return {}
-    from comfy_cli.cql.engine import Graph
+    from comfy_cli.cql.engine import DynamicGroupBindingError, Graph
     from comfy_cli.cql.loader import resilient_load_object_info
-    from comfy_cli.model_variants import resolve_workflow_models
+    from comfy_cli.model_variants import ModelVariantResolutionError, resolve_workflow_models
 
     try:
         graph = Graph.from_object_info(resilient_load_object_info(input_path=input_path))
     except Exception as e:  # noqa: BLE001 — a missing catalog only skips the check
         return {"model_check_skipped": f"could not load object_info: {e}"}
-    subs, unavailable = resolve_workflow_models(wf, graph)
+    try:
+        subs, unavailable = resolve_workflow_models(wf, graph)
+    except DynamicGroupBindingError as e:
+        return {"model_check_skipped": f"could not bind saved widgets: {e}"}
+    except ModelVariantResolutionError as e:
+        return {"model_check_skipped": f"could not safely resolve promoted model widgets: {e}"}
     notes: dict[str, Any] = {}
     if subs:
         notes["model_substitutions"] = subs
@@ -1715,10 +1720,13 @@ def _workflow_node_types(workflow: Any) -> set[str]:
         return types
     if isinstance(workflow.get("nodes"), list):
         node_lists = [workflow.get("nodes") or []]
-        subgraphs = (workflow.get("definitions") or {}).get("subgraphs") or []
-        for sg in subgraphs:
-            if isinstance(sg, dict):
-                node_lists.append(sg.get("nodes") or [])
+        definitions = workflow.get("definitions")
+        subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+        if isinstance(subgraphs, list):
+            for sg in subgraphs:
+                sg_nodes = sg.get("nodes") if isinstance(sg, dict) else None
+                if isinstance(sg_nodes, list):
+                    node_lists.append(sg_nodes)
         for nodes in node_lists:
             for node in nodes:
                 if isinstance(node, dict) and isinstance(node.get("type"), str):

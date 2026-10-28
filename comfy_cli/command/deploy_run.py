@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import urllib.error
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -31,7 +31,7 @@ from comfy_cli.command.deploy_workflow import (
     resolve_asset_roots,
 )
 from comfy_cli.command.run.loader import WorkflowLoadError
-from comfy_cli.credentials import keyed_partner_credential, resolve_partner_credential
+from comfy_cli.credentials import DataPlaneToken, keyed_partner_credential, resolve_partner_credential
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.deploy_assets import DeployAssetClient
 from comfy_cli.deploy_download import (
@@ -85,6 +85,9 @@ class _RunResult:
         output_values: list[JsonValue] = [*self.outputs]
         deployment: JsonObject = {"id": self.deployment_id, "endpointUrl": self.endpoint_origin}
         job: JsonObject = {"id": required_string(self.job, "id"), "status": required_string(self.job, "status")}
+        release_version = _release_version(self.job)
+        if release_version is not None:
+            job["releaseVersion"] = release_version
         assets: JsonValue = self.assets.payload()
         metric_values: JsonValue = metrics
         return {
@@ -96,6 +99,29 @@ class _RunResult:
         }
 
 
+def _release_version(job: JsonObject) -> int | None:
+    """The version of the release that ran the job, when the gateway names a usable one.
+
+    A gateway older than the field, or one that could not look the version up, leaves
+    it out; the result then reads as it did before rather than failing the run.
+    """
+    value = job.get("release_version")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
+def _with_release_version(job: JsonObject, submitted: JsonObject) -> JsonObject:
+    """The finished job, naming the submit answer's release version where its own read named none.
+
+    A job's release never changes, so a version the final read could not look up
+    is still the one the submit answer named.
+    """
+    if _release_version(job) is not None or _release_version(submitted) is None:
+        return job
+    return {**job, "release_version": submitted["release_version"]}
+
+
 @dataclass(slots=True)
 class _RunState:
     """Mutable state exists only to make submission-aware SIGINT cancellation one-shot."""
@@ -103,6 +129,7 @@ class _RunState:
     job: JsonObject | None = None
     endpoint_origin: str | None = None
     target: Target | None = None
+    token: DataPlaneToken | None = None
     cancel_attempted: bool = False
 
 
@@ -126,7 +153,8 @@ def _cancel_once(state: _RunState, renderer: Renderer) -> None:
     state.cancel_attempted = True
     try:
         cancel_url = _job_link(state.job, "cancel", state.endpoint_origin)
-        request_json(cancel_url, state.target, method="POST", max_bytes=_MAX_CANCEL_JSON)
+        target = state.target if state.token is None else replace(state.target, auth_token=state.token.current())
+        request_json(cancel_url, target, method="POST", max_bytes=_MAX_CANCEL_JSON)
     except KeyboardInterrupt:
         raise
     except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError) as error:
@@ -153,8 +181,10 @@ def _emit_cancelled(renderer: Renderer, state: _RunState) -> None:
 def _emit_result(renderer: Renderer, result: _RunResult) -> None:
     payload = result.payload()
     if renderer.is_pretty():
+        job = payload["job"]
+        release = f" (release v{job['releaseVersion']})" if isinstance(job, dict) and "releaseVersion" in job else ""
         renderer.success(
-            f"Deployment job {required_string(result.job, 'id')} is {required_string(result.job, 'status')}"
+            f"Deployment job {required_string(result.job, 'id')}{release} is {required_string(result.job, 'status')}"
         )
     renderer.emit(payload, command="deploy run", changed=True)
 
@@ -205,18 +235,29 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         data_credential = api_key or candidate.target.auth_token
         if not isinstance(data_credential, str) or not data_credential:
             raise DeployAPIError("deploy_not_signed_in", "the control-plane client holds no credential")
+        # A sign-in token expires fifteen minutes after it was minted, so each
+        # step reads it afresh rather than carrying the one this run started
+        # with: a run in flight when it expired lost its job's result to a 401.
+        # A key never expires and is sent as is.
+        sign_in_base_url = None if api_key else getattr(candidate, "sign_in_base_url", None)
+        token = DataPlaneToken(
+            data_credential,
+            refreshes=isinstance(sign_in_base_url, str),
+            base_url=sign_in_base_url if isinstance(sign_in_base_url, str) else None,
+        )
         data_target = Target(kind="cloud", base_url=endpoint_origin, path_prefix="/api/v2", auth_token=data_credential)
         assets = resolve_assets(
             plan,
-            AssetResolveContext(DeployAssetClient(endpoint_origin, data_credential), renderer, not request.no_upload),
+            AssetResolveContext(DeployAssetClient(endpoint_origin, token), renderer, not request.no_upload),
         )
-        submitted = DeployJobClient(endpoint_origin, data_credential).submit_job(
+        submitted = DeployJobClient(endpoint_origin, token.current()).submit_job(
             JobSubmitRequest(assets.workflow, str(uuid.uuid4()), deployment_id, partner_credential),
             candidate,
         )
         state.job = submitted
         state.endpoint_origin = endpoint_origin
         state.target = data_target
+        state.token = token
         if not request.wait:
             _emit_result(renderer, _RunResult(deployment_id, endpoint_origin, submitted, assets, []))
             return
@@ -224,6 +265,7 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             data_target,
             _job_link(submitted, "self", endpoint_origin),
             _job_link(submitted, "events", endpoint_origin),
+            token,
         )
         watched = (
             watch_job(watch_request, JobEventCallbacks(), time.sleep)
@@ -232,10 +274,13 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         )
         _terminal_result(watched.job)
         outputs = download_job_outputs(
-            OutputDownloadRequest(tuple(watched.outputs), endpoint_origin, data_credential, request.output_dir),
+            OutputDownloadRequest(tuple(watched.outputs), endpoint_origin, token, request.output_dir),
             renderer,
         )
-        _emit_result(renderer, _RunResult(deployment_id, endpoint_origin, watched.job, assets, outputs))
+        _emit_result(
+            renderer,
+            _RunResult(deployment_id, endpoint_origin, _with_release_version(watched.job, submitted), assets, outputs),
+        )
     except KeyboardInterrupt as error:
         try:
             _cancel_once(state, renderer)
