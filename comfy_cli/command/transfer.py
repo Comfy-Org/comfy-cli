@@ -801,6 +801,18 @@ def _download_one_url(
     return entry
 
 
+def _job_finished(state: Any, record: Any) -> bool:
+    """True when the job is known to have completed successfully, from either
+    the local state file or the fetched history record."""
+    if state is not None and getattr(state, "status", None) == "completed":
+        return True
+    if isinstance(record, dict):
+        status = record.get("status")
+        if isinstance(status, dict) and (status.get("completed") is True or status.get("status_str") == "success"):
+            return True
+    return False
+
+
 def execute_download(
     prompt_id: str | None = None,
     *,
@@ -889,6 +901,7 @@ def execute_download(
     # `item_map` (when present) drive item-aware file naming below.
     state = jobs_state.read(prompt_id)
     output_urls: list[str] = []
+    record = None
 
     if piped_urls:
         output_urls = list(piped_urls)
@@ -923,12 +936,31 @@ def execute_download(
                 raise typer.Exit(code=1) from exc
 
     if not output_urls:
-        renderer.error(
-            code="download_no_outputs",
-            message=f"Job {prompt_id} has no outputs yet",
-            hint="wait for the job to complete before downloading",
-            details={"prompt_id": prompt_id},
-        )
+        # A job that FINISHED with nothing to fetch is not "not ready yet".
+        # Telling the caller to wait sends an agent into re-runs of a job that
+        # will never produce anything, and it reads the silence as an outage:
+        # the cloud agent told a user an audio service was down when its runs
+        # had completed with no new outputs (cached output nodes / no output
+        # node executed). Same code, so existing callers keep matching on it.
+        if _job_finished(state, record):
+            renderer.error(
+                code="download_no_outputs",
+                message=f"Job {prompt_id} completed but produced no outputs",
+                hint=(
+                    "nothing new was saved: no output node ran, or the outputs were served from cache "
+                    "because the graph matched an earlier run. Change an input or the seed to force a "
+                    f"fresh run, and check `comfy jobs status {prompt_id}` for an execution error. "
+                    "Waiting will not produce outputs."
+                ),
+                details={"prompt_id": prompt_id, "job_status": "completed"},
+            )
+        else:
+            renderer.error(
+                code="download_no_outputs",
+                message=f"Job {prompt_id} has no outputs yet",
+                hint="wait for the job to complete before downloading",
+                details={"prompt_id": prompt_id},
+            )
         raise typer.Exit(code=1)
 
     # -- URL-only mode: emit URLs without downloading --------------------------
