@@ -1479,7 +1479,8 @@ class TestResolvePartnerCredential:
         self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
 
-    def test_a_live_session_outranks_the_forwarded_bearer(self, monkeypatch: pytest.MonkeyPatch):
+    def test_the_forwarded_bearer_outranks_a_live_session(self, monkeypatch: pytest.MonkeyPatch):
+        """The token handed in for this run wins; the stored session is not even read."""
         monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1489,8 +1490,10 @@ class TestResolvePartnerCredential:
         session.access_token = "live-session"
         session.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: session)
-        assert _resolve_partner_credential() == ("auth_token_comfy_org", "live-session")
+        refreshed = []
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw) or session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+        assert refreshed == []
 
     def test_the_forwarded_bearer_outranks_the_cloud_api_key(self, monkeypatch: pytest.MonkeyPatch):
         """Same order the `purpose="cloud"` chain uses: bearer, then env key."""

@@ -1235,10 +1235,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "installed_versions_unavailable",
         "`comfy node deps` could not read the workspace venv's installed packages (`pip list --format=json` "
-        "failed, timed out, or returned unparseable output), so every parseable requirement is reported with "
+        "timed out, returned unparseable output, or exited non-zero and its `importlib.metadata` fallback "
+        "failed too), so every parseable requirement is reported with "
         '`status: "unknown"`. Surfaced in `data.warnings[]` (not as an error envelope) so the declared '
         "requirements are still reported.",
-        "check the workspace venv has pip (`comfy env`), then re-run",
+        "check the workspace interpreter runs (`comfy env`), then re-run",
     ),
     ErrorCode(
         "pack_read_error",
@@ -1658,6 +1659,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
         "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
         "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
+    ),
+    ErrorCode(
+        "deploy_editor_unchanged",
+        "`comfy deploy up --editor` or `--no-editor` reached a deployment whose editor server was not read as asked: "
+        "the latest answer that showed one had the other value, or none did, or the read to confirm it failed "
+        "(`details.read_error` says why). Whatever else `up` did stands (a create, a move, a start, a bounds edit), "
+        "so `data` carries the full payload and `changed` says whether it changed anything; `details.requested` is "
+        "the value asked for.",
+        "run the same `comfy deploy up` again; until it is confirmed the editor server may still be on, and billing",
     ),
     ErrorCode(
         "deploy_watch_lost",

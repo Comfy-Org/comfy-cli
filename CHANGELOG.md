@@ -27,6 +27,14 @@ history.
   with `changed: false`. A watching `up`, `promote` or `rollback` whose update
   a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
   release, rather than reading as failed.
+- `comfy deploy up --no-editor` makes or keeps a deployment without the CPU
+  server comfy-deploy runs beside it for the editor, for one only called
+  through the API; `--editor` turns it back on, and with neither nothing is
+  sent. A value comfy-deploy does not confirm, a failed read to confirm it
+  included, exits 1 with `deploy_editor_unchanged`, the rest of the result
+  kept. `comfy deploy ls`
+  shows each deployment's `editor` where comfy-deploy answers it, blank where
+  it does not.
 - `comfy deploy up --create --name staging` names the deployment it creates,
   and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
   A name outside comfy-deploy's rule is refused before any call
@@ -81,6 +89,13 @@ history.
   (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
   instance `path`. A link that crosses the subgraph boundary is still refused,
   and so is a link inside a definition shared by several instances.
+- `comfy workflow delete-node` and `delete-nodes` accept the interior paths
+  `workflow print` shows (`delete-node 70/2012`). They delete the node from its
+  subgraph definition with its interior links, and emit a `delete_node` op
+  carrying the instance `path`. A definition shared by several instances, or a
+  node that backs a promoted widget, is refused without writing. Replaying the
+  op needs a doc host on comfy-multi-player 0.3.12 or later: older appliers
+  ignore `path` and delete the top-level node with the same id.
 - `comfy workflow disconnect <file> <node>.<input>` removes an input link and
   emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
   autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
@@ -154,7 +169,11 @@ history.
 - `comfy workflow print` renders a graph with broken links instead of refusing
   it: the input prints `None`, the line is marked `BROKEN`, and a warning names
   the `connect` that repairs it. A stale row whose value already reaches the
-  node through another link is reported as a leftover.
+  node through another link is reported as a leftover. Recoverable stale
+  target slots and duplicate link rows now follow the same live-holder and
+  last-row-wins rules as workflow conversion, with warnings instead of losing
+  the graph; malformed and ambiguous promotion boundaries remain bounded and
+  fail closed.
 
 ### Fixed
 
@@ -640,7 +659,7 @@ history.
   the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
   a same-day torch release resolved ahead of its matching torchvision.
 - Promoted subgraph widgets are edited where the frontend reads them. The
-  frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
+  frontend (ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted widget's value on the HOST instance
   (`widgets_values` positional over the widget-backed subgraph inputs) and
   runs that value over the interior default; `set-widget 57.width` used to
   follow the legacy `proxyWidgets` route into the interior node, so the edit
