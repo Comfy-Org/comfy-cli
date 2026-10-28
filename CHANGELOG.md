@@ -17,6 +17,18 @@ history.
 
 ### Added
 
+- `comfy run --output-node-ids 9,12` (repeatable) runs only the named output
+  nodes and the nodes they depend on, locally and with `--where cloud` (sent to
+  `/prompt` as `partial_execution_targets`). Ids that are not in the workflow,
+  or (when the node catalog is available) are not output nodes, fail with
+  `invalid_output_node_ids` before submit, `--print-prompt` included. Preflight
+  validation and the local partner-credential check cover only the nodes that
+  run. The `--allow-spend` gate still covers the whole submitted workflow,
+  because a server that ignores the targets runs every branch.
+  The cloud `partial_execution` warning counts only the targeted nodes, and
+  `partial_execution_targets_ignored` warns when the server ran untargeted
+  nodes anyway. Without the flag the request is unchanged.
+
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
