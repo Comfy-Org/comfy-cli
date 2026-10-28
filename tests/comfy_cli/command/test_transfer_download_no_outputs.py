@@ -76,16 +76,37 @@ def test_completed_job_with_no_outputs_does_not_say_wait(fake_target, capsys):
     _write_state(fake_target, "completed")
     err = _download_error(fake_target, capsys, {"status": {"completed": True, "status_str": "success"}, "outputs": {}})
     assert err["code"] == "download_no_outputs"
-    assert "completed but produced no outputs" in err["message"]
+    assert "completed but produced no output files" in err["message"]
     assert "wait for the job" not in err["hint"]
-    assert "Waiting will not produce outputs" in err["hint"]
+    assert err["hint"].startswith("waiting will not produce files")
     assert err["details"]["job_status"] == "completed"
 
 
 def test_history_record_alone_marks_the_job_finished(fake_target, capsys):
-    # No local state file: the fetched history record is the only witness.
-    err = _download_error(fake_target, capsys, {"status": {"completed": True, "status_str": "success"}, "outputs": {}})
-    assert "completed but produced no outputs" in err["message"]
+    err = _download_error(fake_target, capsys, {"execution_status": "success", "outputs": {}})
+    assert "completed but produced no output files" in err["message"]
+
+
+def test_fetched_record_wins_over_a_stale_state_file(fake_target, capsys):
+    _write_state(fake_target, "completed")
+    err = _download_error(fake_target, capsys, {"status": {"status_str": "error"}, "outputs": {}})
+    assert "ended without completing" in err["message"]
+    assert err["details"]["job_status"] == "failed"
+
+
+def test_failed_job_does_not_say_wait(fake_target, capsys):
+    _write_state(fake_target, "error")
+    err = _download_error(fake_target, capsys, None)
+    assert "ended without completing" in err["message"]
+    assert "wait" not in err["hint"]
+
+
+def test_text_only_job_says_there_is_nothing_to_download(fake_target, capsys):
+    _write_state(fake_target, "completed")
+    record = {"status": {"completed": True, "status_str": "success"}, "outputs": {"7": {"text": ["a caption"]}}}
+    err = _download_error(fake_target, capsys, record)
+    assert "text output only" in err["message"]
+    assert "comfy jobs status" in err["hint"]
 
 
 def test_running_job_still_says_wait(fake_target, capsys):
@@ -94,3 +115,4 @@ def test_running_job_still_says_wait(fake_target, capsys):
     assert err["code"] == "download_no_outputs"
     assert err["message"].endswith("has no outputs yet")
     assert err["hint"] == "wait for the job to complete before downloading"
+    assert "job_status" not in err["details"]
