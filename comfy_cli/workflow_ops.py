@@ -1473,7 +1473,7 @@ def _set_widget_impl(
             f"delete it and add a new one"
         )
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
-    idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"))  # raises on unknown name
+    idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"), node=node)  # raises on unknown name
     value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets)
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value, widgets)  # raises on shape/catalog mismatch
@@ -4474,11 +4474,28 @@ def _other_option_widget_error(
     )
 
 
-def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, node_id: Any = None) -> int:
-    # Node-aware: expand a dynamic combo's sub-widgets by this node's actual
-    # selected key (from ``widgets_values``), not the schema's first key, so the
-    # index stays aligned to ``widgets_values`` for the node's real selection.
-    order = graph.widget_order_for_node(class_type, widgets_values)
+def _widget_index(
+    graph,
+    class_type: str,
+    widget: str,
+    widgets_values=None,
+    *,
+    node_id: Any = None,
+    node: dict | None = None,
+) -> int:
+    # Node-aware twice over. The dynamic combo's sub-widgets expand by this
+    # node's actual selected key (from ``widgets_values``) rather than the
+    # schema's first key, AND in the order the node was SAVED with when it
+    # records one (``inputs[].widget`` markers). The second part matters because
+    # ``widgets_values`` is positional against the save's layout: an option that
+    # has since gained a sub-input shifts every later slot, and the write then
+    # lands on a neighbour. On a pre-``auto_upscale`` Seedance save that meant
+    # ``set-widget seed`` overwrote the seed's ``control_after_generate`` marker
+    # and left the seed itself alone.
+    from comfy_cli.cql import engine as _eng  # lazy: engine imports this module at load time
+
+    saved_names = _eng.saved_widget_order(node)
+    order = graph.widget_order_for_node(class_type, widgets_values, saved_names)
     # A frontend-injected slot (``upload``/``audioUI``/``PREVIEW_3D`` ``image``)
     # sits in ``order`` — it owns a position — but has no schema port to
     # validate against and ``slots`` never advertises it; refuse it by name so
@@ -4486,13 +4503,13 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, n
     # unadvertised but stays writable (it carries a real user value).
     if widget in graph.frontend_injected_widget_names(class_type):
         raise frontend_injected_widget_error(
-            class_type, widget, graph.editable_widget_names(class_type, widgets_values)
+            class_type, widget, graph.editable_widget_names(class_type, widgets_values, saved_names)
         )
     if widget not in order:
         other = _other_option_widget_error(graph, class_type, widget, order, widgets_values, node_id)
         if other is not None:
             raise other
-        avail = graph.editable_widget_names(class_type, widgets_values)
+        avail = graph.editable_widget_names(class_type, widgets_values, saved_names)
         socket = _link_input_note(graph, class_type, widget)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "

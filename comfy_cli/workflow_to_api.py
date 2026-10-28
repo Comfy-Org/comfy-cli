@@ -36,6 +36,10 @@ from comfy_cli.cql.engine import (
     _SubgraphDefs,
     _validate_dynamic_group_layout,
     _validate_dynamic_group_schema,
+    saved_sub_order,
+)
+from comfy_cli.cql.engine import (
+    saved_widget_order as _saved_widget_order,
 )
 
 logger = logging.getLogger(__name__)
@@ -2095,68 +2099,27 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
 def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
     """Expand a dynamic combo's selected sub-inputs in the order the SAVE recorded.
 
-    A ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option contributes its
-    sub-inputs as contiguous ``widgets_values`` slots right after the selector
-    (``dynamicComboWidget.updateWidgets`` -> ``addNodeInput``), and the saved
-    graph names them on its ``inputs[]`` entries, dotted and in that order:
-    ``model.prompt``, ``model.resolution``, ``model.auto_downscale``, ... The
-    option's sub-input list in today's catalog is only today's layout.
+    Thin adapter over :func:`comfy_cli.cql.engine.saved_sub_order`, which is the
+    one implementation of this rule. The edit path (``_write_widget``, the order
+    ``set-widget`` indexes by) resolves through the same function, because the
+    two resolved it independently and disagreed: on a Seedance save made before
+    its option gained ``auto_upscale``, conversion read the seed from one slot
+    while an edit wrote to the next one along, clobbering the seed's
+    ``control_after_generate`` marker.
 
-    ``ByteDance2ReferenceNode`` (Seedance 2.0) gained an OPTIONAL
-    ``auto_upscale`` after ``auto_downscale``. Expanding the current option
-    shifted every later slot by one, so the seed landed on
-    ``model.auto_upscale`` and the seed's ``control_after_generate`` marker
-    landed on ``seed`` — ten of the public Comfy Hub workflows in the 2026-10
-    conversion audit. Ordering by the saved names puts each value back, and a
-    sub the save never named owns no slot, which is what the frontend does with
-    a widget the node does not have.
-
-    Unlike a node's top-level ``inputs[]``, this order is trustworthy: the
-    frontend splices an option's sub-widgets in contiguously when the selector
-    changes, so their relative order is the option's own, not an artifact of
-    when each socket happened to be created.
-
-    Conservative in both directions. If the save names a dotted sub the current
-    option no longer declares, the two layouts disagree in a way this cannot
-    reconcile and ``subs`` is returned unchanged rather than guessed at. Same
-    when the save records no dotted names for this parent, so a graph without
-    the markers expands exactly as before. A repeated name is taken once, at its
-    first position.
+    A sub the save did not name owns no ``widgets_values`` slot. Connection-only
+    subs own none either way, so they are carried through to keep the emitted
+    input set identical to the unordered expansion.
     """
-    if not isinstance(node, dict) or not subs:
+    if not subs:
         return subs
-    raw_inputs = node.get("inputs")
-    if not isinstance(raw_inputs, list):
+    order = saved_sub_order(_saved_widget_order(node), parent, [name for name, _spec in subs])
+    if order is None:
         return subs
     by_name = dict(subs)
-    prefix = f"{parent}."
-    saved: list[tuple[str, Any]] = []
-    seen: set[str] = set()
-    for inp in raw_inputs:
-        if not isinstance(inp, dict) or not inp.get("widget"):
-            continue
-        name = inp.get("name")
-        if not isinstance(name, str) or not name.startswith(prefix) or name in seen:
-            continue
-        if name not in by_name:
-            # A DESCENDANT of a nested selector among these subs
-            # (``model.variant.width`` under ``model.variant``). It is not this
-            # level's slot, and the recursive ``consume`` orders it with the
-            # nested selector as its own parent, so skip it rather than
-            # abandoning the saved order for every sibling at this level.
-            head = name[len(prefix) :].split(".", 1)[0]
-            if f"{prefix}{head}" in by_name:
-                continue
-            # A sub this option no longer declares at all: the layouts disagree
-            # beyond repair from here.
-            return subs
-        seen.add(name)
-        saved.append((name, by_name[name]))
-    if not saved:
-        return subs
-    # Connection-only subs own no slot either way, so carrying them through
-    # keeps the emitted input set identical to the unordered expansion.
-    return saved + [(n, sp) for n, sp in subs if n not in seen and not _is_widget_input(sp)[0]]
+    kept = [(name, by_name[name]) for name in order if name in by_name]
+    named = set(order)
+    return kept + [(n, sp) for n, sp in subs if n not in named and not _is_widget_input(sp)[0]]
 
 
 def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | None]:
