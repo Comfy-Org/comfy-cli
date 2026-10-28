@@ -15,6 +15,19 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
+  the order the workflow was SAVED with, when the saved graph records one,
+  instead of the option's current order. An option that has since gained a
+  sub-input shifted every later slot by one, and once the alignment was off the
+  `control_after_generate` marker was consumed as a real value too — a
+  Seedance 2.0 graph converted with `model.auto_upscale` holding the seed and
+  `seed` holding `"randomize"`. `validate` catches the seed type but not the
+  boolean, so fixing only the seed still submitted the wrong graph. A sub-input
+  the save never carried now takes no slot, and a save that names one the
+  option no longer declares falls back to the current expansion untouched.
+
 ### Added
 
 - `comfy run --output-node-ids 9,12` (repeatable) runs only the named output
