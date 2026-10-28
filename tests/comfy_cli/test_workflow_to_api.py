@@ -3168,6 +3168,31 @@ class TestSocketlessInputAbsentFromASavedWorkflow:
 
 
 class TestRecordWidgetValues:
+    def test_curve_editor_preserves_a_saved_non_default_curve(self):
+        # Match the public socketless CURVE spec; this is a bounded fixture,
+        # not a replay of the four-node oracle workflow.
+        curve = {"interpolation": "monotone_cubic", "points": [[0, 0], [0.389, 0.526], [0.735, 0.449], [1, 1]]}
+        object_info = {
+            "CurveEditor": {
+                "input": {
+                    "required": {
+                        "curve": [
+                            "CURVE",
+                            {
+                                "default": {"interpolation": "linear", "points": [[0.0, 0.0], [1.0, 1.0]]},
+                                "socketless": True,
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["curve"]},
+                "output": ["CURVE"],
+            }
+        }
+        ui = {"nodes": [_node(1, "CurveEditor", widgets=[curve])], "links": []}
+
+        assert convert_ui_to_api(ui, object_info)["1"]["inputs"]["curve"] == curve
+
     @pytest.mark.parametrize("trailer", [[], [0, 0, 512, 512]])
     def test_image_crop_region_is_not_replaced_by_the_default(self, trailer):
         region = {"x": 0, "y": 0, "width": 1669, "height": 2688}
