@@ -27,6 +27,7 @@ from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
 from comfy_cli.command.deploy_types import (
     ComputeRequiredError,
     DeployUpClient,
+    EditorCheck,
     MoveResult,
     UpRequest,
     UpResult,
@@ -230,6 +231,7 @@ def _create_live_deployment(
                 compute,
                 idempotency_key=key,
                 name=request.name,
+                editor=request.editor,
             )
         except DeployAPIError as error:
             # Concurrent creates in the Build took the default name, and comfy-deploy
@@ -268,6 +270,33 @@ def _create_live_deployment(
         # server-side CAS or delete-intent change and is deliberately out of scope.
         return snapshot
     raise AssertionError("bounded create loop exhausted without returning or raising")
+
+
+def _editor_check(requested: bool | None, answer: JsonObject, *, turns: bool = False) -> EditorCheck | None:
+    """`--editor/--no-editor` as asked, judged by the answer to the request that carried it."""
+    return None if requested is None else EditorCheck(requested, turns=turns).observe(answer)
+
+
+def _confirmed_editor(client: DeployUpClient, deployment_id: str, check: EditorCheck | None) -> EditorCheck | None:
+    """``check`` read again where the answer did not show the value asked for, the other value or none.
+
+    The request it rode on is already accepted, so the read only confirms: one
+    that fails leaves the value unconfirmed, saying why, and the change as made.
+    """
+    if check is None or check.held:
+        return check
+    try:
+        return check.observe(client.get_deployment(deployment_id))
+    except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
+        return replace(check, read_error=str(error))
+
+
+def observe_editor(result: UpResult, answer: JsonObject) -> UpResult:
+    """``result`` with the editor value a later answer shows: the latest read that shows one decides."""
+    if result.editor is None:
+        return result
+    editor = result.editor.observe(answer)
+    return replace(result, editor=editor, changed=result.changed or editor.made)
 
 
 def _deployment_holding_name(request: UpRequest, candidates: list[JsonObject]) -> UpRequest:
@@ -528,7 +557,7 @@ def _move(
             hint="drop --no-watch, or run `comfy deploy scale` once the update lands",
         )
     previous = _release_of(builder, releases, _required_string(target, "releaseId"))
-    moved = client.move_deployment(deployment_id, base_revision, release_id)
+    moved = client.move_deployment(deployment_id, base_revision, release_id, editor=request.editor)
     changed = _move_changed(moved, base_revision, release_id, previous["id"])
     result = UpResult(
         moved,
@@ -539,7 +568,10 @@ def _move(
         changed,
         previous_release=previous,
         pending_bounds=pending_bounds,
+        editor=_editor_check(request.editor, moved),
     )
+    # The move is taken and kept as answered; the read after it only confirms the editor.
+    result = replace(result, editor=_confirmed_editor(client, deployment_id, result.editor))
     # The service answers at the same revision when the deployment already
     # serves the release, so there is nothing to wait for before the bounds.
     if changed:
@@ -557,7 +589,7 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, o
     deployment_id = _required_string(watched, "id")
     raise_unless_landed(watched, result.release, result.previous_release or {}, outcomes)
     bounds = result.pending_bounds
-    result = replace(result, deployment=watched, pending_bounds=None)
+    result = observe_editor(replace(result, deployment=watched, pending_bounds=None), watched)
     if bounds is None:
         return result
     try:
@@ -576,7 +608,31 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject, o
         live = result.compute_config
         dropped = tuple(flag for flag, key in (("--min", "min"), ("--max", "max")) if bounds.get(key) != live.get(key))
         return replace(result, dropped_bounds=dropped)
-    return replace(result, deployment=updated, compute_config=bounds)
+    return observe_editor(replace(result, deployment=updated, compute_config=bounds), updated)
+
+
+def _after_editor_edit(
+    error: DeployAPIError | ResponseTooLarge | OSError | http.client.HTTPException,
+    deployment_id: str,
+    editor: bool,
+    what: str,
+) -> Exception:
+    """``error`` from the request after an editor edit that was made, saying the edit was made.
+
+    The editor server bills apart from the workers, so a failure after it
+    never leaves the change unsaid, refused or not: `up` fails as it would
+    have without the flag. A dropped connection or cut-short answer, which the
+    client does not map, still ends as the crash it was, its type named.
+    """
+    turned = "on" if editor else "off"
+    said = f"the editor server was turned {turned} for deployment {deployment_id}, but {what} failed"
+    if isinstance(error, DeployAPIError):
+        return DeployAPIError(
+            error.code, f"{said}: {error}", status=error.status, details=error.details, hint=error.hint
+        )
+    if isinstance(error, ResponseTooLarge):
+        return ResponseTooLarge(f"{said}: {error}")
+    return RuntimeError(f"{said}: {type(error).__name__}: {error}")
 
 
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
@@ -643,7 +699,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         estimate = _deploy_estimate(client, release_id, compute)
         made = _deployments_made(deployments, releases)
         snapshot = _create_live_deployment(client, request, compute, deployments, made)
-        return UpResult(
+        result = UpResult(
             snapshot,
             _release_summary(request.release),
             compute,
@@ -652,23 +708,54 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             True,
             estimate=estimate,
             requested_name=request.name,
+            # A replay of the key answers with the deployment it made, editor as it has it.
+            editor=_editor_check(request.editor, snapshot),
         )
+        return replace(result, editor=_confirmed_editor(client, _required_string(snapshot, "id"), result.editor))
 
     compute = _compute_config(existing)
     _refuse_compute_change(request, existing, compute)
     deployment_id = _required_string(existing, "id")
     status = _required_string(existing, "status")
     dropped = _dropped_bounds(request, compute)
+    # No move here to carry it, and comfy-deploy refuses `editor` beside a
+    # compute edit, so it goes alone: no new running copy, no compute touched.
+    check: EditorCheck | None = None
+    if request.editor is not None:
+        before = existing.get("editor")
+        if not isinstance(before, bool):
+            # comfy-deploy's list answers no `editor`, and a value not known is
+            # no value: the change is judged against a read of the deployment.
+            before = client.get_deployment(deployment_id).get("editor")
+        existing = client.set_deployment_editor(deployment_id, request.editor)
+        turns = before is not request.editor
+        check = _confirmed_editor(client, deployment_id, _editor_check(request.editor, existing, turns=turns))
+    edited = check is not None and check.made
+    release = _release_summary(request.release)
+    # ``check`` has read the edit's answer and any read after it, so only an
+    # answer to a request made after them is observed on top.
     if status in {"stopped", "failed"}:
-        started = client.start_deployment(deployment_id)
-        return UpResult(started, _release_summary(request.release), compute, supersedes, False, True, dropped)
+        try:
+            started = client.start_deployment(deployment_id)
+        except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
+            if not edited:
+                raise
+            raise _after_editor_edit(error, deployment_id, request.editor, "the start") from error
+        return observe_editor(
+            UpResult(started, release, compute, supersedes, False, True, dropped, editor=check), started
+        )
     if status == "stop_failed":
-        return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False, dropped)
+        return UpResult(existing, release, compute, supersedes, False, edited, dropped, editor=check)
     desired = _merged_bounds(request, compute)
     if desired != compute:
-        updated = client.update_deployment(deployment_id, desired)
-        return UpResult(updated, _release_summary(request.release), desired, supersedes, False, True)
-    return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False)
+        try:
+            updated = client.update_deployment(deployment_id, desired)
+        except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
+            if not edited:
+                raise
+            raise _after_editor_edit(error, deployment_id, request.editor, "the --min/--max edit") from error
+        return observe_editor(UpResult(updated, release, desired, supersedes, False, True, editor=check), updated)
+    return UpResult(existing, release, compute, supersedes, False, edited, editor=check)
 
 
 def move_line(result: UpResult, deployment_id: str) -> str | None:
@@ -746,6 +833,7 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             "or use its id wherever a command takes a deployment",
         )
     warn_status(renderer, deployment_id, status, watch=watch)
+    editor_error = _editor_error(renderer, deployment_id, result.editor)
     if result.dropped_bounds:
         joined = " and ".join(result.dropped_bounds)
         renderer.warn(
@@ -769,12 +857,30 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             hint=f"run `comfy deploy stop --deployment {old_id}` if you no longer need it",
         )
     terminal = ends_terminal(result.deployment, status, moving=result.previous_release is not None)
-    renderer.emit(
-        result.payload(),
-        command="deploy up",
-        changed=result.changed,
-        ok=not terminal,
-        error=terminal_status_error(deployment_id, status) if terminal else None,
-    )
-    if terminal:
+    error = terminal_status_error(deployment_id, status) if terminal else editor_error
+    renderer.emit(result.payload(), command="deploy up", changed=result.changed, ok=error is None, error=error)
+    if error is not None:
         raise typer.Exit(code=1)
+
+
+def _editor_error(renderer, deployment_id: str, check: EditorCheck | None) -> JsonObject | None:
+    """Warn of an `--editor/--no-editor` value the deployment was not read holding, and return the error block saying so.
+
+    What else `up` did stands, so ``data`` still carries the whole payload.
+    """
+    if check is None or check.held:
+        return None
+    requested = check.requested
+    flag = "--editor" if requested else "--no-editor"
+    unconfirmed = (
+        f"comfy-deploy did not confirm {flag} on deployment {deployment_id}"
+        if check.read_error is None
+        else f"the read to confirm {flag} on deployment {deployment_id} failed ({check.read_error})"
+    )
+    message = f"{unconfirmed}; its editor server may still be {'off' if requested else 'on'}"
+    hint = f"run `comfy deploy up --deployment {deployment_id} {flag}` again"
+    renderer.warn(f"{message}.", hint=hint)
+    details: JsonObject = {"deployment_id": deployment_id, "requested": requested}
+    if check.read_error is not None:
+        details["read_error"] = check.read_error
+    return {"code": "deploy_editor_unchanged", "message": message, "hint": hint, "details": details}
