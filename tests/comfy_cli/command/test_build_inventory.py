@@ -266,6 +266,40 @@ def test_desktop_inventory_settings_only_modern_registry_is_supported(tmp_path, 
     assert warning is None
 
 
+@pytest.mark.parametrize("value", ["/not-a-model-root", {"/": "models"}, True, False, 1, 0, {}])
+def test_desktop_inventory_settings_only_rejects_non_list_model_roots(tmp_path, monkeypatch, value):
+    from comfy_cli import desktop_install
+    from comfy_cli.command.build import _desktop_model_roots
+
+    app = tmp_path / "desktop-settings"
+    app.mkdir()
+    (app / "settings.json").write_text(json.dumps({"modelsDirs": value}))
+    monkeypatch.setattr(desktop_install, "app_data_dirs", lambda: (app,))
+
+    roots, warning = _desktop_model_roots()
+
+    assert roots == []
+    assert "modelsDirs must be a list" in warning
+    assert "--models-root" in warning
+
+
+def test_desktop_inventory_settings_only_ignores_empty_and_non_string_roots(tmp_path, monkeypatch):
+    from comfy_cli import desktop_install
+    from comfy_cli.command.build import _desktop_model_roots
+
+    app = tmp_path / "desktop-settings"
+    app.mkdir()
+    models = tmp_path / "models"
+    models.mkdir()
+    (app / "settings.json").write_text(json.dumps({"modelsDirs": ["", None, 7, str(models)]}))
+    monkeypatch.setattr(desktop_install, "app_data_dirs", lambda: (app,))
+
+    roots, warning = _desktop_model_roots()
+
+    assert roots == [str(models)]
+    assert warning is None
+
+
 def test_desktop_inventory_plans_only_referenced_file_from_effective_output_root(tmp_path, monkeypatch):
     from comfy_cli import desktop_install
 

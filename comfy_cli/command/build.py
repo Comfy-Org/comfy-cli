@@ -3570,10 +3570,12 @@ def _desktop_model_roots(server_stats: dict[str, Any] | None = None) -> tuple[li
     if len(settings) != 1 or server_stats is not None:
         return [], "--desktop: cannot identify one Desktop model library; pass each verified folder with --models-root"
     try:
-        dirs = json.loads(settings[0].read_text(encoding="utf-8")).get("modelsDirs") or []
+        dirs = json.loads(settings[0].read_text(encoding="utf-8")).get("modelsDirs")
     except (OSError, ValueError, AttributeError) as error:
         return [], f"--desktop: could not read {settings[0]}: {error}"
-    return [d for d in dirs if isinstance(d, str)], None
+    if dirs is not None and not isinstance(dirs, list):
+        return [], f"--desktop: {settings[0]}: modelsDirs must be a list; pass each verified folder with --models-root"
+    return desktop_install._str_list(dirs), None
 
 
 @app.command(
