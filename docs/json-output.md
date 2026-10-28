@@ -1,5 +1,8 @@
 # `comfy run --json`: Machine-Readable Output (NDJSON)
 
+The accepted architecture for machine-readable output is recorded in
+[ADR-AUTOMATION-0003](adr/AUTOMATION-0003-one-versioned-machine-output-dialect.md).
+
 > **Dialect change (breaking).** The legacy `{"event": …, "schema_version": 1,
 > "error": {"kind": …}}` dialect was removed; `comfy run --json` now emits the
 > CLI-wide renderer stream. Every event line carries `schema: "event/1"` and a

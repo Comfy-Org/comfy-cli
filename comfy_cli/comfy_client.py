@@ -175,7 +175,12 @@ class Client:
         if self.target.api_key:
             return False
 
-        from comfy_cli.credentials import get_session
+        from comfy_cli.credentials import env_credential, get_session
+
+        # A token handed in by env is what was refused; the stored sign-in was
+        # never used, so it is not refreshed (or rewritten) on this token's behalf.
+        if env_credential("cloud") is not None:
+            return False
 
         old_token = self.target.auth_token
         # Was there a stored OAuth session backing this token? If not (e.g. a
