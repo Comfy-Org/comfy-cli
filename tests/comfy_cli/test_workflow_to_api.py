@@ -2854,6 +2854,108 @@ class TestSubgraphExpansion:
         assert result["100:50"]["inputs"]["images"] == ["7", 0]
 
 
+class TestAbsentOptionalWidgetsAreNotSynthesized:
+    """An optional widget the SAVED NODE never carried is omitted, not defaulted.
+
+    ``graphToPrompt()`` serializes the widgets a node actually has, so a widget
+    the node did not carry is absent from its prompt. The evidence that it did
+    not carry one is the node's own ``inputs[]`` marker list, not the length of
+    ``widgets_values``: a truncated save whose later widgets ran past the end
+    still HAS those widgets, and the frontend sends their defaults.
+
+    Ground truth is the ``03_video_wan2_2_14B_i2v_subgraphed`` oracle fixture in
+    ``comfy-cloud-mcp-server``. Its ``CreateVideo`` saves
+    ``widgets_values: [16]`` AND ``inputs: [images, audio, fps{widget}]`` — one
+    widget-flagged entry naming ``fps`` — and the golden holds exactly
+    ``{"fps": 16, "images": [...]}`` while today's object_info also declares
+    optional ``bit_depth`` / ``color_space`` / ``codec``.
+    """
+
+    @staticmethod
+    def _convert(widget_values, required, optional, marker_names=None):
+        object_info = {
+            "N": {
+                "input": {"required": required, "optional": optional},
+                "input_order": {"required": list(required), "optional": list(optional)},
+            }
+        }
+        node = {"id": 1, "type": "N", "widgets_values": widget_values}
+        if marker_names is not None:
+            node["inputs"] = [{"name": n, "widget": {"name": n}} for n in marker_names]
+        return convert_ui_to_api({"nodes": [node], "links": []}, object_info)["1"]["inputs"]
+
+    def test_an_optional_widget_the_markers_do_not_name_is_omitted(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16}
+
+    def test_a_truncated_save_still_defaults_a_widget_the_node_had(self):
+        # The markers name `codec`, so the node HAS that widget and its value
+        # merely ran past the end of a truncated widgets_values. The frontend
+        # sends the default here, so dropping it would diverge.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps", "codec"],
+        )
+        assert inputs == {"fps": 16, "codec": "auto"}
+
+    def test_a_node_recording_no_markers_keeps_the_default(self):
+        # No evidence either way: an older frontend wrote an `inputs[]` entry
+        # only for a widget converted to a socket, so an empty marker set
+        # proves nothing. Behaviour is unchanged from before.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+        )
+        assert inputs == {"fps": 16, "codec": "auto"}
+
+    def test_an_absent_required_widget_still_takes_its_default(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}], "quality": ["INT", {"default": 85}]},
+            {},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "quality": 85}
+
+    def test_an_optional_socketless_widget_is_never_dropped(self):
+        # The frontend submits a socketless widget from LIVE widget state even
+        # when it was never serialized, so its absence from the markers is not
+        # evidence that the node lacks it.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"swatch": ["COLOR", {"default": "#000000", "socketless": True}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "swatch": "#000000"}
+
+    def test_a_serialized_optional_widget_keeps_its_saved_value(self):
+        inputs = self._convert(
+            [16, "h264"],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps", "codec"],
+        )
+        assert inputs == {"fps": 16, "codec": "h264"}
+
+    def test_an_optional_non_widget_socket_keeps_its_default(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"vae": ["VAE", {"default": None}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "vae": None}
+
+
 class TestSeedreamDynamicCombo:
     """Regression: a pristine ``COMFY_DYNAMICCOMBO_V3`` template must convert to
     valid API JSON.
@@ -2886,7 +2988,10 @@ class TestSeedreamDynamicCombo:
         assert inputs["seed"] == 0
         assert isinstance(inputs["seed"], int) and not isinstance(inputs["seed"], bool)
         assert inputs["watermark"] is False
-        # Optional input not in widgets_values is filled from its schema default.
+        # ``thinking`` is optional and this template records no ``inputs[]``
+        # widget markers, so nothing proves the node lacked the widget and the
+        # schema default still stands. See
+        # TestAbsentOptionalWidgetsAreNotSynthesized for the marker rule.
         assert inputs["thinking"] is True
 
         # The connection-only ``images`` sub-input must never become a widget,

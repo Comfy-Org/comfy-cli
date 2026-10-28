@@ -27,6 +27,16 @@ history.
   boolean, so fixing only the seed still submitted the wrong graph. A sub-input
   the save never carried now takes no slot, and a save that names one the
   option no longer declares falls back to the current expansion untouched.
+- UI→API conversion no longer synthesizes an input for an optional widget the
+  saved node never carried. `graphToPrompt()` serializes the widgets a node
+  actually has, so padding one from its schema default attached inputs the
+  frontend does not send: `CreateVideo` saved with a single `fps` widget came
+  out carrying `bit_depth`, `color_space` and `codec`, and
+  `ModelSamplingAuraFlow`, `CFGNorm` and `SimpleMath+` behaved the same way.
+  The evidence is the node's own `inputs[]` widget-marker list rather than the
+  length of `widgets_values`, so a truncated save whose later widgets ran past
+  the end still gets their defaults. Required inputs, socketless widgets, and
+  optional non-widget sockets are never dropped.
 
 ### Added
 

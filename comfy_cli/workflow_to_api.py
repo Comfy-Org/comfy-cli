@@ -1726,7 +1726,9 @@ def _build_api_node(
             link_inputs[input_name] = [actual_id_str, actual_slot]
 
     widget_inputs = _collect_widget_inputs(node, node_type, object_info, link_inputs)
-    default_inputs = _collect_default_inputs(schema, widget_inputs, primitive_inputs, link_inputs)
+    default_inputs = _collect_default_inputs(
+        schema, widget_inputs, primitive_inputs, link_inputs, _saved_widget_names(node)
+    )
 
     ordered = _get_ordered_input_names(node_type, node, object_info)
     if ordered:
@@ -2527,11 +2529,63 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
             out.setdefault("➕ Add Lora", value)
 
 
+def _saved_widget_names(node: dict) -> frozenset[str] | None:
+    """The widget names the SAVED node records on its ``inputs[]`` entries.
+
+    ``None`` when the node records none, which is the "no evidence" answer: an
+    older frontend wrote an ``inputs[]`` entry only for a widget converted to a
+    socket, so an empty marker set proves nothing about the node's widgets.
+    """
+    raw = node.get("inputs")
+    if not isinstance(raw, list):
+        return None
+    names = {
+        inp["name"] for inp in raw if isinstance(inp, dict) and inp.get("widget") and isinstance(inp.get("name"), str)
+    }
+    return frozenset(names) or None
+
+
+def _widget_absent_from_the_save(
+    input_name: str, input_spec: Any, section: str, saved_widget_names: frozenset[str] | None
+) -> bool:
+    """Whether the saved node proves it never carried this widget.
+
+    ``graphToPrompt()`` serializes the widgets a node actually has, so an input
+    the node did not carry is absent from its prompt. Synthesizing a schema
+    default for one put inputs in the prompt the frontend's golden does not
+    contain: ``CreateVideo`` in the ``03_video_wan2_2_14B_i2v_subgraphed``
+    oracle fixture saves ``widgets_values: [16]`` and the golden holds exactly
+    ``{"fps": 16, "images": [...]}``, while today's object_info also declares
+    optional ``bit_depth`` / ``color_space`` / ``codec``.
+
+    The evidence is the node's own marker list, NOT the length of
+    ``widgets_values``. That same fixture's node records
+    ``inputs[]: [images, audio, fps{widget}]`` — one widget-flagged entry,
+    naming ``fps`` only — so the file itself says the three optional inputs did
+    not exist on it, independently of the golden. Keying on "absent from
+    ``widgets_values``" instead would also have dropped an optional widget the
+    node really had and whose value simply ran past a truncated save, where the
+    frontend does send the default.
+
+    Required inputs are never dropped: the server rejects a prompt without
+    them, and that repair is load-bearing for a truncated save. A socketless
+    widget is never dropped either — the branch below exists precisely because
+    the frontend submits those from live widget state even when they were never
+    serialized.
+    """
+    if section != "optional" or saved_widget_names is None:
+        return False
+    if not _is_widget_input(input_spec)[0] or _is_socketless_widget(input_spec):
+        return False
+    return input_name not in saved_widget_names
+
+
 def _collect_default_inputs(
     schema: dict | None,
     widget_inputs: dict[str, Any],
     primitive_inputs: dict[str, Any],
     link_inputs: dict[str, list],
+    saved_widget_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     if not schema:
         return {}
@@ -2545,7 +2599,9 @@ def _collect_default_inputs(
             if input_name in widget_inputs or input_name in primitive_inputs or input_name in link_inputs:
                 continue
             default = _extract_default(input_spec)
-            if default is not _MISSING:
+            if default is not _MISSING and not _widget_absent_from_the_save(
+                input_name, input_spec, section, saved_widget_names
+            ):
                 defaults[input_name] = _wrap_widget_value(default)
             elif section == "required" and _is_socketless_widget(input_spec):
                 # A socketless widget the saved workflow never persisted
