@@ -2872,7 +2872,7 @@ class TestAbsentOptionalWidgetsAreNotSynthesized:
     """
 
     @staticmethod
-    def _convert(widget_values, required, optional, marker_names=None):
+    def _convert(widget_values, required, optional, marker_names=None, all_markers_linked=False):
         object_info = {
             "N": {
                 "input": {"required": required, "optional": optional},
@@ -2881,8 +2881,26 @@ class TestAbsentOptionalWidgetsAreNotSynthesized:
         }
         node = {"id": 1, "type": "N", "widgets_values": widget_values}
         if marker_names is not None:
-            node["inputs"] = [{"name": n, "widget": {"name": n}} for n in marker_names]
+            # An UNLINKED marker is what proves the save lists every widget and
+            # not just the converted ones; `all_markers_linked` builds the
+            # ambiguous converted-only shape instead.
+            node["inputs"] = [
+                {"name": n, "widget": {"name": n}, "link": 7 if all_markers_linked else None} for n in marker_names
+            ]
         return convert_ui_to_api({"nodes": [node], "links": []}, object_info)["1"]["inputs"]
+
+    def test_a_converted_only_marker_list_is_not_an_inventory(self):
+        # Every marker is linked, so this could be an older frontend that wrote
+        # an entry only for a widget converted to a socket. An ordinary
+        # unmarked widget may therefore exist, and its default must stand.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+            all_markers_linked=True,
+        )
+        assert inputs["codec"] == "auto"
 
     def test_an_optional_widget_the_markers_do_not_name_is_omitted(self):
         inputs = self._convert(

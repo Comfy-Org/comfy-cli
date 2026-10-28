@@ -2530,19 +2530,44 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
 
 
 def _saved_widget_names(node: dict) -> frozenset[str] | None:
-    """The widget names the SAVED node records on its ``inputs[]`` entries.
+    """The widget names the SAVED node records, when they are a COMPLETE inventory.
 
-    ``None`` when the node records none, which is the "no evidence" answer: an
-    older frontend wrote an ``inputs[]`` entry only for a widget converted to a
-    socket, so an empty marker set proves nothing about the node's widgets.
+    ``None`` means "no usable evidence", and the caller then changes nothing.
+
+    Two frontend generations write ``inputs[]`` markers differently, and only
+    one of them is an inventory:
+
+    * the older one wrote an entry only for a widget CONVERTED to a socket, so
+      an ordinary unconverted widget is simply absent from the list. Reading
+      that as an inventory would drop a widget the node really has;
+    * the current one writes an entry for every widget-backed input, converted
+      or not (the linked-inputs model).
+
+    A converted widget always carries a ``link`` — being connected is what
+    converted it. So **an unlinked widget marker is the discriminator**: if the
+    node records one, this frontend was writing markers for unconverted widgets
+    too and the list is complete. If every marker is linked, the save could be
+    from either generation and this returns ``None``. Measured over the 500
+    oracle fixtures: 6676 of 7945 marker-bearing nodes carry an unlinked
+    marker, and 1269 are the ambiguous converted-only shape.
     """
     raw = node.get("inputs")
     if not isinstance(raw, list):
         return None
-    names = {
-        inp["name"] for inp in raw if isinstance(inp, dict) and inp.get("widget") and isinstance(inp.get("name"), str)
-    }
-    return frozenset(names) or None
+    names: set[str] = set()
+    saw_unlinked = False
+    for inp in raw:
+        if not isinstance(inp, dict) or not inp.get("widget"):
+            continue
+        name = inp.get("name")
+        if not isinstance(name, str):
+            continue
+        names.add(name)
+        if not _is_link_id(inp.get("link")):
+            saw_unlinked = True
+    if not names or not saw_unlinked:
+        return None
+    return frozenset(names)
 
 
 def _widget_absent_from_the_save(
