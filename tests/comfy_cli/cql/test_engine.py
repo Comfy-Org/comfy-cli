@@ -4804,6 +4804,37 @@ class TestUnreachableNodeIsVisible:
         warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
         assert warns == [], "prompt_no_outputs already says it; don't pile on"
 
+    def test_many_dangling_nodes_collapse_to_one_warning(self, graph: Graph):
+        """A canvas that keeps finished branches around must not repeat the
+        same warning per node: one entry carries the count and every id."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        for i in range(2, 8):
+            wf[str(i)] = {"class_type": "DepthControlNet", "inputs": {"image": ["1", 0]}}
+        result = graph.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert len(warns) == 1, warns
+        w = warns[0]
+        assert w["count"] == 6
+        assert sorted(w["node_ids"]) == ["2", "3", "4", "5", "6", "7"]
+        assert w["node_id"] in w["node_ids"]
+        assert "DepthControlNet x6" in w["message"]
+
+    def test_a_few_dangling_nodes_stay_one_warning_each(self, graph: Graph):
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        for i in range(2, 5):
+            wf[str(i)] = {"class_type": "DepthControlNet", "inputs": {"image": ["1", 0]}}
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert sorted(w["node_id"] for w in warns) == ["2", "3", "4"]
+        assert all("count" not in w for w in warns)
+
 
 # ---------------------------------------------------------------------------
 # _subgraph_defs_by_id / _count_instances — corrupt definitions containers
