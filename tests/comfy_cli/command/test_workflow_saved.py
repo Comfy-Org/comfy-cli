@@ -764,6 +764,15 @@ _MIRRORED_RECORD = {
 # Cloud's `POST /api/userdata/{file}?full_info=true` receipt: a FileInfo dict.
 _USERDATA_SAVE_RESPONSE = {"path": "workflows/my workflow.json", "size": 64, "modified": 1700000003000}
 
+_BOOL_NUMBER_MISMATCHES = [
+    pytest.param(1, True, id="one-vs-true"),
+    pytest.param(0, False, id="zero-vs-false"),
+    pytest.param(True, 1, id="true-vs-one"),
+    pytest.param(False, 0, id="false-vs-zero"),
+    pytest.param({"nested": [1]}, {"nested": [True]}, id="nested-one-vs-true"),
+    pytest.param({"nested": [False]}, {"nested": [0]}, id="nested-false-vs-zero"),
+]
+
 
 def _record_listing(*rows: dict) -> dict:
     return {"data": list(rows), "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
@@ -991,6 +1000,44 @@ class TestSave:
         assert env["data"]["workflow_id"] is None
         assert env["data"]["warnings"][0]["code"] == "workflow_record_unresolved"
 
+    @pytest.mark.parametrize(("file_value", "record_value"), _BOOL_NUMBER_MISMATCHES)
+    def test_bool_number_mirror_mismatch_withholds_record_id(
+        self, file_value, record_value, cloud_target, tmp_path, monkeypatch, capsys
+    ):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text(json.dumps({"nodes": [{"id": 1, "widgets_values": [file_value]}]}))
+        _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/content": {"workflow_json": {"nodes": [{"id": 1, "widgets_values": [record_value]}]}},
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] is None
+        assert env["data"]["latest_version"] is None
+        assert env["data"]["warnings"][0]["code"] == "workflow_record_unresolved"
+
+    def test_equivalent_json_numbers_resolve_mirrored_record(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text('{"nodes": [{"id": 1, "widgets_values": [{"nested": [1, true, null]}]}]}')
+        _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/content": {
+                    "workflow_json": {"nodes": [{"widgets_values": [{"nested": [1.0, True, None]}], "id": 1.0}]}
+                },
+            },
+        )
+        env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] == _MIRRORED_RECORD["id"]
+        assert "warnings" not in env["data"]
+
     @pytest.mark.parametrize("name", [".hidden", "team/.hidden/flow", ".json", "team/.json"])
     def test_hidden_names_are_refused_before_cloud_write(self, name, cloud_target, tmp_path, monkeypatch, capsys):
         # Cloud's userdata listing excludes every dot-prefixed component.
@@ -1117,6 +1164,45 @@ def test_cloud_save_list_get_delete_round_trip(cloud_target, tmp_path, monkeypat
 
 
 class TestCloudDeleteFile:
+    @pytest.mark.parametrize(("file_value", "record_value"), _BOOL_NUMBER_MISMATCHES)
+    def test_bool_number_mirror_mismatch_refuses_both_deletes(
+        self, file_value, record_value, cloud_target, monkeypatch, capsys
+    ):
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": {"nodes": [{"id": 1, "widgets_values": [file_value]}]},
+                "/content": {"workflow_json": {"nodes": [{"id": 1, "widgets_values": [record_value]}]}},
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/api/workflows/": _MIRRORED_RECORD,
+                "/api/user": {"id": "user-uuid"},
+            },
+        )
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert not [call for call in calls if call["method"] == "DELETE"]
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_filename_ambiguous"
+
+    def test_equivalent_json_numbers_allow_both_deletes(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "/api/userdata/": {"nodes": [{"id": 1, "widgets_values": [{"nested": [1, True, None]}]}]},
+                "/content": {
+                    "workflow_json": {"nodes": [{"widgets_values": [{"nested": [1.0, True, None]}], "id": 1.0}]}
+                },
+                "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+                "/api/workflows/": _MIRRORED_RECORD,
+                "/api/user": {"id": "user-uuid"},
+            },
+        )
+        env = _run(["delete", _MIRRORED_RECORD["id"], "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert [call["url"] for call in calls if call["method"] == "DELETE"] == [
+            "https://cloud.example.com/api/userdata/workflows%2Fmy%20workflow.json",
+            "https://cloud.example.com/api/workflows/33333333-3333-3333-3333-333333333333",
+        ]
+
     @pytest.mark.parametrize(
         ("content", "creator", "user"),
         [
