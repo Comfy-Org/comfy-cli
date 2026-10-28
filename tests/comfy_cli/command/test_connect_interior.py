@@ -193,6 +193,122 @@ def test_interior_disconnect_op_replays_to_the_same_document():
     assert workflow_ops._write_target(op) == ("input", ("70",), "2011", 1)
 
 
+def test_delete_interior_node_removes_it_and_its_definition_links(tmp_path, capsys):
+    import json
+
+    base = _workflow()
+    base["definitions"]["subgraphs"][0]["links"].append(
+        {"id": 9002, "origin_id": 2012, "origin_slot": 1, "target_id": 2011, "target_slot": 0, "type": "CLIP"}
+    )
+    _node(base, 2012)["outputs"][1]["links"] = [9002]
+    _node(base, 2011)["inputs"][0]["link"] = 9002
+    path = _write(tmp_path, base)
+
+    env = _run(["delete-node", str(path), "70/2012"], capsys)
+
+    assert env["ok"] is True, env
+    op = env["data"]["op"]
+    assert op["path"] == ["70"]
+    assert op["node_id"] == 2012
+    assert op["removed_links"] == [9002]
+    result = json.loads(path.read_text())
+    assert [node["id"] for node in _sg(result)["nodes"]] == [2005, 2011]
+    assert [link["id"] for link in _sg(result)["links"]] == [9001]
+    assert _node(result, 2011)["inputs"][0]["link"] is None
+    assert result["nodes"][0]["id"] == 70
+
+
+def test_delete_interior_node_scrubs_its_links_from_the_boundary_slots(tmp_path, capsys):
+    import json
+
+    base = _workflow()
+    sg = _sg(base)
+    sg["inputs"] = [{"id": "in-clip", "name": "clip", "type": "CLIP", "linkIds": [9101, 9103]}]
+    sg["outputs"] = [{"id": "out-cond", "name": "CONDITIONING", "type": "CONDITIONING", "linkIds": [9102]}]
+    sg["links"] += [
+        {"id": 9101, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 0, "type": "CLIP"},
+        {"id": 9102, "origin_id": 2011, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "CONDITIONING"},
+        # The same boundary input also feeds a surviving node; that id must stay.
+        {"id": 9103, "origin_id": -10, "origin_slot": 0, "target_id": 2005, "target_slot": 0, "type": "CLIP"},
+    ]
+    _node(base, 2011)["inputs"][0]["link"] = 9101
+    _node(base, 2011)["outputs"][0]["links"] = [9102]
+    _node(base, 2005)["inputs"][0]["link"] = 9103
+    path = _write(tmp_path, base)
+
+    env = _run(["delete-node", str(path), "70/2011"], capsys)
+
+    assert env["ok"] is True, env
+    result = _sg(json.loads(path.read_text()))
+    assert result["inputs"][0]["linkIds"] == [9103]
+    assert result["outputs"][0]["linkIds"] == []
+    assert [link["id"] for link in result["links"]] == [9103]
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), env["data"]["op"], _graph())
+    assert _sg(replayed)["inputs"] == result["inputs"]
+    assert _sg(replayed)["outputs"] == result["outputs"]
+
+
+def test_delete_interior_node_refuses_a_promoted_widget_source_without_writing(tmp_path, capsys):
+    base = _workflow()
+    sg = _sg(base)
+    sg["inputs"] = [{"id": "in-text", "name": "prompt", "type": "STRING", "linkIds": [9101]}]
+    sg["links"].append(
+        {"id": 9101, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(base, 2011)["inputs"][1]["link"] = 9101
+    legacy = copy.deepcopy(_workflow())
+    legacy["nodes"][0]["properties"] = {"proxyWidgets": [["2012", "ckpt_name"]]}
+
+    for workflow, target in ((base, "70/2011"), (legacy, "70/2012")):
+        path = _write(tmp_path, workflow)
+        before = path.read_bytes()
+
+        env = _run(["delete-node", str(path), target], capsys)
+
+        assert env["ok"] is False, env
+        assert "backs the promoted widget" in env["error"]["message"]
+        assert path.read_bytes() == before
+
+
+def test_interior_set_widget_after_interior_delete_is_a_no_op_in_either_order():
+    base = _workflow()
+    graph = _graph()
+    _, delete = workflow_ops.delete_node(copy.deepcopy(base), graph, "70/2012", actor="a", base_version=1)
+    _, write = workflow_ops.set_widget(copy.deepcopy(base), graph, "70/2012", "ckpt_name", "b.safetensors", actor="b")
+
+    results = []
+    for ops in ((delete, write), (write, delete)):
+        doc = copy.deepcopy(base)
+        for op in ops:
+            workflow_ops.apply_op(doc, copy.deepcopy(op), graph)
+        results.append(doc["definitions"])
+
+    assert results[0] == results[1]
+    assert [node["id"] for node in _sg({"definitions": results[0]})["nodes"]] == [2005, 2011]
+
+
+def test_interior_delete_op_replays_to_the_same_document():
+    base = _workflow()
+    graph = _graph()
+    out, op = workflow_ops.delete_node(copy.deepcopy(base), graph, "70/2012", actor="agent", base_version=4)
+
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), copy.deepcopy(op), graph)
+
+    assert replayed["definitions"] == out["definitions"]
+    assert workflow_ops._write_target(op) == ("node", ("70",), "2012")
+
+
+def test_delete_interior_node_refuses_a_shared_definition_without_writing(tmp_path, capsys):
+    path = _write(tmp_path, _workflow(instances=2))
+    before = path.read_bytes()
+
+    env = _run(["delete-node", str(path), "70/2012"], capsys)
+
+    assert env["ok"] is False
+    assert "shares its definition" in env["error"]["message"]
+    assert path.read_bytes() == before
+
+
 def test_interior_grown_reconnect_and_disconnect_share_path_register():
     base = _workflow()
     _node(base, 2011)["inputs"][1]["grow_id"] = 7001

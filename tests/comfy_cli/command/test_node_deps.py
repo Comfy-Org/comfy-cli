@@ -8,7 +8,9 @@ subprocess to a fixed payload, so nothing touches a real venv or the network.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -283,6 +285,70 @@ def test_pip_list_unparseable_output_degrades_to_unknown(workspace, monkeypatch)
 
     assert [w["code"] for w in warnings] == ["installed_versions_unavailable"]
     assert _packs_by_name(report)["Registry-Pack"]["requirements"][0]["status"] == "unknown"
+
+
+def test_interpreter_without_pip_still_reports_installed_versions(tmp_path, monkeypatch):
+    """A uv-created venv has no pip; ComfyUI-Manager supports it, so must we.
+
+    Uses a real pip-less venv (no mocks) with one hand-written dist-info, so
+    both the ``satisfied`` and the ``missing`` verdict depend on actually
+    reading that interpreter's site-packages.
+    """
+    import venv
+
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="fakedist>=1.0\nfakedist<2\nabsentdist\n")
+    # Symlink on POSIX, as `python -m venv` does. When pytest itself runs in a
+    # venv, Python 3.10 records that venv as the new one's `home`; a copied
+    # binary then cannot find the stdlib ("No module named 'encodings'").
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(workspace / ".venv")
+    python = str(workspace / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
+    site = subprocess.run(
+        [python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    dist_info = Path(site) / "FakeDist-1.5.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: FakeDist\nVersion: 1.5\n")
+    # pip's leftover from an interrupted uninstall maps to the same name; it must not win,
+    # even from a path entry ahead of site-packages (where first-copy-wins would pick it).
+    leftover_site = tmp_path / "leftover-site"
+    leftover = leftover_site / "~akedist-0.1.dist-info"
+    leftover.mkdir(parents=True)
+    (leftover / "METADATA").write_text("Metadata-Version: 2.1\nName: FakeDist\nVersion: 0.1\n")
+    # One unreadable dist must not sink the whole listing.
+    broken = Path(site) / "Broken-1.0.dist-info"
+    broken.mkdir()
+    (broken / "METADATA").write_bytes(b"Name: Broken\nVersion: 1.0\nSummary: \xff\xfe\n")
+    assert subprocess.run([python, "-m", "pip", "--version"], capture_output=True).returncode != 0
+    monkeypatch.setenv("PYTHONPATH", str(leftover_site))
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+
+    assert warnings == []
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+    assert reqs["fakedist>=1.0"]["status"] == "satisfied"
+    assert reqs["fakedist>=1.0"]["installed"] == "1.5"
+    assert reqs["fakedist<2"]["status"] == "satisfied"
+    assert reqs["absentdist"]["status"] == "missing"
+
+
+def test_pip_list_timeout_is_not_retried(workspace, monkeypatch):
+    """A hung interpreter would hang the fallback too; don't double the wait."""
+    calls = []
+
+    def _hang(cmd, **kwargs):
+        calls.append(cmd)
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+    monkeypatch.setattr(node_deps_cmd.subprocess, "run", _hang)
+
+    _, warnings = node_deps_cmd.build_report(str(workspace), python="/fake/python")
+
+    assert len(calls) == 1
+    assert [w["code"] for w in warnings] == ["installed_versions_unavailable"]
 
 
 def test_pip_list_missing_interpreter_does_not_crash(workspace, monkeypatch):
