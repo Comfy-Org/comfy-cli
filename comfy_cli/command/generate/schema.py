@@ -271,7 +271,7 @@ def help_text(endpoint: Endpoint, flags: list[FlagDef]) -> str:
     lines.append("  --yes              Skip the credit-spend confirmation (required for --json/non-TTY runs")
     lines.append("                     unless `comfy generate consent always` was set).")
     lines.append("  --timeout <sec>    Override sync-poll timeout (default 300).")
-    lines.append("  --api-key <key>    Per-call override. Auth: --api-key > login session > COMFY_API_KEY env.")
+    lines.append("  --api-key <key>    Per-call override. Auth: --api-key > COMFY_API_KEY env > login session.")
     lines.append("  --emit-workflow <path>  Write a runnable partner-node workflow instead of calling the proxy.")
     return "\n".join(line for line in lines if line is not None)
 

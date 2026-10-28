@@ -38,7 +38,7 @@ from rich.progress import BarColumn, Progress, TimeElapsedColumn
 from rich.table import Column, Table
 from websocket import WebSocketTimeoutException
 
-from comfy_cli import execution_errors
+from comfy_cli import execution_errors, jobs_state
 from comfy_cli.caller import usage_source
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
 from comfy_cli.http import no_redirect_urlopen
@@ -107,6 +107,29 @@ def workflow_manifest(workflow: dict) -> list[dict]:
     return manifest
 
 
+def target_subgraph(workflow: dict, target_ids: list[str]) -> dict:
+    """The part of ``workflow`` that ``--output-node-ids`` actually runs: the
+    targets plus every node they depend on through input links. This is the
+    graph ComfyUI validates and executes for ``partial_execution_targets``, so
+    checks that should only cover what runs (preflight, partner-node detection,
+    progress) are scoped to it. Links to ids not in ``workflow`` are skipped."""
+    keep: dict = {}
+    stack = [str(t) for t in target_ids]
+    while stack:
+        nid = stack.pop()
+        if nid in keep or not isinstance(workflow.get(nid), dict):
+            continue
+        node = workflow[nid]
+        keep[nid] = node
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                stack.append(str(value[0]))
+    return keep
+
+
 class ExecutionProgress(Progress):
     def get_renderables(self):
         table_columns = (
@@ -137,12 +160,23 @@ class WorkflowExecution:
         *,
         extra_data: dict | None = None,
         api_key: str | None = None,
+        output_node_ids: list[str] | None = None,
+        client_id: str | None = None,
     ):
         self.workflow = workflow
         self.host = host
         self.port = port
         self.verbose = verbose
-        self.client_id = str(uuid.uuid4())
+        # ComfyUI's /ws handler pops any socket already registered under an
+        # incoming clientId, so opening one with a BORROWED id would evict the
+        # client we are submitting on behalf of. Callers gate on this flag.
+        # cmdline.run already rejects a blank --client-id, but this class is a
+        # reusable surface a programmatic caller can construct directly without
+        # going through that validation, so strip here too rather than trust
+        # the caller — a whitespace-only id must not look like a real one.
+        client_id = client_id.strip() if isinstance(client_id, str) else client_id
+        self.borrowed_client_id = bool(client_id)
+        self.client_id = client_id or str(uuid.uuid4())
         self.outputs: list = []
         # Node-keyed companion to the flat `outputs` URLs — one
         # {"node_id", "url", "filename", "type"} entry per recorded URL, in
@@ -150,7 +184,10 @@ class WorkflowExecution:
         # `run --wait` can group outputs by node / foreach item.
         self.output_entries: list[dict] = []
         self.progress = progress
-        self.remaining_nodes = set(self.workflow.keys())
+        # A targeted run only executes the targets' subgraph; the other nodes
+        # never report, so counting them would stall the bar short of 100%.
+        run_nodes = target_subgraph(self.workflow, output_node_ids) if output_node_ids else self.workflow
+        self.remaining_nodes = set(run_nodes.keys())
         self.total_nodes = len(self.remaining_nodes)
         if progress is not None:
             self.overall_task = self.progress.add_task("", total=self.total_nodes, progress_type="overall")
@@ -165,6 +202,9 @@ class WorkflowExecution:
         # mirrors what ``comfy_client.submit_prompt`` does for cloud.
         self.extra_data = dict(extra_data) if extra_data else None
         self.api_key = api_key
+        # `--output-node-ids`: run only these output nodes (and what they
+        # depend on). Sent as `partial_execution_targets`; absent → whole graph.
+        self.output_node_ids = list(output_node_ids) if output_node_ids else None
         self.renderer = get_renderer()
         # Aggregated node bookkeeping surfaced in the final envelope:
         # `cached_node_ids` — server said the node came from cache;
@@ -186,6 +226,11 @@ class WorkflowExecution:
         self.last_error: dict | None = None
 
     def connect(self):
+        if self.borrowed_client_id:
+            raise RuntimeError(
+                f"refusing to open a websocket as borrowed clientId {self.client_id!r}: "
+                "it would evict the client this run submits on behalf of"
+            )
         # Resolve via the package namespace so tests can patch
         # ``comfy_cli.command.run.WebSocket`` and have it take effect here.
         from comfy_cli.command import run as _run_pkg
@@ -217,6 +262,18 @@ class WorkflowExecution:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:
             data["extra_data"]["api_key_comfy_org"] = self.api_key
+        if self.output_node_ids:
+            data["partial_execution_targets"] = self.output_node_ids
+        # This is a safety property, not caller metadata: keep it authoritative
+        # in both directions, not just when setting it. A caller-supplied
+        # extra_data that happens to carry this key (forwarded from another
+        # prompt, or any other source) must not survive into a genuinely
+        # non-borrowed submission -- that would mark every future watcher of
+        # this prompt poll-only for a run that was never borrowed.
+        if self.borrowed_client_id:
+            data["extra_data"][jobs_state.BORROWED_CLIENT_ID_KEY] = True
+        else:
+            data["extra_data"].pop(jobs_state.BORROWED_CLIENT_ID_KEY, None)
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:

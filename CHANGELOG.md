@@ -24,6 +24,18 @@ history.
   resolve, when its value comes from an interior PrimitiveNode, or when the
   input is backed only by a legacy `proxyWidgets` entry.
   The row's `address` is unchanged and stays the one to edit.
+- `comfy run --output-node-ids 9,12` (repeatable) runs only the named output
+  nodes and the nodes they depend on, locally and with `--where cloud` (sent to
+  `/prompt` as `partial_execution_targets`). Ids that are not in the workflow,
+  or (when the node catalog is available) are not output nodes, fail with
+  `invalid_output_node_ids` before submit, `--print-prompt` included. Preflight
+  validation and the local partner-credential check cover only the nodes that
+  run. The `--allow-spend` gate still covers the whole submitted workflow,
+  because a server that ignores the targets runs every branch.
+  The cloud `partial_execution` warning counts only the targeted nodes, and
+  `partial_execution_targets_ignored` warns when the server ran untargeted
+  nodes anyway. Without the flag the request is unchanged.
+
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
@@ -34,6 +46,14 @@ history.
   with `changed: false`. A watching `up`, `promote` or `rollback` whose update
   a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
   release, rather than reading as failed.
+- `comfy deploy up --no-editor` makes or keeps a deployment without the CPU
+  server comfy-deploy runs beside it for the editor, for one only called
+  through the API; `--editor` turns it back on, and with neither nothing is
+  sent. A value comfy-deploy does not confirm, a failed read to confirm it
+  included, exits 1 with `deploy_editor_unchanged`, the rest of the result
+  kept. `comfy deploy ls`
+  shows each deployment's `editor` where comfy-deploy answers it, blank where
+  it does not.
 - `comfy deploy up --create --name staging` names the deployment it creates,
   and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
   A name outside comfy-deploy's rule is refused before any call
@@ -88,6 +108,13 @@ history.
   (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
   instance `path`. A link that crosses the subgraph boundary is still refused,
   and so is a link inside a definition shared by several instances.
+- `comfy workflow delete-node` and `delete-nodes` accept the interior paths
+  `workflow print` shows (`delete-node 70/2012`). They delete the node from its
+  subgraph definition with its interior links, and emit a `delete_node` op
+  carrying the instance `path`. A definition shared by several instances, or a
+  node that backs a promoted widget, is refused without writing. Replaying the
+  op needs a doc host on comfy-multi-player 0.3.12 or later: older appliers
+  ignore `path` and delete the top-level node with the same id.
 - `comfy workflow disconnect <file> <node>.<input>` removes an input link and
   emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
   autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
@@ -99,6 +126,29 @@ history.
   validate said the graph was valid.
 - `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
   (also on `nodes search --expand-top`) list a long option list in full.
+- `comfy run --client-id <id>` submits as an already-connected WebSocket client
+  instead of a freshly minted one, so ComfyUI addresses the run's execution
+  events — node highlights, progress, outputs — to that client. This is what
+  lets a tool run a workflow on a user's behalf and still have the user's open
+  canvas light up. Local only, and refused with `client_id_rejected` alongside
+  `--wait` or an effective `cloud` target (the flag, `COMFY_WHERE`, a project
+  `comfy.yaml` default, a saved default, or auto-detection from configured
+  cloud credentials): ComfyUI evicts whatever socket already holds an
+  incoming clientId, so this invocation must not attach as the borrowed one.
+  Such a run is marked both in its job state file and in the submitted
+  `extra_data`, so `comfy jobs watch` declines to re-attach to it — from any
+  machine, including one that cannot see the submitter's state file — and
+  polls status instead. An override is honoured only once one of those two
+  sources has positively vouched for the run: with no readable state file and
+  no readable server record for the prompt, `--client-id` is refused with
+  `reason: "indeterminate"` rather than risking the eviction, and the watch
+  polls. The refusal is keyed on the id too, so naming an id another queued run
+  borrowed is refused even when the prompt being watched is ordinary — and
+  refused as `indeterminate` when the `/queue` read that would show those ids
+  did not come back whole, rather than read as nobody borrowing. A blank
+  `--client-id` is refused (`reason: "empty"`) as it is on `comfy run`. The
+  watch envelope carries `poll_reason` (`borrowed`, `indeterminate` or null) so
+  a `--json` consumer can tell why no socket was opened.
 
 ### Changed
 
@@ -138,10 +188,26 @@ history.
 - `comfy workflow print` renders a graph with broken links instead of refusing
   it: the input prints `None`, the line is marked `BROKEN`, and a warning names
   the `connect` that repairs it. A stale row whose value already reaches the
-  node through another link is reported as a leftover.
+  node through another link is reported as a leftover. Recoverable stale
+  target slots and duplicate link rows now follow the same live-holder and
+  last-row-wins rules as workflow conversion, with warnings instead of losing
+  the graph; malformed and ambiguous promotion boundaries remain bounded and
+  fail closed.
 
 ### Fixed
 
+- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
+  accepts a connection and hangs up before answering (a restarting server, a
+  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
+  which `urllib` does not wrap, past the `RuntimeError` net every caller in
+  `jobs` catches.
+- A failed `comfy jobs watch` carries the node's failure under
+  `error.details.execution_error` on both of its exits — instead of
+  `error.details.details.error` on the live path, and instead of
+  `error.details.error` on the one that short-circuits because the prompt had
+  already finished. Neither old key is published any more. The second exit was
+  also skipping the trimming and redaction that key drives, so it emitted the
+  full traceback and a `current_inputs` that can hold an api_key.
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
@@ -601,7 +667,7 @@ history.
   the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
   a same-day torch release resolved ahead of its matching torchvision.
 - Promoted subgraph widgets are edited where the frontend reads them. The
-  frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
+  frontend (ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted widget's value on the HOST instance
   (`widgets_values` positional over the widget-backed subgraph inputs) and
   runs that value over the interior default; `set-widget 57.width` used to
   follow the legacy `proxyWidgets` route into the interior node, so the edit
