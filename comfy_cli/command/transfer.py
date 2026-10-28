@@ -27,7 +27,7 @@ from typing import Any
 import typer
 
 from comfy_cli import jobs_state
-from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
+from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries, extract_text_outputs
 from comfy_cli.credentials import DataPlaneToken
 from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
@@ -801,16 +801,37 @@ def _download_one_url(
     return entry
 
 
-def _job_finished(state: Any, record: Any) -> bool:
-    """True when the job is known to have completed successfully, from either
-    the local state file or the fetched history record."""
-    if state is not None and getattr(state, "status", None) == "completed":
-        return True
+_FAILED_STATUSES = frozenset({"error", "failed", "cancelled", "canceled", "interrupted"})
+
+
+def _job_outcome(state: Any, record: Any) -> str | None:
+    """``"completed"``, ``"failed"``, or ``None`` when not known to have ended.
+
+    The fetched history record wins over the local state file, which can be
+    stale. Reads both status shapes the codebase sees (``status`` or
+    ``execution_status``; a dict with ``status_str``/``completed`` or a plain
+    string), as ``comfy_client._looks_done`` does.
+    """
     if isinstance(record, dict):
-        status = record.get("status")
-        if isinstance(status, dict) and (status.get("completed") is True or status.get("status_str") == "success"):
-            return True
-    return False
+        status = record.get("status") or record.get("execution_status")
+        if isinstance(status, dict):
+            status_str = str(status.get("status_str") or "").lower()
+            if status_str in _FAILED_STATUSES:
+                return "failed"
+            if status_str == "success" or status.get("completed") is True:
+                return "completed"
+        elif isinstance(status, str):
+            lowered = status.lower()
+            if lowered in _FAILED_STATUSES:
+                return "failed"
+            if lowered in {"success", "completed"}:
+                return "completed"
+    local = getattr(state, "status", None)
+    if local == "completed":
+        return "completed"
+    if local in _FAILED_STATUSES:
+        return "failed"
+    return None
 
 
 def execute_download(
@@ -936,31 +957,34 @@ def execute_download(
                 raise typer.Exit(code=1) from exc
 
     if not output_urls:
-        # A job that FINISHED with nothing to fetch is not "not ready yet".
+        # A job that has ENDED with nothing to fetch is not "not ready yet".
         # Telling the caller to wait sends an agent into re-runs of a job that
-        # will never produce anything, and it reads the silence as an outage:
-        # the cloud agent told a user an audio service was down when its runs
-        # had completed with no new outputs (cached output nodes / no output
-        # node executed). Same code, so existing callers keep matching on it.
-        if _job_finished(state, record):
-            renderer.error(
-                code="download_no_outputs",
-                message=f"Job {prompt_id} completed but produced no outputs",
-                hint=(
-                    "nothing new was saved: no output node ran, or the outputs were served from cache "
-                    "because the graph matched an earlier run. Change an input or the seed to force a "
-                    f"fresh run, and check `comfy jobs status {prompt_id}` for an execution error. "
-                    "Waiting will not produce outputs."
-                ),
-                details={"prompt_id": prompt_id, "job_status": "completed"},
+        # will never produce a file, and it reads the silence as an outage: the
+        # cloud agent told a user an audio service was down when its runs had
+        # completed with no new outputs. Same code, so callers matching on it
+        # keep working; the message, hint and details say which case this is.
+        outcome = _job_outcome(state, record)
+        text_nodes = extract_text_outputs(record) if isinstance(record, dict) else {}
+        if outcome == "completed" and text_nodes:
+            message = f"Job {prompt_id} completed with text output only — there are no files to download"
+            hint = f"read the text with `comfy jobs status {prompt_id}`"
+        elif outcome == "completed":
+            message = f"Job {prompt_id} completed but produced no output files"
+            hint = (
+                "waiting will not produce files. Check that the workflow has a save/preview node and look for an "
+                f"execution error with `comfy jobs status {prompt_id}`. If both are fine, nothing new ran because "
+                "the graph matched an earlier run; change an input or the seed to force a fresh run"
             )
+        elif outcome == "failed":
+            message = f"Job {prompt_id} ended without completing, so it has no outputs"
+            hint = f"see why with `comfy jobs status {prompt_id}`, fix the cause, then run it again"
         else:
-            renderer.error(
-                code="download_no_outputs",
-                message=f"Job {prompt_id} has no outputs yet",
-                hint="wait for the job to complete before downloading",
-                details={"prompt_id": prompt_id},
-            )
+            message = f"Job {prompt_id} has no outputs yet"
+            hint = "wait for the job to complete before downloading"
+        error_details: dict[str, Any] = {"prompt_id": prompt_id}
+        if outcome is not None:
+            error_details["job_status"] = outcome
+        renderer.error(code="download_no_outputs", message=message, hint=hint, details=error_details)
         raise typer.Exit(code=1)
 
     # -- URL-only mode: emit URLs without downloading --------------------------
