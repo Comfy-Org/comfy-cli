@@ -47,6 +47,21 @@ app = typer.Typer(no_args_is_help=True, help="Slot-based editing of frontend-for
 # ---------------------------------------------------------------------------
 
 
+def _same_json(left: Any, right: Any) -> bool:
+    """Compare JSON values without equating booleans with numbers.
+
+    JSON has one number type, so integer and floating-point representations of
+    the same number still match. Objects are unordered; arrays are ordered.
+    """
+    if type(left) is not type(right):
+        return type(left) in (int, float) and type(right) in (int, float) and left == right
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def _is_frontend_format(data: Any) -> bool:
     """Heuristic: frontend format has ``nodes`` as a list. API format has it as a dict keyed by IDs."""
     return isinstance(data, dict) and isinstance(data.get("nodes"), list)
@@ -1477,7 +1492,7 @@ def _find_mirrored_record(target, record_name: str, workflow_json: dict | None =
             )
         except (urllib.error.URLError, OSError, _ResponseUnparseable, _ResponseTooLarge):
             return None
-        if not isinstance(content, dict) or content.get("workflow_json") != workflow_json:
+        if not isinstance(content, dict) or not _same_json(content.get("workflow_json"), workflow_json):
             return None
     return record
 
