@@ -3331,7 +3331,7 @@ class TestOutputNodeIdsFlag:
 class TestOutputNodeIdsFullGraphClassCheck:
     """ComfyUI's validate_prompt rejects an unknown class anywhere in the
     submitted graph before it looks at partial_execution_targets, so the CLI's
-    preflight must catch it too, not only inside the targets' subgraph (BE-24121)."""
+    preflight must catch it too, not only inside the targets' subgraph."""
 
     @staticmethod
     def _workflow(tmp_path, skipped_node):
