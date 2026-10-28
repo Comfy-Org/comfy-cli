@@ -100,6 +100,7 @@ from comfy_cli.command.build_validation import (
 )
 from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
 from comfy_cli.registry.api import sanitize_error_body
@@ -3509,7 +3510,7 @@ def _inventory_local_server(report: dict[str, Any], server: str, stats: dict[str
     try:
         stats = stats if stats is not None else _inventory_fetch_json(f"{base}/system_stats")
         object_info = _inventory_fetch_json(f"{base}/object_info")
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, ResponseTooLarge) as error:
         # The server only adds detail; the workflow's own report stands without it.
         section["error"] = f"{type(error).__name__}: {error}"
         return section
@@ -3531,7 +3532,7 @@ def _inventory_cloud_model_size(target: Any, name: str) -> int | None:
     query = urllib.parse.urlencode({"include_tags": "models", "name_contains": name, "limit": 200})
     try:
         body = _http_get_json(target.url("assets") + "?" + query, target)
-    except (OSError, ValueError):
+    except (OSError, ValueError, ResponseTooLarge):
         return None
     assets = body.get("assets") if isinstance(body, dict) else None
     for asset in assets or []:
@@ -3686,7 +3687,7 @@ def inventory_cmd(
             netloc = f"[{host}]" if ":" in host else host
             try:
                 server_stats = _inventory_fetch_json(f"http://{netloc}:{port or 8188}/system_stats")
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, ResponseTooLarge) as error:
                 report["warnings"].append(f"--desktop: cannot verify running server: {error}; pass explicit roots")
         # A supplied but unreachable server must not fall back to an unrelated install.
         desktop_roots, warning = _desktop_model_roots(

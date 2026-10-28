@@ -111,6 +111,87 @@ def test_inventory_unreachable_server_is_reported_not_fatal(tmp_path: Path, monk
     assert "ConnectionRefusedError" in section["error"]
 
 
+@pytest.mark.parametrize("endpoint", ["system_stats", "object_info"])
+def test_inventory_oversized_server_detail_retains_workflow_report(tmp_path, monkeypatch, endpoint):
+    from comfy_cli.http import ResponseTooLarge
+
+    def fetch(url):
+        if url.endswith(endpoint):
+            raise ResponseTooLarge("response exceeds byte cap")
+        return {}
+
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    result, envelope = _invoke(str(_write_workflow(tmp_path)), "--server", "127.0.0.1:8000")
+
+    assert result.exit_code == 0, result.stdout
+    assert envelope["ok"] is True
+    assert envelope["data"]["models"][0]["path"] == "sdxl/base.safetensors"
+    assert "ResponseTooLarge" in envelope["data"]["local_server"]["error"]
+    jsonschema.validate(envelope["data"], json.loads(SCHEMA.read_text()))
+
+
+def test_inventory_oversized_desktop_stats_does_not_discover_another_install(tmp_path, monkeypatch):
+    from comfy_cli import desktop_install
+    from comfy_cli.http import ResponseTooLarge
+
+    observed_stats = []
+
+    def detect(*, server_stats=None):
+        observed_stats.append(server_stats)
+        return None
+
+    def fetch(url):
+        raise ResponseTooLarge("response exceeds byte cap")
+
+    monkeypatch.setattr(desktop_install, "detect", detect)
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    result, envelope = _invoke(str(_write_workflow(tmp_path)), "--desktop", "--server", "127.0.0.1:8000")
+
+    assert result.exit_code == 0, result.stdout
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    assert observed_stats and all(stats == {} for stats in observed_stats)
+    assert "models_roots" not in data
+    assert any("cannot verify running server" in warning for warning in data["warnings"])
+    assert "ResponseTooLarge" in data["local_server"]["error"]
+
+
+def test_inventory_oversized_cloud_size_stays_unknown(tmp_path, monkeypatch):
+    from comfy_cli.http import ResponseTooLarge
+
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps({"1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "model.safetensors"}}})
+    )
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "model.safetensors").write_bytes(b"local")
+
+    class Graph:
+        def node(self, name):
+            return name
+
+        def morphism_to_dict(self, node):
+            return {"inputs": [{"name": "ckpt_name", "choices": ["model.safetensors"]}]}
+
+    class Target:
+        def url(self, path):
+            return "https://cloud.example.test/api/" + path
+
+    def oversized(*args, **kwargs):
+        raise ResponseTooLarge("response exceeds byte cap")
+
+    monkeypatch.setattr("comfy_cli.command.nodes._get_graph", lambda *args, **kwargs: Graph())
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kwargs: Target())
+    monkeypatch.setattr("comfy_cli.command.models.search._http_get_json", oversized)
+    result, envelope = _invoke(str(workflow), "--cloud", "--models-root", str(models))
+
+    assert result.exit_code == 0, result.stdout
+    assert envelope["ok"] is True
+    assert envelope["data"]["cloud"]["models"][0]["weights"] == "unknown"
+    assert envelope["data"]["cloud"]["unverified"]
+
+
 def test_inventory_rejects_a_missing_or_malformed_workflow(tmp_path: Path):
     result, envelope = _invoke(str(tmp_path / "nope.json"))
     assert result.exit_code == 1
