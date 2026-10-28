@@ -1249,3 +1249,54 @@ class TestSlotsSourceAddress:
             name=widget, type="INT", index=0, value_index=0, source_node="1", source_input=widget, source_widget=widget
         )
         assert cql_engine._promoted_source_address("50", {"nodes": [inner]}, pi, {}, _seedream_graph()) == expected
+
+    @pytest.mark.parametrize(
+        ("host_selection", "linked", "expected"),
+        [
+            # The host's promoted selector runs over the interior's saved
+            # "pro", so lite's max_images is the live widget.
+            ("seedream 5.0 lite", False, "50/1.model.max_images"),
+            ("seedream 5.0 pro", False, None),
+            # A link feeds the selector: its value is only known at run time,
+            # so the interior's saved selection (pro) decides.
+            ("seedream 5.0 lite", True, None),
+        ],
+    )
+    def test_dynamic_combo_sub_widget_follows_promoted_selector(self, host_selection, linked, expected):
+        from comfy_cli.cql import engine as cql_engine
+        from comfy_cli.cql import promoted as _promoted
+
+        inner = _seedream_workflow()["nodes"][0]
+        assert inner["widgets_values"][1] == "seedream 5.0 pro"
+        base = len(inner.get("inputs") or [])
+        inner["inputs"] = list(inner.get("inputs") or []) + [
+            {"name": "model", "type": "COMBO", "widget": {"name": "model"}, "link": 1},
+            {"name": "model.max_images", "type": "INT", "widget": {"name": "model.max_images"}, "link": 2},
+        ]
+        sg = {
+            "id": "sg-seedream",
+            "nodes": [inner],
+            "inputs": [
+                {"name": "model", "type": "COMBO", "linkIds": [1]},
+                {"name": "max_images", "type": "INT", "linkIds": [2]},
+            ],
+            "links": [
+                {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": base, "type": "COMBO"},
+                {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": 1, "target_slot": base + 1, "type": "INT"},
+            ],
+        }
+        defs = {"sg-seedream": sg}
+        instance = {
+            "id": 50,
+            "type": "sg-seedream",
+            "inputs": [{"name": "model", "link": 99 if linked else None}, {"name": "max_images", "link": None}],
+            "widgets_values": [host_selection, 3],
+        }
+        workflow = {
+            "nodes": [instance, {"id": 60, "type": "PrimitiveNode"}],
+            "links": [[99, 60, 0, 50, 0, "COMBO"]] if linked else [],
+            "definitions": {"subgraphs": [sg]},
+        }
+        pi = _promoted.find_promoted(sg, defs, "max_images")
+        address = cql_engine._promoted_source_address("50", sg, pi, defs, _seedream_graph(), instance, workflow)
+        assert address == expected

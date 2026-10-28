@@ -1044,7 +1044,8 @@ comfy --json workflow slots path.json
 #   it stands for, e.g. 57/28.unet_name (the real widget name, even when
 #   the promotion is renamed). Optional: a row omits it when its source
 #   does not resolve, when the value comes from an interior PrimitiveNode,
-#   or when the input is only a legacy proxyWidgets entry. Read-only
+#   or when the input is a plain legacy proxyWidgets fallback (a legacy
+#   entry the CLI will repair into a linked input does carry it). Read-only
 #   context: edit at the row's own address
 
 # 2. Set a single slot
