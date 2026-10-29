@@ -1595,6 +1595,41 @@ class TestApplyBatch:
         assert env["error"]["code"] == "workflow_edit_invalid"
         assert path.read_text() == before, "failed batch must not write a partial graph"
 
+    def test_typed_batch_failure_keeps_summary_receipt(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        before = path.read_text()
+        specs = [
+            {
+                "op": "set_widget",
+                "node": 3,
+                "widget": "sampler_name",
+                "value": "totally_made_up",
+            }
+        ]
+        ops_path = tmp_path / "ops.json"
+        ops_path.write_text(json.dumps(specs), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(ops_path), "--ack", "summary"], capsys)
+
+        assert env["ok"] is False
+        error = env["error"]
+        assert error["code"] == "unknown_enum_value"
+        assert error["message"].startswith("batch failed: ")
+        assert error["details"]["value"] == "totally_made_up"
+        assert error["details"]["failed"] == {
+            "index": 0,
+            "op": "set_widget",
+            "code": "unknown_enum_value",
+        }
+        assert error["details"]["applied_count"] == 0
+        assert "retry the whole batch" in error["hint"]
+        assert path.read_text() == before
+
+    def test_typed_error_details_are_strict_json_safe(self):
+        finding = workflow_ops.FatalFindingError(
+            {"code": "unknown_enum_value", "message": "bad value", "value": float("inf")}
+        )
+        assert workflow_edit._json_safe_evidence(finding.finding)["value"] == "inf"
+
     def test_duplicate_alias_is_rejected(self, patched_graph, tmp_path, capsys):
         """A repeated `as` name would silently clobber the earlier node — reject it."""
         path = self._empty(tmp_path)
