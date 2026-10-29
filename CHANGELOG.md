@@ -27,7 +27,9 @@ history.
   combo's trailing sub-input value into the following widget. No shipped call
   site was affected (the one internal caller passes both), but the mis-bind was
   silent: the call still returned pairs, so a test could keep passing while no
-  longer exercising the behaviour it named.
+  longer exercising the behaviour it named. `_filter_control_values` takes the
+  same two values adjacently and is now keyword-only for the same reason, before
+  anything is inserted into it.
 
 - `Create Bounding Boxes` box edits, `Build JSON Prompt (Ideogram)` colour
   palettes and old-style `COLOR` inputs (LayerStyle's `LayerMask: MaskByColor`,

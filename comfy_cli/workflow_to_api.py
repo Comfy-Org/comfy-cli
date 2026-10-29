@@ -2216,6 +2216,7 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
 
 def _filter_control_values(
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
     object_info: dict | None = None,
@@ -2504,7 +2505,7 @@ def _collect_widget_inputs(
     # No schema, or the schema declares no widget inputs: fall back to the
     # positional control-marker heuristic + node-input name inspection, which
     # matches the reference behavior for unknown node types.
-    filtered = _filter_control_values(widget_values, node_type, node, object_info)
+    filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
     names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
