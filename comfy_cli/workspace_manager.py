@@ -12,6 +12,7 @@ from comfy_cli.config_manager import ConfigManager
 # Route prints through the output shim so they land on stderr in JSON mode
 # rather than corrupting the envelope on stdout.
 from comfy_cli.output import rprint as print  # noqa: A001 - intentional shadowing
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.utils import singleton
 
 
@@ -381,8 +382,8 @@ class WorkspaceManager:
     def discovery_data(self) -> dict:
         """Describe the selected workspace, including Desktop's split layout.
 
-        Desktop fallback is reporting-only: discovering a Desktop installation
-        must not implicitly select it for commands that install or launch code.
+        Registry-derived Desktop candidates remain separate from the workspace
+        used by commands that install or launch code.
         """
         from dataclasses import replace
 
@@ -394,9 +395,6 @@ class WorkspaceManager:
         data = {"path": str(path) if path else None, "type": kind, "exists": exists}
         found = desktop_install.detect()
         selected = desktop_install.install_for_dir(path, found) if path and found else None
-        if not exists and kind == WorkspaceType.DEFAULT.value and found and found.selected:
-            selected = found.selected
-            data.update(path=selected.code_dir, type="desktop", exists=True)
         if found and (selected or not data["exists"]):
             if selected:
                 reason = found.selected_reason if selected is found.selected else "matches the selected workspace"
@@ -433,15 +431,22 @@ class WorkspaceManager:
 
         discovery = self.discovery_data()
         rows = [
-            ("Current selected workspace", f"[bold green]→ {discovery['path']}[/bold green]"),
+            ("Current selected workspace", f"[bold green]→ {sanitize_markup(discovery['path'])}[/bold green]"),
             ("Manager", manager_status),
             ("UV Compile Default", uv_compile_status),
         ]
         desktop = discovery.get("desktop")
         if desktop and desktop["code_dir"]:
-            rows.extend([("Desktop code", desktop["code_dir"]), ("Desktop data", desktop["data_dir"])])
-            rows.append(("Desktop model roots", "\n".join(root["path"] for root in desktop["model_roots"])))
-        rows.extend(("Warning", warning["message"]) for warning in discovery.get("warnings", []))
+            rows.extend(
+                [
+                    ("Desktop code", sanitize_markup(desktop["code_dir"])),
+                    ("Desktop data", sanitize_markup(desktop["data_dir"])),
+                ]
+            )
+            rows.append(
+                ("Desktop model roots", "\n".join(sanitize_markup(root["path"]) for root in desktop["model_roots"]))
+            )
+        rows.extend(("Warning", sanitize_markup(warning["message"])) for warning in discovery.get("warnings", []))
         return rows
 
     def fill_data(self) -> dict:

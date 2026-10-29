@@ -248,7 +248,7 @@ def which_panel(
         )
 
     rows: list[tuple[str, Any]] = [
-        ("Path", Text(workspace_path, style="bold white")),
+        ("Path", Text(sanitize_value(workspace_path), style="bold white")),
         ("Type", type_badge),
         ("Python", python_value),
         ("Server", server_value),
@@ -256,11 +256,11 @@ def which_panel(
     if desktop:
         rows.extend(
             [
-                ("Desktop code", Text(desktop["code_dir"])),
-                ("Desktop data", Text(desktop["data_dir"])),
-                ("Desktop Python", Text(desktop["python"] or "—")),
-                ("Model roots", Text("\n".join(root["path"] for root in desktop["model_roots"]))),
-                ("Selected because", Text(desktop["selected_reason"] or "—")),
+                ("Desktop code", Text(sanitize_value(desktop["code_dir"]))),
+                ("Desktop data", Text(sanitize_value(desktop["data_dir"]))),
+                ("Desktop Python", Text(sanitize_value(desktop["python"] or "—"))),
+                ("Model roots", Text("\n".join(sanitize_value(root["path"]) for root in desktop["model_roots"]))),
+                ("Selected because", Text(sanitize_value(desktop["selected_reason"] or "—"))),
             ]
         )
     tbl = Table.grid(padding=(0, 2), expand=False)

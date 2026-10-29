@@ -10,6 +10,7 @@ block (code/data directories, interpreter, model roots, selection reason and can
 installs). Older CLI versions can report a nonexistent default with `ok: true`;
 confirm paths on disk. Last-launched selection is a discovery hint, not evidence
 that it is the server running the workflow.
+A missing selected workspace leaves the Desktop candidate in `which` error `details.desktop` or `env` data `workspace.desktop`; that candidate is neither the selected workspace nor proof of the running process.
 
 ## Best source: the running server
 
@@ -37,13 +38,16 @@ Desktop splits one install across up to three places:
 |---|---|
 | Data dir: `models/`, `custom_nodes/`, `.venv/`, `user/` | Selected install's `adoptedBaseDir` for adopted installs (legacy `ComfyUI/config.json` → `basePath` fallback); otherwise its code directory. The running server's `--base-directory` overrides these records. |
 | Code dir: the ComfyUI git checkout | Both `~/Library/Application Support/comfyui-desktop-2/installations.json` and the older `…/Comfy Desktop/installations.json` → `installPath` (usually `<installPath>/ComfyUI`). Each registry can list several installs. |
-| Extra or shared model roots | The selected registry's `settings.json` → `modelsDirs` and install record's `modelDirs`/`useSharedModels`. With a running server, use its `--extra-model-paths-config` YAML files and instance ID instead of stale settings. The startup log prints effective search paths. OSS installs use `extra_model_paths.yaml`. Keep libraries from different registries separate. |
+| Extra or shared model roots | The selected registry's `settings.json` → `modelsDirs` and install record's `modelDirs`/`useSharedModels`. With a verified local process, use its `--extra-model-paths-config` YAML files at their full registry-owned paths instead of stale settings. The startup log prints effective search paths. OSS installs use `extra_model_paths.yaml`. Keep libraries from different registries separate. |
 | ComfyUI version | `installations.json` → `comfyVersion.baseTag`. `git -C <code dir> describe --tags` works too. |
 
-`build inventory --desktop --server <url>` matches the server's absolute `main.py`,
-base directory or instance YAML ID to one recorded install, reads its effective
-model roots, and uses `--input-directory` (default `<data>/input`) unless explicit
-`--input-root` values were supplied. It reports `desktop` and `input_roots`.
+`build inventory --desktop --server <url>` requires direct-endpoint, local Python
+process and shared-filesystem proof before automatic Desktop selection; a loopback
+address alone is insufficient. It then matches an absolute code/data path or the full generated
+`<owning registry>/instance-model-paths/<install_id>.yaml` path to one recorded
+install, reads its effective model roots, and uses `--input-directory` (default
+`<data>/input`) unless explicit `--input-root` values were supplied. It reports
+`desktop` and `input_roots`.
 The selected server's `--output-directory` (default `<data>/output`) is reported
 as `desktop.output_dir`, with `output_dir_source` distinguishing an explicit
 argument from the server default. That directory joins the exact deployment asset
@@ -51,8 +55,9 @@ scan so a referenced prior output can be approved as an input; unrelated outputs
 are not included. Pass the reported `deployment_asset_roots` explicitly to the
 run's `--asset-root` values. `local_server.launch_paths` contains only known path
 arguments, without unrelated credentials or the raw process argument list.
-An unmatched server, relative launch paths with unknown working directory, or
-ambiguous installs require explicit verified roots. Missing roots produce
+Remote, forwarded or unverified endpoints retain reported catalog/metadata but
+need explicit verified local roots, as do unmatched or ambiguous installs and
+relative launch paths with unknown working directory. Missing roots produce
 `root_not_found` warnings; resolve them before claiming complete inventory.
 Without a server, `--desktop` uses one unambiguous install or one settings-only
 library. It does not combine several unrelated installations.
