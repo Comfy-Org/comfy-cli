@@ -903,8 +903,9 @@ still fails with `workflow_unknown_nodes` (ComfyUI rejects those before it
 applies the targets). `--allow-spend` is still needed when a paid partner node
 sits anywhere in the workflow: a server that ignores the targets runs it. On a
 local server that ignores the targets, a partner node outside them receives an
-explicit `--api-key` when one was supplied; without one, it fails mid-run with
-`execution_error`. On a
+explicit `--api-key`, or a resolved partner credential when the targeted
+subgraph contains a partner node. If no partner credential is sent, it may fail
+mid-run with `execution_error`. On a
 `--where cloud --wait` run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
 when a targeted node returned nothing, and `partial_execution_targets_ignored`
 when the server ran untargeted nodes anyway.
