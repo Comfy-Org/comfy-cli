@@ -437,3 +437,38 @@ def test_relative_output_directory_requires_process_cwd_verification(tmp_path):
     )
     assert found.selected is None
     assert "output_dir" not in found.to_dict()
+
+
+@pytest.mark.parametrize("override_data", [False, True], ids=["registry-data", "process-data"])
+@pytest.mark.parametrize(
+    "process_python", ["missing", "none", "empty", "wrong-type", "missing-file", "directory", "valid-file"]
+)
+def test_server_interpreter_uses_only_a_verified_process_path(tmp_path, override_data, process_python):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    registry_python = _venv(code)
+    app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "live", "installPath": str(code.parent)}])
+    legacy = tmp_path / "legacy"
+    assert desktop_install.detect(app, legacy).selected.python == str(registry_python)
+
+    data = tmp_path / "process-data" if override_data else code
+    if override_data:
+        _venv(data)  # Even an existing data-directory interpreter is not process evidence.
+    runtime_python = tmp_path / "process-python"
+    runtime_python.write_text("")
+    system = {"argv": [str(code / "main.py"), "--base-directory", str(data)]}
+    if process_python != "missing":
+        system["python"] = {
+            "none": None,
+            "empty": "",
+            "wrong-type": 42,
+            "missing-file": str(tmp_path / "missing-python"),
+            "directory": str(data),
+            "valid-file": str(runtime_python),
+        }[process_python]
+
+    found = desktop_install.detect(app, legacy, server_stats={"system": system})
+
+    expected_python = str(runtime_python) if process_python == "valid-file" else None
+    assert found.selected.data_dir == str(data)
+    assert found.selected.python == expected_python
+    assert found.to_dict()["python"] == expected_python

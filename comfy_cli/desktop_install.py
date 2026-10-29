@@ -418,7 +418,7 @@ def _for_server(found: DesktopDetection, stats: dict[str, Any]) -> DesktopDetect
         comfyui_version=_as_tag(version) if isinstance(version, str) and version else chosen.comfyui_version,
         data_dir=data_dir,
         model_roots=tuple(roots),
-        python=python if isinstance(python, str) and Path(python).is_file() else chosen.python,
+        python=python if isinstance(python, str) and Path(python).is_file() else None,
     )
     inputs = _argv_values(argv, "--input-directory")
     input_dir = str(Path(inputs[-1]).expanduser()) if inputs else str(Path(data_dir) / "input")
