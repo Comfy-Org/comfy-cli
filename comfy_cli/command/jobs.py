@@ -935,41 +935,60 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-# What a completed run that saved nothing actually means. `jobs status` used to
-# report it as a bare `status: completed` with `outputs: []` and say nothing
-# else, while `jobs wait` and `comfy download` both explain it — so the three
-# tools an agent calls on the same job contradicted each other, and the cloud
-# agent read the silence as a dead service and re-ran the graph.
-# Wording tracks the `jobs wait` note and the `download` hint deliberately:
-# an agent that sees two of them in one turn must not read them as two
-# different outcomes.
+# What a completed run with an empty outputs map means. `jobs status` and
+# `jobs wait` used to report it as a bare `status: completed` with no outputs
+# and say nothing else, while `comfy download` explains the case — so the tools
+# an agent calls on one job disagreed, and the cloud agent read the silence as
+# a dead generation service and re-ran the graph. `wait_cmd` carries this on
+# its row too, so a wait answers the question instead of deferring it.
+#
+# It says "reported no outputs", not "saved nothing", because that is what is
+# actually observed: a node can write a file and report nothing (ComfyUI's own
+# `CheckpointSave` has `RETURN_TYPES = ()` and returns no UI output). It also
+# puts the save/preview check before the seed advice, as the `download` hint
+# does — telling a graph with no save node to change its seed walks straight
+# back into the re-run loop this note exists to stop.
 _EMPTY_COMPLETION_NOTE = (
-    "completed with no outputs: nothing new was saved — either no save/preview node ran, or the "
-    "results came from cache. Waiting will not produce files and re-running it unchanged gives the "
-    "same result; change an input or the seed to force a fresh run. This is not a service outage."
+    "completed and reported no outputs. Waiting will not produce files. Check that the workflow has "
+    "a save or preview node; if it does, nothing new ran because the graph matched an earlier run, so "
+    "change an input or the seed to force a fresh one. Some nodes also write files without reporting "
+    "them. This is not a service outage."
 )
 
 
-def _empty_completion_note(
-    status: Any,
-    outputs: Any,
-    text_outputs: Any,
-    *,
-    record_read: bool,
-) -> str | None:
-    """``_EMPTY_COMPLETION_NOTE`` when this snapshot is a completed run that
-    produced nothing at all, else ``None``.
+def _empty_completion_note(status: Any, record_outputs: Any) -> str | None:
+    """``_EMPTY_COMPLETION_NOTE`` for a completed run whose history record
+    carries an empty outputs map, else ``None``.
 
-    ``record_read`` is the honesty gate: only a snapshot built from the job's
-    own history record knows the run produced no text either. A fallback that
-    never read one (the state-file path, which records output URLs flat and no
-    text at all) must not assert "nothing was saved" — it would state as fact
-    something it cannot see, which is the same failure mode this note exists to
-    stop, pointed the other way.
+    Decided on the RAW record outputs rather than on this module's extracted
+    `outputs` / `text_outputs`, for two reasons, both of which are ways of
+    not asserting more than the record establishes:
+
+    * The extractors recognize media entries and a ``text`` list of ``str``.
+      A node can report in neither shape — a custom UI key such as a tagger's
+      ``{"tags": [...]}``, a bare-string ``text``, non-``str`` text items — and
+      deciding on what they recognized would tell a run that *did* report
+      something that it reported nothing.
+    * A record that carries no ``outputs`` key at all establishes nothing. On
+      cloud, completion comes from ``/api/jobs/<id>`` while the record is
+      fetched separately, so a status-only record that has not caught up must
+      not produce "waiting will not produce files". Requiring the key is what
+      closes that; a source with no record at all (the state-file fallback,
+      which stores output URLs flat and no node text) passes ``None`` and
+      withholds the note entirely.
+
+    Deliberately NOT also requiring the record's own status to confirm
+    completion: ``/api/jobs/<id>`` is the authority on terminal state on cloud
+    and the same body's status block already decided it on local, while the
+    record's ``status`` is ``omitempty`` — requiring it would silently disable
+    this note on any deployment that omits the field.
     """
-    if not record_read or status != "completed":
+    if status != "completed" or not isinstance(record_outputs, dict):
         return None
-    if outputs or text_outputs:
+    # Any per-node payload with anything in it counts, whatever its shape.
+    # A node entry that exists but is empty (`{"images": []}`) is truthy, so it
+    # withholds the note too — erring toward saying less.
+    if any(record_outputs.values()):
         return None
     return _EMPTY_COMPLETION_NOTE
 
@@ -1002,8 +1021,9 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
         # state file records output URLs flat and no node text at all. Present
         # but empty, so a consumer indexing it on any `jobs status` success
         # payload stays safe. `source: "state_file"` is how a caller tells this
-        # apart from a record-backed `{}` — which is also why this path never
-        # carries the empty-completion note (see `_empty_completion_note`).
+        # apart from a record-backed `{}` — which is also why this path has no
+        # history record to pass to `_empty_completion_note` and so never
+        # carries the empty-completion note.
         "text_outputs": {},
         "workflow_size": None,
         "error": st.error,
@@ -1373,7 +1393,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
         "host": host,
         "port": port,
     }
-    if note := _empty_completion_note(status, output_urls, text_outputs, record_read=True):
+    if note := _empty_completion_note(status, body.get("outputs")):
         snap["note"] = note
     return snap
 
@@ -1391,6 +1411,13 @@ def _text_preview_lines(text_outputs: Any) -> list:
     ``[...]`` that Rich would otherwise interpret as style markup. Shared by
     the local and cloud pretty views so the two render the same text the same
     way; the cloud one previously rendered none at all.
+
+    Both the node id and the text go through ``sanitize``. A ``Text`` cell
+    declines to *parse* markup but still forwards ``\\x1b``, as the badge in
+    ``_render_status_pretty`` already notes — and node text is the one cell
+    here whose content can come from a model describing an attacker-supplied
+    input, so an ANSI/OSC sequence in it would reach the terminal. The node id
+    is bounded as well: only the text body was length-capped before.
     """
     from rich.text import Text
 
@@ -1402,11 +1429,14 @@ def _text_preview_lines(text_outputs: Any) -> list:
         for text in texts:
             if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
                 break
-            stripped = str(text).strip()
-            first = stripped.splitlines()[0] if stripped else ""
+            # Slice before splitting: only the first ~120 chars of the first
+            # line survive, and `splitlines()` on a multi-megabyte single
+            # output would otherwise allocate one list entry per line of it.
+            stripped = str(text).strip()[:4096]
+            first = sanitize(stripped.splitlines()[0]) if stripped else ""
             if len(first) > 120:
                 first = first[:117] + "…"
-            preview_lines.append(Text(f"[{node_id}] {first}"))
+            preview_lines.append(Text(f"[{sanitize(str(node_id))[:64]}] {first}"))
         if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
             break
     if total > len(preview_lines):
@@ -1650,6 +1680,12 @@ def wait_cmd(
             row["outputs"] = snap["outputs"]
         if snap.get("error_message"):
             row["error_message"] = snap["error_message"]
+        if snap.get("note"):
+            # Without this the row is a bare `completed` with no `outputs`, and
+            # the caller has to go and ask `jobs status` the same question it
+            # just waited for an answer to. The row is the whole result of a
+            # wait, so the one thing that explains an empty one belongs on it.
+            row["note"] = snap["note"]
         jobs_list.append(row)
 
     completed = sum(1 for r in jobs_list if r["status"] == "completed")
@@ -2899,11 +2935,13 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     outputs_by_node: dict[str, list[str]] = {}
     outputs_by_item: dict[str, list[str]] = {}
     text_outputs: dict[str, list[str]] = {}
-    record_read = False
+    record_outputs: Any = None
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
-            record_read = True
+            # The raw map, for `_empty_completion_note`'s own gate — see there
+            # for why the extracted views below are the wrong thing to judge on.
+            record_outputs = record.get("outputs")
             node_outputs = client.extract_outputs(record)
             outputs = [o["url"] for o in node_outputs]
             # Text/STRING node outputs live under outputs[node]["text"] as bare
@@ -2959,8 +2997,12 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
         # Same always-present additive key the local snapshot carries: full
-        # untruncated strings for `--json`, `{}` when the run emitted no text
-        # or is not yet terminal.
+        # untruncated strings for `--json`. `{}` when the run emitted no text —
+        # and also, for now, on any non-completed status, since the history
+        # record is only fetched in the completed branch above. So a failed
+        # cloud run reports `{}` even if an earlier node emitted text, where
+        # the local snapshot would surface that partial text; fetching history
+        # for a failed cloud job is a separate change.
         "text_outputs": text_outputs,
         # Not served by the plural jobs-detail endpoint at all — kept so an
         # older deployment still populates it; never synthesized.
@@ -2974,7 +3016,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
-    if note := _empty_completion_note(state, outputs, text_outputs, record_read=record_read):
+    if note := _empty_completion_note(state, record_outputs):
         snap["note"] = note
     return snap
 
