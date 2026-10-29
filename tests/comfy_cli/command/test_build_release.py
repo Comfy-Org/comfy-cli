@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -43,6 +44,7 @@ class ReleaseBuilder:
         self.releases: list[JsonObject] = []
         self.statuses: list[JsonObject | Exception] = []
         self.log_failures: list[Exception] = []
+        self.logs: list[str] = []
 
     def list_build_targets(self) -> list[JsonObject]:
         self.calls.append({"method": "list_build_targets"})
@@ -69,7 +71,8 @@ class ReleaseBuilder:
         self.calls.append({"method": "get_release_logs", "id": release_id, "os": os, "gpu": gpu})
         if self.log_failures:
             raise self.log_failures.pop(0)
-        return {"versionId": release_id, "os": os, "gpu": gpu, "log": "built", "truncated": False}
+        log = self.logs.pop(0) if self.logs else "built"
+        return {"versionId": release_id, "os": os, "gpu": gpu, "log": log, "truncated": False}
 
     def get_release_manifest(self, release_id: str) -> JsonObject:
         self.calls.append({"method": "get_release_manifest", "id": release_id})
@@ -316,7 +319,8 @@ def test_logs_short_follow_flag_polls_until_complete(client: ReleaseBuilder, mon
 
     # Then
     assert result.exit_code == 0, result.stderr
-    assert len([call for call in client.calls if call["method"] == "get_release_logs"]) == 2
+    # One read per status poll, and one more after the release completed.
+    assert len([call for call in client.calls if call["method"] == "get_release_logs"]) == 3
     assert len([call for call in client.calls if call["method"] == "get_release"]) == 2
 
 
@@ -356,9 +360,9 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 def test_create_watch_rides_out_timed_out_polls(workspace: Path, client: ReleaseBuilder, sleeps: list[float]) -> None:
-    """BE-24385: one poll that timed out ended a watch on a release still
-    building. Four misses in a row, a success, then four more must all ride out,
-    since a success resets the count."""
+    """One poll that timed out must not end a watch on a release still building.
+    Four misses in a row, a success, then four more must all ride out, since a
+    success resets the count."""
     # Given
     misses = [
         urllib.error.URLError("timed out"),
@@ -385,14 +389,15 @@ def test_create_watch_rides_out_timed_out_polls(workspace: Path, client: Release
 
 
 @pytest.mark.parametrize(
-    "miss",
+    "miss, reason",
     [
-        pytest.param(urllib.error.URLError("timed out"), id="urlerror"),
-        pytest.param(TimeoutError("timed out"), id="bare-timeout"),
+        pytest.param(urllib.error.URLError("timed out"), "timed out", id="urlerror"),
+        pytest.param(TimeoutError("timed out"), "timed out", id="bare-timeout"),
+        pytest.param(http.client.IncompleteRead(b""), "IncompleteRead(0 bytes read)", id="dropped-response"),
     ],
 )
 def test_create_watch_fails_after_five_transport_misses_in_a_row(
-    workspace: Path, client: ReleaseBuilder, sleeps: list[float], miss: Exception
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], miss: Exception, reason: str
 ) -> None:
     # Given
     client.statuses = [miss] * build._POLL_TRANSPORT_MISSES
@@ -404,7 +409,28 @@ def test_create_watch_fails_after_five_transport_misses_in_a_row(
     assert result.exit_code == 1, result.output
     error = envelope(result)["error"]
     assert error["code"] == "build_builder_error"
-    assert error["message"] == "builder call failed: <urlopen error timed out>"
+    assert error["message"] == f"builder call failed: <urlopen error {reason}>"
+    assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
+    assert sleeps == [4.0, 8.0, 16.0, 30.0]
+
+
+def test_create_watch_rides_out_responses_dropped_mid_body(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A connection that closes partway through a chunked response is the network
+    dropping, like a reset, so the watch polls again."""
+    # Given
+    client.statuses = [
+        *[http.client.IncompleteRead(b"")] * (build._POLL_TRANSPORT_MISSES - 1),
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
     assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
     assert sleeps == [4.0, 8.0, 16.0, 30.0]
 
@@ -444,9 +470,34 @@ def test_logs_follow_rides_out_timed_out_polls(client: ReleaseBuilder, sleeps: l
 
     # Then
     assert result.exit_code == 0, result.output
-    assert _calls(client, "get_release_logs") == 3
+    assert _calls(client, "get_release_logs") == 4
     assert _calls(client, "get_release") == 3
     assert sleeps == [4.0, 4.0, build._RELEASE_POLL_SECONDS]
+
+
+@pytest.mark.parametrize("agentic", [True, False], ids=["json", "pretty"])
+def test_logs_follow_returns_the_log_read_after_the_release_completed(
+    client: ReleaseBuilder, sleeps: list[float], agentic: bool
+) -> None:
+    """The release can finish between the log read and the status read, most
+    plainly while a timed-out status read is retried. The result must carry the
+    log read after completion, or a failed target loses its last lines."""
+    # Given
+    client.logs = ["started\n", "started\nFAILED: missing dependency\n"]
+    client.statuses = [
+        TimeoutError("timed out"),
+        {"id": "release-1", "status": "complete", "artifactCounts": {"failed": 1}},
+    ]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow", agentic=agentic)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    if agentic:
+        assert envelope(result)["data"]["log"] == "started\nFAILED: missing dependency\n"
+    else:
+        assert "FAILED: missing dependency" in result.output
 
 
 def test_logs_follow_ends_on_the_first_builder_answer(client: ReleaseBuilder, sleeps: list[float]) -> None:

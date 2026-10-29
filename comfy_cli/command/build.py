@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -3145,13 +3146,14 @@ def _poll_call(renderer, fn):
     still end the watch on the first one, through the same envelope.
 
     The builder client is urllib-only: a connect timeout arrives wrapped in a
-    ``URLError``, a timeout or reset while awaiting the response arrives bare."""
+    ``URLError``, a timeout or reset while awaiting the response arrives bare, and
+    a connection closed partway through the body arrives as ``IncompleteRead``."""
 
     def attempt():
         for miss in range(1, _POLL_TRANSPORT_MISSES + 1):
             try:
                 return fn()
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
                 if isinstance(e, urllib.error.HTTPError):
                     raise
                 if miss == _POLL_TRANSPORT_MISSES:
@@ -3355,6 +3357,7 @@ def release_logs(
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     previous_log = ""
     content: dict = {}
+    complete = False
     while True:
         # Only a follow is a watch; a single read fails fast like every other command.
         content = (_poll_call if follow else _builder_call)(
@@ -3365,12 +3368,14 @@ def release_logs(
         if renderer.is_pretty() and isinstance(log, str) and log:
             renderer.print(log[len(previous_log) :] if log.startswith(previous_log) else log)
             previous_log = log
-        if not follow:
+        if not follow or complete:
             break
         detail = _poll_call(renderer, lambda: client.get_release(release_id))
         match detail.get("status"):
             case "complete":
-                break
+                # The log above may predate completion (a retried status read
+                # widens that gap), so read it once more for the final lines.
+                complete = True
             case "queued" | "building":
                 time.sleep(_RELEASE_POLL_SECONDS)
             case status:
