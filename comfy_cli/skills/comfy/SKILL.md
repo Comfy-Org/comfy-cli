@@ -891,6 +891,25 @@ without the flag and are byte-identical. (`comfy run-template` gates the same
 way with the same flag, and forwards consent to `comfy run` once its own gate
 has passed.)
 
+**Run only part of a graph — `--output-node-ids 9,12`.** Only the named
+output nodes and the nodes they depend on execute; the rest of the workflow is
+skipped, not deleted. Use it to test one new branch of a large workflow without
+running (or removing) every other branch. The ids are the API-format graph's
+node ids (`--print-prompt` shows them) and must be output nodes; an unknown id
+fails with `invalid_output_node_ids` before submit, and so does a non-output
+node whenever the node catalog is available. Validation covers only the nodes
+that run, except that a missing or unknown `class_type` anywhere in the workflow
+still fails with `workflow_unknown_nodes` (ComfyUI rejects those before it
+applies the targets). `--allow-spend` is still needed when a paid partner node
+sits anywhere in the workflow: a server that ignores the targets runs it. On a
+local server that ignores the targets, a partner node outside them receives an
+explicit `--api-key`, or a resolved partner credential when the targeted
+subgraph contains a partner node. If no partner credential is sent, it may fail
+mid-run with `execution_error`. On a
+`--where cloud --wait` run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
+when a targeted node returned nothing, and `partial_execution_targets_ignored`
+when the server ran untargeted nodes anyway.
+
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
 has its own waiting model — see the next section.
