@@ -13,8 +13,9 @@ implemented four times: the frontend's `graphToPrompt()`
 (`ComfyUI_frontend/src/utils/executionUtil.ts`), `@comfyorg/api-to-workflow`
 (sourced from `comfy-cloud-mcp-server/src/converter/`), comfy-cli's
 `convert_ui_to_api` (`comfy_cli/workflow_to_api.py`), and — for the adjacent
-save-format slot-write contract — `Comfy-Org/cql`. The frontend is ground
-truth because it is the only one with the live LiteGraph runtime.
+save-format slot-write contract — a Go implementation in a separate internal
+repository. The frontend is ground truth because it is the only one with the
+live LiteGraph runtime.
 
 The whole of `graphToPrompt()`'s widget contract is eleven lines: iterate
 `node.widgets`, skip a widget with no name or `options.serialize === false`,
@@ -319,9 +320,9 @@ Standing rules for compliance review, distinct from the alternatives above:
   expression-language alternative should be reconsidered.
 - Class coverage of the generated tables shrinks between releases, or the node
   manifest backing the export degrades.
-- A fifth implementation of this contract appears, or `Comfy-Org/cql` adopts
-  ComfyUI_frontend's ADR-SUBGRAPH-PROMOTION-0009 host-wins value model, at
-  which point the slot-write contract may be foldable into this one.
+- A fifth implementation of this contract appears, or the Go slot-write
+  implementation adopts ComfyUI_frontend's ADR-SUBGRAPH-PROMOTION-0009 host-wins
+  value model, at which point that contract may be foldable into this one.
 - Re-capture becomes feasible on demand, which would make the capture-epoch
   catalog pin optional rather than mandatory.
 - Any implementation's own ratchet is lowered rather than raised, or a
@@ -338,5 +339,5 @@ a frontend `graphToPrompt()` golden in `comfy-cloud-mcp-server`:
 comfy-cloud-mcp-server#1869 (`PreviewAny`), comfy-cloud-mcp-server#1867 (the
 stale parity pin), comfy-cli#1070 (promoted subgraph values, whose original
 diagnosis this work retracted), comfy-cli#893 (widget-type classification),
-comfy-cli#1079 (`set-widget` writing the wrong slot). Triage of the Comfy Hub
-conversion audit that prompted it: BE-24127.
+comfy-cli#1079 (`set-widget` writing the wrong slot). The Comfy Hub conversion
+audit that prompted this work is triaged in the issue tracker.
