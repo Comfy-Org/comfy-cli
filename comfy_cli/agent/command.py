@@ -212,8 +212,12 @@ def _sandbox_status(port: int | None) -> dict | None:
     return detail if verdict == _AGENT_LIVE else None
 
 
-@app.command("allow", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-@app.command("deny", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+_MOVED_SETTINGS = {"allow_extra_args": True, "ignore_unknown_options": True}
+_MOVED_HELP = "Removed, and changes nothing: approve in the agent panel."
+
+
+@app.command("allow", hidden=True, help=_MOVED_HELP, context_settings=_MOVED_SETTINGS)
+@app.command("deny", hidden=True, help=_MOVED_HELP, context_settings=_MOVED_SETTINGS)
 def _moved_to_the_panel(ctx: typer.Context):
     """Kept hidden so an older agent's instructions get an answer: approving here was removed.
 
