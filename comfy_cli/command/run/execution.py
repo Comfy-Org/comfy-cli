@@ -162,6 +162,7 @@ class WorkflowExecution:
         api_key: str | None = None,
         output_node_ids: list[str] | None = None,
         client_id: str | None = None,
+        run_graph: dict | None = None,
     ):
         self.workflow = workflow
         self.host = host
@@ -186,7 +187,13 @@ class WorkflowExecution:
         self.progress = progress
         # A targeted run only executes the targets' subgraph; the other nodes
         # never report, so counting them would stall the bar short of 100%.
-        run_nodes = target_subgraph(self.workflow, output_node_ids) if output_node_ids else self.workflow
+        # `run_graph` is the subgraph the caller already preflighted, passed in
+        # so the progress count and the checks cannot disagree; computed here
+        # only for callers that construct this class directly.
+        if run_graph is not None:
+            run_nodes = run_graph
+        else:
+            run_nodes = target_subgraph(self.workflow, output_node_ids) if output_node_ids else self.workflow
         self.remaining_nodes = set(run_nodes.keys())
         self.total_nodes = len(self.remaining_nodes)
         if progress is not None:
