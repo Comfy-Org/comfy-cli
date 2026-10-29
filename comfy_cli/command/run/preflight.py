@@ -84,6 +84,11 @@ def fetch_object_info(host, port, timeout):
         raise typer.Exit(code=1) from e
 
 
+# Errors ComfyUI's validate_prompt raises for any node in the submitted graph,
+# before partial_execution_targets narrows what runs.
+_GRAPH_WIDE_ERROR_CODES = frozenset({"missing_class_type", "unknown_class_type"})
+
+
 def _preflight_validate(
     renderer,
     workflow: dict,
@@ -91,8 +96,16 @@ def _preflight_validate(
     *,
     target_label: str = "server",
     where: str | None = None,
+    submitted_workflow: dict | None = None,
 ) -> None:
     """Pre-submit validation via the pure-Python CQL engine.
+
+    ``workflow`` is what will run. On a targeted run (``--output-node-ids``)
+    that is only the targets' subgraph, while ``submitted_workflow`` is the
+    full graph that goes to ``/prompt``. ComfyUI rejects a missing or unknown
+    class_type anywhere in the submitted graph before it applies the targets,
+    so those two checks also cover nodes outside the subgraph; every other
+    check stays scoped to what runs.
 
     Checks unknown class_types, input shape mismatches, and catalog drift.
     Raises typer.Exit(1) on hard errors. Prints warnings in pretty mode.
@@ -113,8 +126,11 @@ def _preflight_validate(
     from comfy_cli.cloud_model_validation import resolve_cloud_model_errors
 
     validation = resolve_cloud_model_errors(validation, workflow, where=where)
-    if not validation.get("valid", True):
-        errors = validation.get("errors", [])
+    errors = list(validation.get("errors", [])) if not validation.get("valid", True) else []
+    if submitted_workflow is not None and submitted_workflow is not workflow:
+        skipped = graph.validate_workflow({k: v for k, v in submitted_workflow.items() if k not in workflow})
+        errors += [e for e in skipped.get("errors", []) if e.get("code") in _GRAPH_WIDE_ERROR_CODES]
+    if errors or not validation.get("valid", True):
         hint_parts = []
         for e in errors[:5]:
             line = f"node {e.get('node_id') or '?'}: {e.get('message', '')}"

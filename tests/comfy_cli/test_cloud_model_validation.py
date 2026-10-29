@@ -319,3 +319,43 @@ def test_unique_lookups_are_bounded_and_unchecked_errors_remain(service):
     assert request.call_count == 16
     assert result["valid"] is False
     assert result["errors"] == [errors[-1]]
+
+
+@pytest.mark.parametrize("skipped_kind", ["unknown-class", "missing-class", "unexecuted-model"])
+def test_targeted_run_keeps_verified_model_resolution_and_full_graph_class_checks(service, skipped_kind):
+    import typer
+
+    from comfy_cli.command.run.preflight import _preflight_validate
+
+    _, request = service
+    runnable = workflow()
+    if skipped_kind == "unknown-class":
+        skipped = {"class_type": "NotInstalled", "inputs": {}}
+        expected = "unknown_class_type"
+    elif skipped_kind == "missing-class":
+        skipped = {"inputs": {}}
+        expected = "missing_class_type"
+    else:
+        skipped = copy.deepcopy(runnable["2"])
+        skipped["inputs"]["lora_name"] = "unexecuted-private.safetensors"
+        expected = None
+    submitted = {**runnable, "9": skipped}
+    renderer = Mock()
+    renderer.is_pretty.return_value = False
+
+    def validate():
+        _preflight_validate(
+            renderer, runnable, object_info(), where="cloud", target_label="cloud", submitted_workflow=submitted
+        )
+
+    if expected:
+        with pytest.raises(typer.Exit):
+            validate()
+        details = renderer.error.call_args.kwargs["details"]
+        assert [(error["node_id"], error["code"]) for error in details["errors"]] == [("9", expected)]
+        assert any(warning["code"] == "cloud_model_asset_verified" for warning in details["warnings"])
+    else:
+        validate()
+        renderer.error.assert_not_called()
+    request.assert_called_once()
+    assert parse_qs(urlsplit(request.call_args.args[0]).query)["name_contains"] == [NAME]
