@@ -935,6 +935,45 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+# What a completed run that saved nothing actually means. `jobs status` used to
+# report it as a bare `status: completed` with `outputs: []` and say nothing
+# else, while `jobs wait` and `comfy download` both explain it — so the three
+# tools an agent calls on the same job contradicted each other, and the cloud
+# agent read the silence as a dead service and re-ran the graph (BE-24124).
+# Wording tracks the `jobs wait` note and the `download` hint deliberately:
+# an agent that sees two of them in one turn must not read them as two
+# different outcomes.
+_EMPTY_COMPLETION_NOTE = (
+    "completed with no outputs: nothing new was saved — either no save/preview node ran, or the "
+    "results came from cache. Waiting will not produce files and re-running it unchanged gives the "
+    "same result; change an input or the seed to force a fresh run. This is not a service outage."
+)
+
+
+def _empty_completion_note(
+    status: Any,
+    outputs: Any,
+    text_outputs: Any,
+    *,
+    record_read: bool,
+) -> str | None:
+    """``_EMPTY_COMPLETION_NOTE`` when this snapshot is a completed run that
+    produced nothing at all, else ``None``.
+
+    ``record_read`` is the honesty gate: only a snapshot built from the job's
+    own history record knows the run produced no text either. A fallback that
+    never read one (the state-file path, which records output URLs flat and no
+    text at all) must not assert "nothing was saved" — it would state as fact
+    something it cannot see, which is the same failure mode this note exists to
+    stop, pointed the other way.
+    """
+    if not record_read or status != "completed":
+        return None
+    if outputs or text_outputs:
+        return None
+    return _EMPTY_COMPLETION_NOTE
+
+
 def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, server_running: bool) -> dict:
     """Shape a `jobs status` payload out of the on-disk state file.
 
@@ -959,6 +998,13 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
         # same thing the live queue-hit payload emits.
         "outputs_by_node": {},
         "outputs_by_item": {},
+        # Same reasoning, and the same reason it cannot be reconstructed: the
+        # state file records output URLs flat and no node text at all. Present
+        # but empty, so a consumer indexing it on any `jobs status` success
+        # payload stays safe. `source: "state_file"` is how a caller tells this
+        # apart from a record-backed `{}` — which is also why this path never
+        # carries the empty-completion note (see `_empty_completion_note`).
+        "text_outputs": {},
         "workflow_size": None,
         "error": st.error,
         "host": host,
@@ -1308,26 +1354,64 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
         job = None
     item_map = job.item_map if job is not None else None
     outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
+    # Text/STRING node outputs (image descriptions, ShowText, …) live under
+    # outputs[node]["text"] as bare strings, which the URL flatten drops.
+    # Additive key: full untruncated strings for `--json`; the pretty
+    # renderer previews them. Empty {} when the run emitted no text.
+    text_outputs = extract_text_outputs(body)
+    status = "error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"
 
-    return {
+    snap: dict[str, Any] = {
         "prompt_id": prompt_id,
-        "status": ("error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"),
+        "status": status,
         "workflow_size": None,
         "outputs": output_urls,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
-        # Text/STRING node outputs (image descriptions, ShowText, …) live under
-        # outputs[node]["text"] as bare strings, which the URL flatten drops.
-        # Additive key: full untruncated strings for `--json`; the pretty
-        # renderer previews them. Empty {} when the run emitted no text.
-        "text_outputs": extract_text_outputs(body),
+        "text_outputs": text_outputs,
         "error": error_detail,
         "host": host,
         "port": port,
     }
+    if note := _empty_completion_note(status, output_urls, text_outputs, record_read=True):
+        snap["note"] = note
+    return snap
 
 
 _TEXT_PREVIEW_LIMIT = 20
+
+
+def _text_preview_lines(text_outputs: Any) -> list:
+    """Bounded `text` rows for a status table, or `[]`.
+
+    First non-blank line, ~120 chars per entry, capped at
+    ``_TEXT_PREVIEW_LIMIT`` entries total. The full untruncated text ships on
+    the ``--json`` path (``renderer.emit``). Built as ``Text`` (not markup
+    strings) since node ids / node text are server-supplied and may contain
+    ``[...]`` that Rich would otherwise interpret as style markup. Shared by
+    the local and cloud pretty views so the two render the same text the same
+    way; the cloud one previously rendered none at all.
+    """
+    from rich.text import Text
+
+    if not isinstance(text_outputs, dict) or not text_outputs:
+        return []
+    preview_lines: list[Text] = []
+    total = sum(len(texts) for texts in text_outputs.values())
+    for node_id, texts in text_outputs.items():
+        for text in texts:
+            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                break
+            stripped = str(text).strip()
+            first = stripped.splitlines()[0] if stripped else ""
+            if len(first) > 120:
+                first = first[:117] + "…"
+            preview_lines.append(Text(f"[{node_id}] {first}"))
+        if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+            break
+    if total > len(preview_lines):
+        preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
+    return preview_lines
 
 
 def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
@@ -1362,29 +1446,12 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     tbl.add_row("status", badge)
     if snap.get("outputs"):
         tbl.add_row("outputs", "\n".join(sanitize_markup(o) for o in snap["outputs"]))
-    if snap.get("text_outputs"):
-        # Bounded preview: first non-blank line, ~120 chars per entry, capped at
-        # _TEXT_PREVIEW_LIMIT entries total. The full untruncated text ships on
-        # the `--json` path (renderer.emit). Built as Text (not markup strings)
-        # since node ids / node text are server-supplied and may contain `[...]`
-        # that Rich would otherwise interpret as style markup.
-        preview_lines: list[Text] = []
-        total = sum(len(texts) for texts in snap["text_outputs"].values())
-        for node_id, texts in snap["text_outputs"].items():
-            for text in texts:
-                if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
-                    break
-                stripped = str(text).strip()
-                first = stripped.splitlines()[0] if stripped else ""
-                if len(first) > 120:
-                    first = first[:117] + "…"
-                preview_lines.append(Text(f"[{node_id}] {first}"))
-            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
-                break
-        if total > len(preview_lines):
-            preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
-        if preview_lines:
-            tbl.add_row("text", Text("\n").join(preview_lines))
+    if preview_lines := _text_preview_lines(snap.get("text_outputs")):
+        tbl.add_row("text", Text("\n").join(preview_lines))
+    if snap.get("note"):
+        # A completed run that saved nothing: say so here too, so the pretty
+        # view does not look like a successful run whose files went missing.
+        tbl.add_row("note", sanitize_markup(str(snap["note"])))
     if snap.get("error"):
         # Truncate first, escape second: the 600-char budget stays a budget on
         # the server's text rather than on the backslashes we add to it, and
@@ -2804,7 +2871,7 @@ def _ms_to_iso(value: Any) -> str | None:
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
-    from comfy_cli.comfy_client import _group_outputs
+    from comfy_cli.comfy_client import _group_outputs, extract_text_outputs
 
     client = _cloud_client()
     status = client.get_job_status(prompt_id)
@@ -2831,11 +2898,21 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
     outputs_by_item: dict[str, list[str]] = {}
+    text_outputs: dict[str, list[str]] = {}
+    record_read = False
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
+            record_read = True
             node_outputs = client.extract_outputs(record)
             outputs = [o["url"] for o in node_outputs]
+            # Text/STRING node outputs live under outputs[node]["text"] as bare
+            # strings, which the media flatten above drops. The local snapshot
+            # has carried them since the key was added; cloud did not, so
+            # `comfy download`'s text-only hint ("read the text with
+            # `comfy jobs status <id>`", BE-24124) pointed at a cloud payload
+            # that could not answer it. Same source record, no extra request.
+            text_outputs = extract_text_outputs(record)
             # The compose item_map (foreach item -> node ids) lives on the
             # job state file, written at submit time by `comfy run`.
             job = jobs_state.read(prompt_id)
@@ -2870,7 +2947,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     # everything through `execution_errors.parse_error_message`.
     error_message = (_execution_error_line(raw_execution_error) if failed else None) or status.get("error_message")
 
-    return {
+    snap: dict[str, Any] = {
         "prompt_id": prompt_id,
         "status": state,
         # The server's own spelling, before canonicalization. Always present so
@@ -2881,6 +2958,10 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Same always-present additive key the local snapshot carries: full
+        # untruncated strings for `--json`, `{}` when the run emitted no text
+        # or is not yet terminal.
+        "text_outputs": text_outputs,
         # Not served by the plural jobs-detail endpoint at all — kept so an
         # older deployment still populates it; never synthesized.
         "assigned_inference": status.get("assigned_inference"),
@@ -2893,6 +2974,9 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
+    if note := _empty_completion_note(state, outputs, text_outputs, record_read=record_read):
+        snap["note"] = note
+    return snap
 
 
 def _cloud_status(prompt_id: str) -> None:
@@ -2939,6 +3023,12 @@ def _cloud_status(prompt_id: str) -> None:
             tbl.add_row("error", sanitize_markup(str(snap["error_message"])[:600]))
         for u in snap.get("outputs") or []:
             tbl.add_row("output", sanitize_markup(u))
+        if preview_lines := _text_preview_lines(snap.get("text_outputs")):
+            from rich.text import Text
+
+            tbl.add_row("text", Text("\n").join(preview_lines))
+        if snap.get("note"):
+            tbl.add_row("note", sanitize_markup(str(snap["note"])))
         renderer.console().print(tbl)
     renderer.emit(snap, command="jobs status", where="cloud")
 

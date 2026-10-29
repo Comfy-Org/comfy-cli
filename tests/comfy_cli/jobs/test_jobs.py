@@ -2401,6 +2401,149 @@ def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
     assert snap is not None
     assert snap["outputs_by_node"] == {}
     assert snap["outputs_by_item"] == {}
+    assert snap["text_outputs"] == {}
+    assert "note" not in snap
+
+
+class TestFinishedRunWithNothingToDownload:
+    """BE-24124: the job tools must agree about a run that completed with no
+    output files.
+
+    `comfy download` says which case it is (text output only / completed with
+    no files / failed) and, for the first two, names `comfy jobs status` as the
+    follow-up. These pin the other half of that contract: `jobs status` must
+    carry the text the hint promises, and must say what an empty completion
+    means instead of reporting a bare `completed` with `outputs: []`.
+    """
+
+    _TEXT_ONLY = {
+        "status": {"completed": True, "status_str": "success"},
+        "outputs": {"7": {"text": ["a detailed description of the uploaded image"]}},
+    }
+    _NOTHING = {"status": {"completed": True, "status_str": "success"}, "outputs": {}}
+
+    def test_cloud_snapshot_carries_the_text_the_download_hint_points_at(self, monkeypatch):
+        """A text-only cloud job: `download` refuses with "read the text with
+        `comfy jobs status <id>`", so that command has to return the text. The
+        cloud snapshot used to omit `text_outputs` entirely, making the hint a
+        dead end on exactly the target the hosted agent runs on."""
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._TEXT_ONLY))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-text-only")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["text_outputs"] == {"7": ["a detailed description of the uploaded image"]}
+
+    def test_text_only_completion_is_not_called_empty(self, monkeypatch):
+        """The run produced something, so the "nothing was saved" note must not
+        fire — it would contradict `download`'s own text-only branch."""
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._TEXT_ONLY))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-text-no-note")
+        assert snap is not None
+        assert "note" not in snap
+
+    def test_cloud_snapshot_says_a_completed_run_saved_nothing(self, monkeypatch):
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._NOTHING))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-empty")
+        assert snap is not None
+        # Truthful terminal state is preserved: it DID complete.
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["text_outputs"] == {}
+        assert snap["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+        # The two things the agent got wrong in the reported session.
+        assert "not a service outage" in snap["note"]
+        assert "re-running it unchanged" in snap["note"]
+
+    def test_local_history_snapshot_says_a_completed_run_saved_nothing(self, monkeypatch):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith("/history/pid-local-empty"):
+                return {"pid-local-empty": {"status": {"completed": True, "messages": []}, "outputs": {}}}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "pid-local-empty")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+
+    def test_local_history_snapshot_with_outputs_has_no_note(self, monkeypatch):
+        body = {
+            "status": {"completed": True, "messages": []},
+            "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+        }
+
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith("/history/pid-local-ok"):
+                return {"pid-local-ok": body}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "pid-local-ok")
+        assert snap is not None
+        assert "note" not in snap
+
+    def test_a_failed_run_is_not_given_the_empty_completion_note(self, monkeypatch):
+        """`error` keeps its own classification; only a *completed* run that
+        saved nothing gets this note."""
+        failed = {
+            "status": {"completed": False, "status_str": "error"},
+            "outputs": {},
+        }
+
+        class _FailedClient(_CompletedCloudClient):
+            def get_job_status(self, prompt_id):
+                return {"status": "error", "error_message": "boom"}
+
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FailedClient(failed))
+        snap = jobs_mod._cloud_status_snapshot("pid-failed-empty")
+        assert snap is not None
+        assert snap["status"] == "error"
+        assert "note" not in snap
+
+    def test_state_file_fallback_reports_no_text_but_claims_nothing(self):
+        """The state-file fallback has no history record, so it cannot know a
+        run produced no text. It carries the key (so a consumer indexing it on
+        any `jobs status` payload is safe) and withholds the note rather than
+        asserting something it cannot see."""
+        from comfy_cli import jobs_state
+
+        st = jobs_state.new(prompt_id="pid-sf", client_id="c", workflow="w", where="local")
+        st.status = "completed"
+        st.outputs = []
+
+        snap = jobs_mod._state_file_snapshot(st, prompt_id="pid-sf", host="h", port=8188, server_running=False)
+        assert snap["status"] == "completed"
+        assert snap["text_outputs"] == {}
+        assert snap["source"] == "state_file"
+        assert "note" not in snap
+
+    def test_cloud_envelope_carries_the_note_and_the_text(self, monkeypatch, capsys):
+        """End to end through `jobs status --where cloud` — what the agent's
+        get_job tool actually reads."""
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._NOTHING))
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs status"))
+        jobs_mod._cloud_status("pid-env-empty")
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        env = json.loads(lines[-1])
+        assert env["type"] == "envelope" and env["ok"] is True
+        assert env["data"]["status"] == "completed"
+        assert env["data"]["outputs"] == []
+        assert env["data"]["text_outputs"] == {}
+        assert env["data"]["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
 
 
 def test_jobs_status_cloud_envelope_carries_grouped_outputs(monkeypatch, capsys):
