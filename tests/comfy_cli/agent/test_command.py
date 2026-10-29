@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.agent import StateError, read_state
-from comfy_cli.agent.command import NOTE, app
+from comfy_cli.agent.command import MOVED_HINT, NOTE, app
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
@@ -339,24 +339,197 @@ def test_cli_permissions_prints_no_panel_note_with_nothing_pending(tmp_path: Pat
     assert NOTE not in " ".join(res.output.split())
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["allow", "--approve", "0123456789abcdef"],
-        ["allow", "--path", "/tmp", "--reason", "x"],
-        ["allow", "--host", "models.example.com"],
-        ["deny", "0123456789abcdef"],
-    ],
-)
-def test_allow_and_deny_approve_nothing_and_point_to_the_panel(tmp_path: Path, argv: list[str]):
-    """A script the agent's model runs could otherwise approve its own request."""
+# --- the removed `allow` / `deny`: refuse, point to the panel, touch nothing ---
+
+PANEL_PHRASE = "approve in the agent panel"
+
+_A, _B = "0123456789abcdef", "fedcba9876543210"
+
+# Every form the removed commands took, alone and combined. "<folder>" becomes a
+# real folder, so a command that did write would have something it could grant.
+_REMOVED_FORMS = [
+    ["allow", "--approve", _A],
+    ["allow", "--path", "<folder>", "--reason", "reference photos"],
+    ["allow", "--host", "models.example.com", "--reason", "a VAE"],
+    ["allow", "--path", "<folder>", "--host", "models.example.com", "--reason", "both"],
+    ["allow", "--approve", _A, "--path", "<folder>", "--host", "models.example.com"],
+    ["deny", _A],
+    ["deny", _B, "--reason", "no"],
+    ["allow"],
+    ["deny"],
+]
+
+
+def _argv(form: list[str], folder: Path) -> list[str]:
+    return [str(folder) if a == "<folder>" else a for a in form]
+
+
+def _snapshot(root: Path) -> dict:
+    """Every file and dir under ``root``: bytes and mtime, so a rewrite with equal bytes still shows."""
+    if not root.exists():
+        return {}
+    return {
+        str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mtime_ns) if p.is_file() else "dir"
+        for p in sorted(root.rglob("*"))
+    }
+
+
+def _seed(root: Path, folder: Path) -> None:
+    """A data dir holding two pending requests, an approved folder and host, and a stale discovery file."""
+    _write_pending(
+        root,
+        _req(_A, "path", str(folder), "reference photos"),
+        _req(_B, "host", "models.example.com", "a VAE"),
+        paths=[{"path": "/refs", "reason": "photos", "approved_at": "2026-09-01T00:00:00Z"}],
+    )
+    (root / "egress-allow.json").write_text(
+        json.dumps({"hosts": [{"host": "cdn.example.com", "reason": "r", "approved_at": "2026-09-01T00:00:00Z"}]})
+    )
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+
+
+@pytest.fixture
+def no_agent(monkeypatch):
+    """Nothing answers on the discovery port, as when the agent that wrote agent.json has exited."""
+    from comfy_cli.agent import command
+
+    def _refused(url):
+        raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+    monkeypatch.setattr(command, "_open_health", _refused)
+
+
+@pytest.mark.parametrize("form", _REMOVED_FORMS, ids=lambda f: " ".join(f))
+def test_removed_commands_refuse_in_json_and_leave_the_state_files_alone(tmp_path: Path, no_agent, form):
+    """A script the agent's model runs could otherwise answer its own request."""
     root = tmp_path / "data"
-    _write_pending(root, _req("0123456789abcdef", "host", "models.example.com"))
-    before = sorted((p.name, p.read_text()) for p in root.iterdir())
-    res = CliRunner().invoke(app, [*argv, "--data-dir", str(root)])
-    assert res.exit_code == 1
-    assert "agent panel" in " ".join(res.output.split())
-    assert sorted((p.name, p.read_text()) for p in root.iterdir()) == before
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _seed(root, folder)
+    before = _snapshot(root)
+    state_before = read_state(root)
+
+    res = CliRunner().invoke(app, [*_argv(form, folder), "--data-dir", str(root)])
+
+    assert res.exit_code != 0, res.output
+    env = _envelope(res)
+    assert env["ok"] is False
+    err = env["error"]
+    assert err["code"] == "agent_approval_moved"
+    assert PANEL_PHRASE in err["hint"]
+    assert err["hint"] == MOVED_HINT
+    assert f"comfy agent {form[0]} was removed" in err["message"]
+    assert _snapshot(root) == before, "permissions.json, egress-allow.json and agent.json must be byte-identical"
+    after = read_state(root)
+    assert after.pending == state_before.pending and [e["id"] for e in after.pending] == [_A, _B]
+    assert after.paths == state_before.paths and after.hosts == state_before.hosts
+
+
+@pytest.mark.parametrize("form", _REMOVED_FORMS, ids=lambda f: " ".join(f))
+def test_removed_commands_refuse_in_pretty_output_too(tmp_path: Path, no_agent, form):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _seed(root, folder)
+    before = _snapshot(root)
+    _pin_renderer(OutputMode.PRETTY)
+
+    res = CliRunner().invoke(app, [*_argv(form, folder), "--data-dir", str(root)])
+
+    assert res.exit_code != 0, res.output
+    # The error panel wraps and frames long lines; read it back as one line of words.
+    flat = " ".join(res.output.replace("│", " ").split())
+    assert PANEL_PHRASE in flat, res.output
+    assert "agent_approval_moved" in flat
+    assert _snapshot(root) == before
+
+
+@pytest.mark.parametrize("form", _REMOVED_FORMS, ids=lambda f: " ".join(f))
+@pytest.mark.parametrize("make_root", [False, True], ids=["no-data-dir", "empty-data-dir"])
+def test_removed_commands_create_no_data_dir_or_file(tmp_path: Path, no_agent, form, make_root: bool):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    if make_root:
+        root.mkdir()
+
+    res = CliRunner().invoke(app, [*_argv(form, folder), "--data-dir", str(root)])
+
+    assert res.exit_code != 0, res.output
+    assert PANEL_PHRASE in _envelope(res)["error"]["hint"]
+    if make_root:
+        assert list(root.iterdir()) == [], "no permissions.json, egress-allow.json or other file may appear"
+    else:
+        assert not root.exists(), "an absent data dir must stay absent"
+
+
+@pytest.mark.parametrize("form", _REMOVED_FORMS, ids=lambda f: " ".join(f))
+def test_removed_commands_leave_the_default_data_dir_absent(home: Path, tmp_path: Path, monkeypatch, no_agent, form):
+    monkeypatch.delenv("AGENT_DATA_DIR", raising=False)
+    folder = tmp_path / "refs"
+    folder.mkdir()
+
+    res = CliRunner().invoke(app, _argv(form, folder))
+
+    assert res.exit_code != 0, res.output
+    assert PANEL_PHRASE in _envelope(res)["error"]["hint"]
+    assert not (home / ".comfy-agent").exists()
+
+
+def test_permissions_lists_pending_and_approved_without_writing(tmp_path: Path, no_agent):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _seed(root, folder)
+    before = _snapshot(root)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert [e["id"] for e in data["pending"]] == [_A, _B]
+    assert [e["path"] for e in data["paths"]] == ["/refs"]
+    assert [e["host"] for e in data["hosts"]] == ["cdn.example.com"]
+    assert data["agent"] == {"running": False, "port": 8190}
+    assert PANEL_PHRASE in data["note"]
+    _validate(data)
+
+    _pin_renderer(OutputMode.PRETTY)
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.output
+    assert res.output.find(_A) >= 0 and res.output.find(_B) >= 0
+
+    assert _snapshot(root) == before, "listing must not rewrite or add a file"
+
+
+def test_permissions_creates_no_data_dir(tmp_path: Path):
+    root = tmp_path / "data"
+    res = CliRunner().invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["pending"] == [] and data["paths"] == [] and data["hosts"] == []
+    assert not root.exists()
+
+
+def test_permissions_shows_a_live_agent_and_still_points_to_the_panel(tmp_path: Path, monkeypatch):
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _seed(root, folder)
+    before = _snapshot(root)
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"sandbox": {"mode": "seatbelt"}}'))
+
+    res = CliRunner().invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["agent"] == {"running": True, "port": 8190}
+    assert data["sandbox"] == {"mode": "seatbelt"}
+    assert data["note"] == NOTE
+    assert "grant" not in data and "answer_in" not in data
+    _validate(data)
+    assert _snapshot(root) == before
 
 
 def test_allow_and_deny_stay_out_of_help():

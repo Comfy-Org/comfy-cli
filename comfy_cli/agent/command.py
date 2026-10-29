@@ -45,9 +45,13 @@ _DATA_DIR_OPT = Annotated[
 ]
 
 NOTE = (
-    "approve or deny a pending request on its card in the agent panel; the agent cannot approve its own "
-    "requests. A request whose card closed unanswered gets a new card when the agent asks for it again"
+    "approve in the agent panel, on the card the agent shows when it asks; the agent cannot approve its own "
+    "requests. A request whose card closed unanswered stays pending: it gets a new card only if the user asks "
+    "for that folder or host again and the agent asks again"
 )
+# The refusal's hint. Keep the phrase "approve in the agent panel" in it
+# verbatim: it is the wording the error registry and the tests pin.
+MOVED_HINT = "approve in the agent panel, on the card the agent shows when it asks; nothing here approves or denies"
 
 
 def _age(requested_at: object, now: datetime | None = None) -> str:
@@ -211,11 +215,15 @@ def _sandbox_status(port: int | None) -> dict | None:
 @app.command("allow", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 @app.command("deny", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def _moved_to_the_panel(ctx: typer.Context):
-    """Kept hidden so an older agent's instructions get an answer: approving here was removed, and changes nothing."""
+    """Kept hidden so an older agent's instructions get an answer: approving here was removed.
+
+    It takes every argument the removed commands took and touches none of
+    them, nor the data dir: nothing is read, written or created.
+    """
     get_renderer().error(
         code="agent_approval_moved",
-        message=f"comfy agent {ctx.info_name} was removed: a script the agent ran could approve its own requests",
-        hint="approve or deny the request on its card in the agent panel",
+        message=f"comfy agent {ctx.info_name} was removed: a script the agent ran could answer its own requests",
+        hint=MOVED_HINT,
     )
     raise typer.Exit(code=1)
 

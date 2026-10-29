@@ -205,8 +205,9 @@ history.
 - **Breaking:** `comfy agent allow` and `comfy agent deny`. The local agent's model can run
   comfy-cli, so a script it ran could approve the agent's own requests or grant
   it a folder or host. The user now approves or denies a request only in the
-  agent panel. Both names stay as hidden commands that change nothing and exit
-  1 with `agent_approval_moved`. `comfy agent permissions` still lists what is waiting and what is
+  agent panel. Both names stay as hidden commands that read and write nothing:
+  they exit 1 with `agent_approval_moved` and the hint "approve in the agent
+  panel". `comfy agent permissions` still lists what is waiting and what is
   approved; its `--json` payload drops `grant` and `answer_in` and carries a
   `note` naming the panel. The error codes `agent_state_unwritable`,
   `agent_bad_args`, `agent_refused`, `agent_unknown_request`, `agent_running`

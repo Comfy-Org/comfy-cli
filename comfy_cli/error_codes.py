@@ -641,9 +641,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "agent_approval_moved",
-        "`comfy agent allow` and `comfy agent deny` were removed: a script the agent ran could approve "
-        "its own requests. They change nothing and exit 1.",
-        "approve or deny the request on its card in the agent panel",
+        "`comfy agent allow` and `comfy agent deny` were removed: a script the agent ran could answer "
+        "its own requests. They read and write nothing and exit 1.",
+        "approve in the agent panel, on the card the agent shows when it asks; nothing here approves or denies",
     ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
