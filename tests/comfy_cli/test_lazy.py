@@ -202,6 +202,44 @@ def test_lazy_subcommand_refuses_a_callback_only_app(monkeypatch):
         group.get_command(None, "one")
 
 
+def test_lazy_subcommand_refuses_a_name_that_is_not_a_typer_app(monkeypatch):
+    """``spec.attr`` pointed at the callback itself (or anything else that
+    isn't a Typer app) should raise a message naming the actual mis-wiring,
+    not a bare AttributeError from touching registered_commands."""
+    _fake_module(monkeypatch, "_lz_notapp", only=lambda: None)
+    group = typer.main.get_command(_lazy_root({"one": LazySubcommand("_lz_notapp", attr="only")}))
+    with pytest.raises(TypeError, match="not a typer.Typer instance"):
+        group.get_command(None, "one")
+
+
+def test_lazy_subcommand_refuses_a_truly_empty_app(monkeypatch):
+    """An app with no commands, no subgroups, and no callback at all has
+    nothing to mount — distinct wording from the callback-only case, since
+    there is no callback to redirect the author toward."""
+    _fake_module(monkeypatch, "_lz_empty", app=typer.Typer())
+    group = typer.main.get_command(_lazy_root({"one": LazySubcommand("_lz_empty")}))
+    with pytest.raises(TypeError, match="no callback"):
+        group.get_command(None, "one")
+
+
+def test_lazy_subcommand_accepts_a_nested_lazy_group_with_a_custom_cls(monkeypatch):
+    """A sub-app that is itself a nested LazyTyperGroup with no eager commands
+    of its own has empty registered_commands/registered_groups by design —
+    its real commands build on lookup. The guard must tell that apart from a
+    bare callback by checking for the custom ``cls``, not just emptiness."""
+
+    class InnerRoot(LazyTyperGroup):
+        lazy_subcommands = {"hello": LazyCommand("_lz_inner", attr="hello")}
+
+    inner = typer.Typer(cls=InnerRoot)
+    _fake_module(monkeypatch, "_lz_inner", hello=lambda: typer.echo("hello"))
+    _fake_module(monkeypatch, "_lz_nested", app=inner)
+    group = typer.main.get_command(_lazy_root({"nested": LazySubcommand("_lz_nested")}))
+    built = group.get_command(None, "nested")
+    assert built is not None
+    assert built.get_command(None, "hello") is not None
+
+
 def test_lazy_command_accepts_options_on_either_side_of_the_positional(monkeypatch):
     """The regression this guard protects: with the callback mounted as a
     LazyCommand, every flag order parses to the same result."""

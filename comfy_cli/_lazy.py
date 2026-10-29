@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 from typer.core import TyperGroup
-from typer.models import CommandInfo, TyperInfo
+from typer.models import CommandInfo, DefaultPlaceholder, TyperInfo
 
 if TYPE_CHECKING:
     import click
@@ -123,9 +123,27 @@ def _reject_single_callback_app(name: str, spec: LazySubcommand, sub_app: typer.
     hits only in the installed CLI, since calling the module's app directly
     never exercises the root group. ``code-search`` shipped that way and was
     moved to :class:`LazyCommand`; this keeps the next one from repeating it.
+
+    A sub-app that supplies its own ``cls`` (e.g. a nested :class:`LazyTyperGroup`
+    with its own ``lazy_subcommands`` table) is exempt: its commands are built on
+    lookup rather than registered eagerly, so ``registered_commands`` and
+    ``registered_groups`` are empty by design, not because it is a bare callback.
     """
+    if not isinstance(sub_app, typer.Typer):
+        raise TypeError(
+            f"lazy_subcommands[{name!r}] names {spec.module}.{spec.attr}, which is "
+            f"{sub_app!r}, not a typer.Typer instance."
+        )
     if sub_app.registered_commands or sub_app.registered_groups:
         return
+    if not isinstance(sub_app.info.cls, DefaultPlaceholder):
+        return
+    if sub_app.registered_callback is None:
+        raise TypeError(
+            f"lazy_subcommands[{name!r}] mounts {spec.module}.{spec.attr} as a command group, but "
+            f"that Typer app registers no commands, no subgroups, and no callback — there is nothing "
+            f"to mount. Check the module actually registers the commands you expect."
+        )
     raise TypeError(
         f"lazy_subcommands[{name!r}] mounts {spec.module}.{spec.attr} as a command group, but that "
         f"Typer app registers no commands and no subgroups — it is a single callback. Mounting it as "
