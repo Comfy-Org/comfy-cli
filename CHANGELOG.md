@@ -17,6 +17,18 @@ history.
 
 ### Fixed
 
+- `_schema_widget_pairs` takes `node_type` and `node` keyword-only, so a caller
+  that passes a node where `node_type` is expected now raises rather than
+  converting the wrong thing. `node_type` was added as the third positional
+  parameter ahead of `node`, which meant a three-argument call bound its node to
+  `node_type` and left `node` as `None`. With no node there are no
+  `inputs[].widget` markers to read, so a saved layout was ignored and the walk
+  fell back to the current catalog order — the shape that emits a dynamic
+  combo's trailing sub-input value into the following widget. No shipped call
+  site was affected (the one internal caller passes both), but the mis-bind was
+  silent: the call still returned pairs, so a test could keep passing while no
+  longer exercising the behaviour it named.
+
 - `Create Bounding Boxes` box edits, `Build JSON Prompt (Ideogram)` colour
   palettes and old-style `COLOR` inputs (LayerStyle's `LayerMask: MaskByColor`,
   `LayerUtility: ColorPicker`, `LayerUtility: ExtendCanvas`) keep their widget

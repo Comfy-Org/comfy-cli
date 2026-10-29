@@ -1913,6 +1913,7 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
 def _schema_widget_pairs(
     schema: Any,
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
 ) -> list[tuple[str, Any]]:
@@ -2491,7 +2492,7 @@ def _collect_widget_inputs(
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
-    pairs = _schema_widget_pairs(schema, widget_values, node_type, node) if schema else []
+    pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
     schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
