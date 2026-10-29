@@ -2406,8 +2406,8 @@ def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
 
 
 class TestFinishedRunWithNothingToDownload:
-    """BE-24124: the job tools must agree about a run that completed with no
-    output files.
+    """The job tools must agree about a run that completed with no output
+    files.
 
     `comfy download` says which case it is (text output only / completed with
     no files / failed) and, for the first two, names `comfy jobs status` as the

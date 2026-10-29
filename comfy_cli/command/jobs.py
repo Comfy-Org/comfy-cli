@@ -939,7 +939,7 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # report it as a bare `status: completed` with `outputs: []` and say nothing
 # else, while `jobs wait` and `comfy download` both explain it — so the three
 # tools an agent calls on the same job contradicted each other, and the cloud
-# agent read the silence as a dead service and re-ran the graph (BE-24124).
+# agent read the silence as a dead service and re-ran the graph.
 # Wording tracks the `jobs wait` note and the `download` hint deliberately:
 # an agent that sees two of them in one turn must not read them as two
 # different outcomes.
@@ -2910,8 +2910,8 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
             # strings, which the media flatten above drops. The local snapshot
             # has carried them since the key was added; cloud did not, so
             # `comfy download`'s text-only hint ("read the text with
-            # `comfy jobs status <id>`", BE-24124) pointed at a cloud payload
-            # that could not answer it. Same source record, no extra request.
+            # `comfy jobs status <id>`") pointed at a cloud payload that could
+            # not answer it. Same source record, so no extra request.
             text_outputs = extract_text_outputs(record)
             # The compose item_map (foreach item -> node ids) lives on the
             # job state file, written at submit time by `comfy run`.
