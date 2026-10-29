@@ -187,13 +187,16 @@ class WorkflowExecution:
         self.progress = progress
         # A targeted run only executes the targets' subgraph; the other nodes
         # never report, so counting them would stall the bar short of 100%.
-        # `run_graph` is the subgraph the caller already preflighted, passed in
-        # so the progress count and the checks cannot disagree; computed here
-        # only for callers that construct this class directly.
-        if run_graph is not None:
+        # `run_graph` must be `target_subgraph(workflow, output_node_ids)`: the
+        # subgraph the caller already preflighted, passed in so the progress
+        # count and the checks cannot disagree. Without targets the whole graph
+        # is submitted, so `run_graph` is ignored there.
+        if not output_node_ids:
+            run_nodes = self.workflow
+        elif run_graph is not None:
             run_nodes = run_graph
         else:
-            run_nodes = target_subgraph(self.workflow, output_node_ids) if output_node_ids else self.workflow
+            run_nodes = target_subgraph(self.workflow, output_node_ids)
         self.remaining_nodes = set(run_nodes.keys())
         self.total_nodes = len(self.remaining_nodes)
         if progress is not None:

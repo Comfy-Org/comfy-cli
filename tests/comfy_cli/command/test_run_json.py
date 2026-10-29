@@ -3228,6 +3228,13 @@ class TestOutputNodeIdsLocal:
         assert ex.remaining_nodes == {"1", "2"}
         assert ex.total_nodes == 2
 
+    def test_run_graph_without_targets_counts_the_whole_graph(self, two_output_workflow_file):
+        """Without targets the whole graph is submitted, so a stray subgraph
+        must not shrink the progress count."""
+        workflow = json.loads(open(two_output_workflow_file).read())
+        ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, run_graph={"2": workflow["2"]})
+        assert ex.remaining_nodes == set(workflow)
+
     def test_progress_counts_only_the_targets_subgraph(self, two_output_workflow_file):
         workflow = json.loads(open(two_output_workflow_file).read())
         ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"])
