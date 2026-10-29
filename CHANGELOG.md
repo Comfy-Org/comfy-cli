@@ -15,7 +15,33 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
+  the order the workflow was SAVED with, when the saved graph records one,
+  instead of the option's current order. An option that has since gained a
+  sub-input shifted every later slot by one, and once the alignment was off the
+  `control_after_generate` marker was consumed as a real value too — a
+  Seedance 2.0 graph converted with `model.auto_upscale` holding the seed and
+  `seed` holding `"randomize"`. `validate` catches the seed type but not the
+  boolean, so fixing only the seed still submitted the wrong graph. A sub-input
+  the save never carried now takes no slot, and a save that names one the
+  option no longer declares falls back to the current expansion untouched.
+
 ### Added
+
+- `comfy run --output-node-ids 9,12` (repeatable) runs only the named output
+  nodes and the nodes they depend on, locally and with `--where cloud` (sent to
+  `/prompt` as `partial_execution_targets`). Ids that are not in the workflow,
+  or (when the node catalog is available) are not output nodes, fail with
+  `invalid_output_node_ids` before submit, `--print-prompt` included. Preflight
+  validation and the local partner-credential check cover only the nodes that
+  run, except that a missing or unknown `class_type` anywhere in the workflow
+  fails preflight, as ComfyUI rejects it before applying the targets. The `--allow-spend` gate still covers the whole submitted workflow,
+  because a server that ignores the targets runs every branch.
+  The cloud `partial_execution` warning counts only the targeted nodes, and
+  `partial_execution_targets_ignored` warns when the server ran untargeted
+  nodes anyway. Without the flag the request is unchanged.
 
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
@@ -27,6 +53,14 @@ history.
   with `changed: false`. A watching `up`, `promote` or `rollback` whose update
   a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
   release, rather than reading as failed.
+- `comfy deploy up --no-editor` makes or keeps a deployment without the CPU
+  server comfy-deploy runs beside it for the editor, for one only called
+  through the API; `--editor` turns it back on, and with neither nothing is
+  sent. A value comfy-deploy does not confirm, a failed read to confirm it
+  included, exits 1 with `deploy_editor_unchanged`, the rest of the result
+  kept. `comfy deploy ls`
+  shows each deployment's `editor` where comfy-deploy answers it, blank where
+  it does not.
 - `comfy deploy up --create --name staging` names the deployment it creates,
   and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
   A name outside comfy-deploy's rule is refused before any call

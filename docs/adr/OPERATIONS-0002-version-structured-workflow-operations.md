@@ -28,6 +28,11 @@ tests keep the document, those sets, and dispatch tables aligned. Unsupported
 operation kinds are rejected rather than silently ignored. Proposed additions
 remain clearly marked until ratified into the frozen vocabulary.
 
+Amendment v1.10 in the normative vocabulary extends `add_node` minting to an
+existing subgraph definition with an exact reused-host schema contract and
+explicit conflict metadata. It does not add an operation kind or weaken this
+ADR's versioning and fail-closed requirements.
+
 ## Alternatives considered
 
 - Treat Python functions as the contract. Rejected because remote producers

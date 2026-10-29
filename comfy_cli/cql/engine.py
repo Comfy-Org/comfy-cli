@@ -975,6 +975,20 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     return port.type == "INT" and port.name in ("seed", "noise_seed")
 
 
+def load_3d_advanced_has_legacy_buttons(widgets_values: list[Any] | dict[str, Any] | None) -> bool:
+    """Whether a saved ``Load3DAdvanced`` node still uses the legacy button layout.
+
+    Two consecutive fixed markers right after ``model_file`` are an unambiguous
+    legacy prefix. Accepting a single marker could mistake current viewport
+    state for the old upload button, while requiring all three makes a
+    truncated legacy node unsafe to extend by name. The editor
+    (``load_3d_button_slots``) and the API converter both decide through this
+    one predicate so they never disagree about which value is which.
+    """
+    expected = [value for _name, value in _LOAD_3D_BUTTON_SLOTS]
+    return isinstance(widgets_values, list) and widgets_values[1:3] == expected[:2]
+
+
 def load_3d_button_slots(
     m: Morphism, widgets_values: list[Any] | dict[str, Any] | None = None
 ) -> tuple[tuple[str, str], ...]:
@@ -996,14 +1010,8 @@ def load_3d_button_slots(
     immediately BEFORE the ``LOAD_3D`` slot — unlike every entry in
     ``frontend_extra_widget_names``, which trails the declared inputs.
     """
-    if getattr(m, "id", "") == "Load3DAdvanced":
-        expected = [value for _name, value in _LOAD_3D_BUTTON_SLOTS]
-        # Two consecutive fixed markers are an unambiguous legacy prefix.
-        # Accepting a single marker could mistake current viewport state for
-        # the old upload button, while requiring all three makes a truncated
-        # legacy node unsafe to extend by name.
-        if not isinstance(widgets_values, list) or widgets_values[1:3] != expected[:2]:
-            return ()
+    if getattr(m, "id", "") == "Load3DAdvanced" and not load_3d_advanced_has_legacy_buttons(widgets_values):
+        return ()
     if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
         return ()
     return _LOAD_3D_BUTTON_SLOTS

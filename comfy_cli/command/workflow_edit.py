@@ -260,7 +260,10 @@ def add_node_cmd(
                 "(the only UI-only classes this surface can mint)"
             )
         elif e.subgraph_id:
-            hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
+            hint = (
+                "reuse the exact definition id from `comfy workflow ls-nodes <file>` only in the workflow that "
+                "already contains that definition and an instance, or pick a node class with `comfy nodes search <text>`"
+            )
         elif e.close_matches:
             hint = f"did you mean: {', '.join(e.close_matches)}?"
         else:
@@ -756,8 +759,8 @@ def ls_nodes_cmd(
         # A row's `type` reads like an addable class. Two kinds are not: a
         # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
         # instance, whose `type` is its definition uuid. Both stay listed (the
-        # graph must still be understood); the flag says `add-node` / `nodes
-        # show` cannot take that type. Only set when true, like `mode`.
+        # graph must still be understood); the flag distinguishes them from
+        # catalog classes. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
             if workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:

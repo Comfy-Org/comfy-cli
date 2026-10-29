@@ -2002,6 +2002,19 @@ def run(
             ),
         ),
     ] = False,
+    output_node_ids: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--output-node-ids",
+            show_default=False,
+            help=(
+                "Comma-separated ids of output nodes to run (e.g. 9,12; repeatable); only they and "
+                "the nodes they depend on execute, the rest of the graph is skipped. Ids are the "
+                "API-format graph's node ids and must be output nodes. Sent to /prompt as "
+                "partial_execution_targets. Omit to run the whole graph."
+            ),
+        ),
+    ] = None,
     client_id: Annotated[
         str | None,
         typer.Option(
@@ -2094,6 +2107,18 @@ def run(
         # ask for). The user can override either way with --notify/--no-notify.
         effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
 
+        target_ids: list[str] | None = None
+        if output_node_ids:
+            target_ids = run_inner.parse_output_node_ids(output_node_ids)
+            if not target_ids:
+                renderer.error(
+                    code="invalid_output_node_ids",
+                    message="--output-node-ids was given but names no node ids",
+                    hint="pass comma-separated output node ids, e.g. --output-node-ids 9,12; omit it to run the whole graph",
+                    details={"unknown_node_ids": [], "non_output_node_ids": []},
+                )
+                raise typer.Exit(code=1)
+
         # --prompt/--set build an in-memory API-format graph from the bundled
         # default text2img workflow (no --workflow file). The aliases resolve
         # against OUR pinned node ids, so mixing them with a user --workflow —
@@ -2148,6 +2173,7 @@ def run(
                 workflow_id=workflow_id,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                output_node_ids=target_ids,
             )
         else:
             # Both targets must fall off the END of this try suite: Python skips
@@ -2186,6 +2212,7 @@ def run(
                 print_prompt=print_prompt,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                output_node_ids=target_ids,
                 client_id=client_id,
             )
     except typer.Exit as e:
