@@ -81,18 +81,113 @@ def _open_health(url: str):
     return build_http_only_opener(urllib.request.ProxyHandler({})).open(url, timeout=2)
 
 
-def _sandbox_status(port: int | None) -> dict | None:
+# The keys only the agent's own /health carries. The standalone binary serves
+# the plain string "ok" until it has something to report and a JSON object
+# once it has, and its startup reports sandbox and cli together, so a JSON
+# object carrying none of these is some other service on a reused port (cloud
+# services/agent/local/internal/server/server.go, healthPayload). `status` is
+# deliberately not in the list: every other health endpoint has one too.
+# Checked against that struct's JSON tags at cloud commit 6c54e206, and pinned
+# by test_health_markers_are_fields_the_agent_actually_sends so a rename on the
+# agent's side fails here instead of reading a live agent as gone.
+_AGENT_HEALTH_KEYS = (
+    "sandbox",
+    "skills",
+    "crdt",
+    "doc_host",
+    "prompt",
+    "cli",
+    "assets",
+    "memory",
+    "node_trees",
+)
+
+
+# What a /health probe on the discovery port established: GONE is only for what
+# the probe *proved* is not this agent, and everything it could not settle is
+# UNCONFIRMED. `_sandbox_status` collapses both onto None for display — either
+# way there is no running agent or sandbox to show.
+_AGENT_LIVE = "live"
+_AGENT_GONE = "gone"
+_AGENT_UNCONFIRMED = "unconfirmed"
+
+# The bare answer the agent's health handler falls through to while every
+# reporter is still nil, in both forms it could arrive in: the server sends the
+# two bytes as text/plain, a JSON encoder would quote them.
+#
+# No agent can serve it on the port this probe reaches. `app.go` calls
+# ReportSandbox/ReportCLI/ReportNodeTrees/ReportAssets/ReportMemory/
+# ReportPrompt/ReportSkills/ReportCRDT (lines 233-255 on cloud main) BEFORE
+# net.Listen (257) and before WriteDiscoveryWith puts the port in agent.json
+# (263), so by the time anything can connect, or even learn the port, eight
+# reporters are non-nil and the handler serves the JSON payload. The
+# fall-through is live code on a path nothing can observe from here.
+#
+# So this body means "something else holds the port", not "the agent, early".
+_AGENT_EARLY_OK = ("ok", '"ok"')
+
+
+def _probe_agent(port: int | None) -> tuple[str, dict | None]:
+    """Ask the discovery port whether this agent is answering on it.
+
+    Returns the verdict and, when the answer carried them, the sandbox and
+    workspace fields `permissions` displays.
+    """
     if not port:
-        return None
+        return _AGENT_GONE, None
     try:
         with _open_health(f"http://127.0.0.1:{port}/health") as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError:
+        # Something serves HTTP here and refused the probe. Whether it is the
+        # agent is exactly what this failed to establish.
+        return _AGENT_UNCONFIRMED, None
+    except urllib.error.URLError as exc:
+        # urllib wraps the transport error; a refused connection is the one
+        # that proves nothing is listening, so agent.json is stale.
+        return (_AGENT_GONE if isinstance(exc.reason, ConnectionRefusedError) else _AGENT_UNCONFIRMED), None
+    except ConnectionRefusedError:
+        return _AGENT_GONE, None
+    except (http.client.RemoteDisconnected, http.client.IncompleteRead):
+        # Both reach the HTTPException clause below and must not: they come
+        # from a peer that accepted the connection and then failed mid-exchange
+        # -- a live agent shutting down, crashing or overloaded does exactly
+        # this. urllib wraps only h.request() in URLError, not h.getresponse(),
+        # so a RemoteDisconnected (a BadStatusLine as well as a
+        # ConnectionResetError) arrives here unwrapped; an IncompleteRead comes
+        # from resp.read() on a short body. Neither establishes that the
+        # listener is not this agent.
+        return _AGENT_UNCONFIRMED, None
+    except http.client.HTTPException:
         # HTTPException is not an OSError: a stale port taken by something
-        # that is not HTTP (an SSH banner) raises BadStatusLine here.
-        return None
+        # that is not HTTP (an SSH banner) raises BadStatusLine here. Proof
+        # enough that this is not the agent.
+        return _AGENT_GONE, None
+    except (OSError, ValueError):
+        # A timeout (the 2 s budget in _open_health) or a reset mid-read.
+        # Something is there; what it is is unsettled.
+        return _AGENT_UNCONFIRMED, None
+    if raw.strip() in _AGENT_EARLY_OK:
+        # Unsettled, and deliberately not either certainty. It cannot be this
+        # agent answering early (see `_AGENT_EARLY_OK`: the port does not exist
+        # until eight reporters do), so "live" would assert something false.
+        # But it is not proof of absence either — something is listening on
+        # the port agent.json names. The JSON-quoted form is matched too, so a
+        # later switch to `c.JSON` does not change the verdict.
+        return _AGENT_UNCONFIRMED, None
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        # Not the early answer, and not JSON either. Something is there; what
+        # it is is unsettled.
+        return _AGENT_UNCONFIRMED, None
     if not isinstance(body, dict):
-        return None  # a stale port answered by something that is not the agent
+        # Neither the agent's own early answer nor anything judgeable.
+        return _AGENT_UNCONFIRMED, None
+    if not any(key in body for key in _AGENT_HEALTH_KEYS):
+        # A reused port held by an unrelated local service whose /health
+        # answers `{"status": "ok"}`. Established: not this agent.
+        return _AGENT_GONE, None
     # The envelope schema says sandbox is an object or null and comfy_path a
     # string or null; a stale or foreign server's shapes are not passed on.
     sandbox = body.get("sandbox")
@@ -100,7 +195,17 @@ def _sandbox_status(port: int | None) -> dict | None:
     cli = body.get("cli")
     if isinstance(cli, dict) and isinstance(cli.get("workspace"), str) and cli["workspace"]:
         out["comfy_path"] = cli["workspace"]
-    return out
+    return _AGENT_LIVE, out
+
+
+def _sandbox_status(port: int | None) -> dict | None:
+    """The sandbox and workspace to display, or ``None`` when there are none.
+
+    Two-valued on purpose: a caller that only renders state has nothing to do
+    differently for a port it could not reach and one it reached and dismissed.
+    """
+    verdict, detail = _probe_agent(port)
+    return detail if verdict == _AGENT_LIVE else None
 
 
 @app.command("allow", hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

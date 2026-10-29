@@ -143,7 +143,8 @@ While the status is `provisioning` or `starting` the deployment carries a
 `progress` object, and `status --json` returns it as `data.progress`: `step`
 (`staging_models`, `creating_endpoint`, `waiting_for_worker`) and, while models
 are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
-`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
+`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond`, `etaSeconds` and
+`placingModels`.
 Under `--watch` the same object arrives as `deploy_progress` events, one per new
 sample (the service rewrites it about every three seconds in every step): on **stderr** under `--json`,
 on stdout under `--json-stream`. Relay those numbers instead of "still
@@ -152,6 +153,13 @@ provisioning". Things to read correctly:
 - `bytesTotal` absent means nobody measured the release, so there is no time
   left to quote; `0` means every model was already in place.
 - `bytesTotalIsFloor: true` means "at least this much", with no `etaSeconds`.
+- `placingModels: true` means every byte is in and staging is finishing: the
+  models are being put in place and, on Modal, the release image built beside
+  the upload may still be building, for up to about 4 minutes after the last
+  byte. The step stays `staging_models` with `bytesDone` equal to `bytesTotal`
+  and no rate, and the progress line adds "finishing: putting the models in
+  place" on every provider. That is not a stall, even once `etaSeconds`
+  runs out and is dropped; never infer it from the bytes alone.
 - `etaSeconds` covers staging only. Creating the endpoint and the first worker's
   cold start come after it.
 - `attempt` above 1 means the step was restarted, and `bytesDone` started again.
@@ -177,7 +185,8 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-watch]
+                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-editor]
+                       [--no-watch]
 comfy deploy rename [PATH] <name> [--deployment <name|id>]
 ```
 
@@ -198,6 +207,14 @@ comfy deploy rename [PATH] <name> [--deployment <name|id>]
   finds the deployment holding that name. `up` refuses `--name` when it would
   update a deployment holding another name: `comfy deploy rename` names an
   existing one, and without `--deployment` renames the Build's only one.
+- **Pass `--no-editor` for a deployment only called through the API**, never
+  opened in the editor: without it comfy-deploy gives a new deployment a CPU
+  server for the editor, running beside it. With neither flag an existing
+  deployment keeps what it has, on or off. On an existing deployment the flag
+  goes with the move, or alone, starting no new copy; `--editor` turns the
+  server back on. A value comfy-deploy does not confirm, a failed read to
+  confirm it included, exits 1 with `deploy_editor_unchanged`, and the rest of
+  what `up` did stands: `data` and `changed` still say what it did.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an

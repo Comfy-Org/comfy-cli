@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1070,3 +1071,371 @@ def test_dynamic_group_prompt_validation_checks_only_submitted_rows(inputs, mini
     else:
         assert not result["valid"]
         assert error_field in {error["field"] for error in result["errors"]}
+
+
+def _replace_rows(workflow, rows, node=1):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    return workflow_ops.apply_specs(
+        workflow, graph, [{"op": "set_dynamic_group_rows", "node": node, "group": "loras", "rows": rows}]
+    )
+
+
+def _replay(ops):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    replayed = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    for op in ops:
+        workflow_ops.apply_op(replayed, op, graph)
+    return replayed
+
+
+def test_group_row_replacement_rewrites_every_row_as_set_widget_ops():
+    rows = [
+        {"lora_name": "B.safetensors", "strength": 0.3},
+        {"lora_name": "A.safetensors"},
+        {"lora_name": "C.safetensors", "enabled": False},
+    ]
+    edited, ops, _ = _replace_rows(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), rows)
+
+    assert {op["op"] for op in ops} == {"set_widget"}
+    assert (ops[0]["widget"], ops[0]["value"]) == ("loras", 3)
+    assert [op["widget"] for op in ops[1:]] == [
+        f"loras.{r}.{f}" for r in range(3) for f in ("lora_name", "strength", "enabled")
+    ]
+    assert workflow_to_api.convert_ui_to_api(edited, FIXTURE["object_info"])["1"]["inputs"] == {
+        "before": "head",
+        "loras.0.lora_name": "B.safetensors",
+        "loras.0.strength": 0.3,
+        "loras.0.enabled": True,
+        "loras.1.lora_name": "A.safetensors",
+        "loras.1.strength": 1.0,
+        "loras.1.enabled": True,
+        "loras.2.lora_name": "C.safetensors",
+        "loras.2.strength": 1.0,
+        "loras.2.enabled": False,
+        "after": "tail",
+    }
+    assert workflow_ops.canonical(_replay(ops)) == workflow_ops.canonical(edited)
+
+
+def test_group_row_replacement_removes_a_middle_row_without_index_ops():
+    rows = [{"lora_name": "C.safetensors", "strength": 0.5, "enabled": False}]
+    edited, ops, _ = _replace_rows(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), rows)
+
+    assert edited["nodes"][0]["widgets_values"] == ["head", 1, "C.safetensors", 0.5, False, "tail"]
+    assert workflow_ops.canonical(_replay(ops)) == workflow_ops.canonical(edited)
+
+
+def test_group_row_replacement_keeps_a_connected_row_in_place():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}, {"lora_name": "A.safetensors"}])
+
+    assert edited["nodes"][0]["widgets_values"] == [
+        "head", 3, "B.safetensors", 1.0, True, "C.safetensors", 0.5, False, "A.safetensors", 1.0, True, "tail",
+    ]  # fmt: skip
+    assert not any(op["widget"].startswith("loras.1.") for op in ops)
+    assert edited["nodes"][0]["inputs"][4] == {**workflow["nodes"][0]["inputs"][4], "link": 10}
+
+
+def test_group_row_replacement_refuses_to_move_a_connected_row():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+    original = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match=r"loras\.1 is connected; disconnect it first"):
+        _replace_rows(workflow, [])
+    assert workflow == original
+
+
+@pytest.mark.parametrize(
+    ("rows", "match"),
+    [
+        ([{"lora": "A.safetensors"}], "unknown field"),
+        ({"lora_name": "A.safetensors"}, "list of objects"),
+        ([{"lora_name": "A.safetensors"}] * 4, "exceed the maximum of 3"),
+        ([{"lora_name": "A.safetensors", "strength": 5}], "strength"),
+    ],
+)
+def test_group_row_replacement_refuses_invalid_rows(rows, match):
+    with pytest.raises(ValueError, match=match):
+        _replace_rows(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), rows)
+
+
+def test_group_row_replacement_edits_an_interior_node():
+    node = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]["nodes"][0])
+    workflow = {
+        "last_node_id": 9,
+        "last_link_id": 0,
+        "nodes": [{"id": 9, "type": "group-def", "pos": [0, 0], "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": "group-def", "name": "Group", "inputs": [], "outputs": [], "nodes": [node], "links": []}
+            ]
+        },
+    }
+
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}], node="9/1")
+
+    interior = edited["definitions"]["subgraphs"][0]["nodes"][0]
+    assert interior["widgets_values"] == ["head", 1, "B.safetensors", 1.0, True, "tail"]
+    assert all(op.get("path") == ["9", "1"] for op in ops)
+
+
+def _group_in_subgraph(properties=None):
+    node = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]["nodes"][0])
+    return {
+        "last_node_id": 9,
+        "last_link_id": 0,
+        "nodes": [
+            {"id": 9, "type": "group-def", "pos": [0, 0], "inputs": [], "outputs": [], "properties": properties or {}}
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": "group-def", "name": "Group", "inputs": [], "outputs": [], "nodes": [node], "links": []}
+            ]
+        },
+    }
+
+
+def test_group_row_replacement_leaves_a_direct_caller_unchanged_on_a_refused_value():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    original = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match="strength"):
+        workflow_ops.set_dynamic_group_rows(
+            workflow, graph, 1, "loras", [{"lora_name": "B.safetensors"}, {"lora_name": "A.safetensors", "strength": 5}]
+        )
+    assert workflow == original
+
+
+def test_group_row_replacement_rewrites_seed_control_modes_with_their_rows():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"] = {
+        "required": {"seed": ["INT", {"default": 5, "control_after_generate": True}]}
+    }
+    graph = Graph.from_object_info(info)
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    workflow, _ = workflow_ops.set_widget(workflow, graph, 1, "loras", 2)
+    workflow, _ = workflow_ops.set_widget(workflow, graph, 1, "loras.0.seed.0", "randomize")
+
+    edited, ops = workflow_ops.set_dynamic_group_rows(
+        workflow, graph, 1, "loras", [{"seed": 7}, {"seed": 9, "seed.0": "increment"}], base_version=1
+    )
+
+    assert edited["nodes"][0]["widgets_values"] == ["first", 2, 7, "fixed", 9, "increment", "last"]
+    assert [op["widget"] for op in ops] == ["loras", "loras.0.seed", "loras.0.seed.0", "loras.1.seed", "loras.1.seed.0"]
+
+
+def test_group_row_replacement_accepts_the_template_id_of_an_inserted_node():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["id"] = "insert:op1:root:node:1"
+
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}])
+
+    assert edited["nodes"][0]["widgets_values"] == ["head", 1, "B.safetensors", 1.0, True, "tail"]
+    assert {op["node_id"] for op in ops} == {"insert:op1:root:node:1"}
+
+
+@pytest.mark.parametrize("name", ["LoRA #2 strength", ["loras.1.strength"]])
+def test_group_row_replacement_pins_a_row_connected_by_widget_name_only(name):
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4].update(name=name, link=10)
+
+    with pytest.raises(ValueError, match=r"loras\.1 is connected"):
+        _replace_rows(workflow, [])
+
+
+def test_group_row_replacement_pins_a_row_promoted_by_legacy_proxy_widgets():
+    workflow = _group_in_subgraph({"proxyWidgets": [["1", "loras.1.strength"]]})
+
+    with pytest.raises(ValueError, match=r"loras\.1 is promoted to the parent subgraph; unpromote it first"):
+        _replace_rows(workflow, [], node="9/1")
+    edited, ops, _ = _replace_rows(workflow, [{"lora_name": "B.safetensors"}], node="9/1")
+
+    interior = edited["definitions"]["subgraphs"][0]["nodes"][0]
+    assert interior["widgets_values"][1:8] == [2, "B.safetensors", 1.0, True, "C.safetensors", 0.5, False]
+    assert not any(op["widget"].startswith("loras.1.") for op in ops)
+
+
+def test_group_row_replacement_requires_a_field_without_a_default():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"]["required"]["lora_name"] = [
+        "COMBO",
+        {"options": []},
+    ]
+    graph = Graph.from_object_info(info)
+
+    with pytest.raises(ValueError, match="'lora_name' has no default"):
+        workflow_ops.set_dynamic_group_rows(
+            copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, 1, "loras", [{"strength": 0.5}]
+        )
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        {"op": "set_widget", "node": 1, "widget": "loras.0.strength", "value": 0.2},
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": []},
+    ],
+)
+def test_group_row_replacement_refuses_an_earlier_write_to_the_group_in_its_batch(earlier):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        earlier,
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+    ]
+
+    with pytest.raises(ValueError, match=r"loras(\.0\.strength)? is already written at stamp \[0, cli\]"):
+        workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
+
+
+def test_group_row_replacement_counts_pinned_rows_against_the_maximum():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+
+    with pytest.raises(ValueError, match=r"3 row\(s\) plus 1 connected or promoted row\(s\) exceed the maximum of 3"):
+        _replace_rows(workflow, [{"lora_name": "A.safetensors"}] * 3)
+
+
+@pytest.mark.parametrize(
+    ("widget", "value", "hint"),
+    [("loras", 1, "change the number of rows"), ("loras.0.strength", 0.2, "put the value in its rows")],
+)
+def test_group_row_replacement_refuses_a_later_write_to_the_group_in_its_batch(widget, value, hint):
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+        {"op": "set_widget", "node": 1, "widget": "before", "value": "kept"},
+        {"op": "set_widget", "node": 1, "widget": widget, "value": value},
+    ]
+
+    with pytest.raises(ValueError, match=rf"spec #2: {re.escape(widget)} was replaced earlier in this batch.*{hint}"):
+        workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
+
+
+def test_group_row_replacement_writes_a_recreated_row_on_the_interior_despite_a_stale_promotion():
+    workflow = _group_in_subgraph({"proxyWidgets": [["1", "loras.2.strength"]]})
+    rows = [
+        {"lora_name": "A.safetensors"},
+        {"lora_name": "B.safetensors"},
+        {"lora_name": "C.safetensors", "strength": 0.4},
+    ]
+
+    edited, ops, _ = _replace_rows(workflow, rows, node="9/1")
+
+    assert all(op.get("path") == ["9", "1"] and "promoted" not in op for op in ops)
+    assert edited["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][8:10] == ["C.safetensors", 0.4]
+    assert edited["nodes"][0]["inputs"] == []
+
+
+def test_group_row_replacement_reports_the_stamp_that_holds_the_group():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    workflow, _ = workflow_ops.set_widget(
+        copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, 1, "loras", 1, actor="doc", base_version=5
+    )
+
+    with pytest.raises(ValueError, match=r"loras is already written at stamp \[5, doc\]"):
+        workflow_ops.set_dynamic_group_rows(workflow, graph, 1, "loras", [], base_version=2)
+
+
+def test_group_row_replacement_accepts_a_later_write_to_a_pinned_row():
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][4]["link"] = 10
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+        {"op": "set_widget", "node": 1, "widget": "loras.1.lora_name", "value": "A.safetensors"},
+    ]
+
+    edited, _, _ = workflow_ops.apply_specs(workflow, graph, specs)
+
+    assert edited["nodes"][0]["widgets_values"][5] == "A.safetensors"
+
+
+def test_group_row_replacement_names_a_subgraph_input_promotion():
+    workflow = _group_in_subgraph()
+    definition = workflow["definitions"]["subgraphs"][0]
+    definition["inputs"] = [{"id": "in-1", "name": "strength", "type": "FLOAT", "linkIds": [1]}]
+    definition["links"] = [
+        {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 4, "type": "FLOAT"}
+    ]
+    definition["nodes"][0]["inputs"][4]["link"] = 1
+    workflow["nodes"][0]["inputs"] = [
+        {"name": "strength", "type": "FLOAT", "link": None, "widget": {"name": "strength"}}
+    ]
+
+    with pytest.raises(ValueError, match=r"loras\.1 is promoted to the parent subgraph; unpromote it first"):
+        _replace_rows(workflow, [], node="9/1")
+
+
+def test_group_row_replacement_does_not_retry_a_refused_write_on_an_inserted_copy(monkeypatch):
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    copy_node = copy.deepcopy(workflow["nodes"][0])
+    copy_node["id"] = "insert:op1:root:node:1"
+    workflow["nodes"].append(copy_node)
+    monkeypatch.setattr(workflow_ops, "_inserted_node_id", lambda *_: pytest.fail("retried on the inserted copy"))
+
+    with pytest.raises(ValueError, match="strength"):
+        _replace_rows(workflow, [{"lora_name": "B.safetensors", "strength": 5}])
+
+
+def test_group_row_replacement_refuses_a_recreated_row_that_still_has_a_link():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    workflow["nodes"][0]["inputs"][3].update(name="LoRA #2 lora_name", link=10)
+    workflow, _ = workflow_ops.set_widget(workflow, graph, 1, "loras", 1)
+    assert workflow["nodes"][0]["inputs"][-1]["link"] == 10
+
+    with pytest.raises(ValueError, match=r"loras\.1 still has a link from an earlier row"):
+        workflow_ops.set_dynamic_group_rows(
+            workflow,
+            graph,
+            1,
+            "loras",
+            [{"lora_name": "A.safetensors"}, {"lora_name": "B.safetensors"}],
+            base_version=1,
+        )
+
+
+def test_group_row_replacement_refuses_an_earlier_write_to_a_dropped_row():
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    specs = [
+        {"op": "set_widget", "node": 1, "widget": "loras.1.strength", "value": 0.3},
+        {"op": "set_dynamic_group_rows", "node": 1, "group": "loras", "rows": [{"lora_name": "B.safetensors"}]},
+    ]
+
+    with pytest.raises(ValueError, match=r"loras\.1\.strength is already written"):
+        workflow_ops.apply_specs(copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"]), graph, specs)
+
+
+def test_pruned_dynamic_group_range_finding_stays_advisory():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["Sink"] = {
+        "input": {"required": {}},
+        "output": [],
+        "output_name": [],
+        "output_node": True,
+    }
+    prompt = {
+        "1": {
+            "class_type": "DevToolsNodeWithDynamicGroup",
+            "inputs": {
+                "before": "head",
+                "after": "tail",
+                "loras.0.lora_name": "A.safetensors",
+                "loras.0.strength": "3",
+            },
+        },
+        "2": {"class_type": "Sink", "inputs": {}},
+    }
+
+    result = Graph.from_object_info(info).validate_workflow(prompt)
+
+    assert result["valid"], result["errors"]
+    findings = {warning["code"]: warning for warning in result["warnings"]}
+    assert findings["above_max"]["field"] == "1.DevToolsNodeWithDynamicGroup.loras.0.strength"
+    assert "set-widget" not in findings["coercible_type"]["hint"]

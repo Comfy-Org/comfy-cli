@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import socket
 import threading
+import urllib.error
 from pathlib import Path
 
 import jsonschema
@@ -125,6 +127,23 @@ def test_sandbox_status_treats_non_object_health_as_unavailable(monkeypatch):
     assert command._sandbox_status(8190) is None
     monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"sandbox": {"mode": "seatbelt"}}'))
     assert command._sandbox_status(8190) == {"sandbox": {"mode": "seatbelt"}}
+
+
+def test_sandbox_status_rejects_another_service_on_a_reused_port(monkeypatch):
+    """`{"status": "ok"}` from an unrelated service is not this agent, so no sandbox is shown for it."""
+    from comfy_cli.agent import command
+
+    for body in (b'{"status": "ok"}', b'{"status": "healthy", "uptime": 12}', b"{}"):
+        monkeypatch.setattr(command, "_open_health", lambda url, b=body: _Resp(b))
+        assert command._sandbox_status(8190) is None, body
+
+    # One agent-only key is enough, even with no sandbox reported yet.
+    monkeypatch.setattr(
+        command,
+        "_open_health",
+        lambda url: _Resp(b'{"status": "ok", "cli": {"source": "pinned", "workspace": "/opt/ComfyUI"}}'),
+    )
+    assert command._sandbox_status(8190) == {"sandbox": None, "comfy_path": "/opt/ComfyUI"}
 
 
 def test_sandbox_status_normalizes_malformed_nested_health(monkeypatch):
@@ -344,3 +363,92 @@ def test_allow_and_deny_stay_out_of_help():
     res = CliRunner().invoke(app, ["--help"])
     assert res.exit_code == 0
     assert " allow " not in res.output and " deny " not in res.output
+
+
+def _raises(exc):
+    """An `_open_health` stand-in that fails the way a real probe would."""
+
+    def _open(url):
+        raise exc
+
+    return _open
+
+
+def _refused_connection(url):
+    """What `_open_health` raises when nothing is listening on the port."""
+    raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+
+# Every JSON field name the standalone agent's /health can send, transcribed
+# from the `healthPayload` struct tags in the cloud repository at
+# services/agent/local/internal/server/server.go, pinned at commit
+# 6c54e20662aac9a9fc140aa15a5ae1adeecaf67f (the file's current head on cloud
+# `main`). Nothing in this repository can reach that server, so the list is
+# pinned here instead: if the agent renames or drops a field, this test fails
+# and names the rename, rather than `_probe_agent` silently reading a live
+# agent as gone.
+_CLOUD_HEALTH_FIELDS = (
+    "status",
+    "sandbox",
+    "skills",
+    "crdt",
+    "doc_host",
+    "prompt",
+    "cli",
+    "assets",
+    "assets_hint",
+    "memory",
+    "node_trees",
+)
+
+
+def test_health_markers_are_fields_the_agent_actually_sends():
+    """Each marker must be a real `healthPayload` field, and `status` must not be."""
+    from comfy_cli.agent import command
+
+    unknown = sorted(set(command._AGENT_HEALTH_KEYS) - set(_CLOUD_HEALTH_FIELDS))
+    assert not unknown, f"not fields the agent sends: {unknown}"
+    assert "status" not in command._AGENT_HEALTH_KEYS, "every health endpoint has a status"
+    # `assets_hint` only ever rides alongside `assets`, so it adds no reach.
+    missing = sorted(set(_CLOUD_HEALTH_FIELDS) - set(command._AGENT_HEALTH_KEYS) - {"status", "assets_hint"})
+    assert not missing, f"fields the agent sends that no marker covers: {missing}"
+
+
+@pytest.mark.parametrize("body", [b"ok", b"ok\n", b'"ok"'])
+def test_probe_reads_a_bare_ok_as_unconfirmed_not_gone(monkeypatch, body: bytes):
+    """A bare `ok` on the port `agent.json` names is not this agent answering early, nor proof of absence.
+
+    No agent can serve it on that port: the agent fills its health reporters
+    before it listens and records the port, so a bare `ok` there is some other
+    program. The JSON-quoted form is covered so a later `c.JSON` keeps the verdict.
+    """
+    from comfy_cli.agent import command
+
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(body))
+    assert command._probe_agent(8190) == (command._AGENT_UNCONFIRMED, None)
+    # Still nothing to display, which is what `_sandbox_status` reports.
+    assert command._sandbox_status(8190) is None
+
+
+@pytest.mark.parametrize(
+    ("raiser", "want"),
+    [
+        (_refused_connection, "gone"),
+        (_raises(ConnectionRefusedError(111, "Connection refused")), "gone"),
+        (_raises(http.client.BadStatusLine("SSH-2.0-OpenSSH")), "gone"),
+        (_raises(http.client.RemoteDisconnected("closed without a response")), "unconfirmed"),
+        (_raises(http.client.IncompleteRead(b"")), "unconfirmed"),
+        (_raises(TimeoutError("timed out")), "unconfirmed"),
+        (_raises(urllib.error.URLError(TimeoutError("timed out"))), "unconfirmed"),
+        (
+            _raises(urllib.error.HTTPError("http://127.0.0.1:8190/health", 503, "busy", {}, None)),
+            "unconfirmed",
+        ),
+    ],
+)
+def test_probe_separates_a_proven_absence_from_an_unsettled_one(monkeypatch, raiser, want):
+    """Only what the probe proves is not the agent reads as gone."""
+    from comfy_cli.agent import command
+
+    monkeypatch.setattr(command, "_open_health", raiser)
+    assert command._probe_agent(8190) == (want, None)

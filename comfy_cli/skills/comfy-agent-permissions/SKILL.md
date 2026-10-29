@@ -36,7 +36,7 @@ ask; it can never make the answer.
 |---|---|---|
 | A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting in the agent panel; retry only after it is approved |
 | A host (`egress denied: <host>`; from a CLI command, `Tunnel connection failed: 403`, which is the same refusal) | call `request_host` with the host and what the download or install is for. The host is missing from the list and does not indicate the shell is cut off from the network | same; rerun the command after the approval |
-| A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: the agent refuses the request as soon as it is made | say the host stays refused and find another source, or ask the user for the file |
+| A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: the host can never be approved, so the request cannot help | say the host stays refused and find another source, or ask the user for the file |
 | No shell on this machine | say that the environment block names the start-time setting that enables one | the user restarts the agent with it |
 
 The user approves or refuses the request in the agent panel: it shows up in
@@ -55,6 +55,11 @@ comfy agent permissions                       # what is waiting (id, kind, targe
 
 The agent vets the target when the user approves it: a target that can never
 be granted (below) is not approved.
+
+If the session has no agent panel (an older frontend, a headless or API
+client, a plain chat surface), say so plainly: nothing in the session can
+answer the request, so do not wait on it. The user can instead grant the folder
+or host ahead of time with a start-time setting (below) and restart the agent.
 
 An approval is remembered for every later start (`<data dir>/permissions.json`,
 `<data dir>/egress-allow.json`). A running agent applies an approval from the

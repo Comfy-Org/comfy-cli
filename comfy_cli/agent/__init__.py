@@ -15,8 +15,10 @@ ask, but nothing it can call moves a target into an approved list. The user
 approves or denies a request in the agent panel, a channel the model cannot
 reach, and the agent vets the target and records the approval itself. This
 module only reads those files: the model can run this CLI, so nothing here
-writes an approval. The data dir is ``AGENT_DATA_DIR`` when set, else
-``~/.comfy-agent`` — the same rule the agent and its launcher use.
+writes an approval. The agent is the only writer of these files: it loads them
+at start and saves its whole state on every change. The data dir is
+``AGENT_DATA_DIR`` when set, else ``~/.comfy-agent`` — the same rule the agent
+and its launcher use.
 """
 
 from __future__ import annotations
