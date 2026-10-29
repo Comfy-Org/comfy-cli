@@ -346,3 +346,32 @@ def test_listener_reads_fresh_create_time_instead_of_iterator_cache(process, mon
     listener = identity._listener("127.0.0.1", 8188)
     assert listener.create_time == 20.0
     constructor.assert_called_once_with(123)
+
+
+@pytest.mark.parametrize(
+    "cwd,script,reported,expected",
+    [
+        ("D:\\work", "C:main.py", "C:main.py", False),
+        ("D:\\work", "C:\\work\\main.py", "C:main.py", False),
+        ("C:\\work", "C:main.py", "C:main.py", True),
+    ],
+)
+def test_windows_drive_relative_script_needs_absolute_process_resolution(monkeypatch, cwd, script, reported, expected):
+    import ntpath
+
+    # Model Windows paths without modifying the host's os.path or touching a
+    # per-drive filesystem. Cross-drive joins remain relative on Windows.
+    assert ntpath.isabs(ntpath.join(cwd, script)) == (expected or ntpath.isabs(script))
+    monkeypatch.setattr(identity, "os", SimpleNamespace(path=ntpath))
+    monkeypatch.setattr(identity, "_is_python_ish", lambda arg: True)
+    monkeypatch.setattr(identity, "_same_filesystem_namespace", lambda pid: True)
+    files = Mock(return_value=SimpleNamespace(is_file=lambda: True, samefile=lambda other: True))
+    monkeypatch.setattr(identity, "Path", files)
+    process = Listener(123, ["C:\\Python\\python.exe", script], cwd, "python", "127.0.0.1", 10.0)
+    stats = {"system": {"argv": [reported], "comfyui_version": "test"}}
+
+    assert identity._verified(stats, process, process) == expected
+    if expected:
+        files.assert_called_with("C:\\work\\main.py")
+    else:
+        files.assert_not_called()

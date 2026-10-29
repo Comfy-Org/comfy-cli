@@ -152,6 +152,10 @@ def _verified(stats: Any, before: Listener | None, after: Listener | None) -> bo
         if not before.cwd or not os.path.isabs(before.cwd):
             return False
         reported = os.path.join(before.cwd, reported)
+    # Windows cross-drive joins can remain drive-relative (C:main.py).
+    # Such a path would otherwise use the CLI's per-drive cwd, not the owner.
+    if not os.path.isabs(script) or not os.path.isabs(reported):
+        return False
     try:
         return Path(script).is_file() and Path(script).samefile(reported)
     except OSError:
