@@ -258,7 +258,13 @@ Standing rules for compliance review, distinct from the alternatives above:
    an extra signature and a resolved-but-still-listed signature both fail.
 7. `catalogSensitive` is computed from the two-catalog run and must equal the
    manifest's stored value.
-8. The tolerance file's implementation-gap field is null.
+8. The tolerance file's implementation-gap field is null, and every entry
+   carries the two evidence fields the tolerance rule above demands: the
+   implementation named as **correct** for that divergence, and the recorded
+   reason. The schema rejects a missing or empty either one. Requiring the
+   verdict without checking for it is how `PreviewAny` was tolerated as "UI-only"
+   on 148 of 148 golden nodes without anyone naming which side matched the
+   reference.
 9. Every tolerance entry carries a cited fixture and a sunset date, and the
    schema rejects one that does not. An entry producing no signature is a hard
    failure when its class is present in the corpus; when its class is **absent**
@@ -308,6 +314,15 @@ Standing rules for compliance review, distinct from the alternatives above:
     the twelve-class default went unnoticed.
 20. Every consumed artifact set shares one compatibility id; a mixed set fails
     before any conversion runs, naming each artifact and its id.
+21. Each implementation's expected-fail set for the shared classifier vectors is
+    a **subset of its own previous set** — an entry may be removed, never added.
+    This is the enforcement the local-ratchet rule depends on and is why the
+    ledger is per repo: without a subset check, a newly added entry silences a
+    regression at exactly the moment it appears, which is the failure mode a
+    ratchet exists to prevent. Admitting a *new vector* that an implementation
+    fails is the separate, allowed case — the vector is new, so there is no
+    previous set to grow relative to, and the entry is recorded in the same
+    change that adds the vector.
 
 ## Revisit triggers
 
