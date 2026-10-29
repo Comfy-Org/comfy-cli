@@ -36,6 +36,7 @@ from comfy_cli.cql.engine import (
     _SubgraphDefs,
     _validate_dynamic_group_layout,
     _validate_dynamic_group_schema,
+    load_3d_advanced_has_legacy_buttons,
 )
 
 logger = logging.getLogger(__name__)
@@ -1909,7 +1910,12 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
     return [option.get("key") for option in options if isinstance(option, dict)]
 
 
-def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | None = None) -> list[tuple[str, Any]]:
+def _schema_widget_pairs(
+    schema: Any,
+    widget_values: list[Any],
+    node_type: str | None = None,
+    node: dict | None = None,
+) -> list[tuple[str, Any]]:
     """Pair a schema's widget inputs with their ``widgets_values`` slots.
 
     One ordered walk that unifies name-order and control-marker filtering so the
@@ -1943,6 +1949,11 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
     # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
     # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
+    if node_type == "Load3DAdvanced" and not load_3d_advanced_has_legacy_buttons(widget_values):
+        # Same predicate the editor's ``load_3d_button_slots`` uses: a lone
+        # marker at the viewport slot is the viewport's own value, not a
+        # legacy button, so skipping it would shift width/height by one.
+        injects_load_3d_buttons = False
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -2005,13 +2016,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
                 # component widget, so their values sit between ``model_file`` and
                 # this slot. Consuming them here read "upload3dmodel" into the
                 # viewport input and shifted width/height by three.
-                while (
-                    vidx < len(widget_values)
-                    and isinstance(widget_values[vidx], str)
-                    and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
-                ):
+                if node_type == "Load3DAdvanced":
+                    # The shared predicate matched, so the editor placed all
+                    # three button slots here whatever the third value holds;
+                    # skip the same three or the two read different values.
                     legacy_buttons_consumed = True
-                    vidx += 1
+                    vidx = min(vidx + len(LOAD_3D_BUTTON_VALUES), len(widget_values))
+                else:
+                    while (
+                        vidx < len(widget_values)
+                        and isinstance(widget_values[vidx], str)
+                        and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+                    ):
+                        legacy_buttons_consumed = True
+                        vidx += 1
             if vidx >= len(widget_values):
                 if legacy_buttons_consumed:
                     # A save truncated after its button markers still names this
@@ -2473,7 +2491,7 @@ def _collect_widget_inputs(
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
-    pairs = _schema_widget_pairs(schema, widget_values, node) if schema else []
+    pairs = _schema_widget_pairs(schema, widget_values, node_type, node) if schema else []
     schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
