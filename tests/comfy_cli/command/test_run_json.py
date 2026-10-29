@@ -3326,3 +3326,68 @@ class TestOutputNodeIdsFlag:
         assert result.exit_code == 1
         assert not mock_execute.called
         assert "invalid_output_node_ids" in result.output
+
+
+class TestOutputNodeIdsFullGraphClassCheck:
+    """ComfyUI's validate_prompt rejects an unknown class anywhere in the
+    submitted graph before it looks at partial_execution_targets, so the CLI's
+    preflight must catch it too, not only inside the targets' subgraph."""
+
+    @staticmethod
+    def _workflow(tmp_path, skipped_node):
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+            "2": skipped_node,
+            "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+        }
+        path = tmp_path / "skipped_branch.json"
+        path.write_text(json.dumps(wf))
+        return str(path)
+
+    @pytest.mark.parametrize(
+        ("skipped_node", "code"),
+        [
+            ({"class_type": "NotInstalledNode", "inputs": {}}, "unknown_class_type"),
+            ({"inputs": {}}, "missing_class_type"),
+        ],
+    )
+    def test_cloud_rejects_bad_class_in_skipped_branch_before_submit(
+        self, monkeypatch, tmp_path, capsys, skipped_node, code
+    ):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(
+            capsys, self._workflow(tmp_path, skipped_node), wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 1
+        assert client.submitted == []
+        err = _envelope(lines)["error"]
+        assert err["code"] == "workflow_unknown_nodes"
+        assert [(e["node_id"], e["code"]) for e in err["details"]["errors"]] == [("2", code)]
+
+    def test_local_rejects_unknown_class_in_skipped_branch_before_submit(self, tmp_path, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            lines, exit_code = _run_execute_capture(
+                self._workflow(tmp_path, {"class_type": "NotInstalledNode", "inputs": {}}),
+                capsys,
+                wait=True,
+                output_node_ids=["3"],
+            )
+        assert exit_code == 1
+        assert not MockExec.called
+        assert _envelope(lines)["error"]["code"] == "workflow_unknown_nodes"
+
+    def test_input_errors_in_skipped_branch_still_do_not_block(self, monkeypatch, tmp_path, capsys):
+        """Only class existence is graph-wide; input checks stay scoped to what runs."""
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        skipped = {"class_type": "SaveImage", "inputs": {"filename_prefix": "a", "images": ["404", 0]}}
+        _lines, exit_code = _cloud_capture(
+            capsys, self._workflow(tmp_path, skipped), wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert len(client.submitted) == 1

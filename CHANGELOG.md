@@ -36,7 +36,8 @@ history.
   or (when the node catalog is available) are not output nodes, fail with
   `invalid_output_node_ids` before submit, `--print-prompt` included. Preflight
   validation and the local partner-credential check cover only the nodes that
-  run. The `--allow-spend` gate still covers the whole submitted workflow,
+  run, except that a missing or unknown `class_type` anywhere in the workflow
+  fails preflight, as ComfyUI rejects it before applying the targets. The `--allow-spend` gate still covers the whole submitted workflow,
   because a server that ignores the targets runs every branch.
   The cloud `partial_execution` warning counts only the targeted nodes, and
   `partial_execution_targets_ignored` warns when the server ran untargeted
