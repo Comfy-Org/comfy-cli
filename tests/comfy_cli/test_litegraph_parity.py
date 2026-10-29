@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from comfy_cli import layout
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_litegraph_parity.py"
 _SPEC = importlib.util.spec_from_file_location("check_litegraph_parity", _SCRIPT)
 if _SPEC is None or _SPEC.loader is None:  # pragma: no cover - only if the script is deleted
@@ -69,6 +71,158 @@ NODE_FIXTURE_LEGACY = """
         : font_size * (text?.length ?? 0) * 0.6
     }
 """
+
+
+# Verbatim from upstream `LGraphNode.computeSize` on main as of 2026-10-29. Both numbers
+# accumulate into the same variable, which is why each finder has to exclude the other's
+# line rather than just search for a number near `widgets_height`.
+COMPUTE_SIZE_FIXTURE = """
+    let widgets_height = 0
+    if (widgets?.length) {
+      for (const widget of widgets) {
+        if (!this.isWidgetRowVisible(widget)) continue
+
+        let widget_height = 0
+        if (widget.computeSize) {
+          widget_height += widget.computeSize(size[0])[1]
+        } else {
+          widget_height += LiteGraph.NODE_WIDGET_HEIGHT
+        }
+        widgets_height += widget_height + 4
+      }
+      widgets_height += 8
+    }
+"""
+
+# Verbatim from upstream `createImageHost` in src/scripts/ui/imagePreview.ts.
+IMAGE_HOST_FIXTURE = """
+  function updateSize() {
+    if (currentImgs) {
+      let elH = el.clientHeight
+      if (first) {
+        first = false
+        // On first run, if we are small then grow a bit
+        if (elH < 190) {
+          elH = 190
+        }
+"""
+
+# Verbatim from upstream `useStringWidget.ts`.
+STRING_WIDGET_FIXTURE = """
+  widget.options.minNodeSize = [400, 200]
+"""
+
+
+def test_finds_the_widget_row_gap_and_block_pad_separately():
+    """Both land in `widgets_height`; each finder must read its own line.
+
+    This is the pair that was unguarded longest, and it is the one that matters most on
+    a widget-heavy node: the row gap is charged per widget, so an upstream change to it
+    scales with the widget count while the block pad does not.
+    """
+    assert parity.find_widget_row_gap(COMPUTE_SIZE_FIXTURE) == 4.0
+    assert parity.find_widget_block_pad(COMPUTE_SIZE_FIXTURE) == 8.0
+
+
+def test_row_gap_finder_does_not_read_the_block_pad():
+    """Drift one and only one, and only that one must move.
+
+    If either finder could match the other's line they would agree on a single number,
+    which reports parity on a term that has actually drifted.
+    """
+    drifted_pad = COMPUTE_SIZE_FIXTURE.replace("widgets_height += 8", "widgets_height += 12")
+    assert parity.find_widget_row_gap(drifted_pad) == 4.0
+    assert parity.find_widget_block_pad(drifted_pad) == 12.0
+
+    drifted_gap = COMPUTE_SIZE_FIXTURE.replace("widget_height + 4", "widget_height + 6")
+    assert parity.find_widget_row_gap(drifted_gap) == 6.0
+    assert parity.find_widget_block_pad(drifted_gap) == 8.0
+
+
+def test_widget_accumulator_finders_return_none_when_reshaped():
+    """A refactor must read as 'could not check', never as parity."""
+    assert parity.find_widget_row_gap("widgetsHeight += widget_height + 4") is None
+    assert parity.find_widget_block_pad("widgetsHeight += 8") is None
+
+
+def test_finds_the_image_host_floor_not_the_comparison_or_the_clientheight():
+    """`elH` is assigned twice; only the numeric assignment is the floor.
+
+    `let elH = el.clientHeight` must not match (it would yield None and mask the real
+    value), and neither must `if (elH < 190)`, which happens to carry the same number
+    today -- so matching it would pass for the wrong reason and keep passing after
+    upstream changed only the assignment.
+    """
+    assert parity.find_image_host_min_height(IMAGE_HOST_FIXTURE) == 190.0
+
+    drifted = IMAGE_HOST_FIXTURE.replace("elH = 190", "elH = 240")
+    assert parity.find_image_host_min_height(drifted) == 240.0
+
+
+def test_image_host_floor_absent_returns_none():
+    assert parity.find_image_host_min_height("let elH = el.clientHeight") is None
+
+
+def test_finds_the_multiline_min_node_width():
+    assert parity.find_multiline_min_node_width(STRING_WIDGET_FIXTURE) == 400.0
+    drifted = STRING_WIDGET_FIXTURE.replace("[400, 200]", "[520, 200]")
+    assert parity.find_multiline_min_node_width(drifted) == 520.0
+
+
+def test_multiline_min_node_width_takes_the_width_not_the_height():
+    """The tuple is [width, height] and the height is a different constant.
+
+    Reading the second term would compare a height against a width and report drift
+    that does not exist -- or agree by accident and check nothing.
+    """
+    assert parity.find_multiline_min_node_width("minNodeSize: [400, 200]") == 400.0
+    assert parity.find_multiline_min_node_width("minNodeSize = [111, 222]") == 111.0
+
+
+def test_multiline_min_node_width_absent_returns_none():
+    assert parity.find_multiline_min_node_width("widget.options.minNodeSize") is None
+
+
+def test_every_geometry_constant_is_classified():
+    """The gate that stops a new fitted constant joining the unguarded set silently.
+
+    Four constants were unguarded for weeks for no better reason than that nobody was
+    counting: upstream states all four, they just are not `NAME = value` declarations.
+    A constant added to layout.py now has to be declared checkable, derived,
+    browser-fitted or placer policy, and the failure names it.
+    """
+    gaps = parity.coverage()["unclassified"]
+    assert gaps == set(), (
+        f"unclassified geometry constants in layout.py: {sorted(gaps)}. Add each to "
+        "CHECKS/DERIVED_CHECKS if upstream states it, to BROWSER_FITTED with a fit date "
+        "if only a browser can, or to PLACER_POLICY if upstream has no opinion on it."
+    )
+
+
+def test_coverage_buckets_are_disjoint():
+    """A constant in two buckets is a constant whose provenance is ambiguous."""
+    cov = parity.coverage()
+    buckets = ["checked", "derived", "fitted", "policy"]
+    for i, first in enumerate(buckets):
+        for second in buckets[i + 1 :]:
+            overlap = cov[first] & cov[second]
+            assert overlap == set(), f"{first} and {second} both claim {sorted(overlap)}"
+
+
+def test_browser_fitted_values_match_the_live_constants():
+    """Editing a browser-fitted constant must require re-recording how it was fitted.
+
+    These are the two values no static check can verify, so the registry's recorded
+    value is the only thing tying them to a measurement. Letting them drift apart would
+    leave the guard reporting a fit date for a number that was never fitted.
+    """
+    for name, fitted_at, when, how in parity.BROWSER_FITTED:
+        assert getattr(layout, name) == fitted_at, (
+            f"{name} is now {getattr(layout, name)} but BROWSER_FITTED still records "
+            f"{fitted_at} from {when}. Re-fit it against rendered geometry and update "
+            "the entry, or the guard's 'not checked here' report is stale."
+        )
+        assert when and how, f"{name} needs a fit date and a method"
 
 
 def test_finds_each_constant():
