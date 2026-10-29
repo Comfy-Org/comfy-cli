@@ -257,13 +257,14 @@ def test_which_renders_hostile_desktop_fields_literally_without_changing_json(
 ):
     raw = "[/]literal[red]x[/red]\x1b[2J\x1b]0;osc-title\x07\x9b2J\r\u202e世界"
     visible = "[/]literal[red]x[/red]\u202e世界"
-    code = fallback_workspace.parent / f"code:{raw}"
+    code = fallback_workspace.parent / "selected-comfy"
+    desktop_code = fallback_workspace.parent / f"code:{raw}"
     code.mkdir(parents=True)
     (code / "main.py").write_text("")
     found = desktop_install.detect()
     candidate = replace(
         found.selected,
-        code_dir=str(code),
+        code_dir=str(desktop_code),
         data_dir=f"data:{raw}",
         python=f"python:{raw}",
         model_roots=(desktop_install.ModelRoot(f"model:{raw}", "data", True),),
@@ -272,13 +273,14 @@ def test_which_renders_hostile_desktop_fields_literally_without_changing_json(
         found, installs=(candidate,), selected=candidate, selected_reason=f"reason:{raw}", problems=(f"warning:{raw}",)
     )
     monkeypatch.setattr(desktop_install, "detect", lambda: found)
+    monkeypatch.setattr(desktop_install, "install_for_dir", lambda path, detected: {str(code): candidate}.get(path))
     monkeypatch.setattr("comfy_cli.cmdline.env_checker.check_comfy_server_running", lambda **kwargs: False)
 
     json_result, envelope = _invoke("--json", "--workspace", str(code), "which")
     assert json_result.exit_code == 0, json_result.output
     data = envelope["data"]
     assert data["workspace_path"] == str(code)
-    assert data["desktop"]["code_dir"] == str(code)
+    assert data["desktop"]["code_dir"] == str(desktop_code)
     assert data["desktop"]["data_dir"] == f"data:{raw}"
     assert data["desktop"]["python"] == f"python:{raw}"
     assert data["desktop"]["model_roots"][0]["path"] == f"model:{raw}"
