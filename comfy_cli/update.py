@@ -44,11 +44,67 @@ def check_for_newer_pypi_version(package_name, current_version):
 
 
 class UpgradeUnavailable(RuntimeError):
-    """No installer can upgrade the environment comfy-cli is running from."""
+    """The running installation cannot be upgraded automatically."""
 
     def __init__(self, message: str, hint: str):
         super().__init__(message)
         self.hint = hint
+
+
+def _check_uv_tool_pin(receipt: Path) -> None:
+    """Preserve exact primary-tool constraints rather than reporting a no-op upgrade."""
+    from packaging.requirements import Requirement
+    from packaging.specifiers import SpecifierSet
+    from packaging.utils import canonicalize_name
+    from tomlkit import parse
+    from tomlkit.exceptions import ParseError
+
+    tool_root = receipt.parent.parent
+    hint = (
+        "Review the receipt. To change or remove a pin, explicitly reinstall using your chosen requirement "
+        "(for example `uv tool install --force comfy-cli` to remove it); "
+        f"first set UV_TOOL_DIR to {tool_root} to target this installation."
+    )
+    pinned = False
+    try:
+        tool = parse(receipt.read_text(encoding="utf-8")).unwrap().get("tool")
+        if not isinstance(tool, dict):
+            raise ValueError("missing tool table")
+        for field in ("requirements", "constraints"):
+            rows = tool.get(field, [])
+            if not isinstance(rows, list):
+                raise ValueError("invalid requirement list")
+            for row in rows:
+                if isinstance(row, str):
+                    requirement = Requirement(row)
+                    name, specifiers = requirement.name, requirement.specifier
+                elif isinstance(row, dict):
+                    name = row.get("name")
+                    if not isinstance(name, str):
+                        raise ValueError("missing requirement name")
+                    parsed_name = Requirement(name)
+                    if parsed_name.extras or parsed_name.url or parsed_name.specifier or parsed_name.marker:
+                        raise ValueError("invalid package name")
+                    if canonicalize_name(name) != "comfy-cli":
+                        continue
+                    specifier = row.get("specifier", "")
+                    if not isinstance(specifier, str):
+                        raise ValueError("invalid primary specifier")
+                    specifiers = SpecifierSet(specifier)
+                else:
+                    raise ValueError("invalid requirement row")
+                if canonicalize_name(name) == "comfy-cli" and any(
+                    spec.operator == "===" or (spec.operator == "==" and not spec.version.endswith(".*"))
+                    for spec in specifiers
+                ):
+                    pinned = True
+    except (OSError, ValueError, ParseError) as error:
+        raise UpgradeUnavailable("The running uv tool receipt could not be read or understood.", hint=hint) from error
+    if pinned:
+        raise UpgradeUnavailable(
+            "The running comfy-cli installation has an exact uv version pin; this command will not remove it.",
+            hint=hint,
+        )
 
 
 def upgrade_cli():
@@ -56,16 +112,32 @@ def upgrade_cli():
 
     A ``uv tool install`` env ships without pip, so it is upgraded through
     ``uv tool upgrade``; anything else goes through pip against the running
-    interpreter. Raises ``UpgradeUnavailable`` when neither installer is usable
-    and propagates installer exit, start, or timeout failures to the command."""
-    if (Path(sys.prefix) / "uv-receipt.toml").is_file():
+    interpreter. Exact uv pins remain unchanged. Raises ``UpgradeUnavailable``
+    for unusable installers or receipts, and propagates installer exit, start,
+    or timeout failures to the command."""
+    from comfy_cli.output import get_renderer
+
+    installer_stdout = sys.stderr if get_renderer().is_json() else None
+    receipt = Path(sys.prefix) / "uv-receipt.toml"
+    if receipt.is_file():
         uv = resolve_binary("uv")
         if uv is None:
             raise UpgradeUnavailable(
                 "comfy-cli was installed with `uv tool`, but `uv` is not on PATH.",
                 hint="run `uv tool upgrade comfy-cli` from a shell where uv is available",
             )
-        subprocess.run([uv, "tool", "upgrade", "comfy-cli"], check=True, timeout=CLI_UPGRADE_TIMEOUT_SECONDS)
+        _check_uv_tool_pin(receipt)
+        # Upgrade the running installation even if its original tool-dir override
+        # is absent now, or the current shell selects another tools directory.
+        installer_env = os.environ.copy()
+        installer_env["UV_TOOL_DIR"] = str(Path(sys.prefix).parent)
+        subprocess.run(
+            [uv, "tool", "upgrade", "comfy-cli"],
+            check=True,
+            timeout=CLI_UPGRADE_TIMEOUT_SECONDS,
+            env=installer_env,
+            stdout=installer_stdout,
+        )
         return
     if importlib.util.find_spec("pip") is None:
         raise UpgradeUnavailable(
@@ -73,7 +145,10 @@ def upgrade_cli():
             hint="upgrade comfy-cli with the tool that installed it (e.g. `pipx upgrade comfy-cli`)",
         )
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "comfy-cli"], check=True, timeout=CLI_UPGRADE_TIMEOUT_SECONDS
+        [sys.executable, "-m", "pip", "install", "-U", "comfy-cli"],
+        check=True,
+        timeout=CLI_UPGRADE_TIMEOUT_SECONDS,
+        stdout=installer_stdout,
     )
 
 

@@ -126,6 +126,37 @@ class TestUpgradeCli:
         assert mock_run.call_args[1]["check"] is True
         assert mock_run.call_args[1].get("timeout") == 600
 
+    @pytest.mark.parametrize("ambient_tool_dir", [None, "other", "current"])
+    @patch("comfy_cli.update.subprocess.run")
+    def test_uv_upgrade_targets_running_install_not_ambient_tool_dir(
+        self, mock_run, tmp_path, monkeypatch, ambient_tool_dir
+    ):
+        tool_root = tmp_path / "custom-tools"
+        prefix = tool_root / "comfy-cli"
+        prefix.mkdir(parents=True)
+        (prefix / "uv-receipt.toml").write_text("[tool]\n")
+        previous = (
+            None
+            if ambient_tool_dir is None
+            else str(tool_root if ambient_tool_dir == "current" else tmp_path / "other-tools")
+        )
+        if previous is None:
+            monkeypatch.delenv("UV_TOOL_DIR", raising=False)
+        else:
+            monkeypatch.setenv("UV_TOOL_DIR", previous)
+        monkeypatch.setenv("UV_SELF_UPGRADE_TEST_SENTINEL", "preserved")
+        with (
+            patch.object(update.sys, "prefix", str(prefix)),
+            patch("comfy_cli.update.resolve_binary", return_value="/opt/bin/uv"),
+        ):
+            upgrade_cli()
+        installer_env = mock_run.call_args.kwargs.get("env", {})
+        assert installer_env.get("UV_TOOL_DIR") == str(tool_root)
+        assert installer_env.get("UV_SELF_UPGRADE_TEST_SENTINEL") == "preserved"
+        assert update.os.environ.get("UV_TOOL_DIR") == previous
+        assert mock_run.call_args.args[0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
+        assert mock_run.call_args.kwargs["timeout"] == 600
+
     @patch("comfy_cli.update.subprocess.run")
     def test_uv_tool_install_without_uv_on_path_is_unavailable(self, mock_run, tmp_path):
         (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
@@ -167,3 +198,107 @@ def test_latest_upgrade_version_survives_missing_latest_key(mock_check, tmp_path
 def test_latest_upgrade_version_survives_unparseable_latest(tmp_path):
     (tmp_path / "update-check.json").write_text(json.dumps({"checked_at": time.time(), "latest": "unknown"}))
     assert update.latest_upgrade_version("1.0.0", str(tmp_path)) is None
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        '[tool]\nrequirements = [{ name = "comfy-cli", specifier = "==1.2.3" }]\n',
+        '[tool]\nrequirements = [{ name = "comfy-cli", specifier = "===1.2.3" }]\n',
+        '[tool]\nrequirements = [{ name = "Comfy_Cli", specifier = ">=1,==1.2.3" }]\n',
+        '[tool]\nrequirements = ["comfy-cli==1.2.3"]\n',
+        '[tool]\nrequirements = [{ name = "comfy-cli" }]\nconstraints = [{ name = "comfy-cli", specifier = "==1.2.3" }]\n',
+    ],
+    ids=["exact", "arbitrary-exact", "mixed-normalized", "legacy", "constraint"],
+)
+def test_uv_exact_pin_blocks_installer_and_preserves_receipt(tmp_path, monkeypatch, receipt):
+    prefix = tmp_path / "original tools" / "comfy-cli"
+    prefix.mkdir(parents=True)
+    path = prefix / "uv-receipt.toml"
+    path.write_text(receipt)
+    monkeypatch.setattr(update.sys, "prefix", str(prefix))
+    monkeypatch.setattr(update, "resolve_binary", lambda name: "/opt/bin/uv")
+    with patch("comfy_cli.update.subprocess.run") as installer, pytest.raises(update.UpgradeUnavailable) as failure:
+        upgrade_cli()
+    assert "pin" in str(failure.value).lower()
+    assert "UV_TOOL_DIR" in failure.value.hint
+    assert str(prefix.parent) in failure.value.hint
+    assert "reinstall" in failure.value.hint.lower()
+    assert path.read_text() == receipt
+    installer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        "[tool]\n",
+        '[tool]\nrequirements = [{ name = "comfy-cli" }]\n',
+        '[tool]\nrequirements = [{ name = "comfy-cli", specifier = ">=1,<2" }]\n',
+        '[tool]\nrequirements = [{ name = "comfy-cli", specifier = "==1.2.*" }]\n',
+        '[tool]\nrequirements = [{ name = "comfy-cli", specifier = ">=1" }, { name = "helper", specifier = "==2" }]\nconstraints = [{ name = "helper", specifier = "==2" }]\n',
+        '[tool]\nrequirements = ["comfy-cli>=1", "helper==2"]\n',
+    ],
+    ids=["legacy-empty", "unbounded", "range", "wildcard", "other-dependency", "legacy-range"],
+)
+def test_uv_unpinned_or_ranged_receipt_keeps_existing_upgrade(tmp_path, monkeypatch, receipt):
+    prefix = tmp_path / "tools" / "comfy-cli"
+    prefix.mkdir(parents=True)
+    path = prefix / "uv-receipt.toml"
+    path.write_text(receipt)
+    monkeypatch.setattr(update.sys, "prefix", str(prefix))
+    monkeypatch.setattr(update, "resolve_binary", lambda name: "/opt/bin/uv")
+    with patch("comfy_cli.update.subprocess.run") as installer:
+        upgrade_cli()
+    assert installer.call_count == 1
+    assert installer.call_args.args[0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
+    assert installer.call_args.kwargs["env"]["UV_TOOL_DIR"] == str(prefix.parent)
+    assert installer.call_args.kwargs["check"] is True
+    assert installer.call_args.kwargs["timeout"] == 600
+    assert path.read_text() == receipt
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        "[tool",
+        'other = "invalid"\n',
+        '[tool]\nrequirements = "invalid"\n',
+        "[tool]\nrequirements = [7]\n",
+        '[tool]\nrequirements = [{name="comfy-cli", specifier="token=secret"}]\n',
+    ],
+)
+def test_malformed_uv_receipt_is_structured_and_never_runs_installer(tmp_path, monkeypatch, receipt):
+    prefix = tmp_path / "tools" / "comfy-cli"
+    prefix.mkdir(parents=True)
+    path = prefix / "uv-receipt.toml"
+    path.write_text(receipt)
+    monkeypatch.setattr(update.sys, "prefix", str(prefix))
+    monkeypatch.setattr(update, "resolve_binary", lambda name: "/opt/bin/uv")
+    with patch("comfy_cli.update.subprocess.run") as installer, pytest.raises(update.UpgradeUnavailable) as failure:
+        upgrade_cli()
+    assert "receipt" in str(failure.value).lower()
+    assert "token=secret" not in str(failure.value)
+    assert "UV_TOOL_DIR" in failure.value.hint
+    installer.assert_not_called()
+
+
+def test_unreadable_uv_receipt_is_unavailable_without_exposing_details(tmp_path, monkeypatch):
+    prefix = tmp_path / "tools" / "comfy-cli"
+    prefix.mkdir(parents=True)
+    receipt = prefix / "uv-receipt.toml"
+    receipt.write_text("[tool]\n")
+    monkeypatch.setattr(update.sys, "prefix", str(prefix))
+    monkeypatch.setattr(update, "resolve_binary", lambda name: "/opt/bin/uv")
+    original_read = update.Path.read_text
+
+    def guarded_read(path, *args, **kwargs):
+        if path == receipt:
+            raise PermissionError("sensitive-parser-details")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(update.Path, "read_text", guarded_read)
+    with patch("comfy_cli.update.subprocess.run") as installer, pytest.raises(update.UpgradeUnavailable) as failure:
+        upgrade_cli()
+    assert "receipt" in str(failure.value).lower()
+    assert "sensitive-parser-details" not in str(failure.value)
+    installer.assert_not_called()

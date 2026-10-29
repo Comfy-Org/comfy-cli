@@ -1790,9 +1790,21 @@ def update(
                 hint="check the installer executable and its permissions, then re-run `comfy update cli`",
             )
             raise typer.Exit(code=1) from e
+        get_renderer().emit({"target": "cli"}, command="update")
         return
 
-    comfy_path = workspace_manager.workspace_path
+    try:
+        comfy_path = workspace_manager.workspace_path
+    except typer.Exit as error:
+        if target != "comfy":
+            raise
+        get_renderer().error(
+            code="not_in_workspace",
+            message="ComfyUI workspace could not be resolved.",
+            hint="run `comfy install`, or pass `--workspace` to point at an existing install",
+            exit_code=error.exit_code,
+        )
+        raise
 
     if "all" == target:
         # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
