@@ -1190,9 +1190,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "update_cli_failed",
         "`comfy update cli` could not upgrade comfy-cli: either no usable installer was found "
-        "(a `uv tool` env without `uv` on PATH, or an env without pip) or the installer exited "
-        "non-zero, in which case `details.returncode` carries its status.",
-        "follow the error's hint; for a `uv tool` install, `uv tool upgrade comfy-cli` always works",
+        "(a `uv tool` env without `uv` on PATH, or an env without pip), or the installer could not start, "
+        "timed out, or exited non-zero. `details.timeout` carries the expired time budget; "
+        "`details.returncode` carries a non-zero exit status.",
+        "follow the error's hint; for a `uv tool` install, ensure `uv` is on PATH before running "
+        "`uv tool upgrade comfy-cli`",
     ),
     ErrorCode(
         "version_switch_unknown_version",

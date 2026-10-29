@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 UPDATE_CHECK_TTL_SECONDS = 24 * 60 * 60
 UPDATE_CHECK_DISABLE_ENV = "COMFY_NO_UPDATE_CHECK"
+CLI_UPGRADE_TIMEOUT_SECONDS = 600
 
 
 def check_for_newer_pypi_version(package_name, current_version):
@@ -56,7 +57,7 @@ def upgrade_cli():
     A ``uv tool install`` env ships without pip, so it is upgraded through
     ``uv tool upgrade``; anything else goes through pip against the running
     interpreter. Raises ``UpgradeUnavailable`` when neither installer is usable
-    and ``CalledProcessError`` if the installer fails — fail fast."""
+    and propagates installer exit, start, or timeout failures to the command."""
     if (Path(sys.prefix) / "uv-receipt.toml").is_file():
         uv = resolve_binary("uv")
         if uv is None:
@@ -64,14 +65,16 @@ def upgrade_cli():
                 "comfy-cli was installed with `uv tool`, but `uv` is not on PATH.",
                 hint="run `uv tool upgrade comfy-cli` from a shell where uv is available",
             )
-        subprocess.run([uv, "tool", "upgrade", "comfy-cli"], check=True)
+        subprocess.run([uv, "tool", "upgrade", "comfy-cli"], check=True, timeout=CLI_UPGRADE_TIMEOUT_SECONDS)
         return
     if importlib.util.find_spec("pip") is None:
         raise UpgradeUnavailable(
             f"pip is not installed in the comfy-cli environment ({sys.prefix}).",
             hint="upgrade comfy-cli with the tool that installed it (e.g. `pipx upgrade comfy-cli`)",
         )
-    subprocess.run([sys.executable, "-m", "pip", "install", "-U", "comfy-cli"], check=True)
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "comfy-cli"], check=True, timeout=CLI_UPGRADE_TIMEOUT_SECONDS
+    )
 
 
 def _read_fresh_cache(cache_file, now):

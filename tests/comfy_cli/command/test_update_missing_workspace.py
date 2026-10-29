@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -111,3 +112,28 @@ class TestUpdateCliFailures:
         envelope = json.loads(result.stdout.strip().splitlines()[-1])
         assert envelope["error"]["code"] == "update_cli_failed"
         assert envelope["error"]["details"]["returncode"] == 1
+
+    @pytest.mark.parametrize("output_flag", ["--json", "--no-json"])
+    @pytest.mark.parametrize(
+        "installer_error",
+        [
+            FileNotFoundError("installer disappeared"),
+            PermissionError("installer is not executable"),
+            subprocess.TimeoutExpired(["uv", "tool", "upgrade", "comfy-cli"], 600),
+        ],
+        ids=["missing-installer", "installer-permissions", "timeout"],
+    )
+    def test_installer_start_and_timeout_failures_are_structured(self, installer_error, output_flag):
+        with patch("comfy_cli.update.upgrade_cli", side_effect=installer_error):
+            result = runner.invoke(cmdline.app, [output_flag, "update", "cli"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        if output_flag == "--json":
+            envelope = json.loads(result.stdout.strip().splitlines()[-1])
+            assert envelope["error"]["code"] == "update_cli_failed"
+            assert envelope["error"]["hint"]
+            if isinstance(installer_error, subprocess.TimeoutExpired):
+                assert envelope["error"]["details"]["timeout"] == 600
+        else:
+            assert "update_cli_failed" in _strip_ansi(result.stdout)

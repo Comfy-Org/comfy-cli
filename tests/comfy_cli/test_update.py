@@ -1,5 +1,6 @@
 import json
 import time
+from importlib.machinery import ModuleSpec
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -102,11 +103,15 @@ class TestLatestUpgradeVersion:
 class TestUpgradeCli:
     @patch("comfy_cli.update.subprocess.run")
     def test_runs_pip_install_upgrade(self, mock_run, tmp_path):
-        with patch.object(update.sys, "prefix", str(tmp_path)):
+        with (
+            patch.object(update.sys, "prefix", str(tmp_path)),
+            patch("comfy_cli.update.importlib.util.find_spec", return_value=ModuleSpec("pip", loader=None)),
+        ):
             upgrade_cli()
         args = mock_run.call_args[0][0]
         assert args[1:] == ["-m", "pip", "install", "-U", "comfy-cli"]
         assert mock_run.call_args[1]["check"] is True
+        assert mock_run.call_args[1].get("timeout") == 600
 
     @patch("comfy_cli.update.subprocess.run")
     def test_uv_tool_install_upgrades_through_uv(self, mock_run, tmp_path):
@@ -119,6 +124,7 @@ class TestUpgradeCli:
             upgrade_cli()
         assert mock_run.call_args[0][0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
         assert mock_run.call_args[1]["check"] is True
+        assert mock_run.call_args[1].get("timeout") == 600
 
     @patch("comfy_cli.update.subprocess.run")
     def test_uv_tool_install_without_uv_on_path_is_unavailable(self, mock_run, tmp_path):
