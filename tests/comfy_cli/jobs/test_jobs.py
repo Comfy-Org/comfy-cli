@@ -2461,6 +2461,10 @@ class TestFinishedRunWithNothingToDownload:
         # report nothing, so the note must not assert nothing was saved.
         assert "reported no outputs" in note
         assert "saved nothing" not in note
+        # A cache hit is a possibility, not the established cause — an empty
+        # outputs map does not prove one, and neither does a save node.
+        assert "cache hit is also possible" in note
+        assert "because the graph matched" not in note
         # And the save/preview check comes before the seed advice, or a graph
         # with no save node is sent back into the re-run loop.
         assert note.index("save or preview node") < note.index("change an input or the seed")

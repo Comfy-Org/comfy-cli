@@ -942,17 +942,24 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # a dead generation service and re-ran the graph. `wait_cmd` carries this on
 # its row too, so a wait answers the question instead of deferring it.
 #
-# It says "reported no outputs", not "saved nothing", because that is what is
-# actually observed: a node can write a file and report nothing (ComfyUI's own
-# `CheckpointSave` has `RETURN_TYPES = ()` and returns no UI output). It also
-# puts the save/preview check before the seed advice, as the `download` hint
-# does — telling a graph with no save node to change its seed walks straight
-# back into the re-run loop this note exists to stop.
+# Every clause is deliberately only as strong as the record supports, since a
+# note written to stop the agent overstating an outcome must not overstate one
+# itself:
+#
+# * "reported no outputs", not "saved nothing" — a node can write a file and
+#   report nothing (ComfyUI's own `CheckpointSave` has `RETURN_TYPES = ()` and
+#   returns no UI output).
+# * a cache hit is named as *possible*, not as the cause. An empty outputs map
+#   does not establish one, and the presence of a save node does not either —
+#   `CheckpointSave` is a counterexample to both.
+# * the save/preview check comes before the seed advice, as the `download`
+#   hint does. Telling a graph with no save node to change its seed walks
+#   straight back into the re-run loop this note exists to stop.
 _EMPTY_COMPLETION_NOTE = (
     "completed and reported no outputs. Waiting will not produce files. Check that the workflow has "
-    "a save or preview node; if it does, nothing new ran because the graph matched an earlier run, so "
-    "change an input or the seed to force a fresh one. Some nodes also write files without reporting "
-    "them. This is not a service outage."
+    "a save or preview node. A cache hit is also possible, so change an input or the seed if you need "
+    "to force fresh execution. Some nodes write files without reporting them. This is not a service "
+    "outage."
 )
 
 
