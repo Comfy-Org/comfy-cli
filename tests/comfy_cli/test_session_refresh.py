@@ -387,6 +387,48 @@ def test_a_release_watch_refused_after_the_refresh_says_the_release_keeps_buildi
     assert sessions.forced == 1
 
 
+@pytest.mark.parametrize("misses", [1, 4])
+@pytest.mark.parametrize("refreshed", ["refreshed", None], ids=["sign-in-retained", "signed-out"])
+@pytest.mark.parametrize("later_poll", [False, True], ids=["initial-poll", "later-poll"])
+def test_a_release_watch_transport_retry_preserves_the_following_auth_refusal(
+    monkeypatch, misses, refreshed, later_poll
+) -> None:
+    from comfy_cli.command import build
+
+    class TimeoutThenRefuse(_AnswersTheCut):
+        remaining = misses
+        pending_building = later_poll
+
+        def __call__(self, url, target, **kwargs):
+            if kwargs.get("method") != "POST" and self.pending_building:
+                self.pending_building = False
+                return 200, {"id": "r1", "status": "building"}
+            if kwargs.get("method") != "POST" and self.remaining:
+                self.remaining -= 1
+                raise TimeoutError("timed out")
+            return super().__call__(url, target, **kwargs)
+
+    server = TimeoutThenRefuse(valid=set())
+    sessions = _Sessions(first="signed-in", after=refreshed)
+    sleeps = []
+    monkeypatch.setattr(build.time, "sleep", sleeps.append)
+
+    result, error = _watched_cut(monkeypatch, server, sessions)
+
+    assert result.exit_code == (75 if refreshed else 1), result.output
+    assert error["code"] == ("watch_auth_lost" if refreshed else "build_not_signed_in")
+    assert sleeps == ([build._RELEASE_POLL_SECONDS] if later_poll else []) + [4.0, 8.0, 16.0, 30.0][:misses]
+    assert server.tokens == (["signed-in", "signed-in", "refreshed"] if refreshed else ["signed-in", "signed-in"])
+    assert sessions.forced == 1
+    assert sessions.cleared is (refreshed is None)
+    assert server.remaining == 0
+    if refreshed:
+        assert error["details"] == {"releaseId": "r1"}
+        assert "may still be building" in error["message"]
+        assert "comfy build release show r1" in error["hint"]
+        assert "comfy cloud login" not in error["hint"]
+
+
 def test_a_release_watch_whose_refresh_signed_the_user_out_still_says_to_sign_in(monkeypatch) -> None:
     # Given a watch refused, and a refresh that cleared the sign-in
     server = _AnswersTheCut(valid=set())
