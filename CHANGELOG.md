@@ -27,7 +27,9 @@ history.
   converted with the boxes in `last_incoming`; and a saved MaskByColor put its
   colour into `color_in_HEX` and shifted every later value. On Comfy Cloud's
   node catalog this changes exactly those five classes. `forceInput` still makes
-  any of these types a plain link.
+  any of these types a plain link. A connect to one of these inputs is still
+  checked against its declared socket type, and a fresh node starts an
+  undeclared `BOUNDING_BOXES` or `COLORS` value at `[]`, as the frontend does.
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a

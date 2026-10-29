@@ -76,7 +76,21 @@ _FRONTEND_DOM_WIDGET_TYPES = frozenset(
 # What a fresh node serializes in a DOM-widget slot. ``add_node`` must emit
 # these for NON-trailing slots (``Load3D.image`` sits before ``width``), or the
 # frontend reads ``width`` into the viewport slot.
-_FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {"LOAD_3D": "", "LOAD_3D_ADVANCED": "", "PREVIEW_3D": ""}
+_FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {
+    "LOAD_3D": "",
+    "LOAD_3D_ADVANCED": "",
+    "PREVIEW_3D": "",
+    # The frontend's constructors start these at an empty list
+    # (``useBoundingBoxesWidget`` / ``useColorsWidget``); ComfyUI's own schemas
+    # always declare ``default: []``, but a custom schema may omit it.
+    "BOUNDING_BOXES": [],
+    "COLORS": [],
+}
+
+# Widget types that also keep a TYPED input socket. A connect to one is checked
+# against that type, as the frontend checks it; other widget-to-input conversions
+# take the source type.
+SOCKETED_WIDGET_TYPES = frozenset({"BOUNDING_BOXES", "COLORS", "COLOR"})
 
 # ``getCustomWidgets().LOAD_3D`` adds three button widgets BEFORE its own
 # component widget, and only when the node already carries a ``model_file``
@@ -2699,7 +2713,8 @@ def _widget_default(p: Port) -> Any:
     if p.enum_values:
         return p.enum_values[0]
     if p.type in _FRONTEND_DOM_WIDGET_TYPES:
-        return _FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type)
+        # A copy: the list defaults must not be shared between nodes.
+        return copy.deepcopy(_FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type))
     return None
 
 

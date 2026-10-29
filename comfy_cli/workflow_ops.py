@@ -61,6 +61,7 @@ from typing import Any
 
 from comfy_cli import layout
 from comfy_cli.cql.engine import (
+    SOCKETED_WIDGET_TYPES,
     DynamicGroupBindingError,
     _dynamic_group_widgets,
     _validate_dynamic_group_layout,
@@ -4800,6 +4801,14 @@ def _resolve_input_target(
     # bare-element guess (``image0``) a group's vocabulary might also match.
     node_type = node.get("type", "")
     if graph is not None and isinstance(slot, str) and slot in _linkable_widget_names(node, graph):
+        declared = _socketed_widget_type(graph, node_type, slot)
+        if declared is not None:
+            if not _types_compatible(elem_type, declared):
+                raise ValueError(
+                    f"type mismatch: {elem_type} output cannot connect to {declared} input {slot!r} "
+                    f"of node {node.get('id')}"
+                )
+            return None, {"name": slot, "type": declared, "widget": slot}
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
@@ -4918,6 +4927,17 @@ def _resolve_dynamic_link_input(
     # register from a concurrent first connect's grow, and the occupant would
     # depend on apply order. Both appliers reuse the existing entry by name.
     return None, {"name": slot, "type": hit.type, "promoted": True}
+
+
+def _socketed_widget_type(graph, node_type: str, name: str) -> str | None:
+    """The declared socket type of widget ``name`` when it is one of the
+    :data:`SOCKETED_WIDGET_TYPES` (``CreateBoundingBoxes.editor_state``), else
+    ``None``."""
+    m = graph.node(node_type) if node_type else None
+    for p in getattr(m, "inputs", None) or []:
+        if p.name == name and p.type in SOCKETED_WIDGET_TYPES:
+            return p.type
+    return None
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:

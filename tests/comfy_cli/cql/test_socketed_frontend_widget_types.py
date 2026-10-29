@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from comfy_cli import workflow_ops
 from comfy_cli.cql.engine import Graph
 from comfy_cli.cql.widget_catalog import build_types
 from comfy_cli.workflow_to_api import convert_ui_to_api
@@ -93,6 +94,15 @@ def _object_info() -> dict[str, Any]:
             "display_name": "LayerMask: Mask By Color",
             "category": "LayerMask",
             "python_module": "custom_nodes.comfyui_layerstyle",
+        },
+        "BoxSource": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["BOUNDING_BOXES", "IMAGE"],
+            "output_name": ["boxes", "image"],
+            "display_name": "Box Source",
+            "category": "test",
+            "python_module": "custom_nodes.test",
         },
         # forceInput still demotes the same type to a pure link.
         "BoxesFromUpstream": {
@@ -184,3 +194,33 @@ class TestSocketedWidgetTypesOwnASlot:
         inputs = convert_ui_to_api(ui, _object_info())["7"]["inputs"]
         assert inputs["medium"] == "photograph"
         assert inputs["color_palette"] == {"__value__": ["#ff0000", "#00ff00"]}
+
+
+class TestSocketedWidgetConnect:
+    """These widgets keep a typed socket, so a connect is still type-checked."""
+
+    def _two_nodes(self, graph: Graph) -> tuple[dict[str, Any], Any, Any]:
+        wf: dict[str, Any] = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, _ = workflow_ops.add_node(wf, graph, "BoxSource")
+        wf, _ = workflow_ops.add_node(wf, graph, "CreateBoundingBoxes")
+        return wf, wf["nodes"][0]["id"], wf["nodes"][1]["id"]
+
+    def test_a_matching_output_connects_with_the_declared_socket_type(self, graph: Graph):
+        wf, src, dst = self._two_nodes(graph)
+        wf, _ = workflow_ops.connect(wf, graph, src, "boxes", dst, "editor_state")
+        (entry,) = [i for i in wf["nodes"][1]["inputs"] if i["name"] == "editor_state"]
+        assert entry["type"] == "BOUNDING_BOXES"
+        assert entry["link"] is not None
+
+    def test_a_mismatched_output_is_refused(self, graph: Graph):
+        wf, src, dst = self._two_nodes(graph)
+        with pytest.raises(ValueError, match="type mismatch"):
+            workflow_ops.connect(wf, graph, src, "image", dst, "editor_state")
+
+    def test_a_fresh_node_carries_the_frontends_empty_boxes(self, graph: Graph):
+        wf: dict[str, Any] = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        defaults = _object_info()
+        del defaults["CreateBoundingBoxes"]["input"]["required"]["editor_state"][1]["default"]
+        g = Graph.from_object_info(defaults)
+        wf, _ = workflow_ops.add_node(wf, g, "CreateBoundingBoxes")
+        assert wf["nodes"][0]["widgets_values"][2] == []
