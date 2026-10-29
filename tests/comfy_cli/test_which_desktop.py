@@ -9,14 +9,16 @@ does not exist on a Desktop-only machine. These commands used to report it with
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import jsonschema
 import pytest
 from typer.testing import CliRunner
 
-from comfy_cli import utils
-from comfy_cli.cmdline import app
+from comfy_cli import desktop_install, utils
+from comfy_cli.cmdline import app, workspace_manager
+from comfy_cli.env_checker import EnvChecker
 
 SCHEMAS_DIR = Path(__file__).resolve().parents[2] / "comfy_cli" / "schemas"
 
@@ -46,17 +48,17 @@ def _invoke(*args: str):
     return result, envelope
 
 
-def test_which_reports_the_desktop_install_when_nothing_else_is_selected(comfy_desktop, fallback_workspace):
+def test_which_keeps_missing_selected_workspace_separate_from_desktop_candidate(comfy_desktop, fallback_workspace):
     result, envelope = _invoke("--json", "which")
 
-    assert result.exit_code == 0, result.output
-    assert envelope["ok"] is True
-    data = envelope["data"]
-    jsonschema.validate(data, _schema("which.json"))
-    assert data["workspace_type"] == "desktop"
-    assert data["workspace_path"] == str(comfy_desktop["code"])
-    assert data["exists"] is True
-    desktop = data["desktop"]
+    assert result.exit_code == 1, result.output
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "workspace_not_found"
+    details = envelope["error"]["details"]
+    assert details["workspace_type"] == workspace_manager.workspace_type.value == "default"
+    assert details["path"] == workspace_manager.workspace_path == str(fallback_workspace)
+    assert not Path(workspace_manager.workspace_path).is_dir()
+    desktop = details["desktop"]
     assert desktop["code_dir"] == str(comfy_desktop["code"])
     assert desktop["data_dir"] == str(comfy_desktop["data"])
     assert desktop["python"] == str(comfy_desktop["python"])
@@ -81,7 +83,7 @@ def test_which_lists_every_desktop_install_and_says_which_it_picked(comfy_deskto
 
     _, envelope = _invoke("--json", "which")
 
-    desktop = envelope["data"]["desktop"]
+    desktop = envelope["error"]["details"]["desktop"]
     assert desktop["install_id"] == "inst-adopted"
     assert "most recently launched of 2" in desktop["selected_reason"]
     assert {row["install_id"]: row["selected"] for row in desktop["installs"]} == {
@@ -143,17 +145,23 @@ def test_which_warns_when_desktop_settings_are_unreadable(comfy_desktop, fallbac
 
     result, envelope = _invoke("--json", "which")
 
-    assert result.exit_code == 0, result.output
-    assert envelope["data"]["workspace_type"] == "desktop"
-    assert [w["code"] for w in envelope["data"]["warnings"]] == ["desktop_config_unreadable"]
+    assert result.exit_code == 1, result.output
+    assert envelope["error"]["code"] == "workspace_not_found"
+    desktop = envelope["error"]["details"]["desktop"]
+    assert any("settings.json" in problem for problem in desktop["problems"])
 
 
 def test_pretty_which_shows_the_desktop_data_dir(comfy_desktop, fallback_workspace):
-    result = CliRunner().invoke(app, ["which"], env={"COMFY_OUTPUT": "pretty", "COLUMNS": "400"})
+    result = CliRunner().invoke(
+        app,
+        ["--workspace", str(comfy_desktop["code"]), "which"],
+        env={"COMFY_OUTPUT": "pretty", "COLUMNS": "400"},
+    )
 
     assert result.exit_code == 0, result.output
     assert str(comfy_desktop["data"]) in result.output
-    assert "desktop" in result.output
+    assert "Desktop data" in result.output
+    assert "specified" in result.output
 
 
 def test_env_reports_the_desktop_install(comfy_desktop, fallback_workspace):
@@ -163,11 +171,11 @@ def test_env_reports_the_desktop_install(comfy_desktop, fallback_workspace):
     data = envelope["data"]
     jsonschema.validate(data, _schema("env.json"))
     workspace = data["workspace"]
-    assert workspace["type"] == "desktop"
-    assert workspace["path"] == str(comfy_desktop["code"])
-    assert workspace["exists"] is True
+    assert workspace["type"] == workspace_manager.workspace_type.value == "default"
+    assert workspace["path"] == workspace_manager.workspace_path == str(fallback_workspace)
+    assert workspace["exists"] is False
     assert workspace["desktop"]["data_dir"] == str(comfy_desktop["data"])
-    assert "warnings" not in data
+    assert [w["code"] for w in data["warnings"]] == ["workspace_not_found"]
 
 
 def test_env_flags_a_missing_workspace_instead_of_a_silent_default(fallback_workspace):
@@ -187,6 +195,7 @@ def test_which_enriches_an_explicit_desktop_workspace(comfy_desktop, fallback_wo
     result, envelope = _invoke("--json", "--workspace", str(comfy_desktop[part]), "which")
 
     assert result.exit_code == 0, result.output
+    jsonschema.validate(envelope["data"], _schema("which.json"))
     assert envelope["data"]["workspace_type"] == "specified"
     assert envelope["data"]["workspace_path"] == str(comfy_desktop[part])
     assert envelope["data"]["desktop"]["data_dir"] == str(comfy_desktop["data"])
@@ -199,4 +208,95 @@ def test_env_warns_when_desktop_settings_are_unreadable(comfy_desktop, fallback_
     result, envelope = _invoke("--json", "env")
 
     assert result.exit_code == 0, result.output
-    assert [w["code"] for w in envelope["data"]["warnings"]] == ["desktop_config_unreadable"]
+    assert [w["code"] for w in envelope["data"]["warnings"]] == ["workspace_not_found", "desktop_config_unreadable"]
+
+
+def test_env_renders_hostile_discovery_values_literally_without_changing_json(
+    comfy_desktop, fallback_workspace, monkeypatch
+):
+    raw = "[/]literal[red]x[/red]\x1b[2J\x1b]0;osc-title\x07\x9b2J\r\u202e世界"
+    visible = "[/]literal[red]x[/red]\u202e世界"
+    selected_path = str(fallback_workspace.parent / raw)
+    monkeypatch.setattr(utils, "get_not_user_set_default_workspace", lambda: selected_path)
+    found = desktop_install.detect()
+    candidate = replace(
+        found.selected,
+        code_dir=f"code:{raw}",
+        data_dir=f"data:{raw}",
+        model_roots=(desktop_install.ModelRoot(f"model:{raw}", "data", True),),
+    )
+    found = replace(found, installs=(candidate,), selected=candidate, problems=(f"warning:{raw}",))
+    monkeypatch.setattr(desktop_install, "detect", lambda: found)
+    monkeypatch.setattr(EnvChecker(), "fill_print_table", lambda: [])
+
+    json_result, envelope = _invoke("--json", "env")
+    assert json_result.exit_code == 0, json_result.output
+    workspace = envelope["data"]["workspace"]
+    assert workspace["path"] == selected_path
+    assert workspace["desktop"]["code_dir"] == f"code:{raw}"
+    assert workspace["desktop"]["data_dir"] == f"data:{raw}"
+    assert workspace["desktop"]["model_roots"][0]["path"] == f"model:{raw}"
+    assert any(warning["message"] == f"warning:{raw}" for warning in envelope["data"]["warnings"])
+
+    result = CliRunner().invoke(app, ["env"], env={"COMFY_OUTPUT": "pretty", "COLUMNS": "600", "NO_COLOR": "1"})
+
+    assert result.exit_code == 0, result.output
+    assert str(fallback_workspace.parent / visible) in result.output
+    assert f"code:{visible}" in result.output
+    assert f"data:{visible}" in result.output
+    assert f"model:{visible}" in result.output
+    assert f"warning:{visible}" in result.output
+    assert "\x1b" not in result.output and "\x9b" not in result.output
+    assert "\x07" not in result.output and "\r" not in result.output
+    assert "osc-title" not in result.output
+    assert "\u202e世界" in result.output
+
+
+def test_which_renders_hostile_desktop_fields_literally_without_changing_json(
+    comfy_desktop, fallback_workspace, monkeypatch
+):
+    raw = "[/]literal[red]x[/red]\x1b[2J\x1b]0;osc-title\x07\x9b2J\r\u202e世界"
+    visible = "[/]literal[red]x[/red]\u202e世界"
+    code = fallback_workspace.parent / f"code:{raw}"
+    code.mkdir(parents=True)
+    (code / "main.py").write_text("")
+    found = desktop_install.detect()
+    candidate = replace(
+        found.selected,
+        code_dir=str(code),
+        data_dir=f"data:{raw}",
+        python=f"python:{raw}",
+        model_roots=(desktop_install.ModelRoot(f"model:{raw}", "data", True),),
+    )
+    found = replace(
+        found, installs=(candidate,), selected=candidate, selected_reason=f"reason:{raw}", problems=(f"warning:{raw}",)
+    )
+    monkeypatch.setattr(desktop_install, "detect", lambda: found)
+    monkeypatch.setattr("comfy_cli.cmdline.env_checker.check_comfy_server_running", lambda **kwargs: False)
+
+    json_result, envelope = _invoke("--json", "--workspace", str(code), "which")
+    assert json_result.exit_code == 0, json_result.output
+    data = envelope["data"]
+    assert data["workspace_path"] == str(code)
+    assert data["desktop"]["code_dir"] == str(code)
+    assert data["desktop"]["data_dir"] == f"data:{raw}"
+    assert data["desktop"]["python"] == f"python:{raw}"
+    assert data["desktop"]["model_roots"][0]["path"] == f"model:{raw}"
+    assert data["desktop"]["selected_reason"] == f"reason:{raw}"
+    assert data["warnings"][0]["message"] == f"warning:{raw}"
+
+    result = CliRunner().invoke(
+        app, ["--workspace", str(code), "which"], env={"COMFY_OUTPUT": "pretty", "COLUMNS": "600", "NO_COLOR": "1"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert str(fallback_workspace.parent / f"code:{visible}") in result.output
+    assert f"data:{visible}" in result.output
+    assert f"python:{visible}" in result.output
+    assert f"model:{visible}" in result.output
+    assert f"reason:{visible}" in result.output
+    assert f"warning:{visible}" in result.output
+    assert "\x1b" not in result.output and "\x9b" not in result.output
+    assert "\x07" not in result.output and "\r" not in result.output
+    assert "osc-title" not in result.output
+    assert "\u202e世界" in result.output

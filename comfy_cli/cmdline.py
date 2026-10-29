@@ -2803,6 +2803,7 @@ def which():
         from comfy_cli.env_checker import _display_url
         from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
+        from comfy_cli.output.sanitize import sanitize_value
 
         host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
         try:
@@ -2822,7 +2823,7 @@ def which():
             )
         )
         for warning in workspace.get("warnings", []):
-            renderer.console().print(warning["message"], markup=False)
+            renderer.console().print(sanitize_value(warning["message"]), markup=False)
     renderer.emit(
         {
             "workspace_path": str(comfy_path),
