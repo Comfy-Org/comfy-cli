@@ -90,6 +90,8 @@ class DesktopInstall:
     #: The code dir holds a ComfyUI checkout (``main.py``) — only such an
     #: install can be selected.
     exists: bool
+    #: Internal registry ownership for generated config identity; never serialized.
+    registry_dir: str | None = field(default=None, repr=False)
 
     @property
     def last_launched_at(self) -> str | None:
@@ -221,7 +223,9 @@ def _model_roots(data_dir: Path, record: dict, shared_dirs: list[str]) -> tuple[
     return tuple(roots)
 
 
-def _install_from_record(record: dict, shared_dirs: list[str], legacy_base_path: str | None) -> DesktopInstall | None:
+def _install_from_record(
+    record: dict, shared_dirs: list[str], legacy_base_path: str | None, *, registry_dir: Path | None = None
+) -> DesktopInstall | None:
     install_path = record.get("installPath")
     if not isinstance(install_path, str) or not install_path:
         return None  # a remote entry (Comfy Cloud) has no local files
@@ -259,6 +263,7 @@ def _install_from_record(record: dict, shared_dirs: list[str], legacy_base_path:
         status=record.get("status") if isinstance(record.get("status"), str) else None,
         last_launched_ms=last_launched if isinstance(last_launched, (int, float)) and last_launched > 0 else None,
         exists=(code_dir / "main.py").is_file(),
+        registry_dir=str(registry_dir) if registry_dir is not None else None,
     )
 
 
@@ -320,8 +325,36 @@ def server_launch_paths(stats: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
-def _for_server(found: DesktopDetection, stats: dict[str, Any]) -> DesktopDetection:
+def _config_identifies_install(config: str, install: DesktopInstall) -> bool:
+    install_id = install.install_id
+    if (
+        not install.registry_dir
+        or not install_id
+        or install_id in (".", "..")
+        or any(c in install_id for c in "/\\:\x00")
+    ):
+        return False
+    path = Path(config).expanduser()
+    if not path.is_absolute():
+        return False
+    expected = Path(install.registry_dir) / "instance-model-paths" / f"{install_id}.yaml"
+    return _same_path(str(path), str(expected))
+
+
+def _for_server(
+    found: DesktopDetection, stats: dict[str, Any], *, filesystem_verified: bool = False
+) -> DesktopDetection:
     """Select using launch identity, never a remembered last-launched record."""
+    if not filesystem_verified:
+        return replace(
+            found,
+            selected=None,
+            selected_reason=None,
+            input_dir=None,
+            output_dir=None,
+            output_dir_source=None,
+            problems=(*found.problems, "running server filesystem is unverified; pass explicit model/input roots"),
+        )
     system = stats.get("system") or {}
     if not isinstance(system, dict):
         system = {}
@@ -338,7 +371,7 @@ def _for_server(found: DesktopDetection, stats: dict[str, Any]) -> DesktopDetect
         and (
             any(_same_path(base, install.data_dir) for base in bases)
             or any(_same_path(str(Path(script).parent), install.code_dir) for script in scripts)
-            or any(Path(config).stem == install.install_id for config in configs)
+            or any(_config_identifies_install(config, install) for config in configs)
         )
     ]
     if len(matches) != 1:
@@ -435,11 +468,17 @@ def _for_server(found: DesktopDetection, stats: dict[str, Any]) -> DesktopDetect
 
 
 def detect(
-    app_data_dir: Path | None = None, legacy_dir: Path | None = None, *, server_stats: dict[str, Any] | None = None
+    app_data_dir: Path | None = None,
+    legacy_dir: Path | None = None,
+    *,
+    server_stats: dict[str, Any] | None = None,
+    server_filesystem_verified: bool = False,
 ) -> DesktopDetection | None:
     """Read Desktop 2's install records. ``None`` means Desktop 2 is not installed.
 
     The app-data dirs default to this OS's; tests pass fixture dirs instead.
+    Server paths require caller-established local process/filesystem provenance;
+    matching strings or a loopback URL alone are insufficient.
     """
     if app_data_dir is None:
         detections = [found for directory in app_data_dirs() if (found := detect(directory, legacy_dir)) is not None]
@@ -453,7 +492,11 @@ def detect(
         found = DesktopDetection(
             origin, installs, selected, reason, tuple(problem for item in detections for problem in item.problems)
         )
-        return _for_server(found, server_stats) if server_stats is not None else found
+        return (
+            _for_server(found, server_stats, filesystem_verified=server_filesystem_verified)
+            if server_stats is not None
+            else found
+        )
     app_dir = app_data_dir
     if app_dir is None:
         return None
@@ -505,7 +548,7 @@ def detect(
     installs = tuple(
         install
         for install in (
-            _install_from_record(record, shared_dirs, legacy_base_path)
+            _install_from_record(record, shared_dirs, legacy_base_path, registry_dir=app_dir)
             for record in records
             if isinstance(record, dict)
         )
@@ -519,7 +562,11 @@ def detect(
         selected_reason=reason,
         problems=tuple(problems),
     )
-    return _for_server(found, server_stats) if server_stats is not None else found
+    return (
+        _for_server(found, server_stats, filesystem_verified=server_filesystem_verified)
+        if server_stats is not None
+        else found
+    )
 
 
 def install_for_dir(path: str | os.PathLike[str], detection: DesktopDetection | None = None) -> DesktopInstall | None:
