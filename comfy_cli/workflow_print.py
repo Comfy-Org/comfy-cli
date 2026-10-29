@@ -59,6 +59,7 @@ from comfy_cli.cql.engine import (
     _resolve_proxy_value,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
+    saved_widget_order,
 )
 from comfy_cli.workflow_to_api import is_subgraph_uuid
 
@@ -1153,7 +1154,12 @@ def _build_args(
             args.append(f"widgets={py_literal(positional)}")
         warnings.append(f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally")
     else:
-        entries = validated_entries if validated_entries is not None else _expand_widget_entries(m, positional)
+        saved_names = saved_widget_order(node, ctx.graph, class_type)
+        entries = (
+            validated_entries
+            if validated_entries is not None
+            else _expand_widget_entries(m, positional, saved_widget_names=saved_names)
+        )
         for idx, entry in enumerate(entries):
             if entry.frontend_injected:
                 # ``upload`` / ``audioUI`` / PREVIEW_3D ``image``: a frontend

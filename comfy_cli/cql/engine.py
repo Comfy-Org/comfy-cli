@@ -4539,7 +4539,12 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
                 raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
         else:
             raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
-    entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
+    saved_names = saved_widget_order(node)
+    entries = _expand_widget_entries(
+        m,
+        source if isinstance(source, (list, dict)) else [],
+        saved_widget_names=saved_names,
+    )
     saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
     if saved_length is not None:
         while len(entries) > saved_length and entries[-1].frontend_injected:
@@ -4598,32 +4603,64 @@ def saved_sub_order(saved_widget_names: list[str] | None, parent: str, sub_names
     """
     if not saved_widget_names or not sub_names:
         return None
-    declared = set(sub_names)
+    declared: dict[str, int] = {}
+    for name in sub_names:
+        declared[name] = declared.get(name, 0) + 1
     prefix = f"{parent}."
     ordered: list[str] = []
-    seen: set[str] = set()
+    seen: dict[str, int] = {}
     for name in saved_widget_names:
-        if not isinstance(name, str) or not name.startswith(prefix) or name in seen:
+        if not isinstance(name, str) or not name.startswith(prefix):
             continue
         if name not in declared:
             head = name[len(prefix) :].split(".", 1)[0]
             if f"{prefix}{head}" in declared:
                 continue
             return None
-        seen.add(name)
+        occurrence = seen.get(name, 0)
+        if occurrence >= declared[name]:
+            # A duplicated marker cannot create another positional occurrence.
+            continue
+        seen[name] = occurrence + 1
         ordered.append(name)
     if not ordered:
         return None
     return None if ordered == sub_names else ordered
 
 
-def saved_widget_order(node: dict | None) -> list[str] | None:
+def saved_widget_order(
+    node: dict | None,
+    graph: Graph | None = None,
+    class_type: str | None = None,
+) -> list[str] | None:
     """The widget names a SAVED node records on its ``inputs[]`` entries, in order.
 
-    ``None`` when the node records none. Positional ``widgets_values`` was
-    written against this list, not against today's catalog.
+    ``widgets_values_form.order`` is the explicit A24 layout and wins when it
+    exactly describes a positional array. A name-keyed value object needs no
+    positional recovery, so input markers are ignored for it.
+
+    Legacy arrays may instead record their layout through ``inputs[].widget``.
+    When a graph is supplied, trust those markers only if expanding with them
+    accounts for the complete positional array. CLI-built nodes can acquire a
+    single marker when one widget is promoted or connected; treating that
+    partial marker set as a complete save layout drops unrelated combo slots.
     """
     if not isinstance(node, dict):
+        return None
+    values = node.get("widgets_values")
+    form = node.get("widgets_values_form")
+    if isinstance(values, list) and isinstance(form, dict):
+        order = form.get("order")
+        if (
+            set(form) == {"order"}
+            and isinstance(order, list)
+            and len(order) == len(values)
+            and all(isinstance(name, str) and name for name in order)
+            and len(order) == len(set(order))
+        ):
+            return list(order)
+        return None
+    if isinstance(values, dict):
         return None
     raw = node.get("inputs")
     if not isinstance(raw, list):
@@ -4631,7 +4668,16 @@ def saved_widget_order(node: dict | None) -> list[str] | None:
     names = [
         inp["name"] for inp in raw if isinstance(inp, dict) and inp.get("widget") and isinstance(inp.get("name"), str)
     ]
-    return names or None
+    if not names:
+        return None
+    if graph is not None and isinstance(values, list):
+        morphism = graph.node(class_type or str(node.get("type", "")))
+        if morphism is None:
+            return None
+        entries = _expand_widget_entries(morphism, values, saved_widget_names=names)
+        if len(entries) != len(values):
+            return None
+    return names
 
 
 def _expand_widget_entries(
@@ -4713,12 +4759,16 @@ def _expand_widget_entries(
             subs = _dynamic_combo_sub_ports(port.dynamic_options, selector, name)
             order = saved_sub_order(saved_widget_names, name, [s.name for s in subs])
             if order is not None:
-                by_name = {s.name: s for s in subs}
-                kept = [by_name[n] for n in order if n in by_name]
+                remaining = list(subs)
+                kept: list[Port] = []
+                for saved_name in order:
+                    index = next((i for i, sub in enumerate(remaining) if sub.name == saved_name), None)
+                    if index is not None:
+                        kept.append(remaining.pop(index))
                 # A sub the save never named owns no slot. Connection-only subs
                 # own none either way, so carrying them keeps `sub_links`
                 # complete without moving any positional index.
-                kept += [s for s in subs if s.name not in order and s.is_link]
+                kept += [sub for sub in remaining if sub.is_link]
                 subs = kept
             for sub in subs:
                 if sub.is_link:
@@ -4758,7 +4808,8 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
-    for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
+    saved_names = saved_widget_order(node, graph, node_type)
+    for idx, entry in enumerate(_expand_widget_entries(m, widgets, saved_widget_names=saved_names)):
         if entry.port is None:  # control_after_generate / injected marker — not a slot
             continue
         current = widgets[idx] if idx < len(widgets) else None
@@ -5021,7 +5072,8 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
                 continue
             interior_class = inode.get("type", "")
             widgets = _widgets_as_positional(inode.get("widgets_values"), graph, interior_class)
-            order = graph.widget_order_for_node(interior_class, widgets)
+            saved_names = saved_widget_order(inode, graph, interior_class)
+            order = graph.widget_order_for_node(interior_class, widgets, saved_names)
             try:
                 idx = order.index(name)
             except ValueError:
@@ -5061,7 +5113,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     # which its `inputs[].widget` markers record. Expanding a dynamic combo's
     # option from today's catalog instead put every slot after an added
     # sub-input one place out, so the write landed on a neighbour.
-    saved_names = saved_widget_order(node)
+    saved_names = saved_widget_order(node, graph, node_type)
     if extend:
         button_defaults = dict(load_3d_button_slots(m, widgets))
 
@@ -5118,7 +5170,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             )
             widgets.extend(default_values)
     order = graph.widget_order_for_node(node_type, widgets, saved_names)
-    if has_group and order.count(input_name) > 1:
+    if order.count(input_name) > 1:
         raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
     entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
     if any(e.frontend_injected and e.name == input_name for e in entries):
@@ -5362,7 +5414,9 @@ def _write_dynamic_combo_selector(
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
     raw_values = node.get("widgets_values")
-    preserve_named = isinstance(raw_values, dict) and any(e.port and e.port.is_dynamic_group for e in entries)
+    preserve_named = isinstance(raw_values, dict) and (
+        "widgets_values_form" in node or any(e.port and e.port.is_dynamic_group for e in entries)
+    )
     if not any(_dynamic_combo_key_matches(value, key) for key in port.enum_values):
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
@@ -5401,6 +5455,7 @@ def _write_dynamic_combo_selector(
         }
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
+    _clear_dynamic_combo_widget_markers(node, input_name)
     if any(entry.port and entry.port.is_dynamic_group for entry in entries):
         if "widgets_values_form" in node:
             node["widgets_values_form"]["order"] = (
@@ -5426,6 +5481,28 @@ def _write_dynamic_combo_selector(
             ),
         }
     ]
+
+
+def _clear_dynamic_combo_widget_markers(node: dict, parent: str) -> None:
+    """Invalidate legacy markers after rebuilding a combo's positional roster.
+
+    The positional values have just been replaced with today's selected-option
+    layout. Keeping the previous option's dotted markers would make the next
+    read interpret those new values using the old layout. Clear only markers in
+    this selector's subtree and preserve the input objects themselves, including
+    any link/socket metadata. Do not fabricate replacement input objects: CLI-
+    built nodes intentionally keep value widgets out of ``inputs`` and adding
+    them changes their connectable socket surface. With no saved subtree marker,
+    subsequent reads use the same pinned catalog order that built the new array.
+    """
+    inputs = node.get("inputs")
+    if not isinstance(inputs, list) or any(not isinstance(item, dict) for item in inputs):
+        return
+    prefix = f"{parent}."
+    for item in inputs:
+        name = item.get("name")
+        if isinstance(name, str) and name.startswith(prefix):
+            item.pop("widget", None)
 
 
 def _dynamic_combo_default_values(

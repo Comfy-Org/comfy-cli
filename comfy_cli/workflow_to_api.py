@@ -2116,10 +2116,13 @@ def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]
     order = saved_sub_order(_saved_widget_order(node), parent, [name for name, _spec in subs])
     if order is None:
         return subs
-    by_name = dict(subs)
-    kept = [(name, by_name[name]) for name in order if name in by_name]
-    named = set(order)
-    return kept + [(n, sp) for n, sp in subs if n not in named and not _is_widget_input(sp)[0]]
+    remaining = list(subs)
+    kept: list[tuple[str, Any]] = []
+    for saved_name in order:
+        index = next((i for i, (name, _spec) in enumerate(remaining) if name == saved_name), None)
+        if index is not None:
+            kept.append(remaining.pop(index))
+    return kept + [(name, spec) for name, spec in remaining if not _is_widget_input(spec)[0]]
 
 
 def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | None]:

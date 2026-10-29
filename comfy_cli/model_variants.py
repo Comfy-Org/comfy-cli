@@ -147,7 +147,10 @@ def _model_widgets(node: dict, graph) -> list[tuple[Any, Any, str, Any]]:
         return []
     ports = {p.name: p for p in m.inputs}
     if isinstance(wv, list):
-        names = graph.widget_order_for_node(node["type"], wv)
+        from comfy_cli.cql.engine import saved_widget_order
+
+        saved_names = saved_widget_order(node, graph, str(node["type"]))
+        names = graph.widget_order_for_node(node["type"], wv, saved_names)
         pairs = [(i, names[i]) for i in range(min(len(wv), len(names)))]
     else:
         pairs = [(k, k) for k in wv]

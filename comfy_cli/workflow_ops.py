@@ -1225,7 +1225,13 @@ def _widget_schema_port(graph, class_type: str, widget: str):
 
 
 def _normalize_combo(
-    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+    graph,
+    class_type: str,
+    widget: str,
+    value: Any,
+    widgets_values: list[Any] | None = None,
+    *,
+    node: dict | None = None,
 ) -> tuple[Any, dict | None]:
     """Rewrite a mangled model/COMBO value to the real option it means so the
     model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
@@ -1241,8 +1247,17 @@ def _normalize_combo(
         m = graph.node(class_type)
         if m is None:
             return value, None
+        saved_names = _engine.saved_widget_order(node, graph, class_type)
         port = next(
-            (entry.port for entry in _engine._expand_widget_entries(m, widgets_values) if entry.name == widget),
+            (
+                entry.port
+                for entry in _engine._expand_widget_entries(
+                    m,
+                    widgets_values,
+                    saved_widget_names=saved_names,
+                )
+                if entry.name == widget
+            ),
             None,
         )
     if port is None:
@@ -1434,15 +1449,29 @@ def _set_widget_impl(
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
-        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value, cur)
+        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value, cur, node=target)
         old = None
         if graph.node(inner_type) is not None:
             # Same resolution as a top-level node, so a sub-widget the current
             # dynamic-combo option hides is refused here too instead of
             # recording an op that writes nothing.
-            i = _widget_index(graph, inner_type, inner_widget, cur, node_id="/".join(str(s) for s in segments))
+            i = _widget_index(
+                graph,
+                inner_type,
+                inner_widget,
+                cur,
+                node_id="/".join(str(s) for s in segments),
+                node=target,
+            )
             old = cur[i] if i < len(cur) else None
-        warnings = _validate_widget(graph, inner_type, inner_widget, value, cur)  # raises on shape/catalog mismatch
+        warnings = _validate_widget(
+            graph,
+            inner_type,
+            inner_widget,
+            value,
+            cur,
+            node=target,
+        )  # raises on shape/catalog mismatch
         if norm_note:
             warnings = [norm_note, *warnings]
         op = _new_op(
@@ -1474,9 +1503,16 @@ def _set_widget_impl(
         )
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
     idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"), node=node)  # raises on unknown name
-    value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets)
+    value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets, node=node)
     old = widgets[idx] if idx < len(widgets) else None
-    warnings = _validate_widget(graph, class_type, widget, value, widgets)  # raises on shape/catalog mismatch
+    warnings = _validate_widget(
+        graph,
+        class_type,
+        widget,
+        value,
+        widgets,
+        node=node,
+    )  # raises on shape/catalog mismatch
     morphism = graph.node(class_type)
     port = next((p for p in morphism.inputs if p.name == widget), None) if morphism is not None else None
     if port is not None and port.dynamic_options:
@@ -3017,7 +3053,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
         saved_values = n.get("widgets_values")
         widgets = _engine._widgets_as_positional(saved_values, graph, class_type)
-        order = graph.widget_order_for_node(class_type, widgets)
+        saved_names = _engine.saved_widget_order(n, graph, class_type)
+        order = graph.widget_order_for_node(class_type, widgets, saved_names)
         group_widgets = {e.name for e in group_entries.get(n["id"], [])}
         defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
@@ -3598,7 +3635,7 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
     # integer key into it — leaving ``inputcount`` stale next to a garbage key.
     widgets = _engine._widgets_as_positional(dst.get("widgets_values"), graph, dst.get("type", ""))
     dst["widgets_values"] = widgets
-    idx = _widget_index(graph, dst.get("type", ""), widget, widgets)
+    idx = _widget_index(graph, dst.get("type", ""), widget, widgets, node=dst)
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = value
@@ -4494,7 +4531,7 @@ def _widget_index(
     # and left the seed itself alone.
     from comfy_cli.cql import engine as _eng  # lazy: engine imports this module at load time
 
-    saved_names = _eng.saved_widget_order(node)
+    saved_names = _eng.saved_widget_order(node, graph, class_type)
     order = graph.widget_order_for_node(class_type, widgets_values, saved_names)
     # A frontend-injected slot (``upload``/``audioUI``/``PREVIEW_3D`` ``image``)
     # sits in ``order`` — it owns a position — but has no schema port to
@@ -4560,7 +4597,13 @@ class FatalFindingError(ValueError):
 
 
 def _validate_widget(
-    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+    graph,
+    class_type: str,
+    widget: str,
+    value: Any,
+    widgets_values: list[Any] | None = None,
+    *,
+    node: dict | None = None,
 ) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
@@ -4576,7 +4619,8 @@ def _validate_widget(
         m = graph.node(class_type)
         if m is None:
             return []
-        entries = _engine._expand_widget_entries(m, widgets_values)
+        saved_names = _engine.saved_widget_order(node, graph, class_type)
+        entries = _engine._expand_widget_entries(m, widgets_values, saved_widget_names=saved_names)
         port = next((entry.port for entry in entries if entry.name == widget), None)
     if port is None:
         return []
@@ -4903,7 +4947,8 @@ def _resolve_dynamic_link_input(
     if port is None or not port.dynamic_options or not _engine._is_dynamic_combo_type(port.type):
         return None
     values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    order = graph.widget_order_for_node(node_type, values)
+    saved_names = _engine.saved_widget_order(node, graph, node_type)
+    order = graph.widget_order_for_node(node_type, values, saved_names)
     current = values[order.index(selector)] if selector in order and order.index(selector) < len(values) else None
 
     def link_sub(key: Any):

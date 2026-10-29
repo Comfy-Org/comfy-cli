@@ -802,11 +802,12 @@ def host_value(instance: dict, pi: PromotedInput) -> Any:
 
 def _interior_widget_value(node: dict, widget: str, graph) -> Any:
     """Read ``widget`` off an interior node's positional ``widgets_values``."""
-    from comfy_cli.cql.engine import _widgets_as_positional
+    from comfy_cli.cql.engine import _widgets_as_positional, saved_widget_order
 
     node_type = str(node.get("type", ""))
     values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    order = graph.widget_order_for_node(node_type, values) if graph is not None else []
+    saved_names = saved_widget_order(node, graph, node_type) if graph is not None else None
+    order = graph.widget_order_for_node(node_type, values, saved_names) if graph is not None else []
     if widget in order:
         idx = order.index(widget)
         return values[idx] if idx < len(values) else None
@@ -1228,7 +1229,14 @@ def trace_upstream_write(
         m = graph.node(src_type) if graph is not None and src_type not in defs else None
         if m is not None:
             widgets = _widgets_as_positional(src.get("widgets_values"), graph, src_type)
-            order = [n for n in graph.widget_order_for_node(src_type, widgets) if n not in FRONTEND_MARKER_SLOTS]
+            from comfy_cli.cql.engine import saved_widget_order
+
+            saved_names = saved_widget_order(src, graph, src_type)
+            order = [
+                name
+                for name in graph.widget_order_for_node(src_type, widgets, saved_names)
+                if name not in FRONTEND_MARKER_SLOTS
+            ]
             if len(order) == 1:
                 return WriteTarget("top", node=src, widget=order[0], redirected_from=redirected_from)
         raise ValueError(
@@ -1422,11 +1430,12 @@ def _node_widget_names(node: dict, graph) -> list[str]:
         return list(_PRIMITIVE_WIDGET_ORDER)
     if graph is None:
         return []
-    from comfy_cli.cql.engine import _widgets_as_positional
+    from comfy_cli.cql.engine import _widgets_as_positional, saved_widget_order
 
     node_type = str(node.get("type", ""))
     values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    return list(graph.widget_order_for_node(node_type, values))
+    saved_names = saved_widget_order(node, graph, node_type)
+    return list(graph.widget_order_for_node(node_type, values, saved_names))
 
 
 def _node_widget_value(node: dict, widget: str, graph) -> Any:
