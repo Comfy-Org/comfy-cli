@@ -44,7 +44,9 @@ class ReleaseBuilder:
         self.releases: list[JsonObject] = []
         self.statuses: list[JsonObject | Exception] = []
         self.log_failures: list[Exception] = []
-        self.logs: list[str] = []
+        #: ``None`` is a body cut short inside its Content-Length, which the
+        #: HTTP layer parses as ``{}`` rather than raising.
+        self.logs: list[str | None] = []
 
     def list_build_targets(self) -> list[JsonObject]:
         self.calls.append({"method": "list_build_targets"})
@@ -72,6 +74,8 @@ class ReleaseBuilder:
         if self.log_failures:
             raise self.log_failures.pop(0)
         log = self.logs.pop(0) if self.logs else "built"
+        if log is None:
+            return {}
         return {"versionId": release_id, "os": os, "gpu": gpu, "log": log, "truncated": False}
 
     def get_release_manifest(self, release_id: str) -> JsonObject:
@@ -498,6 +502,36 @@ def test_logs_follow_returns_the_log_read_after_the_release_completed(
         assert envelope(result)["data"]["log"] == "started\nFAILED: missing dependency\n"
     else:
         assert "FAILED: missing dependency" in result.output
+
+
+@pytest.mark.parametrize("agentic", [True, False], ids=["json", "pretty"])
+def test_logs_follow_keeps_the_captured_log_when_the_final_read_comes_back_empty(
+    client: ReleaseBuilder, sleeps: list[float], agentic: bool
+) -> None:
+    """A final read cut short parses as ``{}``. Publishing it would drop the log
+    already read and fail the command's own schema, so the last whole log stands
+    and the user is told it may lack the final lines."""
+    # Given
+    import jsonschema
+
+    client.logs = ["started\nFAILED: missing dependency\n", None]
+    client.statuses = [{"id": "release-1", "status": "complete", "artifactCounts": {"failed": 1}}]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow", agentic=agentic)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _calls(client, "get_release_logs") == 2
+    if agentic:
+        data = envelope(result)["data"]
+        assert data["log"] == "started\nFAILED: missing dependency\n"
+        schemas_dir = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas"
+        schema = json.loads((schemas_dir / "build_release_logs.json").read_text(encoding="utf-8"))
+        jsonschema.Draft202012Validator(schema).validate(data)
+    else:
+        assert "FAILED: missing dependency" in result.output
+    assert "the final log read came back incomplete" in " ".join(result.output.split())
 
 
 def test_logs_follow_ends_on_the_first_builder_answer(client: ReleaseBuilder, sleeps: list[float]) -> None:

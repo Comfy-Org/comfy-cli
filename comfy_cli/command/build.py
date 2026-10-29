@@ -3360,10 +3360,18 @@ def release_logs(
     complete = False
     while True:
         # Only a follow is a watch; a single read fails fast like every other command.
-        content = (_poll_call if follow else _builder_call)(
+        read = (_poll_call if follow else _builder_call)(
             renderer,
             lambda: client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu),
         )
+        # A body cut short inside its Content-Length parses as `{}` rather than
+        # raising. Publishing it would drop the log already read and fail
+        # `build_release_logs.json`, so the last whole log stands until a later
+        # read replaces it.
+        if isinstance(read.get("log"), str) or not content:
+            content = read
+        elif complete:
+            renderer.warn("the final log read came back incomplete; showing the log read before the release completed")
         log = content.get("log", "")
         if renderer.is_pretty() and isinstance(log, str) and log:
             renderer.print(log[len(previous_log) :] if log.startswith(previous_log) else log)
