@@ -55,6 +55,7 @@ from comfy_cli.cql import promoted as _promoted
 from comfy_cli.cql.engine import (
     _UNRESOLVED,
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _expand_widget_entries,
     _resolve_proxy_value,
     _validate_dynamic_group_layout,
@@ -1921,7 +1922,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
 
     try:
         return _render_py(workflow, graph)
-    except PromotionTraversalLimitError as exc:
+    except (PromotionTraversalLimitError, SavedWidgetLayoutError) as exc:
         raise PrintUnsupported([str(exc)]) from exc
 
 

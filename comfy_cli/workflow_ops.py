@@ -67,6 +67,7 @@ from comfy_cli.cql.engine import (
     _widgets_as_positional,
     frontend_injected_widget_error,
     is_wildcard_type,
+    saved_widget_order,
 )
 
 # New ids live in [2**40, 2**53): always large (never collides with small
@@ -2908,7 +2909,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         # but no value, and apply would refuse it anyway — say so up front.
         node_type = node.get("type", "")
         values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-        if widget not in graph.editable_widget_names(node_type, values):
+        saved_names = saved_widget_order(node, graph, node_type)
+        if widget not in graph.editable_widget_names(node_type, values, saved_names):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
         saved_values = node.get("widgets_values")
         if isinstance(saved_values, dict) and widget not in saved_values:

@@ -178,12 +178,13 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     workflow's top-level mapping is replaced with that transactional result,
     so references into its former nested objects are no longer current.
     """
+    from comfy_cli.cql.engine import SavedWidgetLayoutError
     from comfy_cli.cql.promoted import PromotionTraversalLimitError
 
     try:
         candidate = copy.deepcopy(workflow)
         result = _resolve_workflow_models(candidate, graph)
-    except (PromotionTraversalLimitError, RecursionError) as exc:
+    except (PromotionTraversalLimitError, RecursionError, SavedWidgetLayoutError) as exc:
         raise ModelVariantResolutionError(str(exc)) from exc
     workflow.clear()
     workflow.update(candidate)

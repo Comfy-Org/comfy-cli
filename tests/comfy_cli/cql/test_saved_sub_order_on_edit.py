@@ -143,6 +143,15 @@ def test_setting_a_new_catalog_sub_widget_refuses_to_guess_a_saved_slot():
         workflow_ops.set_widget(_workflow(), _graph(), 14, "model.auto_upscale", True)
 
 
+def test_recipe_capture_refuses_to_lift_a_new_catalog_sub_widget_without_a_saved_slot():
+    with pytest.raises(workflow_ops.RecipeError, match="not an editable widget"):
+        workflow_ops.capture_recipe(
+            _workflow(),
+            _graph(),
+            lift={(14, "model.auto_upscale"): "upscale"},
+        )
+
+
 def test_a_save_matching_the_current_option_is_unaffected():
     """No gap to correct for: the save already names today's layout."""
     wf = {
