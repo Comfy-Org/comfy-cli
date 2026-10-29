@@ -249,7 +249,8 @@ Standing rules for compliance review, distinct from the alternatives above:
    which is what makes it a socket). A type in no bucket is the failure.
 2. Each implementation's classifier agrees with the census verdict on a
    synthetic spec of every census type, and with every `classifier-vectors`
-   case not listed in its own `failsToday`.
+   case not listed in its own repo's expected-fail set (the per-repo ledger the
+   Decision section defines; the shared file carries no such list).
 3. Every member of a widget-type allowlist either has a declared input in the
    snapshot or is tagged injected with its injecting class list.
 4. No converter output over the corpus contains an input named `upload`.
