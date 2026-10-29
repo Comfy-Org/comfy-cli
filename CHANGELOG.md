@@ -242,6 +242,11 @@ history.
 
 ### Fixed
 
+- Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
+  (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
+  written `widgets_values` is the frontend's four-widget shape
+  (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
+  restored those values by position into viewport state, width and height.
 - Run-on-Cloud inventories resolve the selected Desktop instance's effective
   paths, retain uncertain dependencies, distinguish runtime inputs from model
   coverage, and report missing or conflicting model identity. Verified private
