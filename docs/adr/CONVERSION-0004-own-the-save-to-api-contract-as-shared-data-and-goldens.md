@@ -70,6 +70,18 @@ not owned as shared converter code.
 - **One shared corpus.** The 500 goldens plus a capture-epoch `object_info`
   pinned to them, published as a versioned artifact so the public repo can
   consume it without a private checkout or a secret.
+- **One immutable compatibility bundle.** All five inputs — `widget-layout.json`,
+  `widget-type-census.json`, `classifier-vectors.json`, the goldens, and the
+  capture-epoch `object_info` — are published **atomically under a single
+  compatibility id**, and a consumer rejects a set whose ids do not all match.
+  Per-artifact content hashes and the ancestry pin bind each file to itself;
+  neither binds the *set*. Without one id over all five, a consumer can pair a
+  newer layout or classification rule with older goldens and produce output that
+  disagrees with the very corpus meant to adjudicate it — a disagreement that
+  reads as a converter defect and is not one, which is the same confusion between
+  drift and defect that the capture-epoch pin exists to remove. The id changes
+  whenever any member changes, so a partial upgrade is a loud mismatch rather
+  than a silent reinterpretation.
 - **A shared comparison kernel as a specification with self-test vectors**,
   re-implemented per language (~150 LOC each) rather than shared as code or a
   subprocess. The signature grammar, the normalization rules, the verdict
@@ -195,8 +207,12 @@ Standing rules for compliance review, distinct from the alternatives above:
   and the alternative — failing closed on any unmanifested class — would make
   every custom pack unconvertible. Validation 18 bounds the carve-out by failing
   if the absent set grows.
-- More moving parts than a hardcoded pin: a dated bundle, auto-bump PRs, and
-  two publish channels on every release.
+- More moving parts than a hardcoded pin: a dated bundle under one compatibility
+  id, auto-bump PRs carrying its digest, and two publish channels on every
+  release. The single id is also a coupling cost — any one artifact changing
+  invalidates the whole set, so a census-only correction forces every consumer to
+  re-pin. That is the intended trade: a loud re-pin is cheaper than a silent
+  mismatch between a layout and the goldens meant to judge it.
 - A `slot`-indexed layout assumes a class's widget set is static at creation.
   Two cases break that, and they are different in kind.
 
@@ -281,6 +297,16 @@ Standing rules for compliance review, distinct from the alternatives above:
     releases. Growth means the frontend's node manifest is shedding coverage,
     which is the degradation the revisit trigger below watches for, and it is
     only visible if it is counted.
+19. The absent-class fallback is asserted on a fixture, not merely bounded by
+    its count: a class absent from the layout but declaring `image_upload`
+    derives its injected widget from that flag, maps the remaining
+    `widgets_values` to the correct inputs, and emits the diagnostic naming the
+    class. A fixture whose class gains a layout entry later must keep asserting
+    the fallback against a synthetic absent class, since the carve-out is the
+    path every unmanifested custom pack takes and an untested fallback is how
+    the twelve-class default went unnoticed.
+20. Every consumed artifact set shares one compatibility id; a mixed set fails
+    before any conversion runs, naming each artifact and its id.
 
 ## Revisit triggers
 
