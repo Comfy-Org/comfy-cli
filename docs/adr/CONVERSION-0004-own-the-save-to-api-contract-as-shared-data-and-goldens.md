@@ -47,13 +47,24 @@ not owned as shared converter code.
 
 - **Generated, frontend-owned data.** `widget-layout.json` (per class, the
   ordered `node.widgets` with each widget's slot index, `promptEmit` derived
-  verbatim from `options.serialize !== false`, and an optional `serializeValue`
+  verbatim from the oracle loop's own emit condition — `options.serialize !==
+  false` **and** a non-empty `name`, because `graphToPrompt()` skips an unnamed
+  widget regardless of its serialize flag — and an optional `serializeValue`
   in one of three closed forms) and `widget-type-census.json` (the registered
   widget-type set, which is literally `useWidgetStore().widgets`) are emitted
   by jobs in `ComfyUI_frontend` CI. A hand edit to either is rejected.
 - **Jointly owned, evidence-bearing data.** `classifier-vectors.json` carries
-  the ordered classification rule procedure as executable cases with a
-  per-implementation `failsToday` ledger that may only shrink. `tolerances.json`
+  the ordered classification rule procedure as executable cases. A new vector
+  is admitted on evidence alone, never gated on who currently passes it: each
+  implementation records its own expected-fail set **in its own repo**, next to
+  its own ratchet, and that per-repo set may only shrink. The shared file
+  therefore holds no cross-implementation gap ledger — adding a vector that
+  every implementation fails today is the normal way a new defect class enters
+  the contract, and it reddens each repo only until that repo records the
+  expected fail. (An earlier draft put a `failsToday` ledger in the shared
+  file. That both contradicted the local-ratchet rule below and made the
+  vectors unable to gain a case nobody passes yet, which is the only kind of
+  case worth adding.) `tolerances.json`
   carries **corpus capture artifacts only**; its schema requires the
   implementation-gap field to be null.
 - **One shared corpus.** The 500 goldens plus a capture-epoch `object_info`
@@ -124,6 +135,12 @@ Standing rules for compliance review, distinct from the alternatives above:
   one implementation's allowlist is the defect class this ADR exists to stop: the
   two existing allowlists overlap in two entries out of twenty-four, and neither
   carried `COLORCODE`, which is a confirmed defect on 16 inputs across 15 classes.
+  The single carve-out is the generic upload-flag rule used for a class with no
+  layout entry (see Consequences). It is permitted because it is not per-type
+  knowledge — it is the one rule the frontend itself applies, keyed on input
+  flags rather than on any class or widget type — and because failing closed
+  instead would make every unmanifested custom pack unconvertible. It is bounded
+  by Validation 18 and is not a precedent for a hardcoded class or type list.
 - **A tolerance entry as a substitute for a verdict.** A divergence may be
   tolerated only with the side named as correct and the reason recorded. An entry
   that says "UI-only" without naming which implementation matches the reference is
@@ -159,25 +176,60 @@ Standing rules for compliance review, distinct from the alternatives above:
 
 ### Negative
 
-- Generated data is only as wide as the frontend's node manifest; classes
-  outside it get no entry, and a missing entry must mean "no injected
-  widgets" — today's wrong-for-twelve-classes default. Honest coverage
-  downgrade for unmanifested packs in exchange for correctness on manifested
-  ones.
+- Generated data is only as wide as the frontend's node manifest, so a class
+  outside it has no layout entry. **A missing entry must not be read as "no
+  injected widgets."** That default is already wrong for twelve classes, and
+  because upload injection is keyed on the input flags `image_upload`,
+  `video_upload` and `audio_upload` rather than on class identity, treating
+  absence as emptiness would silently map a custom pack's `widgets_values` onto
+  the wrong inputs — the exact failure mode this ADR exists to stop, reintroduced
+  as a default. The layout file therefore distinguishes three states per class:
+  an entry (authoritative), an explicit `"injects": []` (known empty, generated
+  from a class the manifest covers), and **absent** (unknown).
+
+  For an absent class, the consumer falls back to deriving injection from the
+  `object_info` input flags, which is what comfy-cli does today, and emits a
+  diagnostic naming the class. This is a deliberate carve-out from "no per-type
+  widget knowledge outside the shared files" below: the flag rule is not
+  per-type knowledge, it is the one generic rule the frontend itself applies,
+  and the alternative — failing closed on any unmanifested class — would make
+  every custom pack unconvertible. Validation 18 bounds the carve-out by failing
+  if the absent set grows.
 - More moving parts than a hardcoded pin: a dated bundle, auto-bump PRs, and
   two publish channels on every release.
 - A `slot`-indexed layout assumes a class's widget set is static at creation.
-  A class whose extension branches on a widget *value* at creation time cannot
-  be expressed and stays a named per-language escape hatch.
+  Two cases break that, and they are different in kind.
+
+  **Dynamic input *types* — `COMFY_DYNAMICCOMBO_V3`, `COMFY_AUTOGROW_V3`.**
+  Here the variation comes from the input type, not from the class, so these are
+  explicitly **not** per-class escape hatches: enumerating them as such would put
+  every class using them into the escape list and blow past the revisit threshold
+  below on adoption day. The layout instead records, for the declaring input, its
+  type and the sub-port expansion rule for that type — the selector's options and
+  each option's ordered sub-ports for `DYNAMICCOMBO`, the per-instance growth unit
+  for `AUTOGROW` — and the consumer expands slots from that rule plus the saved
+  file. The rule is shared data keyed by input type, of which there are a handful;
+  the classes using it are unbounded and unenumerated.
+
+  **A class whose extension branches on a widget *value* at creation time.**
+  This genuinely cannot be expressed as data and stays a named per-language
+  escape hatch, which is what the "roughly five entries" threshold counts.
 - The corpus cannot adjudicate two real shapes (`widgets_values_named`,
   populated legacy `proxyWidgets` host arrays). Those need hand-authored
   fixtures whose verdicts must never be quoted as oracle-backed.
 
 ## Validation
 
-1. Every input type string in the `object_info` snapshot appears in the census
-   in exactly one bucket; an unknown type fails with its usage count and three
-   example `Class.input` sites.
+1. Every input type string in the `object_info` snapshot resolves to exactly
+   one bucket; an unresolved type fails with its usage count and three example
+   `Class.input` sites. The buckets are **not** `useWidgetStore().widgets`
+   alone — that set covers only registered widget types, so every link type
+   (`MODEL`, `LATENT`, any custom-pack type) would fail as unknown on every
+   real catalog. `widget-type-census.json` therefore carries three generated
+   buckets: `registeredWidget` (literally `useWidgetStore().widgets`),
+   `dynamicInput` (the V3 types whose expansion rule the layout records), and
+   `link` (the residual — any type the frontend constructs no widget for,
+   which is what makes it a socket). A type in no bucket is the failure.
 2. Each implementation's classifier agrees with the census verdict on a
    synthetic spec of every census type, and with every `classifier-vectors`
    case not listed in its own `failsToday`.
@@ -190,9 +242,20 @@ Standing rules for compliance review, distinct from the alternatives above:
 7. `catalogSensitive` is computed from the two-catalog run and must equal the
    manifest's stored value.
 8. The tolerance file's implementation-gap field is null.
-9. Any tolerance entry producing no signature, on a class present in the
-   corpus, is a hard failure.
-10. The pinned cross-repo SHA is an ancestor of that repo's main branch.
+9. Every tolerance entry carries a cited fixture and a sunset date, and the
+   schema rejects one that does not. An entry producing no signature is a hard
+   failure when its class is present in the corpus; when its class is **absent**
+   from the corpus it is also a failure, because a tolerance for a class the
+   corpus cannot exercise is unfalsifiable by construction and is exactly the
+   dead tolerance this ADR rejects. A past sunset date fails regardless.
+10. The pinned cross-repo SHA is an ancestor of that repo's main branch **and
+    within a bounded distance of it** — 30 days and 50 commits, whichever binds
+    first. Ancestry alone does not bound staleness: the 114-day pin this ADR
+    cites as motivating evidence was an ancestor the whole time, which is why it
+    went undetected. Exceeding either bound fails with the pin's age and commit
+    distance. The bound is what makes the staleness claim above true, so a red
+    upstream main does not license an indefinite freeze: it makes the bump a
+    blocking item rather than an automatic one.
 11. The suite executes at least one assertion per corpus fixture, with zero
     pending tests — a wholesale skip reddens.
 12. A poison fixture whose golden is deliberately wrong in three ways produces
@@ -203,10 +266,21 @@ Standing rules for compliance review, distinct from the alternatives above:
 14. Conversion never constructs an eager full catalog graph.
 15. Each language's kernel reproduces every shared self-test vector byte-
     exactly.
-16. A vendored data table is byte-identical to the published bundle at the
-    pinned version.
+16. A vendored data table is byte-identical to the published bundle, checked
+    against a **content hash recorded in the consuming repo** rather than
+    against a version label. A label is not an integrity check: a replaceable
+    release asset, a re-published tag or a moved dist-tag all let a swapped
+    bundle pass while the label still matches. The hash is what the auto-bump PR
+    changes, so the diff shows the new digest and a bump that does not move the
+    digest is a no-op.
+
 17. A hand-authored fixture is excluded from every oracle-derived clean count
     and floor.
+18. The absent-class set — classes with no layout entry, which fall back to
+    flag-derived injection per the carve-out above — does not grow between
+    releases. Growth means the frontend's node manifest is shedding coverage,
+    which is the degradation the revisit trigger below watches for, and it is
+    only visible if it is counted.
 
 ## Revisit triggers
 
@@ -219,14 +293,13 @@ Standing rules for compliance review, distinct from the alternatives above:
   expression-language alternative should be reconsidered.
 - Class coverage of the generated tables shrinks between releases, or the node
   manifest backing the export degrades.
-- A fifth implementation of this contract appears, or `cql` adopts
-  ADR-SUBGRAPH-PROMOTION-0009's host-wins value model, at which point the
-  slot-write contract may be foldable into this one.
+- A fifth implementation of this contract appears, or `Comfy-Org/cql` adopts
+  ComfyUI_frontend's ADR-SUBGRAPH-PROMOTION-0009 host-wins value model, at
+  which point the slot-write contract may be foldable into this one.
 - Re-capture becomes feasible on demand, which would make the capture-epoch
   catalog pin optional rather than mandatory.
 - Any implementation's own ratchet is lowered rather than raised, or a
   tolerance is added without a cited fixture and a sunset date.
-```
 
 ---
 
