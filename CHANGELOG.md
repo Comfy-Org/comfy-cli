@@ -17,14 +17,17 @@ history.
 
 ### Fixed
 
-- `Create Bounding Boxes` box edits and `Build JSON Prompt (Ideogram)` colour
-  palettes keep their widget slot. Both inputs keep an input socket
-  (`socketless: false`), and a `BOUNDING_BOXES` or `COLORS` input with a socket
-  was read as a link, so `editor_state` and `color_palette` were missing from
-  the widget order and the widget catalog. The Agent's doc host then refused
-  every edit of the box editor (`unknown_widget`), and a saved
-  `[width, height, editor_state, last_incoming]` converted with the boxes in
-  `last_incoming`. `forceInput` still makes either type a plain link.
+- `Create Bounding Boxes` box edits, `Build JSON Prompt (Ideogram)` colour
+  palettes and old-style `COLOR` inputs (LayerStyle's `LayerMask: MaskByColor`,
+  `LayerUtility: ColorPicker`, `LayerUtility: ExtendCanvas`) keep their widget
+  slot. A `BOUNDING_BOXES`, `COLORS` or `COLOR` input that keeps its socket was
+  read as a link, so it was missing from the widget order and the widget
+  catalog. The Agent's doc host then refused every edit of the box editor
+  (`unknown_widget`); a saved `[width, height, editor_state, last_incoming]`
+  converted with the boxes in `last_incoming`; and a saved MaskByColor put its
+  colour into `color_in_HEX` and shifted every later value. On Comfy Cloud's
+  node catalog this changes exactly those five classes. `forceInput` still makes
+  any of these types a plain link.
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a

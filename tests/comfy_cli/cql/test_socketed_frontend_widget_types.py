@@ -69,6 +69,31 @@ def _object_info() -> dict[str, Any]:
             "category": "utilities",
             "python_module": "comfy_extras.nodes_json_prompt",
         },
+        # Old-style COLOR input (no socketless key), as ComfyUI_LayerStyle
+        # declares it; on Comfy Cloud's object_info today.
+        "LayerMask: MaskByColor": {
+            "input": {
+                "required": {
+                    "image": ["IMAGE"],
+                    "color": ["COLOR", {"default": "#FFFFFF"}],
+                    "color_in_HEX": ["STRING", {"default": ""}],
+                    "threshold": ["INT", {"default": 50, "min": 0, "max": 100, "step": 1}],
+                    "fix_gap": ["INT", {"default": 2, "min": 0, "max": 32, "step": 1}],
+                    "fix_threshold": ["FLOAT", {"default": 0.75, "min": 0.01, "max": 0.99, "step": 0.01}],
+                    "invert_mask": ["BOOLEAN", {"default": False}],
+                },
+                "optional": {"mask": ["MASK"]},
+            },
+            "input_order": {
+                "required": ["image", "color", "color_in_HEX", "threshold", "fix_gap", "fix_threshold", "invert_mask"],
+                "optional": ["mask"],
+            },
+            "output": ["MASK"],
+            "output_name": ["mask"],
+            "display_name": "LayerMask: Mask By Color",
+            "category": "LayerMask",
+            "python_module": "custom_nodes.comfyui_layerstyle",
+        },
         # forceInput still demotes the same type to a pure link.
         "BoxesFromUpstream": {
             "input": {
@@ -118,6 +143,28 @@ class TestSocketedWidgetTypesOwnASlot:
 
     def test_colors_input_with_a_socket_is_in_the_widget_order(self, graph: Graph):
         assert graph.widget_order("BuildJsonPromptIdeogram") == ["medium", "color_palette"]
+
+    def test_old_style_color_input_is_in_the_widget_order(self, graph: Graph):
+        assert graph.widget_order("LayerMask: MaskByColor") == [
+            "color",
+            "color_in_HEX",
+            "threshold",
+            "fix_gap",
+            "fix_threshold",
+            "invert_mask",
+        ]
+
+    def test_saved_mask_by_color_keeps_every_value_in_place(self):
+        # widgets_values exactly as ComfyUI_LayerStyle's own example workflow
+        # (workflow/mask_by_color_example.json) saves the node.
+        ui = _ui("LayerMask: MaskByColor", ["#e64549", "", 100, 2, 0.75, False])
+        inputs = convert_ui_to_api(ui, _object_info())["7"]["inputs"]
+        assert inputs["color"] == "#e64549"
+        assert inputs["color_in_HEX"] == ""
+        assert inputs["threshold"] == 100
+        assert inputs["fix_gap"] == 2
+        assert inputs["fix_threshold"] == 0.75
+        assert inputs["invert_mask"] is False
 
     def test_force_input_still_demotes_it_to_a_link(self, graph: Graph):
         assert graph.widget_order("BoxesFromUpstream") == ["width"]

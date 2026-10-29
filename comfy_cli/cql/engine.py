@@ -46,14 +46,17 @@ _IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN
 # ``LOAD3D_CAMERA`` is deliberately
 # absent: ``camera_info`` is ``serialize: false`` and writes no slot.
 #
-# ``BOUNDING_BOXES`` and ``COLORS`` are here for the inputs that keep their
-# socket (``socketless: false``): ``CreateBoundingBoxes.editor_state`` and
-# ``BuildJsonPromptIdeogram.color_palette``. The frontend renders a widget for
-# any type it has a constructor for (``widgetStore.inputIsWidget``), and both
-# widgets serialize, so the slot exists with or without a socket. Read as a
-# link, ``editor_state`` fell out of the widget order: the doc host refused
-# every box edit (``unknown_widget``) and the saved boxes decoded into
-# ``last_incoming``.
+# ``BOUNDING_BOXES``, ``COLORS`` and ``COLOR`` are here for the inputs that
+# keep their socket: ``CreateBoundingBoxes.editor_state`` and
+# ``BuildJsonPromptIdeogram.color_palette`` (``socketless: false``), and
+# old-style ``["COLOR", {"default": "#FFFFFF"}]`` inputs such as LayerStyle's
+# ``LayerMask: MaskByColor``. The frontend renders a widget for any type it has
+# a constructor for (``widgetStore.inputIsWidget``), and these widgets
+# serialize, so the slot exists with or without a socket. Read as a link,
+# ``editor_state`` fell out of the widget order: the doc host refused every box
+# edit (``unknown_widget``) and the saved boxes decoded into ``last_incoming``;
+# a saved MaskByColor ``["#e64549", "", 100, ...]`` put the colour into
+# ``color_in_HEX`` and shifted every later value.
 _FRONTEND_DOM_WIDGET_TYPES = frozenset(
     {
         "LOAD_3D",
@@ -66,6 +69,7 @@ _FRONTEND_DOM_WIDGET_TYPES = frozenset(
         "AUDIOUPLOAD",
         "BOUNDING_BOXES",
         "COLORS",
+        "COLOR",
     }
 )
 
