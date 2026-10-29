@@ -4564,6 +4564,10 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
     return entries
 
 
+class SavedWidgetLayoutError(ValueError):
+    """A recorded positional widget layout cannot be reconciled safely."""
+
+
 def saved_sub_order(saved_widget_names: list[str] | None, parent: str, sub_names: list[str]) -> list[str] | None:
     """Reorder a dynamic combo's selected sub-input names to the SAVED layout.
 
@@ -4614,9 +4618,16 @@ def saved_sub_order(saved_widget_names: list[str] | None, parent: str, sub_names
             continue
         if name not in declared:
             head = name[len(prefix) :].split(".", 1)[0]
-            if f"{prefix}{head}" in declared:
+            direct_parent = f"{prefix}{head}"
+            if direct_parent in declared:
+                occurrence = seen.get(direct_parent, 0)
+                if occurrence < declared[direct_parent]:
+                    seen[direct_parent] = occurrence + 1
+                    ordered.append(direct_parent)
                 continue
-            return None
+            raise SavedWidgetLayoutError(
+                f"saved widget {name!r} under {parent!r} is absent from the current catalog layout"
+            )
         occurrence = seen.get(name, 0)
         if occurrence >= declared[name]:
             # A duplicated marker cannot create another positional occurrence.
@@ -4764,7 +4775,12 @@ def _expand_widget_entries(
                 for saved_name in order:
                     index = next((i for i, sub in enumerate(remaining) if sub.name == saved_name), None)
                     if index is not None:
-                        kept.append(remaining.pop(index))
+                        sub = remaining.pop(index)
+                        if sub.is_link:
+                            raise SavedWidgetLayoutError(
+                                f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                            )
+                        kept.append(sub)
                 # A sub the save never named owns no slot. Connection-only subs
                 # own none either way, so carrying them keeps `sub_links`
                 # complete without moving any positional index.
@@ -5180,6 +5196,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     try:
         widget_idx = order.index(input_name)
     except ValueError:
+        if saved_names is not None:
+            current_entries = _expand_widget_entries(m, widgets)
+            current = next((entry for entry in current_entries if entry.name == input_name), None)
+            if current is not None and current.port is not None and not current.port.is_link:
+                raise ValueError(
+                    f"widget {input_name!r} exists in the current catalog but not in this saved workflow's layout; "
+                    "the save predates that widget, so no positional slot was guessed or written"
+                )
         warning = _unknown_dynamic_sub_warning(
             m,
             input_name,

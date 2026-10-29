@@ -28,6 +28,7 @@ from comfy_cli.cql.engine import (
     _FRONTEND_DOM_WIDGET_TYPES,
     LOAD_3D_BUTTON_VALUES,
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _dynamic_combo_server_key_matches,
     _dynamic_group_fields,
     _dynamic_group_row_count,
@@ -2113,7 +2114,10 @@ def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]
     """
     if not subs:
         return subs
-    order = saved_sub_order(_saved_widget_order(node), parent, [name for name, _spec in subs])
+    try:
+        order = saved_sub_order(_saved_widget_order(node), parent, [name for name, _spec in subs])
+    except SavedWidgetLayoutError as exc:
+        raise WorkflowConversionError(str(exc)) from exc
     if order is None:
         return subs
     remaining = list(subs)
@@ -2121,7 +2125,12 @@ def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]
     for saved_name in order:
         index = next((i for i, (name, _spec) in enumerate(remaining) if name == saved_name), None)
         if index is not None:
-            kept.append(remaining.pop(index))
+            pair = remaining.pop(index)
+            if not _is_widget_input(pair[1])[0]:
+                raise WorkflowConversionError(
+                    f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                )
+            kept.append(pair)
     return kept + [(name, spec) for name, spec in remaining if not _is_widget_input(spec)[0]]
 
 

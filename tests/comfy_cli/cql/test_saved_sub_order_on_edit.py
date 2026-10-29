@@ -20,6 +20,8 @@ and both now resolve through one helper so they cannot disagree again.
 
 from __future__ import annotations
 
+import pytest
+
 from comfy_cli import workflow_ops
 from comfy_cli.cql.engine import Graph, _extract_frontend_slots, saved_sub_order
 
@@ -134,6 +136,11 @@ def test_setting_the_sub_widget_adjacent_to_the_gap_writes_its_own_slot():
     values = _node(wf)["widgets_values"]
     assert values[3] is False
     assert values[4] == 118383194, "the seed must not be clobbered"
+
+
+def test_setting_a_new_catalog_sub_widget_refuses_to_guess_a_saved_slot():
+    with pytest.raises(ValueError, match="save predates that widget"):
+        workflow_ops.set_widget(_workflow(), _graph(), 14, "model.auto_upscale", True)
 
 
 def test_a_save_matching_the_current_option_is_unaffected():

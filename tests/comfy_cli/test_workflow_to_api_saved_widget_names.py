@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import copy
 
-from comfy_cli.workflow_to_api import convert_ui_to_api
+import pytest
+
+from comfy_cli.workflow_to_api import WorkflowConversionError, _schema_widget_pairs, convert_ui_to_api
 
 
 def _object_info() -> dict:
@@ -120,12 +122,22 @@ def test_a_connection_only_sub_input_consumes_no_slot():
 # --------------------------------------------------------------------------- #
 
 
-def test_a_save_naming_a_sub_the_option_dropped_falls_back():
+def test_a_save_naming_a_sub_the_option_dropped_is_refused():
     node = _node()
     node["inputs"].insert(4, {"name": "model.retired_knob", "widget": {"name": "model.retired_knob"}})
-    inputs = _convert(node)
-    assert "model.retired_knob" not in inputs
-    assert inputs["model"] == "Seedance 2.0"
+    schema = _object_info()[node["type"]]
+    with pytest.raises(WorkflowConversionError, match="retired_knob.*absent from the current catalog"):
+        _schema_widget_pairs(schema, node["widgets_values"], node)
+
+
+def test_a_saved_widget_that_became_connection_only_is_refused():
+    object_info = _object_info()
+    option = object_info["ByteDance2ReferenceNode"]["input"]["required"]["model"][1]["options"][0]
+    option["inputs"]["optional"]["auto_downscale"] = ["BOOLEAN", {"forceInput": True}]
+
+    with pytest.raises(WorkflowConversionError, match="auto_downscale.*connection-only"):
+        node = _node()
+        _schema_widget_pairs(object_info[node["type"]], node["widgets_values"], node)
 
 
 def test_a_node_without_widget_markers_expands_the_current_option():
@@ -241,6 +253,30 @@ def test_a_nested_selectors_descendants_do_not_disable_the_parents_saved_order()
     # current option declares as prompt, variant, auto_downscale.
     assert inputs["model.auto_downscale"] is True
     assert inputs["model.prompt"] == "a prompt"
+    assert inputs["model.variant"] == "wide"
+    assert inputs["model.variant.width"] == 512
+    assert inputs["seed"] == 4242
+
+
+def test_a_nested_selector_is_retained_when_only_its_descendant_has_a_marker():
+    node = {
+        "id": 1,
+        "type": "N",
+        "widgets_values": ["Seedance 2.0", True, "a prompt", "wide", 512, 4242, "randomize"],
+        "inputs": [
+            {"name": n, "widget": {"name": n}}
+            for n in (
+                "model",
+                "model.auto_downscale",
+                "model.prompt",
+                "model.variant.width",
+                "seed",
+            )
+        ],
+    }
+
+    inputs = _convert(node, _nested_object_info())
+
     assert inputs["model.variant"] == "wide"
     assert inputs["model.variant.width"] == 512
     assert inputs["seed"] == 4242

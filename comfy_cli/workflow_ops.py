@@ -4543,6 +4543,11 @@ def _widget_index(
             class_type, widget, graph.editable_widget_names(class_type, widgets_values, saved_names)
         )
     if widget not in order:
+        if saved_names is not None and widget in graph.widget_order_for_node(class_type, widgets_values):
+            raise ValueError(
+                f"widget {widget!r} exists in the current catalog but not in this saved workflow's layout; "
+                "the save predates that widget, so no positional slot was guessed or written"
+            )
         other = _other_option_widget_error(graph, class_type, widget, order, widgets_values, node_id)
         if other is not None:
             raise other
