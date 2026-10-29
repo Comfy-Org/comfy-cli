@@ -128,6 +128,9 @@ def _reject_single_callback_app(name: str, spec: LazySubcommand, sub_app: typer.
     with its own ``lazy_subcommands`` table) is exempt: its commands are built on
     lookup rather than registered eagerly, so ``registered_commands`` and
     ``registered_groups`` are empty by design, not because it is a bare callback.
+    ``cls`` can be set on the app itself (``typer.Typer(cls=...)``) or on its
+    callback (``@sub_app.callback(cls=...)``); ``typer.main.solve_typer_info_defaults``
+    reads the callback's value first, so this checks both in that order.
     """
     if not isinstance(sub_app, typer.Typer):
         raise TypeError(
@@ -136,7 +139,10 @@ def _reject_single_callback_app(name: str, spec: LazySubcommand, sub_app: typer.
         )
     if sub_app.registered_commands or sub_app.registered_groups:
         return
-    if not isinstance(sub_app.info.cls, DefaultPlaceholder):
+    callback = sub_app.registered_callback
+    callback_cls = callback.cls if callback is not None else DefaultPlaceholder(None)
+    effective_cls = callback_cls if not isinstance(callback_cls, DefaultPlaceholder) else sub_app.info.cls
+    if not isinstance(effective_cls, DefaultPlaceholder):
         return
     if sub_app.registered_callback is None:
         raise TypeError(

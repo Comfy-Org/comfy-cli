@@ -240,6 +240,30 @@ def test_lazy_subcommand_accepts_a_nested_lazy_group_with_a_custom_cls(monkeypat
     assert built.get_command(None, "hello") is not None
 
 
+def test_lazy_subcommand_accepts_a_custom_cls_set_on_the_callback(monkeypatch):
+    """``cls`` can be declared on ``@sub_app.callback(cls=...)`` instead of on
+    ``typer.Typer(cls=...)``. ``typer.main.solve_typer_info_defaults`` reads the
+    callback's value first, so a sub-app with a plain ``typer.Typer()`` but a
+    custom ``cls`` on its callback is a real custom group too, not a bare
+    callback — the guard must check both, not just ``sub_app.info.cls``."""
+
+    class InnerRoot(LazyTyperGroup):
+        lazy_subcommands = {"hello": LazyCommand("_lz_inner2", attr="hello")}
+
+    inner = typer.Typer()
+
+    @inner.callback(cls=InnerRoot)
+    def _inner_callback():
+        pass
+
+    _fake_module(monkeypatch, "_lz_inner2", hello=lambda: typer.echo("hello"))
+    _fake_module(monkeypatch, "_lz_nested2", app=inner)
+    group = typer.main.get_command(_lazy_root({"nested": LazySubcommand("_lz_nested2")}))
+    built = group.get_command(None, "nested")
+    assert built is not None
+    assert built.get_command(None, "hello") is not None
+
+
 def test_lazy_command_accepts_options_on_either_side_of_the_positional(monkeypatch):
     """The regression this guard protects: with the callback mounted as a
     LazyCommand, every flag order parses to the same result."""
