@@ -558,7 +558,7 @@ def test_a_watch_fails_after_five_unreadable_polls_in_a_row(
     assert result.exit_code == 1, result.output
     error = envelope(result)["error"]
     assert error["code"] == "build_builder_error"
-    assert error["message"] == "the builder sent no readable release status in 5 polls in a row."
+    assert error["message"] == "the builder sent no readable answer in 5 polls in a row."
     assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
     assert sleeps[-4:] == [4.0, 8.0, 16.0, 30.0]
 
@@ -680,6 +680,74 @@ def test_logs_follow_rides_out_a_status_answer_cut_short(client: ReleaseBuilder,
     assert _calls(client, "get_release") == 3
     assert sleeps == [4.0, build._RELEASE_POLL_SECONDS]
     assert "polling again (1/4)" in result.output
+
+
+def test_logs_follow_rides_out_a_log_read_cut_short_before_any_log_was_read(
+    client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """With no log in hand there is nothing to fall back on, so a cut-short log
+    read is polled again like a cut-short status read."""
+    # Given
+    client.logs = [None, "started\n", "started\ndone\n"]
+    client.statuses = [{"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}}]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["log"] == "started\ndone\n"
+    assert _calls(client, "get_release_logs") == 3
+    assert sleeps == [4.0]
+    assert "polling again (1/4)" in result.output
+
+
+def test_logs_follow_fails_when_no_log_read_comes_back_whole(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    """A follow whose every log read is cut short has no log to publish; exiting 0
+    with only the release id would fail the command's own schema."""
+    # Given
+    client.logs = [None] * build._POLL_TRANSPORT_MISSES
+    client.statuses = [{"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}}]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == "the builder sent no readable answer in 5 polls in a row."
+    assert _calls(client, "get_release_logs") == build._POLL_TRANSPORT_MISSES
+    assert sleeps == [4.0, 8.0, 16.0, 30.0]
+
+
+def test_a_watch_ends_on_the_first_tls_verification_failure(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A certificate the CA store refuses will be refused again, so the watch ends
+    at once with the same trust hint a single read gives."""
+    # Given
+    import ssl
+
+    def cert_refused() -> urllib.error.URLError:
+        return urllib.error.URLError(
+            ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        )
+
+    client.statuses = [cert_refused()]
+
+    # When
+    watched = invoke_release("create", "--target", "linux/nvidia", "--watch")
+    client.statuses = [cert_refused()]
+    single = invoke_release("show", "release-1")
+
+    # Then
+    assert watched.exit_code == 1, watched.output
+    assert envelope(watched)["error"]["code"] == "tls_verify_failed"
+    assert envelope(watched)["error"] == envelope(single)["error"]
+    assert _calls(client, "get_release") == 2
+    assert sleeps == []
+    assert "polling again" not in watched.output
 
 
 def test_logs_follow_ends_on_the_first_builder_answer(client: ReleaseBuilder, sleeps: list[float]) -> None:

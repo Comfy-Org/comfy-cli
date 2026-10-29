@@ -3149,16 +3149,19 @@ def _poll_call(renderer, fn, usable=None):
     The builder client is urllib-only: a connect timeout arrives wrapped in a
     ``URLError``, a timeout or reset while awaiting the response arrives bare, and
     a connection closed partway through the body arrives as ``IncompleteRead``.
+    A certificate the CA store refuses also arrives as a ``URLError``, but it
+    will be refused again, so it ends the watch at once with its trust hint.
     A fixed-length body cut short arrives as no error at all: the HTTP layer
     returns the partial bytes, which parse as ``{}``. So an answer ``usable``
     rejects counts as a miss in the same run, and the last one ends the watch."""
+    from comfy_cli.http import tls_verification_failed
 
     def attempt():
         for miss in range(1, _POLL_TRANSPORT_MISSES + 1):
             try:
                 answer = fn()
             except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
-                if isinstance(e, urllib.error.HTTPError):
+                if isinstance(e, urllib.error.HTTPError) or tls_verification_failed(e):
                     raise
                 if miss == _POLL_TRANSPORT_MISSES:
                     if isinstance(e, urllib.error.URLError):
@@ -3172,13 +3175,19 @@ def _poll_call(renderer, fn, usable=None):
                 if miss == _POLL_TRANSPORT_MISSES:
                     renderer.error(
                         code="build_builder_error",
-                        message=f"the builder sent no readable release status in {miss} polls in a row.",
+                        message=f"the builder sent no readable answer in {miss} polls in a row.",
                     )
                     raise typer.Exit(code=1)
                 renderer.warn(f"builder answer unreadable; polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
             time.sleep(min(_RELEASE_POLL_SECONDS * 2**miss, 30.0))
 
     return _builder_call(renderer, attempt)
+
+
+def _readable_log(answer) -> bool:
+    """The builder always sends ``log``, empty when none was captured yet, so an
+    answer without one is a body cut short."""
+    return isinstance(answer, dict) and isinstance(answer.get("log"), str)
 
 
 def _poll_status(renderer, client, release_id: str) -> dict:
@@ -3383,17 +3392,23 @@ def release_logs(
     previous_log = ""
     content: dict = {}
     complete = False
+
+    def read_log() -> dict:
+        return client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu)
+
     while True:
         # Only a follow is a watch; a single read fails fast like every other command.
-        read = (_poll_call if follow else _builder_call)(
-            renderer,
-            lambda: client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu),
-        )
         # A body cut short inside its Content-Length parses as `{}` rather than
-        # raising. Publishing it would drop the log already read and fail
-        # `build_release_logs.json`, so the last whole log stands until a later
-        # read replaces it.
-        if isinstance(read.get("log"), str) or not content:
+        # raising. Before any whole log is in hand the follow polls again, as for
+        # a status read; after, publishing it would drop the log already read and
+        # fail `build_release_logs.json`, so the last whole log stands until a
+        # later read replaces it.
+        if follow:
+            had_log = _readable_log(content)
+            read = _poll_call(renderer, read_log, usable=lambda answer: had_log or _readable_log(answer))
+        else:
+            read = _builder_call(renderer, read_log)
+        if _readable_log(read) or not content:
             content = read
         elif complete:
             renderer.warn("the final log read came back incomplete; showing the log read before the release completed")
