@@ -15,6 +15,7 @@ import sys
 import types
 from unittest.mock import patch
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -177,6 +178,58 @@ def test_lazy_command_hidden_applies_on_register_branch_too(monkeypatch):
     group = typer.main.get_command(lazy)
     cmd = group.get_command(None, "reg")
     assert cmd.hidden is True
+
+
+def _callback_only_app() -> typer.Typer:
+    """A Typer app that is one callback with a positional and an option —
+    the ``code-search`` shape."""
+    sub = typer.Typer()
+
+    @sub.callback(invoke_without_command=True)
+    def _only(query: str, repo: str = typer.Option(None, "--repo")):
+        typer.echo(f"q={query} repo={repo}")
+
+    return sub
+
+
+def test_lazy_subcommand_refuses_a_callback_only_app(monkeypatch):
+    """Mounting a single-callback app as a group is always a wiring bug: click
+    then demands a nested COMMAND and rejects options after the positional.
+    Fail at build time, naming LazyCommand, instead of shipping that parse."""
+    _fake_module(monkeypatch, "_lz_cb", app=_callback_only_app())
+    group = typer.main.get_command(_lazy_root({"one": LazySubcommand("_lz_cb")}))
+    with pytest.raises(TypeError, match="LazyCommand"):
+        group.get_command(None, "one")
+
+
+def test_lazy_command_accepts_options_on_either_side_of_the_positional(monkeypatch):
+    """The regression this guard protects: with the callback mounted as a
+    LazyCommand, every flag order parses to the same result."""
+
+    def only(query: str, repo: str = typer.Option(None, "--repo")):
+        typer.echo(f"q={query} repo={repo}")
+
+    _fake_module(monkeypatch, "_lz_cb2", only=only)
+    lazy = _lazy_root({"one": LazyCommand("_lz_cb2", attr="only")})
+
+    runner = CliRunner()
+    for argv in (["one", "Q", "--repo", "X"], ["one", "--repo", "X", "Q"]):
+        result = runner.invoke(lazy, argv)
+        assert result.exit_code == 0, (argv, result.output)
+        assert "q=Q repo=X" in result.output, argv
+
+
+def test_every_mounted_root_subcommand_builds():
+    """Walk the real root table so a future mis-mount fails in CI rather than
+    in an installed CLI. Building is what runs the guard above."""
+    from click import Context
+
+    from comfy_cli.cmdline import app as root_app
+
+    root_command = typer.main.get_command(root_app)
+    ctx = Context(root_command)
+    for name in root_command.lazy_subcommands:
+        assert root_command.get_command(ctx, name) is not None, name
 
 
 def test_lazy_group_renders_exactly_like_add_typer(monkeypatch):
