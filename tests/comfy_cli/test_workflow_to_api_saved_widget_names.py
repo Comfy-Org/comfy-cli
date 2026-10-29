@@ -127,7 +127,7 @@ def test_a_save_naming_a_sub_the_option_dropped_is_refused():
     node["inputs"].insert(4, {"name": "model.retired_knob", "widget": {"name": "model.retired_knob"}})
     schema = _object_info()[node["type"]]
     with pytest.raises(WorkflowConversionError, match="retired_knob.*absent from the current catalog"):
-        _schema_widget_pairs(schema, node["widgets_values"], node)
+        _schema_widget_pairs(schema, node["widgets_values"], node=node)
 
 
 def test_a_saved_widget_that_became_connection_only_is_refused():
@@ -137,7 +137,7 @@ def test_a_saved_widget_that_became_connection_only_is_refused():
 
     with pytest.raises(WorkflowConversionError, match="auto_downscale.*connection-only"):
         node = _node()
-        _schema_widget_pairs(object_info[node["type"]], node["widgets_values"], node)
+        _schema_widget_pairs(object_info[node["type"]], node["widgets_values"], node=node)
 
 
 def test_a_node_without_widget_markers_expands_the_current_option():

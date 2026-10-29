@@ -437,7 +437,9 @@ def execute(
             extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
-    _preflight_validate(renderer, run_graph, object_info, target_label="server", where="local")
+    _preflight_validate(
+        renderer, run_graph, object_info, target_label="server", where="local", submitted_workflow=workflow
+    )
 
     progress = None
     start = time.time()
@@ -457,6 +459,7 @@ def execute(
         extra_data=extra_data,
         output_node_ids=output_node_ids,
         client_id=client_id,
+        run_graph=run_graph,
     )
     # Wire SIGINT → close the WebSocket so the loop exits promptly.
     token = cancellation.get_token()
@@ -1340,7 +1343,14 @@ def execute_cloud(
     run_graph = target_subgraph(parsed_workflow, output_node_ids) if output_node_ids else parsed_workflow
 
     # Pre-submit validation via pure-Python CQL engine.
-    _preflight_validate(renderer, run_graph, cloud_object_info, target_label="cloud", where="cloud")
+    _preflight_validate(
+        renderer,
+        run_graph,
+        cloud_object_info,
+        target_label="cloud",
+        where="cloud",
+        submitted_workflow=parsed_workflow,
+    )
 
     # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
