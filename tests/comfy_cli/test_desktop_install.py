@@ -322,7 +322,9 @@ def test_running_server_selects_matching_instance_instead_of_latest(tmp_path):
         records.append({"id": name, "installPath": str(code.parent), "lastLaunchedAt": launched})
     app = _write_desktop(tmp_path / "Comfy Desktop", records)
     found = desktop_install.detect(
-        app, server_stats={"system": {"argv": [str(tmp_path / "running" / "ComfyUI" / "main.py")]}}
+        app,
+        server_stats={"system": {"argv": [str(tmp_path / "running" / "ComfyUI" / "main.py")]}},
+        server_filesystem_verified=True,
     )
     assert found.selected.install_id == "running"
     assert "running server" in found.selected_reason
@@ -350,7 +352,7 @@ def test_server_instance_config_matches_install_and_applies_effective_paths(tmp_
             ]
         }
     }
-    found = desktop_install.detect(app, server_stats=stats)
+    found = desktop_install.detect(app, server_stats=stats, server_filesystem_verified=True)
     assert found.selected.install_id == "inst-live"
     assert found.selected.data_dir == str(data)
     assert str(root) in [root.path for root in found.selected.model_roots]
@@ -360,7 +362,11 @@ def test_server_instance_config_matches_install_and_applies_effective_paths(tmp_
 def test_server_that_does_not_match_records_is_not_silently_assumed(tmp_path):
     code = _checkout(tmp_path / "install" / "ComfyUI")
     app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "candidate", "installPath": str(code.parent)}])
-    found = desktop_install.detect(app, server_stats={"system": {"argv": [str(tmp_path / "different" / "main.py")]}})
+    found = desktop_install.detect(
+        app,
+        server_stats={"system": {"argv": [str(tmp_path / "different" / "main.py")]}},
+        server_filesystem_verified=True,
+    )
     assert found.selected is None
     assert any("running server" in problem for problem in found.problems)
 
@@ -381,7 +387,7 @@ def test_server_model_configs_replace_stale_shared_settings(tmp_path):
             "comfyui_version": "0.99.0",
         }
     }
-    found = desktop_install.detect(app, server_stats=stats)
+    found = desktop_install.detect(app, server_stats=stats, server_filesystem_verified=True)
     paths = [root.path for root in found.selected.model_roots]
     assert str(tmp_path / "stale") not in paths
     assert str(tmp_path / "models-one") in paths
@@ -393,7 +399,9 @@ def test_relative_server_data_paths_are_unverified(tmp_path):
     code = _checkout(tmp_path / "install" / "ComfyUI")
     app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "live", "installPath": str(code.parent)}])
     found = desktop_install.detect(
-        app, server_stats={"system": {"argv": [str(code / "main.py"), "--base-directory", "relative-data"]}}
+        app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--base-directory", "relative-data"]}},
+        server_filesystem_verified=True,
     )
     assert found.selected is None
     assert any("relative" in problem for problem in found.problems)
@@ -408,7 +416,9 @@ def test_server_config_includes_absolute_paths_outside_base_and_no_base_sections
         f"one:\n  base_path: {tmp_path / 'models'}\n  loras: {outside}\ntwo:\n  checkpoints: relative-checkpoints\n"
     )
     found = desktop_install.detect(
-        app, server_stats={"system": {"argv": [str(code / "main.py"), "--extra-model-paths-config", str(config)]}}
+        app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--extra-model-paths-config", str(config)]}},
+        server_filesystem_verified=True,
     )
     paths = [root.path for root in found.selected.model_roots]
     assert str(outside) in paths
@@ -424,7 +434,7 @@ def test_running_server_output_directory_is_reported_with_source(tmp_path, expli
     argv = [str(code / "main.py")]
     if explicit:
         argv += ["--output-directory", str(output)]
-    found = desktop_install.detect(app, server_stats={"system": {"argv": argv}})
+    found = desktop_install.detect(app, server_stats={"system": {"argv": argv}}, server_filesystem_verified=True)
     assert found.to_dict()["output_dir"] == str(output)
     assert found.to_dict()["output_dir_source"] == ("server_argv" if explicit else "server_default")
 
@@ -433,7 +443,9 @@ def test_relative_output_directory_requires_process_cwd_verification(tmp_path):
     code = _checkout(tmp_path / "install" / "ComfyUI")
     app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "live", "installPath": str(code.parent)}])
     found = desktop_install.detect(
-        app, server_stats={"system": {"argv": [str(code / "main.py"), "--output-directory", "relative-output"]}}
+        app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--output-directory", "relative-output"]}},
+        server_filesystem_verified=True,
     )
     assert found.selected is None
     assert "output_dir" not in found.to_dict()
@@ -466,9 +478,138 @@ def test_server_interpreter_uses_only_a_verified_process_path(tmp_path, override
             "valid-file": str(runtime_python),
         }[process_python]
 
-    found = desktop_install.detect(app, legacy, server_stats={"system": system})
+    found = desktop_install.detect(app, legacy, server_stats={"system": system}, server_filesystem_verified=True)
 
     expected_python = str(runtime_python) if process_python == "valid-file" else None
     assert found.selected.data_dir == str(data)
     assert found.selected.python == expected_python
     assert found.to_dict()["python"] == expected_python
+
+
+@pytest.mark.parametrize("match", ["code-path", "config-stem"])
+def test_server_paths_without_filesystem_provenance_do_not_select_local_install(tmp_path, monkeypatch, match):
+    code = _checkout(tmp_path / "unrelated-local" / "ComfyUI")
+    _venv(code)
+    app = _write_desktop(tmp_path / "registry", [{"id": "collision", "installPath": str(code.parent)}])
+    config = app / "collision.yaml"
+    config.write_text("private:\n  base_path: /unrelated-local-models\n  checkpoints: checkpoints\n")
+    argv = [str(code / "main.py")] if match == "code-path" else ["/remote/main.py"]
+    argv += ["--extra-model-paths-config", str(config)]
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        assert path != config, "unverified server metadata must not read a local model config"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    found = desktop_install.detect(app, server_stats={"system": {"argv": argv}})
+
+    assert found.selected is None
+    block = found.to_dict()
+    assert block["python"] is None
+    assert block["model_roots"] == []
+    assert "input_dir" not in block and "output_dir" not in block
+    assert any("filesystem" in problem for problem in found.problems)
+
+
+def test_verified_local_server_cannot_select_desktop_by_copied_config_stem(tmp_path, monkeypatch):
+    code = _checkout(tmp_path / "unrelated-desktop" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "collision", "installPath": str(code.parent)}])
+    copied = tmp_path / "outside-registry" / "collision.yaml"
+    copied.parent.mkdir()
+    copied.write_text("private:\n  base_path: /unrelated-private\n  loras: loras\n")
+    original = Path.read_text
+
+    def read(path, *args, **kwargs):
+        assert path != copied, "a copied config name is not Desktop launch identity"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    found = desktop_install.detect(
+        app,
+        server_stats={"system": {"argv": ["/other/main.py", "--extra-model-paths-config", str(copied)]}},
+        server_filesystem_verified=True,
+    )
+    assert found.selected is None
+    assert found.to_dict()["model_roots"] == []
+
+
+@pytest.mark.parametrize("selected_registry", [0, 1])
+def test_generated_config_identity_keeps_owning_registry_with_duplicate_ids(tmp_path, monkeypatch, selected_registry):
+    apps = []
+    codes = []
+    for name in ("comfyui-desktop-2", "Comfy Desktop"):
+        code = _checkout(tmp_path / name / "install" / "ComfyUI")
+        app = _write_desktop(tmp_path / name / "registry", [{"id": "same-id", "installPath": str(code.parent)}])
+        config = app / "instance-model-paths" / "same-id.yaml"
+        config.parent.mkdir()
+        config.write_text("{}")
+        apps.append(app)
+        codes.append(code)
+    monkeypatch.setattr(desktop_install, "app_data_dirs", lambda: tuple(apps))
+    config = apps[selected_registry] / "instance-model-paths" / "same-id.yaml"
+    found = desktop_install.detect(
+        server_stats={"system": {"argv": ["/shared/bundled/main.py", "--extra-model-paths-config", str(config)]}},
+        server_filesystem_verified=True,
+    )
+    assert found.selected.code_dir == str(codes[selected_registry])
+    assert [i.summary(selected=i is found.selected)["selected"] for i in found.installs] == [
+        selected_registry == 0,
+        selected_registry == 1,
+    ]
+    block = found.to_dict()
+    assert "registry_dir" not in block
+    assert all("registry_dir" not in item for item in block["installs"])
+
+
+@pytest.mark.parametrize(
+    "install_id", ["../collision", "nested/id", "nested\\id", "/absolute", "C:collision", "null\x00id"]
+)
+def test_config_identity_rejects_path_separators_in_record_id(tmp_path, install_id):
+    if ":" in install_id:
+        from pathlib import PureWindowsPath
+
+        # A drive-relative component discards the owning registry on Windows.
+        expected = PureWindowsPath("D:/registry/instance-model-paths") / f"{install_id}.yaml"
+        assert expected.drive == "C:" and not expected.is_absolute()
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": install_id, "installPath": str(code.parent)}])
+    config = app / "instance-model-paths" / f"{install_id}.yaml"
+    found = desktop_install.detect(
+        app,
+        server_stats={"system": {"argv": ["/other/main.py", "--extra-model-paths-config", str(config)]}},
+        server_filesystem_verified=True,
+    )
+    assert found.selected is None
+
+
+def test_unknown_server_provenance_clears_previously_derived_directories(tmp_path):
+    from dataclasses import replace
+
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    found = replace(
+        desktop_install.detect(app),
+        input_dir="/previous/input",
+        output_dir="/previous/output",
+        output_dir_source="server_argv",
+    )
+    unresolved = desktop_install._for_server(found, {"system": {"argv": [str(code / "main.py")]}})
+    assert unresolved.selected is None
+    assert unresolved.input_dir is None and unresolved.output_dir is None and unresolved.output_dir_source is None
+
+
+def test_generated_config_identity_accepts_verified_file_alias(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    config = app / "instance-model-paths" / "live.yaml"
+    config.parent.mkdir()
+    config.write_text("{}")
+    alias = tmp_path / "verified-config-alias.yaml"
+    alias.symlink_to(config)
+    found = desktop_install.detect(
+        app,
+        server_stats={"system": {"argv": ["/shared/main.py", "--extra-model-paths-config", str(alias)]}},
+        server_filesystem_verified=True,
+    )
+    assert found.selected.install_id == "live"

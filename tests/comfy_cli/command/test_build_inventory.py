@@ -101,7 +101,7 @@ def test_inventory_unreachable_server_is_reported_not_fatal(tmp_path: Path, monk
     def refuse(url, **kwargs):
         raise ConnectionRefusedError(61, "Connection refused")
 
-    monkeypatch.setattr("comfy_cli.http.plain_urlopen", refuse)
+    monkeypatch.setattr("comfy_cli.local_server_identity.fetch_json", refuse)
 
     result, envelope = _invoke(str(workflow), "--server", "http://127.0.0.1:8000")
 
@@ -121,6 +121,7 @@ def test_inventory_oversized_server_detail_retains_workflow_report(tmp_path, mon
         return {}
 
     monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_server_stats", lambda url: (fetch(url), True))
     result, envelope = _invoke(str(_write_workflow(tmp_path)), "--server", "127.0.0.1:8000")
 
     assert result.exit_code == 0, result.stdout
@@ -136,7 +137,7 @@ def test_inventory_oversized_desktop_stats_does_not_discover_another_install(tmp
 
     observed_stats = []
 
-    def detect(*, server_stats=None):
+    def detect(*, server_stats=None, server_filesystem_verified=False):
         observed_stats.append(server_stats)
         return None
 
@@ -145,6 +146,7 @@ def test_inventory_oversized_desktop_stats_does_not_discover_another_install(tmp
 
     monkeypatch.setattr(desktop_install, "detect", detect)
     monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_server_stats", lambda url: (fetch(url), True))
     result, envelope = _invoke(str(_write_workflow(tmp_path)), "--desktop", "--server", "127.0.0.1:8000")
 
     assert result.exit_code == 0, result.stdout
@@ -325,6 +327,7 @@ def test_desktop_inventory_uses_only_running_instance_models_and_input(tmp_path,
         )
 
     monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_server_stats", lambda url: (fetch(url), True))
     result, envelope = _invoke(str(_write_workflow(tmp_path)), "--desktop", "--server", "127.0.0.1:8000")
     assert result.exit_code == 0
     data = envelope["data"]
@@ -412,6 +415,7 @@ def test_desktop_inventory_plans_only_referenced_file_from_effective_output_root
         )
 
     monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", fetch)
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_server_stats", lambda url: (fetch(url), True))
     result, envelope = _invoke(str(workflow), "--desktop", "--server", "127.0.0.1:8000")
     assert result.exit_code == 0, result.output
     data = envelope["data"]
@@ -420,3 +424,70 @@ def test_desktop_inventory_plans_only_referenced_file_from_effective_output_root
     assert [entry["local_path"] for entry in data["deployment_assets"]] == [str(required)]
     assert data["local_server"]["launch_paths"]["output_directory"] == [str(output)]
     assert "secret-not-path" not in result.output
+
+
+@pytest.mark.parametrize("server", ["192.0.2.77:8188", "127.0.0.1:8000"])
+def test_unverified_desktop_server_keeps_metadata_and_explicit_roots_only(tmp_path, monkeypatch, server):
+    from comfy_cli import desktop_install
+
+    app = tmp_path / "registry"
+    app.mkdir()
+    code = tmp_path / "unrelated" / "ComfyUI"
+    code.mkdir(parents=True)
+    (code / "main.py").write_text("")
+    (code / "models").mkdir()
+    (app / "installations.json").write_text(json.dumps([{"id": "collision", "installPath": str(code.parent)}]))
+    explicit = tmp_path / "explicit-models"
+    explicit.mkdir()
+    (explicit / "private_v1.safetensors").write_bytes(b"explicit")
+    stats = {"system": {"argv": [str(code / "main.py")], "python": "/unrelated/python", "comfyui_version": "remote"}}
+    monkeypatch.setattr(desktop_install, "app_data_dirs", lambda: (app,))
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_server_stats", lambda url: (stats, False))
+    monkeypatch.setattr("comfy_cli.command.build._inventory_fetch_json", lambda url: {})
+
+    result, envelope = _invoke(
+        str(_write_workflow(tmp_path)), "--desktop", "--server", server, "--models-root", str(explicit)
+    )
+
+    assert result.exit_code == 0, result.stdout
+    data = envelope["data"]
+    assert data["desktop"]["install_id"] is None
+    assert data["desktop"]["python"] is None
+    assert data["desktop"]["model_roots"] == []
+    assert data["models_roots"] == [str(explicit)]
+    assert data["models"][1]["local"][0]["bytes"] == 8
+    assert "input_roots" not in data and "output_dir" not in data["desktop"]
+    assert data["local_server"]["comfyui_version"] == "remote"
+    assert any("filesystem" in warning for warning in data["warnings"])
+    jsonschema.validate(data, json.loads(SCHEMA.read_text()))
+
+
+@pytest.mark.parametrize("invalid", ["stats-array", "system-string", "object-info-array"])
+def test_malformed_optional_server_shape_keeps_workflow_and_explicit_roots(tmp_path, monkeypatch, invalid):
+    stats = (
+        []
+        if invalid == "stats-array"
+        else {"system": "not-an-object"}
+        if invalid == "system-string"
+        else {"system": {}}
+    )
+    object_info = [] if invalid == "object-info-array" else {}
+    explicit = tmp_path / "explicit-models"
+    explicit.mkdir()
+    (explicit / "private_v1.safetensors").write_bytes(b"explicit")
+    monkeypatch.setattr(
+        "comfy_cli.command.build._inventory_fetch_json",
+        lambda url: stats if url.endswith("system_stats") else object_info,
+    )
+
+    result, envelope = _invoke(
+        str(_write_workflow(tmp_path)), "--server", "127.0.0.1:8000", "--models-root", str(explicit)
+    )
+
+    assert result.exit_code == 0, result.stdout
+    data = envelope["data"]
+    assert envelope["ok"] is True
+    assert data["models_roots"] == [str(explicit)]
+    assert data["models"][1]["local"][0]["bytes"] == 8
+    assert "ValueError" in data["local_server"]["error"]
+    jsonschema.validate(data, json.loads(SCHEMA.read_text()))

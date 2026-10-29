@@ -27,9 +27,25 @@ files while reporting the wrong version.
 - Without running-server evidence, describe selection as a registry-derived
   candidate and expose its selection reason. Do not claim it identifies the
   running process.
-- When the caller supplies server launch metadata, require one recorded existing
-  installation to match its absolute code/data path or instance config identity.
-  Zero or conflicting matches leave selection unresolved instead of combining
+- Server launch metadata is not evidence of a shared filesystem, even for a
+  loopback endpoint (which may be a forwarder). Before using its paths to select
+  a local Desktop installation or read local configurations/interpreters/roots,
+  require caller-established direct-endpoint and local-process provenance. Bind
+  the request to its resolved address, bypass proxies, refuse redirects, match
+  the address-specific socket owner across the request using PID/create time,
+  and corroborate the actual Python script/argv/cwd. On Linux, require the same
+  mount namespace and process root as the CLI; inability to read that evidence
+  leaves provenance unknown. The pure discovery API defaults provenance to
+  unknown. Remote, forwarded, container, inaccessible or ambiguous endpoints
+  retain their reported catalog/metadata but require explicit local roots.
+- With verified shared-filesystem provenance, require one recorded existing
+  installation to match its absolute code/data path or the full resolved generated
+  config path: that record's owning registry directory plus
+  `instance-model-paths/<install_id>.yaml`. A copied filename/stem is insufficient;
+  retain per-record ownership across coexisting registries and reject path
+  separators and Windows drive/stream separators in IDs used for config identity. This preserves bundled/shared-code
+  discovery without conflating registries. Internal ownership adds no public
+  output fields. Zero or conflicting matches leave selection unresolved instead of combining
   unrelated installations.
 - Derive effective code/data/model/input/output roots from that selected process.
   Resolve its model-path configuration and retain external paths explicitly.
@@ -77,7 +93,8 @@ tests with the worktree's package first on `PYTHONPATH`, plus Ruff lint/format,
 ## Revisit triggers
 
 Reopen if one running process resolves to another installation, if an unresolved
-relative path is reported as verified, if shared folders lose provenance, or if
+relative path is reported as verified, if server metadata bypasses direct local
+process/filesystem proof, if shared folders lose provenance, or if
 new Desktop layouts/launch flags require an additional documented discovery
 source. A change that allows discovery to mutate installations or grants upload
 permission requires a separate decision.

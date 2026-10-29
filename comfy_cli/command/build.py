@@ -3489,14 +3489,19 @@ def validate_cmd(
     renderer.emit(result, command="build validate")
 
 
-_INVENTORY_MAX_BYTES = 64 * 1024 * 1024
-
-
 def _inventory_fetch_json(url: str) -> Any:
-    from comfy_cli.http import plain_urlopen, read_capped
+    from comfy_cli.local_server_identity import fetch_json
 
-    with plain_urlopen(url, timeout=10) as resp:
-        return json.loads(read_capped(resp, url, max_bytes=_INVENTORY_MAX_BYTES))
+    return fetch_json(url).data
+
+
+def _inventory_fetch_server_stats(url: str) -> tuple[dict[str, Any], bool]:
+    from comfy_cli.local_server_identity import fetch_json
+
+    document = fetch_json(url, verify_filesystem=True)
+    if not isinstance(document.data, dict):
+        raise ValueError("/system_stats did not return an object")
+    return document.data, document.filesystem_verified
 
 
 def _inventory_local_server(report: dict[str, Any], server: str, stats: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3510,6 +3515,10 @@ def _inventory_local_server(report: dict[str, Any], server: str, stats: dict[str
     try:
         stats = stats if stats is not None else _inventory_fetch_json(f"{base}/system_stats")
         object_info = _inventory_fetch_json(f"{base}/object_info")
+        if not isinstance(stats, dict) or not isinstance(object_info, dict):
+            raise ValueError("server stats and object_info must be objects")
+        if stats.get("system") is not None and not isinstance(stats["system"], dict):
+            raise ValueError("server stats.system must be an object")
     except (OSError, ValueError, ResponseTooLarge) as error:
         # The server only adds detail; the workflow's own report stands without it.
         section["error"] = f"{type(error).__name__}: {error}"
@@ -3554,10 +3563,12 @@ def _check_server_option(value: str | None) -> str | None:
     return value
 
 
-def _desktop_model_roots(server_stats: dict[str, Any] | None = None) -> tuple[list[str], str | None]:
+def _desktop_model_roots(
+    server_stats: dict[str, Any] | None = None, *, server_filesystem_verified: bool = False
+) -> tuple[list[str], str | None]:
     from comfy_cli import desktop_install
 
-    found = desktop_install.detect(server_stats=server_stats)
+    found = desktop_install.detect(server_stats=server_stats, server_filesystem_verified=server_filesystem_verified)
     if found is not None:
         if found.selected is None or (server_stats is None and sum(item.exists for item in found.installs) > 1):
             return [], "--desktop: select the actual install with --server or explicit --models-root; " + "; ".join(
@@ -3677,6 +3688,7 @@ def inventory_cmd(
     inputs = list(input_root or [])
     outputs: list[str] = []
     server_stats = None
+    server_filesystem_verified = False
     if desktop:
         from comfy_cli import desktop_install
 
@@ -3686,18 +3698,22 @@ def inventory_cmd(
             host, port = parse_local_url(server)
             netloc = f"[{host}]" if ":" in host else host
             try:
-                server_stats = _inventory_fetch_json(f"http://{netloc}:{port or 8188}/system_stats")
+                server_stats, server_filesystem_verified = _inventory_fetch_server_stats(
+                    f"http://{netloc}:{port or 8188}/system_stats"
+                )
             except (OSError, ValueError, ResponseTooLarge) as error:
                 report["warnings"].append(f"--desktop: cannot verify running server: {error}; pass explicit roots")
         # A supplied but unreachable server must not fall back to an unrelated install.
         desktop_roots, warning = _desktop_model_roots(
-            server_stats if server_stats is not None else ({} if server else None)
+            server_stats if server_stats is not None else ({} if server else None),
+            server_filesystem_verified=server_filesystem_verified,
         )
         roots += [r for r in desktop_roots if r not in roots]
         if warning:
             report["warnings"].append(warning)
         found = desktop_install.detect(
-            server_stats=server_stats if server_stats is not None else ({} if server else None)
+            server_stats=server_stats if server_stats is not None else ({} if server else None),
+            server_filesystem_verified=server_filesystem_verified,
         )
         if found is not None:
             report["desktop"] = found.to_dict()
