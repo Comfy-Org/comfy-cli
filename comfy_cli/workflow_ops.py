@@ -62,6 +62,7 @@ from typing import Any
 from comfy_cli import layout
 from comfy_cli.cql.engine import (
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _dynamic_group_widgets,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
@@ -2838,6 +2839,13 @@ def _param(name: str, params: dict[str, Any]) -> Any:
     return params[name]
 
 
+def _capture_saved_widget_order(node: dict, graph, node_type: str) -> list[str] | None:
+    try:
+        return saved_widget_order(node, graph, node_type)
+    except SavedWidgetLayoutError as exc:
+        raise RecipeError(f"node {node.get('id')}: {exc}") from exc
+
+
 def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | None = None) -> tuple[dict, list[dict]]:
     """Project a UI-format graph into a recipe — the op-batch that rebuilds it
     (add_node + non-default set_widget + connect). The inverse of `apply`:
@@ -2909,7 +2917,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         # but no value, and apply would refuse it anyway — say so up front.
         node_type = node.get("type", "")
         values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-        saved_names = saved_widget_order(node, graph, node_type)
+        saved_names = _capture_saved_widget_order(node, graph, node_type)
         if widget not in graph.editable_widget_names(node_type, values, saved_names):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
         saved_values = node.get("widgets_values")
@@ -3055,7 +3063,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
         saved_values = n.get("widgets_values")
         widgets = _engine._widgets_as_positional(saved_values, graph, class_type)
-        saved_names = _engine.saved_widget_order(n, graph, class_type)
+        saved_names = _capture_saved_widget_order(n, graph, class_type)
         order = graph.widget_order_for_node(class_type, widgets, saved_names)
         group_widgets = {e.name for e in group_entries.get(n["id"], [])}
         defaults = graph.widget_defaults(class_type)

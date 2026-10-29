@@ -23,7 +23,7 @@ from __future__ import annotations
 import pytest
 
 from comfy_cli import workflow_ops
-from comfy_cli.cql.engine import Graph, _extract_frontend_slots, saved_sub_order
+from comfy_cli.cql.engine import Graph, SavedWidgetLayoutError, _extract_frontend_slots, saved_sub_order
 
 # `model` is a selector whose "Seedance 2.0" option has since gained an optional
 # `auto_upscale` after `auto_downscale`. `reference_images` is connection-only:
@@ -150,6 +150,39 @@ def test_recipe_capture_refuses_to_lift_a_new_catalog_sub_widget_without_a_saved
             _graph(),
             lift={(14, "model.auto_upscale"): "upscale"},
         )
+
+
+def test_recipe_capture_reports_a_saved_widget_removed_from_the_catalog():
+    object_info = {
+        "ByteDance2ReferenceNode": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    **_OPTION,
+                                    "inputs": {
+                                        **_OPTION["inputs"],
+                                        "optional": {"auto_upscale": ["BOOLEAN", {"default": False}]},
+                                    },
+                                }
+                            ]
+                        },
+                    ],
+                    "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                    "watermark": ["BOOLEAN", {"default": False}],
+                }
+            },
+            "input_order": {"required": ["model", "seed", "watermark"]},
+        }
+    }
+
+    with pytest.raises(workflow_ops.RecipeError, match="absent from the current catalog") as exc:
+        workflow_ops.capture_recipe(_workflow(), Graph.from_object_info(object_info))
+
+    assert isinstance(exc.value.__cause__, SavedWidgetLayoutError)
 
 
 def test_a_save_matching_the_current_option_is_unaffected():
