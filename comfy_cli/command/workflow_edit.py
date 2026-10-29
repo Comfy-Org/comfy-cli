@@ -980,6 +980,12 @@ def apply_cmd(
             details={"requested": e.class_type, "replacement": e.replacement},
         )
         raise typer.Exit(code=1) from e
+    except workflow_ops.FatalFindingError as e:
+        # ``apply_specs`` preserves typed catalog refusals while re-hinting
+        # them against the pre-batch graph. Emit the same operand evidence as
+        # a standalone edit, plus the atomic-batch failure position.
+        _emit_edit_error(renderer, e, hint="correct the rejected value and retry the whole batch")
+        raise typer.Exit(code=1) from e
     except (ValueError, KeyError) as e:
         # Atomic batch: nothing is written if any spec fails. Same error code
         # and exit in both ack modes — `--ack summary` only ADDS a structured

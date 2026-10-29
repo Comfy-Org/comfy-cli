@@ -467,7 +467,17 @@ def _rehint_discarded_batch(e: Exception, pre_batch_hint: str) -> ValueError:
             "Any node id minted by this batch is gone; re-read ids with "
             "`comfy workflow slots` / `ls-nodes` before addressing nodes."
         )
-    return ValueError(msg + suffix)
+    rendered = msg + suffix
+    if isinstance(e, FatalFindingError):
+        # Preserve the catalog finding across the atomic-batch re-hint. The
+        # command layer can then emit its stable code and operand evidence
+        # instead of flattening an actionable refusal into
+        # ``workflow_edit_invalid``. Keep the re-hinted message because any
+        # ids created earlier in this failed batch no longer exist.
+        finding = dict(e.finding)
+        finding["message"] = rendered
+        return FatalFindingError(finding)
+    return ValueError(rendered)
 
 
 def _find_by_str(workflow: dict, node_id: Any) -> dict | None:

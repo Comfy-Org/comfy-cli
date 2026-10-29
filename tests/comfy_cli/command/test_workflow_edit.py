@@ -1635,6 +1635,25 @@ class TestApplyBatch:
         assert len(set(positions)) == len(positions)
         assert (0, 0) not in positions
 
+    def test_apply_specs_preserves_typed_catalog_refusal(self):
+        workflow = _base_workflow()
+        before = json.loads(json.dumps(workflow))
+
+        with pytest.raises(workflow_ops.FatalFindingError) as exc:
+            workflow_ops.apply_specs(
+                workflow,
+                _graph(),
+                [{"op": "set_widget", "node": 3, "widget": "sampler_name", "value": "totally_made_up"}],
+            )
+
+        assert exc.value.finding["code"] == "unknown_enum_value"
+        assert exc.value.finding["value"] == "totally_made_up"
+        assert "No changes were applied" in exc.value.finding["message"]
+        assert exc.value.spec_index == 0
+        assert exc.value.spec_op == "set_widget"
+        assert exc.value.applied_count == 0
+        assert workflow == before
+
 
 # ---------------------------------------------------------------------------
 # dynamic combo (COMFY_DYNAMICCOMBO_V3) — set_widget on model + model.resolution
