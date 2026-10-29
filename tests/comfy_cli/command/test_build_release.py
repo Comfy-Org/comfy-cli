@@ -41,7 +41,8 @@ class ReleaseBuilder:
     def __init__(self) -> None:
         self.calls: list[dict] = []
         self.releases: list[JsonObject] = []
-        self.statuses: list[JsonObject] = []
+        self.statuses: list[JsonObject | Exception] = []
+        self.log_failures: list[Exception] = []
 
     def list_build_targets(self) -> list[JsonObject]:
         self.calls.append({"method": "list_build_targets"})
@@ -59,10 +60,15 @@ class ReleaseBuilder:
 
     def get_release(self, release_id: str) -> JsonObject:
         self.calls.append({"method": "get_release", "id": release_id})
-        return self.statuses.pop(0)
+        status = self.statuses.pop(0)
+        if isinstance(status, Exception):
+            raise status
+        return status
 
     def get_release_logs(self, release_id: str, *, os: str, gpu: str) -> JsonObject:
         self.calls.append({"method": "get_release_logs", "id": release_id, "os": os, "gpu": gpu})
+        if self.log_failures:
+            raise self.log_failures.pop(0)
         return {"versionId": release_id, "os": os, "gpu": gpu, "log": "built", "truncated": False}
 
     def get_release_manifest(self, release_id: str) -> JsonObject:
@@ -336,6 +342,141 @@ def test_create_watch_polls_to_complete_and_reflects_target_failure(
     # Then
     assert result.exit_code == expected_exit, result.stderr
     assert len([call for call in client.calls if call["method"] == "get_release"]) == 3
+
+
+def _calls(client: ReleaseBuilder, method: str) -> int:
+    return len([call for call in client.calls if call["method"] == method])
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    recorded: list[float] = []
+    monkeypatch.setattr(build.time, "sleep", recorded.append)
+    return recorded
+
+
+def test_create_watch_rides_out_timed_out_polls(workspace: Path, client: ReleaseBuilder, sleeps: list[float]) -> None:
+    """BE-24385: one poll that timed out ended a watch on a release still
+    building. Four misses in a row, a success, then four more must all ride out,
+    since a success resets the count."""
+    # Given
+    misses = [
+        urllib.error.URLError("timed out"),
+        TimeoutError("timed out"),
+        ConnectionResetError("connection reset by peer"),
+        urllib.error.URLError("timed out"),
+    ]
+    client.statuses = [
+        *misses,
+        {"id": "release-created", "status": "building", "artifactCounts": {"failed": 0}},
+        *misses,
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _calls(client, "get_release") == 10
+    assert sleeps == [4.0, 8.0, 16.0, 30.0, build._RELEASE_POLL_SECONDS, 4.0, 8.0, 16.0, 30.0]
+    assert "polling again (1/4)" in result.output
+
+
+@pytest.mark.parametrize(
+    "miss",
+    [
+        pytest.param(urllib.error.URLError("timed out"), id="urlerror"),
+        pytest.param(TimeoutError("timed out"), id="bare-timeout"),
+    ],
+)
+def test_create_watch_fails_after_five_transport_misses_in_a_row(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], miss: Exception
+) -> None:
+    # Given
+    client.statuses = [miss] * build._POLL_TRANSPORT_MISSES
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == "builder call failed: <urlopen error timed out>"
+    assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
+    assert sleeps == [4.0, 8.0, 16.0, 30.0]
+
+
+def test_create_watch_ends_on_the_first_builder_answer(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A status code is the builder answering, not the network dropping, so it is
+    not retried."""
+    # Given
+    client.statuses = [
+        refusal(500, {"error": "INTERNAL", "message": "boom"}, "https://builder.test/v1/releases/release-created"),
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["details"]["status"] == 500
+    assert _calls(client, "get_release") == 1
+    assert sleeps == []
+
+
+def test_logs_follow_rides_out_timed_out_polls(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    # Given
+    client.log_failures = [urllib.error.URLError("timed out")]
+    client.statuses = [
+        TimeoutError("timed out"),
+        {"id": "release-1", "status": "building", "artifactCounts": {"failed": 0}},
+        {"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _calls(client, "get_release_logs") == 3
+    assert _calls(client, "get_release") == 3
+    assert sleeps == [4.0, 4.0, build._RELEASE_POLL_SECONDS]
+
+
+def test_logs_follow_ends_on_the_first_builder_answer(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    # Given
+    client.statuses = [refusal(503, {"error": "UNAVAILABLE"}, "https://builder.test/v1/releases/release-1")]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["details"]["status"] == 503
+    assert _calls(client, "get_release") == 1
+    assert sleeps == []
+
+
+def test_logs_without_follow_still_fails_on_the_first_timeout(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    """Only a watch rides out a dropped request; a one-off read fails fast like
+    every other builder command."""
+    # Given
+    client.log_failures = [urllib.error.URLError("timed out")]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["message"] == "builder call failed: <urlopen error timed out>"
+    assert _calls(client, "get_release_logs") == 1
+    assert sleeps == []
 
 
 def test_same_version_releases_break_the_tie_on_the_instant_not_the_spelling() -> None:

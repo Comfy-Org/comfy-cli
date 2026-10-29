@@ -2979,6 +2979,9 @@ def show_cmd(
 
 
 _RELEASE_POLL_SECONDS = 2.0
+#: Transport failures in a row a watch rides out before it fails as any other
+#: builder call does; with the backoff in ``_poll_call``, about a minute of outage.
+_POLL_TRANSPORT_MISSES = 5
 
 
 #: Sorts below every usable timestamp, so a release the builder dated badly loses
@@ -3134,9 +3137,37 @@ def _selected_release_id(renderer, client, scope: _BuildScope, release: str | No
     return _newest_release_id(renderer, client, _resolve_build_id(renderer, client, scope))
 
 
+def _poll_call(renderer, fn):
+    """``_builder_call`` for one poll of a watch, which a single timed-out or
+    dropped request must not end: the release keeps building either way. A
+    transport failure sleeps and polls again, up to ``_POLL_TRANSPORT_MISSES`` in
+    a row; the builder's own answer (an ``HTTPError``) and every other failure
+    still end the watch on the first one, through the same envelope.
+
+    The builder client is urllib-only: a connect timeout arrives wrapped in a
+    ``URLError``, a timeout or reset while awaiting the response arrives bare."""
+
+    def attempt():
+        for miss in range(1, _POLL_TRANSPORT_MISSES + 1):
+            try:
+                return fn()
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if isinstance(e, urllib.error.HTTPError):
+                    raise
+                if miss == _POLL_TRANSPORT_MISSES:
+                    if isinstance(e, urllib.error.URLError):
+                        raise
+                    # Wrapped, or a bare one would escape ``_builder_call`` as a traceback.
+                    raise urllib.error.URLError(e) from e
+                renderer.warn(f"builder unreachable ({e}); polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
+                time.sleep(min(_RELEASE_POLL_SECONDS * 2**miss, 30.0))
+
+    return _builder_call(renderer, attempt)
+
+
 def _poll_release(renderer, client, release_id: str) -> dict:
     while True:
-        release = _builder_call(renderer, lambda: client.get_release(release_id))
+        release = _poll_call(renderer, lambda: client.get_release(release_id))
         status = release.get("status")
         if renderer.is_pretty():
             renderer.info(f"release {release_id}: {status}")
@@ -3325,7 +3356,8 @@ def release_logs(
     previous_log = ""
     content: dict = {}
     while True:
-        content = _builder_call(
+        # Only a follow is a watch; a single read fails fast like every other command.
+        content = (_poll_call if follow else _builder_call)(
             renderer,
             lambda: client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu),
         )
@@ -3335,7 +3367,7 @@ def release_logs(
             previous_log = log
         if not follow:
             break
-        detail = _builder_call(renderer, lambda: client.get_release(release_id))
+        detail = _poll_call(renderer, lambda: client.get_release(release_id))
         match detail.get("status"):
             case "complete":
                 break
