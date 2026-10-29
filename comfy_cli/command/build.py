@@ -2980,8 +2980,9 @@ def show_cmd(
 
 
 _RELEASE_POLL_SECONDS = 2.0
-#: Transport failures in a row a watch rides out before it fails as any other
-#: builder call does; with the backoff in ``_poll_call``, about a minute of outage.
+#: Failed polls in a row a watch rides out before it ends: transport failures and
+#: answers too damaged to read, counted together. With the backoff in
+#: ``_poll_call``, about a minute of outage.
 _POLL_TRANSPORT_MISSES = 5
 
 
@@ -3138,7 +3139,7 @@ def _selected_release_id(renderer, client, scope: _BuildScope, release: str | No
     return _newest_release_id(renderer, client, _resolve_build_id(renderer, client, scope))
 
 
-def _poll_call(renderer, fn):
+def _poll_call(renderer, fn, usable=None):
     """``_builder_call`` for one poll of a watch, which a single timed-out or
     dropped request must not end: the release keeps building either way. A
     transport failure sleeps and polls again, up to ``_POLL_TRANSPORT_MISSES`` in
@@ -3147,12 +3148,15 @@ def _poll_call(renderer, fn):
 
     The builder client is urllib-only: a connect timeout arrives wrapped in a
     ``URLError``, a timeout or reset while awaiting the response arrives bare, and
-    a connection closed partway through the body arrives as ``IncompleteRead``."""
+    a connection closed partway through the body arrives as ``IncompleteRead``.
+    A fixed-length body cut short arrives as no error at all: the HTTP layer
+    returns the partial bytes, which parse as ``{}``. So an answer ``usable``
+    rejects counts as a miss in the same run, and the last one ends the watch."""
 
     def attempt():
         for miss in range(1, _POLL_TRANSPORT_MISSES + 1):
             try:
-                return fn()
+                answer = fn()
             except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
                 if isinstance(e, urllib.error.HTTPError):
                     raise
@@ -3162,14 +3166,35 @@ def _poll_call(renderer, fn):
                     # Wrapped, or a bare one would escape ``_builder_call`` as a traceback.
                     raise urllib.error.URLError(e) from e
                 renderer.warn(f"builder unreachable ({e}); polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
-                time.sleep(min(_RELEASE_POLL_SECONDS * 2**miss, 30.0))
+            else:
+                if usable is None or usable(answer):
+                    return answer
+                if miss == _POLL_TRANSPORT_MISSES:
+                    renderer.error(
+                        code="build_builder_error",
+                        message=f"the builder sent no readable release status in {miss} polls in a row.",
+                    )
+                    raise typer.Exit(code=1)
+                renderer.warn(f"builder answer unreadable; polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
+            time.sleep(min(_RELEASE_POLL_SECONDS * 2**miss, 30.0))
 
     return _builder_call(renderer, attempt)
 
 
+def _poll_status(renderer, client, release_id: str) -> dict:
+    """One status read of a watch. An answer with no status string is unreadable
+    and polled again; a whole answer naming an unknown status is the builder's
+    word and ends the watch at the caller."""
+    return _poll_call(
+        renderer,
+        lambda: client.get_release(release_id),
+        usable=lambda release: isinstance(release, dict) and isinstance(release.get("status"), str),
+    )
+
+
 def _poll_release(renderer, client, release_id: str) -> dict:
     while True:
-        release = _poll_call(renderer, lambda: client.get_release(release_id))
+        release = _poll_status(renderer, client, release_id)
         status = release.get("status")
         if renderer.is_pretty():
             renderer.info(f"release {release_id}: {status}")
@@ -3378,7 +3403,7 @@ def release_logs(
             previous_log = log
         if not follow or complete:
             break
-        detail = _poll_call(renderer, lambda: client.get_release(release_id))
+        detail = _poll_status(renderer, client, release_id)
         match detail.get("status"):
             case "complete":
                 # The log above may predate completion (a retried status read

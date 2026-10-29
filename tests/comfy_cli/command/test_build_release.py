@@ -5,7 +5,9 @@ import io
 import json
 import os
 import sys
+import threading
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -460,6 +462,132 @@ def test_create_watch_ends_on_the_first_builder_answer(
     assert sleeps == []
 
 
+def test_create_watch_rides_out_a_status_answer_cut_short(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float]
+) -> None:
+    """A status body cut short inside its Content-Length parses as ``{}`` rather
+    than raising. It says nothing about the release, so the watch polls again."""
+    # Given
+    client.statuses = [
+        {},
+        {"id": "release-created", "status": "building", "artifactCounts": {"failed": 0}},
+        {"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _calls(client, "get_release") == 3
+    assert sleeps == [4.0, build._RELEASE_POLL_SECONDS]
+    assert "polling again (1/4)" in result.output
+
+
+class _CutShortStatus(BaseHTTPRequestHandler):
+    """Answers each GET with the next queued body. A ``(declared, sent)`` pair
+    declares ``declared`` bytes in Content-Length, sends only ``sent``, and
+    closes the connection."""
+
+    bodies: list[bytes | tuple[bytes, bytes]] = []
+
+    def do_GET(self) -> None:
+        body = self.bodies.pop(0)
+        declared, sent = body if isinstance(body, tuple) else (body, body)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(declared)))
+        self.end_headers()
+        self.wfile.write(sent)
+        self.close_connection = True
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+def test_create_watch_rides_out_a_status_response_cut_short_on_the_wire(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real HTTP layer reading a fixed-length response that stops early: the
+    standard library returns the partial bytes without raising."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    complete = json.dumps({"id": "release-created", "status": "complete", "artifactCounts": {"failed": 0}}).encode()
+    monkeypatch.setattr(_CutShortStatus, "bodies", [(complete, complete[:20]), complete])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortStatus)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = BuilderClient(f"http://127.0.0.1:{server.server_address[1]}", "jwt-token")
+    monkeypatch.setattr(client, "get_release", real.get_release)
+
+    # When
+    try:
+        result = invoke_release("create", "--target", "linux/nvidia", "--watch")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["release"]["status"] == "complete"
+    assert _CutShortStatus.bodies == []
+    assert sleeps == [4.0]
+    assert "polling again (1/4)" in result.output
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        pytest.param(("create", "--target", "linux/nvidia", "--watch"), id="create-watch"),
+        pytest.param(("logs", "release-1", "--target", "linux/nvidia", "--follow"), id="logs-follow"),
+    ],
+)
+def test_a_watch_fails_after_five_unreadable_polls_in_a_row(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], verb: tuple[str, ...]
+) -> None:
+    """An unreadable answer and a dropped request share one count, so a builder
+    that never answers whole still ends the watch after about a minute."""
+    # Given
+    client.statuses = [{}, TimeoutError("timed out"), {}, [], {"id": "release-1", "status": None}]
+
+    # When
+    result = invoke_release(*verb)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == "the builder sent no readable release status in 5 polls in a row."
+    assert _calls(client, "get_release") == build._POLL_TRANSPORT_MISSES
+    assert sleeps[-4:] == [4.0, 8.0, 16.0, 30.0]
+
+
+@pytest.mark.parametrize(
+    "verb",
+    [
+        pytest.param(("create", "--target", "linux/nvidia", "--watch"), id="create-watch"),
+        pytest.param(("logs", "release-1", "--target", "linux/nvidia", "--follow"), id="logs-follow"),
+    ],
+)
+def test_a_watch_still_ends_on_the_first_unknown_status(
+    workspace: Path, client: ReleaseBuilder, sleeps: list[float], verb: tuple[str, ...]
+) -> None:
+    """A whole answer naming a status this CLI does not know is the builder
+    speaking, not the network dropping, so it is not retried."""
+    # Given
+    client.statuses = [{"id": "release-1", "status": "exploded"}]
+
+    # When
+    result = invoke_release(*verb)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert envelope(result)["error"]["message"] == "the builder returned unknown release status 'exploded'."
+    assert _calls(client, "get_release") == 1
+    assert sleeps == []
+
+
 def test_logs_follow_rides_out_timed_out_polls(client: ReleaseBuilder, sleeps: list[float]) -> None:
     # Given
     client.log_failures = [urllib.error.URLError("timed out")]
@@ -532,6 +660,26 @@ def test_logs_follow_keeps_the_captured_log_when_the_final_read_comes_back_empty
     else:
         assert "FAILED: missing dependency" in result.output
     assert "the final log read came back incomplete" in " ".join(result.output.split())
+
+
+def test_logs_follow_rides_out_a_status_answer_cut_short(client: ReleaseBuilder, sleeps: list[float]) -> None:
+    # Given
+    client.logs = ["started\n", "started\nmore\n", "started\nmore\ndone\n"]
+    client.statuses = [
+        {},
+        {"id": "release-1", "status": "building", "artifactCounts": {"failed": 0}},
+        {"id": "release-1", "status": "complete", "artifactCounts": {"failed": 0}},
+    ]
+
+    # When
+    result = invoke_release("logs", "release-1", "--target", "linux/nvidia", "--follow")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["data"]["log"] == "started\nmore\ndone\n"
+    assert _calls(client, "get_release") == 3
+    assert sleeps == [4.0, build._RELEASE_POLL_SECONDS]
+    assert "polling again (1/4)" in result.output
 
 
 def test_logs_follow_ends_on_the_first_builder_answer(client: ReleaseBuilder, sleeps: list[float]) -> None:
