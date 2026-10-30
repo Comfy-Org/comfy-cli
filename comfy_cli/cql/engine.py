@@ -5298,7 +5298,15 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             )
             widgets.extend(default_values)
     order = graph.widget_order_for_node(node_type, widgets, saved_names)
-    if order.count(input_name) > 1:
+    # Dynamic-group rows are the only place a REQUESTED name can occupy two
+    # positions, so the ambiguity refusal stays scoped to them. Outside a group
+    # the sole repeated name is the frontend's ``control_after_generate`` marker
+    # — a node with both ``seed`` and ``noise_seed`` carries two — and that name
+    # was editable (first occurrence) long before this saved-layout read, with
+    # no per-widget address to disambiguate it. Threading ``saved_names`` in
+    # cannot add a duplicate either: ``saved_sub_order`` caps every name at the
+    # number of occurrences the catalog declares.
+    if has_group and order.count(input_name) > 1:
         raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
     entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
     if any(e.frontend_injected and e.name == input_name for e in entries):
