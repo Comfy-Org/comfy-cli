@@ -1940,7 +1940,13 @@ def _schema_widget_pairs(
     A dynamic combo's selected sub-inputs are expanded in the order the SAVE
     recorded them when ``node`` records one (:func:`_saved_sub_order`), because
     ``widgets_values`` is positional against the option's sub-input list AT SAVE
-    TIME, not against today's.
+    TIME, not against today's. A save that names only SOME of the option's
+    sub-inputs is a partial layout, not a historical one: it consumes too few
+    slots and shifts every later widget. Such a walk accounts for fewer than all
+    the values, so when neither stream shape is exact under the saved order the
+    walk is retried on the catalog order and taken only if THAT is exact — a
+    short or extra ``widgets_values`` array is also inexact, and there the saved
+    order is still the better guess.
 
     Returns ``[]`` when the schema declares no widget inputs, so the caller can
     fall back to node-input inspection exactly as before.
@@ -1992,7 +1998,9 @@ def _schema_widget_pairs(
             names = listed + [n for n in names if n not in listed]
         ordered.extend((n, section_def[n]) for n in names)
 
-    def walk(strict: bool) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+    def walk(strict: bool, saved_node: dict | None = node) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+        # ``saved_node`` is the node whose recorded widget order sub-inputs are
+        # expanded in; ``None`` means "ignore the save, use the catalog order".
         # ``strict`` assumes the current frontend's slot layout: every exact
         # ``seed``/``noise_seed`` INT is followed by its companion slot, so a
         # control keyword there is always consumed. Returns the pairs and
@@ -2057,7 +2065,7 @@ def _schema_widget_pairs(
                 return
             pairs.append((name, value))
             if is_dynamic:
-                subs = _saved_sub_order(node, name, _dynamic_combo_selected_subs(name, spec, value))
+                subs = _saved_sub_order(saved_node, name, _dynamic_combo_selected_subs(name, spec, value))
                 if not subs and not any(
                     _dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(spec)
                 ):
@@ -2107,7 +2115,31 @@ def _schema_widget_pairs(
     # take a keyword the next COMBO lists.
     pairs, exact, warnings = walk(strict=True)
     if not exact:
-        pairs, _exact, warnings = walk(strict=False)
+        pairs, exact, warnings = walk(strict=False)
+    if not exact and node is not None:
+        # Neither stream shape accounts for the array under the SAVED sub-order.
+        # One cause is a partial set of ``widget`` markers: a save that names
+        # only some of an option's sub-inputs makes ``_saved_sub_order`` consume
+        # too few slots, so every later widget reads a shifted one. Retrying on
+        # the catalog order recovers that — but only when the catalog walk is
+        # itself exact. ``exact`` is also false for an unrelated short or extra
+        # ``widgets_values`` array, where both orders leave values over and the
+        # saved one is still the better guess; retrying unconditionally there
+        # would discard a valid saved order and shift the earlier sub-values.
+        #
+        # This is the gate every OTHER reader of the saved layout already has.
+        # ``engine.saved_widget_order`` refuses a saved order whose expansion
+        # does not account for the whole array (``len(entries) != len(values)``
+        # -> ``None`` -> catalog order), but it can only run that check with a
+        # Graph, and conversion has none here. ``exact`` is the same question
+        # answered from the walk itself, so an edit and a conversion resolve a
+        # partially-marked save the same way instead of disagreeing — the
+        # failure this function's saved-order rule exists to prevent.
+        for catalog_strict in (True, False):
+            catalog_pairs, catalog_exact, catalog_warnings = walk(strict=catalog_strict, saved_node=None)
+            if catalog_exact:
+                pairs, warnings = catalog_pairs, catalog_warnings
+                break
     for warning in warnings:
         logger.warning(*warning)
     return pairs

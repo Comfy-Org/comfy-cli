@@ -21,6 +21,7 @@ import copy
 
 import pytest
 
+from comfy_cli.cql.engine import Graph, _expand_widget_entries, saved_widget_order
 from comfy_cli.workflow_to_api import WorkflowConversionError, _schema_widget_pairs, convert_ui_to_api
 
 
@@ -280,3 +281,158 @@ def test_a_nested_selector_is_retained_when_only_its_descendant_has_a_marker():
     assert inputs["model.variant"] == "wide"
     assert inputs["model.variant.width"] == 512
     assert inputs["seed"] == 4242
+
+
+# --------------------------------------------------------------------------- #
+# A PARTIAL set of markers is not a historical layout. A save that names only
+# some of an option's sub-inputs makes the saved-order walk consume too few
+# slots, so every later widget reads a shifted one. That walk accounts for
+# fewer than all the values, so it is retried on the catalog order — but only
+# taken when the catalog walk is itself exact, because a merely short or extra
+# `widgets_values` array is inexact under both orders and the saved one is
+# still the better guess there.
+# --------------------------------------------------------------------------- #
+
+
+def _partially_marked_node() -> dict:
+    """A save whose `inputs[]` names only two of the option's four sub-widgets.
+
+    The value array still holds all eight slots, so the omission is a gap in
+    the markers rather than a node that genuinely lacked the widgets. Expanding
+    only `prompt`/`resolution` leaves `auto_downscale`'s and `auto_upscale`'s
+    values to be read by `seed` and `watermark`.
+    """
+    return {
+        "id": 14,
+        "type": "ByteDance2ReferenceNode",
+        "widgets_values": [
+            "Seedance 2.0",
+            "a pirate dances in the alley",
+            "720p",
+            True,
+            False,
+            118383194,
+            "randomize",
+            True,
+        ],
+        "inputs": [
+            {"name": n, "widget": {"name": n}}
+            for n in ("model", "model.prompt", "model.resolution", "seed", "watermark")
+        ],
+    }
+
+
+def test_a_partial_marker_set_does_not_bind_sub_values_to_later_inputs():
+    inputs = _convert(_partially_marked_node())
+    # Before the catalog retry these read the two BOOLEAN sub-values:
+    # seed == True and watermark == False.
+    assert inputs["seed"] == 118383194
+    assert inputs["watermark"] is True
+
+
+def test_a_partial_marker_set_still_emits_the_unmarked_sub_inputs():
+    inputs = _convert(_partially_marked_node())
+    assert inputs["model.prompt"] == "a pirate dances in the alley"
+    assert inputs["model.resolution"] == "720p"
+    assert inputs["model.auto_downscale"] is True
+    assert inputs["model.auto_upscale"] is False
+
+
+def test_a_partial_marker_set_does_not_emit_the_control_marker():
+    assert "randomize" not in _convert(_partially_marked_node()).values()
+
+
+def test_a_short_value_array_keeps_the_saved_order():
+    """The bot's caveat: `exact` is false here for an unrelated reason.
+
+    The array is one value short of the node's widgets, so NEITHER order
+    accounts for it. Retrying on the catalog order regardless would read the
+    seed into `model.auto_upscale` and the control marker into `seed`.
+    """
+    node = _node()
+    node["widgets_values"] = node["widgets_values"][:-1]  # drop `watermark`
+
+    inputs = _convert(node)
+
+    assert inputs["seed"] == 118383194
+    assert inputs["model.auto_downscale"] is True
+    assert "model.auto_upscale" not in inputs
+    # The truncated slot is backfilled from the schema default, not taken from
+    # a value that belongs to another input.
+    assert inputs["watermark"] is False
+
+
+def test_an_extra_value_keeps_the_saved_order():
+    """Same caveat from the other side: a trailing value nothing claims."""
+    node = _node()
+    node["widgets_values"] = [*node["widgets_values"], "unclaimed"]
+
+    inputs = _convert(node)
+
+    assert inputs["seed"] == 118383194
+    assert inputs["model.auto_downscale"] is True
+    assert inputs["watermark"] is False
+    assert "model.auto_upscale" not in inputs
+
+
+def test_the_catalog_retry_is_skipped_when_the_saved_walk_is_exact():
+    """`_node()` omits `model.auto_upscale` too, but consumes every value.
+
+    So the genuine pre-`auto_upscale` save must never reach the retry: the
+    catalog order would read its seed into `model.auto_upscale`.
+    """
+    inputs = _convert(_node())
+    assert inputs["seed"] == 118383194
+    assert "model.auto_upscale" not in inputs
+
+
+# --------------------------------------------------------------------------- #
+# The conversion and the edit path must resolve a saved layout the same way.
+# `engine.saved_widget_order` already refuses a saved order whose expansion
+# does not account for the whole value array; conversion was the one reader
+# without that gate, because it has no Graph to run the check against.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_edit_path_also_refuses_a_partial_marker_set():
+    """What conversion now agrees with, asserted on the edit path directly."""
+    graph = Graph.from_object_info(_object_info())
+    node = _partially_marked_node()
+
+    assert saved_widget_order(node, graph, node["type"]) is None
+
+
+def test_the_edit_path_keeps_a_saved_order_that_consumes_every_value():
+    graph = Graph.from_object_info(_object_info())
+    node = _node()
+
+    assert saved_widget_order(node, graph, node["type"]) == list(_SAVED_WIDGET_NAMES)
+
+
+@pytest.mark.parametrize("node_factory", [_node, _partially_marked_node])
+def test_conversion_reads_the_slot_an_edit_would_write(node_factory):
+    """Both readers land on the same name for every slot.
+
+    An edit indexes `widgets_values` by the order `saved_widget_order` resolves
+    (or the catalog order when it returns `None`). Conversion pairs the same
+    array against its own walk. Where the two disagree, `set-widget seed`
+    writes one slot while conversion reads another — the Seedance bug this
+    module's saved-order rule exists to prevent.
+    """
+    node = node_factory()
+    object_info = _object_info()
+    graph = Graph.from_object_info(object_info)
+
+    saved_names = saved_widget_order(node, graph, node["type"])
+    edit_order = [
+        entry.name
+        for entry in _expand_widget_entries(
+            graph.node(node["type"]), node["widgets_values"], saved_widget_names=saved_names
+        )
+    ]
+    converted = _convert(node, object_info)
+
+    for index, name in enumerate(edit_order):
+        if name not in converted:  # a control marker slot owns no input
+            continue
+        assert converted[name] == node["widgets_values"][index], f"slot {index} ({name})"
