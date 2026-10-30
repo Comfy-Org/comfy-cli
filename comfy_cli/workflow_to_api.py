@@ -1913,6 +1913,7 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
 def _schema_widget_pairs(
     schema: Any,
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
 ) -> list[tuple[str, Any]]:
@@ -2215,6 +2216,7 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
 
 def _filter_control_values(
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
     object_info: dict | None = None,
@@ -2492,7 +2494,7 @@ def _collect_widget_inputs(
     # a dynamic combo before a seed steal the seed's slot, e.g. Seedream's
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
-    pairs = _schema_widget_pairs(schema, widget_values, node_type, node) if schema else []
+    pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
     if pairs or schema_widgets:
         for name, value in pairs:
             if not name or name in link_inputs:
@@ -2503,7 +2505,7 @@ def _collect_widget_inputs(
     # No schema, or the schema declares no widget inputs: fall back to the
     # positional control-marker heuristic + node-input name inspection, which
     # matches the reference behavior for unknown node types.
-    filtered = _filter_control_values(widget_values, node_type, node, object_info)
+    filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
     names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
