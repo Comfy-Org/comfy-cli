@@ -65,6 +65,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Checked BEFORE the token step so a missing credential names itself.
+      # `create-github-app-token` fails on an empty `private-key` with a generic
+      # "input must be set to a non-empty string", which on a daily schedule
+      # reads as a mystery red and tells nobody what to do about it. This ran
+      # red every day from 2026-10-21 to 2026-10-29 for exactly that reason,
+      # and the only cost of the vague message was that no one could tell the
+      # difference between an unprovisioned repo and a broken refresh.
+      - name: Verify the bot app credentials are set
+        env:
+          APP_ID: ${{ vars.APP_ID }}
+          CLOUD_CODE_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+        run: |
+          missing=""
+          [ -z "${APP_ID:-}" ] && missing="${missing} vars.APP_ID"
+          [ -z "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" ] && missing="${missing} secrets.CLOUD_CODE_BOT_PRIVATE_KEY"
+          if [ -n "${missing}" ]; then
+            echo "::error::Not configured in this repository:${missing}"
+            echo "This workflow cannot refresh the CQL catalogs without the"
+            echo "CLOUD_CODE_BOT app credentials, which it uses to author the"
+            echo "auto-PR as the bot rather than as a human (see this file's"
+            echo "header for why that matters to the PR's CI)."
+            echo
+            echo "A repository admin has to set them; a workflow change cannot."
+            echo "Until then this job fails every day on its schedule, and that"
+            echo "failure is NOT a signal about the catalogs or about main."
+            exit 1
+          fi
+
       # Mint a CLOUD_CODE_BOT installation token so the auto-PR is authored by
       # the bot, not by a human — see the header prerequisites for why.
       - name: Generate GitHub App token
