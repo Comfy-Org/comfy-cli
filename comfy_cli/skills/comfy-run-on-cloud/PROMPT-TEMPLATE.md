@@ -57,9 +57,9 @@ Approval for uploads applies to every route, including reusing a custom environm
 a required file, do not upload or substitute it; report the route as prepared, not run.
 Pre-flight converted workflows and verify a real job on the selected target with its
 required approved inputs before saying it runs. Return a verified authenticated UI link
-only when the target supports it. Prefer read-only workflow ui <UUID> --workspace <id>
+only when the target supports it. Prefer read-only workflow ui --saved-file <saved_file_id> --workspace <id>
 --environment standard, or --environment custom --deployment <id>, after the normal
-saved record/version/content and sidebar file match and the release capability is true.
+actual userdata UUID/path/content snapshot is verified and private_saved_file_links_enabled is literal true. Keep workflow_id record IDs distinct; legacy positional/record links require regeneration. If saved_file_id is unavailable on an older server, keep the successful save and use verified sidebar recovery without repeating saves or uploads.
 This retains the normal saved-workflow identity and selects the browser environment
 without changing compute. When unavailable, explain the Workflows-sidebar/API fallback;
 a verified deploy ui URL opens only the custom environment, not the saved workflow. A standard-environment save does not select a custom environment.

@@ -1843,7 +1843,6 @@ class WorkflowUiEnvironment(str, Enum):
 )
 @tracking.track_command("workflow")
 def ui_cmd(
-    workflow_id: Annotated[str, typer.Argument(help="Exact private saved workflow UUID.")],
     workspace: Annotated[
         str,
         typer.Option(
@@ -1856,10 +1855,22 @@ def ui_cmd(
     deployment_id: Annotated[
         str | None, typer.Option("--deployment", help="Exact ready deployment ID, required only for custom.")
     ] = None,
+    workflow_id: Annotated[
+        str | None, typer.Argument(help="Legacy workflow-record UUID; refuses with regeneration guidance.")
+    ] = None,
+    saved_file_id: Annotated[
+        str | None, typer.Option("--saved-file", help="Exact userdata saved_file_id UUID from a supported Cloud save.")
+    ] = None,
 ) -> None:
     from comfy_cli.command.workflow_ui import run_ui
 
-    run_ui(workflow_id, workspace=workspace, environment=environment.value, deployment_id=deployment_id)
+    run_ui(
+        workflow_id,
+        saved_file_id=saved_file_id,
+        workspace=workspace,
+        environment=environment.value,
+        deployment_id=deployment_id,
+    )
 
 
 @app.command(

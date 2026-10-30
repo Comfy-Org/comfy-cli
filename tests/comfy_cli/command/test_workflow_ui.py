@@ -33,6 +33,7 @@ def test_cli_ui_command_exists():
     result = CliRunner().invoke(cmd.app, ["ui", "--help"])
     assert result.exit_code == 0, result.output
     help_text = unstyle(result.output)
+    assert "--saved-file" in help_text
     assert "--workspace" in help_text
     assert "--environment" in help_text
     assert "--deployment" in help_text
@@ -46,7 +47,7 @@ def server(monkeypatch):
     monkeypatch.setattr(ui, "resolve_target", lambda **kwargs: target)
     bodies = {
         "/api/workspaces/current": {"id": WORKSPACE, "name": "Test workspace"},
-        "/api/features": {"private_workflow_links_enabled": True},
+        "/api/features": {"private_saved_file_links_enabled": True},
         f"/api/workflows/{WID}": copy.deepcopy(META),
         f"/api/workflows/{WID}/content": {
             "id": "version-1",
@@ -56,6 +57,13 @@ def server(monkeypatch):
             "workflow_json": copy.deepcopy(GRAPH),
         },
         "/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json": copy.deepcopy(GRAPH),
+        f"/api/userdata-files/{WID}": {
+            "id": WID,
+            "path": "workflows/sub/My saved workflow.json",
+            "content": json.dumps(GRAPH),
+            "modified": 1793320000000,
+            "size": len(json.dumps(GRAPH).encode()),
+        },
     }
     calls = []
 
@@ -73,15 +81,16 @@ def server(monkeypatch):
     return ui, bodies, calls, target
 
 
-def test_standard_link_verifies_exact_record_content_and_userdata(server):
+def test_standard_link_verifies_exact_userdata_snapshot(server):
     ui, _, calls, _ = server
     result = ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
-    assert result["workflowId"] == WID
+    assert result["savedFileId"] == WID
     assert result["filename"] == "workflows/sub/My saved workflow.json"
     assert result["verified"] is True
     query = parse_qs(urlsplit(result["url"]).query)
-    assert query == {"workflow": [WID], "workspace": [WORKSPACE], "environment": ["standard"]}
-    assert "/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json" in calls
+    assert query == {"savedFile": [WID], "workspace": [WORKSPACE], "environment": ["standard"]}
+    assert f"/api/userdata-files/{WID}" in calls
+    assert not any("/workflows/" in call or "/userdata/" in call for call in calls)
     assert not urlsplit(result["url"]).fragment
     assert "workflow_json" not in result
 
@@ -89,7 +98,7 @@ def test_standard_link_verifies_exact_record_content_and_userdata(server):
 @pytest.mark.parametrize("flag", [None, False, 1, "true", {}, []])
 def test_missing_or_nonboolean_capability_cannot_produce_url(server, flag):
     ui, bodies, calls, _ = server
-    bodies["/api/features"] = {} if flag is None else {"private_workflow_links_enabled": flag}
+    bodies["/api/features"] = {} if flag is None else {"private_saved_file_links_enabled": flag}
     with pytest.raises(ui.WorkflowUiUnavailable) as failure:
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
     assert failure.value.reason == "capability_unavailable"
@@ -119,9 +128,11 @@ def test_wrong_or_unsafe_workspace_is_refused(server, workspace):
         "sub/.. /file",
     ],
 )
-def test_missing_or_unsafe_record_name_never_becomes_userdata_path(server, name):
+def test_missing_or_unsafe_snapshot_path_is_refused(server, name):
     ui, bodies, calls, _ = server
-    bodies[f"/api/workflows/{WID}"]["name"] = name
+    bodies[f"/api/userdata-files/{WID}"]["path"] = (
+        ("~hidden.json" if name == "~hidden" else f"workflows/{name}.json") if isinstance(name, str) else name
+    )
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
     assert not any("/userdata/" in path for path in calls)
@@ -137,48 +148,44 @@ def test_bad_workflow_identity_rejected_before_network(server, bad_id):
 
 def test_metadata_other_id_is_refused(server):
     ui, bodies, _, _ = server
-    bodies[f"/api/workflows/{WID}"]["id"] = "other-id"
+    bodies[f"/api/userdata-files/{WID}"]["id"] = "other-id"
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
 
 
-@pytest.mark.parametrize("field", ["created_by", "created_at", "updated_at", "latest_version"])
+@pytest.mark.parametrize("field", ["id", "path", "modified", "size"])
 def test_malformed_metadata_is_refused(server, field):
     ui, bodies, _, _ = server
-    bodies[f"/api/workflows/{WID}"].pop(field)
+    bodies[f"/api/userdata-files/{WID}"].pop(field)
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
 
 
-def test_stale_version_or_userdata_content_is_refused(server):
+def test_inconsistent_snapshot_size_or_invalid_content_is_refused(server):
     ui, bodies, _, _ = server
-    bodies[f"/api/workflows/{WID}/content"]["version"] = 2
+    bodies[f"/api/userdata-files/{WID}"]["size"] += 1
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
-    bodies[f"/api/workflows/{WID}/content"]["version"] = 1
-    bodies["/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json"]["nodes"] = [{"id": 1}]
+    bodies[f"/api/userdata-files/{WID}"]["size"] -= 1
+    bodies[f"/api/userdata-files/{WID}"]["content"] = "{bad json"
     with pytest.raises(ui.WorkflowUiUnavailable) as failure:
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
-    assert failure.value.reason == "file_mismatch"
+    assert failure.value.reason == "content_unverified"
 
 
-def test_boolean_number_difference_is_not_matching_json(server):
-    ui, bodies, _, _ = server
+def test_record_file_boolean_number_comparison_is_not_identity_evidence(server):
+    ui, bodies, calls, _ = server
     bodies[f"/api/workflows/{WID}/content"]["workflow_json"]["extra"] = {"flag": True}
     bodies["/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json"]["extra"] = {"flag": 1}
-    with pytest.raises(ui.WorkflowUiUnavailable):
-        ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
+    # These legacy surfaces cannot affect the UUID-bound snapshot in either direction.
+    assert ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")["savedFileId"] == WID
+    assert not any("/workflows/" in call or "/userdata/" in call for call in calls)
 
 
 @pytest.mark.parametrize("point", ["metadata", "content", "file"])
 def test_old_record_only_or_inaccessible_workflow_has_safe_fallback(server, point):
     ui, bodies, _, _ = server
-    paths = {
-        "metadata": f"/api/workflows/{WID}",
-        "content": f"/api/workflows/{WID}/content",
-        "file": "/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json",
-    }
-    bodies[paths[point]] = urllib.error.HTTPError("https://cloud.test", 404, "missing", {}, None)
+    bodies[f"/api/userdata-files/{WID}"] = urllib.error.HTTPError("https://cloud.test", 404, "missing", {}, None)
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
 
@@ -219,7 +226,7 @@ def test_custom_link_reuses_exact_verified_deployment_target(server, monkeypatch
     monkeypatch.setattr(ui, "verify_deployment_editor_target", verified)
     result = ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="custom", deployment_id=DEPLOYMENT)
     assert parse_qs(urlsplit(result["url"]).query) == {
-        "workflow": [WID],
+        "savedFile": [WID],
         "workspace": [WORKSPACE],
         "deployment": [DEPLOYMENT],
     }
@@ -234,7 +241,7 @@ def test_error_response_never_leaks_private_prompts_or_credentials(server, monke
     monkeypatch.setattr(ui, "get_renderer", lambda: renderer)
     monkeypatch.setattr(ui, "request_json", Mock(side_effect=ValueError("SECRET PRIVATE PROMPT oauth-token")))
     with pytest.raises(Exception):
-        ui.run_ui(WID, workspace=WORKSPACE, environment="standard")
+        ui.run_ui(saved_file_id=WID, workspace=WORKSPACE, environment="standard")
     error = renderer.error.call_args.kwargs
     assert error["code"] == "workflow_ui_unavailable"
     assert "SECRET" not in json.dumps(error)
@@ -304,13 +311,7 @@ def test_custom_link_real_shared_verifier_passes_and_schema_matches(server, monk
 @pytest.mark.parametrize("location", ["metadata", "content", "userdata", "features"])
 def test_malformed_bodies_are_refused_without_content_in_errors(server, location):
     ui, bodies, _, _ = server
-    paths = {
-        "metadata": f"/api/workflows/{WID}",
-        "content": f"/api/workflows/{WID}/content",
-        "userdata": "/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json",
-        "features": "/api/features",
-    }
-    bodies[paths[location]] = ["SECRET PRIVATE PROMPT"]
+    bodies["/api/features" if location == "features" else f"/api/userdata-files/{WID}"] = ["SECRET PRIVATE PROMPT"]
     with pytest.raises(ui.WorkflowUiUnavailable) as failure:
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
     assert "SECRET" not in str(failure.value)
@@ -337,21 +338,21 @@ def test_actual_read_only_http_transport_and_single_segment_userdata_encoding(se
     monkeypatch.setattr(http._AUTHED_OPENER, "open", open_request)
     monkeypatch.setattr(ui, "request_json", http.request_json)
     assert ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")["verified"] is True
-    assert observed[-1] == "/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json"
+    assert observed[-1] == f"/api/userdata-files/{WID}"
 
 
-@pytest.mark.parametrize("field", ["created_by", "created_at"])
+@pytest.mark.parametrize("field", ["content", "path"])
 def test_content_requires_the_frontend_response_contract(server, field):
     ui, bodies, _, _ = server
-    bodies[f"/api/workflows/{WID}/content"].pop(field)
+    bodies[f"/api/userdata-files/{WID}"].pop(field)
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
 
 
-@pytest.mark.parametrize("field", ["created_at", "updated_at"])
-def test_frontend_datetime_metadata_must_be_valid(server, field):
+@pytest.mark.parametrize("field", ["modified", "size"])
+def test_snapshot_numeric_metadata_must_be_valid(server, field):
     ui, bodies, _, _ = server
-    bodies[f"/api/workflows/{WID}"][field] = "not-a-timestamp"
+    bodies[f"/api/userdata-files/{WID}"][field] = "not-a-number"
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
 
@@ -359,18 +360,16 @@ def test_frontend_datetime_metadata_must_be_valid(server, field):
 @pytest.mark.parametrize(
     "field,value", [("default_view", "unknown"), ("description", 12), ("forked_from", {"workflow_id": 12})]
 )
-def test_optional_metadata_still_obeys_frontend_schema(server, field, value):
+def test_optional_record_metadata_is_not_file_identity_evidence(server, field, value):
     ui, bodies, _, _ = server
     bodies[f"/api/workflows/{WID}"][field] = value
-    with pytest.raises(ui.WorkflowUiUnavailable):
-        ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
+    assert ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")["savedFileId"] == WID
 
 
-def test_malformed_content_asset_references_cannot_produce_a_link(server):
+def test_record_asset_references_are_not_file_identity_evidence(server):
     ui, bodies, _, _ = server
     bodies[f"/api/workflows/{WID}/content"]["dependency_asset_ids"] = [42]
-    with pytest.raises(ui.WorkflowUiUnavailable):
-        ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
+    assert ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")["savedFileId"] == WID
 
 
 @pytest.mark.parametrize(
@@ -378,7 +377,7 @@ def test_malformed_content_asset_references_cannot_produce_a_link(server):
 )
 def test_actual_consumer_invalid_graph_is_not_a_verified_normal_link(server, graph):
     ui, bodies, _, _ = server
-    bodies[f"/api/workflows/{WID}/content"]["workflow_json"] = graph
-    bodies["/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json"] = graph
+    text = json.dumps(graph)
+    bodies[f"/api/userdata-files/{WID}"].update(content=text, size=len(text.encode()))
     with pytest.raises(ui.WorkflowUiUnavailable):
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")

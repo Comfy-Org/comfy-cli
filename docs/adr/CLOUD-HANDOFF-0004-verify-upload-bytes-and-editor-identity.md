@@ -65,12 +65,17 @@ protocol is outside this change.
   including explicitly forwarded environment credentials; discovery does not
   weaken server authorization or embed credentials in links.
 - Private workflow links require the literal server capability
-  `private_workflow_links_enabled: true`. Absence or false is unsupported until
-  the matching frontend release is deployed and the operator enables it.
-- A private link targets the ordinary saved workflow UUID only after verifying
-  the exact record/version/content and its matching normal
-  `workflows/<record-name>.json` sidebar file. Duplicate, malformed, incompatible
-  or mismatched evidence fails closed. A custom link also verifies the exact
+  `private_saved_file_links_enabled: true`. Absence or false is unsupported until
+  the matching backend snapshot/identity-guard API and frontend saved-document consumer are deployed and the operator enables it. This advertises CLI publication; the browser does not use it as a kill switch.
+- A private link uses `savedFile=<userdata UUID>` only after reading the exact
+  authenticated `/api/userdata-files/{id}` snapshot: its row UUID, canonical
+  `workflows/*.json` path and original UTF-8 JSON content. The `--saved-file`
+  command input is explicit. A workflow record ID, name or equal content cannot
+  establish userdata identity; old positional commands and `workflow=` links
+  require regeneration. Missing, malformed, incompatible or mismatched evidence
+  fails closed. Cloud save exposes `saved_file_id` separately from record-based
+  `workflow_id`; older save responses remain successful with a null file ID and
+  an explicit limitation, without duplicate saves/uploads. A custom link also verifies the exact
   deployment and served release; a standard link explicitly selects the standard
   environment in the browser. The browser rechecks access and performs selection.
 - An unavailable complete handoff returns a precise limitation and verified
@@ -146,7 +151,7 @@ simulated tests do not establish original-workflow inference quality.
   HTTP results. `test_cloud_model_validation.py` retains unrelated validation
   failures and bounds authenticated exact-asset lookup.
 - `test_deploy_ui.py` and `test_workflow_ui.py` cover authorization/target/release
-  mismatch, disabled capability, saved record/sidebar association and read-only
+  mismatch, disabled capability, exact UUID snapshots, legacy refusal and read-only
   behavior. Existing save tests retain collision protection and read-back proof.
 - `test_cloud_workflow_schema.py` replays the actual frontend consumer corpus,
   including URL acceptance, opaque object boundaries, no network/base and
@@ -163,7 +168,7 @@ simulated tests do not establish original-workflow inference quality.
 
 Reopen this decision if any changed source byte reaches model upload despite a
 matching expected digest; if a public-only match is reported as owned reuse; if
-any private link selects a different record/workspace/release; if frontend/Python
+any private link selects a different userdata row/workspace/release; if frontend/Python
 acceptance differs on one oracle case; or if a supported Python/OS target lacks a
 usable Ada installation. A request for atomic guarantees on another upload
 mechanism requires a separately reviewed protocol decision.
