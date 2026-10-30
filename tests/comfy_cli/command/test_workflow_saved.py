@@ -762,7 +762,14 @@ _MIRRORED_RECORD = {
 }
 
 # Cloud's `POST /api/userdata/{file}?full_info=true` receipt: a FileInfo dict.
-_USERDATA_SAVE_RESPONSE = {"path": "workflows/my workflow.json", "size": 64, "modified": 1700000003000}
+_SAVED_FILE_ID = "978e5f58-49dc-4a81-8235-a0b91c204a1c"
+_USERDATA_SAVE_RESPONSE = {
+    "id": _SAVED_FILE_ID,
+    "path": "workflows/my workflow.json",
+    "size": 64,
+    "modified": 1700000003000,
+}
+
 
 _BOOL_NUMBER_MISMATCHES = [
     pytest.param(1, True, id="one-vs-true"),
@@ -1451,3 +1458,66 @@ class TestListMalformedShape:
         env = _run(["list", "--where", "cloud"], capsys)
         assert env["ok"] is True
         assert env["data"]["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "identity", [None, "", 12, True, "not-a-uuid", "a" * 32, "978E5F58-49DC-4A81-8235-A0B91C204A1C"]
+)
+def test_cloud_save_without_canonical_file_id_keeps_success_and_record_separate(
+    cloud_target, tmp_path, monkeypatch, capsys, identity
+):
+    wf_path, _ = _cloud_wf(tmp_path)
+    receipt = {**_USERDATA_SAVE_RESPONSE, "id": identity}
+    if identity is None:
+        receipt.pop("id")
+    calls = _patch_urlopen(
+        monkeypatch,
+        {
+            "/api/userdata/": receipt,
+            "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+            "/content": {"workflow_json": _LOCAL_WORKFLOW},
+        },
+    )
+    env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+    assert env["ok"] is True
+    assert env["data"]["saved_file_id"] is None
+    assert env["data"]["workflow_id"] == _MIRRORED_RECORD["id"]
+    warning = next(w for w in env["data"]["warnings"] if w["code"] == "saved_file_identity_unavailable")
+    assert "do not repeat" in warning["message"]
+    assert len([c for c in calls if c["method"] == "POST"]) == 1
+
+
+def test_cloud_save_exposes_received_file_uuid_distinct_from_equal_content_record(
+    cloud_target, tmp_path, monkeypatch, capsys
+):
+    wf_path, _ = _cloud_wf(tmp_path)
+    _patch_urlopen(
+        monkeypatch,
+        {
+            "/api/userdata/": _USERDATA_SAVE_RESPONSE,
+            "/api/workflows?": _record_listing(_MIRRORED_RECORD),
+            "/content": {"workflow_json": _LOCAL_WORKFLOW},
+        },
+    )
+    env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+    assert env["ok"] is True
+    assert env["data"]["saved_file_id"] == _SAVED_FILE_ID
+    assert env["data"]["workflow_id"] == _MIRRORED_RECORD["id"]
+    assert env["data"]["saved_file_id"] != env["data"]["workflow_id"]
+
+
+@pytest.mark.parametrize("path", [None, "workflows/other.json", "my workflow.json"])
+def test_cloud_save_other_receipt_path_does_not_certify_requested_file(
+    cloud_target, tmp_path, monkeypatch, capsys, path
+):
+    wf_path, _ = _cloud_wf(tmp_path)
+    _patch_urlopen(
+        monkeypatch,
+        {
+            "/api/userdata/": {**_USERDATA_SAVE_RESPONSE, "path": path},
+            "/api/workflows?": _record_listing(),
+        },
+    )
+    env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
+    assert env["ok"] is True
+    assert env["data"]["saved_file_id"] is None
