@@ -6,7 +6,6 @@ import json
 import re
 import urllib.error
 import urllib.parse
-from uuid import UUID
 
 import typer
 
@@ -17,6 +16,7 @@ from comfy_cli.command.deploy_ui import EditorUnavailableError, verify_deploymen
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge, assert_safe_url, request_json
 from comfy_cli.output import get_renderer
+from comfy_cli.saved_file_identity import canonical_saved_file_id
 from comfy_cli.target import resolve_target
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -76,16 +76,9 @@ def verify_workflow_link(
     No save/share operation, browser launch, environment mutation or compute
     operation occurs. A capability absent on an older release is a hard refusal.
     """
-    try:
-        identity = UUID(saved_file_id)
-        canonical_id = str(identity)
-    except (ValueError, AttributeError, TypeError):
+    canonical_id = canonical_saved_file_id(saved_file_id.lower()) if isinstance(saved_file_id, str) else None
+    if canonical_id is None:
         _refuse("invalid_identity", "Use the exact saved_file_id UUID from the userdata save receipt.")
-    # Match the browser uuid.validate contract: RFC versions1..8, plus nil/max.
-    if identity.int not in (0, (1 << 128) - 1) and identity.version not in range(1, 9):
-        _refuse("invalid_identity", "Cloud editor links require a supported saved-file UUID.")
-    if canonical_id != saved_file_id.lower():
-        _refuse("invalid_identity", "Use the canonical saved_file_id UUID.")
     if not isinstance(workspace, str) or not _SAFE_ID.fullmatch(workspace):
         _refuse("invalid_workspace", "Use the exact destination workspace ID.")
     if environment not in ("standard", "custom"):
