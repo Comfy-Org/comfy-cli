@@ -6,9 +6,8 @@ implicit main-thread loop creation was removed. `background_launch` now uses
 `asyncio.run(...)`, which works identically on 3.10-3.14+.
 """
 
-from unittest.mock import AsyncMock, patch
-
 import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
