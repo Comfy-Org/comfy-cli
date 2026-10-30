@@ -2482,7 +2482,9 @@ def _collect_widget_inputs(
     if not isinstance(widget_values, list):
         return {}
 
-    if any(isinstance(v, dict) for v in widget_values):
+    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
+    # Any schema-declared widget makes this list positional; self-naming dict layouts require no declared widgets.
+    if not schema_widgets and any(isinstance(v, dict) for v in widget_values):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
@@ -2492,9 +2494,7 @@ def _collect_widget_inputs(
     # a dynamic combo before a seed steal the seed's slot, e.g. Seedream's
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
-    schema = _schema_for(node_type, node, object_info)
     pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
-    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
             if not name or name in link_inputs:

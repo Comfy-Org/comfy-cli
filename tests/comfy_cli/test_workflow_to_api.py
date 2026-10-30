@@ -3178,3 +3178,182 @@ class TestSocketlessInputAbsentFromASavedWorkflow:
 
     def test_a_saved_value_still_wins_over_the_placeholder(self, object_info_compare):
         assert self._one("ColorNode", ["#123456"], object_info_compare)["color"] == "#123456"
+
+
+class TestRecordWidgetValues:
+    def test_curve_editor_preserves_a_saved_non_default_curve(self):
+        # Match the public socketless CURVE spec; this is a bounded fixture,
+        # not a replay of the four-node oracle workflow.
+        curve = {"interpolation": "monotone_cubic", "points": [[0, 0], [0.389, 0.526], [0.735, 0.449], [1, 1]]}
+        object_info = {
+            "CurveEditor": {
+                "input": {
+                    "required": {
+                        "curve": [
+                            "CURVE",
+                            {
+                                "default": {"interpolation": "linear", "points": [[0.0, 0.0], [1.0, 1.0]]},
+                                "socketless": True,
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["curve"]},
+                "output": ["CURVE"],
+            }
+        }
+        ui = {"nodes": [_node(1, "CurveEditor", widgets=[curve])], "links": []}
+
+        assert convert_ui_to_api(ui, object_info)["1"]["inputs"]["curve"] == curve
+
+    @pytest.mark.parametrize("trailer", [[], [0, 0, 512, 512]])
+    def test_image_crop_region_is_not_replaced_by_the_default(self, trailer):
+        region = {"x": 0, "y": 0, "width": 1669, "height": 2688}
+        object_info = {
+            "ImageCropV2": {
+                "input": {
+                    "required": {
+                        "image": ["IMAGE", {}],
+                        "crop_region": [
+                            "BOUNDING_BOX",
+                            {
+                                "default": {"x": 0, "y": 0, "width": 512, "height": 512},
+                                "socketless": True,
+                                "component": "ImageCrop",
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["image", "crop_region"]},
+                "output": ["IMAGE"],
+            }
+        }
+        ui = {
+            "nodes": [
+                _node(1, "ImageSource", outputs=[{"name": "IMAGE", "links": [1]}]),
+                _node(
+                    338,
+                    "ImageCropV2",
+                    inputs=[{"name": "image", "link": 1}, {"name": "crop_region", "link": None}],
+                    widgets=[region, *trailer],
+                ),
+            ],
+            "links": [[1, 1, 0, 338, 0, "IMAGE"]],
+        }
+        assert convert_ui_to_api(ui, object_info)["338"]["inputs"] == {
+            "image": ["1", 0],
+            "crop_region": region,
+        }
+
+    @pytest.fixture
+    def record_schema(self):
+        return {
+            "RecordNode": {
+                "input": {
+                    "required": {
+                        "before": ["FLOAT", {"default": 1.0}],
+                        "record": ["RECORD", {"socketless": True}],
+                        "after": ["STRING", {"default": "default"}],
+                    }
+                },
+                "input_order": {"required": ["before", "record", "after"]},
+                "output": [],
+            }
+        }
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            {},
+            {"x": 4, "width": 32},
+            {"type": "rectangle"},
+            {"lora": "ordinary record data"},
+            {"type": "rectangle", "lora": "ordinary record data", "nested": {"points": [[1, 2]]}},
+        ],
+    )
+    def test_record_members_do_not_choose_a_different_widget_layout(self, record_schema, record):
+        ui = {"nodes": [_node(2, "RecordNode", widgets=[0.25, record, "chosen"])], "links": []}
+        assert convert_ui_to_api(ui, record_schema)["2"]["inputs"] == {
+            "before": 0.25,
+            "record": record,
+            "after": "chosen",
+        }
+
+    def test_linked_record_keeps_following_widget_values_aligned(self, record_schema):
+        ui = {
+            "nodes": [
+                _node(1, "RecordSource", outputs=[{"name": "RECORD", "links": [1]}]),
+                _node(
+                    2,
+                    "RecordNode",
+                    inputs=[{"name": "record", "link": 1}],
+                    widgets=[0.25, {"type": "saved record"}, "chosen"],
+                ),
+            ],
+            "links": [[1, 1, 0, 2, 0, "RECORD"]],
+        }
+        assert convert_ui_to_api(ui, record_schema)["2"]["inputs"] == {
+            "before": 0.25,
+            "record": ["1", 0],
+            "after": "chosen",
+        }
+
+
+class TestMixedWidgetLayouts:
+    @pytest.mark.parametrize("section", ["required", "optional"])
+    @pytest.mark.parametrize(
+        ("widgets", "expected"),
+        [
+            ([5, "hi", {"type": "Hdr"}], {"seed": 5, "text": "hi"}),
+            ([{"type": "Hdr"}, 5, "hi"], {"seed": {"type": "Hdr"}, "text": 5}),
+        ],
+    )
+    def test_declared_widgets_remain_positional_with_self_named_dicts(self, section, widgets, expected):
+        # Synthetic mixed layouts retain positional mapping, even when a dict precedes the declared values.
+        object_info = {
+            "MixedLayoutNode": {
+                "input": {section: {"seed": ["INT", {"default": 0}], "text": ["STRING", {"default": "default"}]}},
+                "input_order": {section: ["seed", "text"]},
+                "output": [],
+            }
+        }
+        ui = {"nodes": [_node(2, "MixedLayoutNode", widgets=widgets)], "links": []}
+        assert convert_ui_to_api(ui, object_info)["2"]["inputs"] == expected
+
+
+class TestLegacyLoraWidgetValues:
+    @pytest.mark.parametrize("with_schema", [False, True])
+    @pytest.mark.parametrize("linked", [False, True])
+    @pytest.mark.parametrize("clip_strength", [0.0, 0.25])
+    def test_self_named_widgets_without_schema_slots_keep_their_layout(self, with_schema, linked, clip_strength):
+        node_type = "Power Lora Loader (rgthree)"
+        header = {"type": "PowerLoraLoaderHeaderWidget"}
+        first = {"on": True, "lora": "first.safetensors", "strength": 0.5, "strengthTwo": None}
+        second = {"on": False, "lora": "second.safetensors", "strength": 0.75, "strengthTwo": clip_strength}
+        node = _node(2, node_type, widgets=[header, first, second, {}, ""])
+        ui = {"nodes": [node], "links": []}
+        expected = {
+            "PowerLoraLoaderHeaderWidget": header,
+            "lora_1": {"on": True, "lora": "first.safetensors", "strength": 0.5},
+            "lora_2": second,
+            "➕ Add Lora": "",
+        }
+        if linked:
+            ui["nodes"].insert(0, _node(1, "Source", outputs=[{"links": [1]}, {"links": [2]}]))
+            node["inputs"] = [
+                {"name": "lora_1", "link": 1},
+                {"name": "PowerLoraLoaderHeaderWidget", "link": 2},
+            ]
+            ui["links"] = [[1, 1, 0, 2, 0, "*"], [2, 1, 1, 2, 1, "*"]]
+            expected.update(lora_1=["1", 0], PowerLoraLoaderHeaderWidget=["1", 1])
+        object_info = (
+            {
+                node_type: {
+                    "input": {"required": {}, "optional": {"model": ["MODEL"], "clip": ["CLIP"]}},
+                    "output": ["MODEL", "CLIP"],
+                }
+            }
+            if with_schema
+            else {}
+        )
+        assert convert_ui_to_api(ui, object_info)["2"]["inputs"] == expected

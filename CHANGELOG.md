@@ -230,6 +230,9 @@ history.
 
 ### Fixed
 
+- Converting a UI workflow to API format keeps a record widget's saved value,
+  such as `ImageCropV2.crop_region`, instead of replacing it with the schema
+  default.
 - Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
   (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
   written `widgets_values` is the frontend's four-widget shape
