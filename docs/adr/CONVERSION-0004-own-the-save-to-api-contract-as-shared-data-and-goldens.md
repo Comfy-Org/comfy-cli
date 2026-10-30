@@ -4,16 +4,16 @@ Date: 2026-10-28
 
 ## Status
 
-Accepted 2026-10-30.
+Accepted
 
-The Decision section below binds two repositories other than this one:
-`ComfyUI_frontend` generates the widget data, and `comfy-cloud-mcp-server`'s
-converter consumes the bundle instead of its own tables. Neither affected path
-carries a per-path `CODEOWNERS` entry, so there was no single named reviewer to
-request, and acceptance was taken by the author in their capacity as a code
-owner of both. The two obligations are tracked as issues in those repositories
-(see Notes) and remain open to pushback there on implementation and cost; what
-is settled here is the design.
+Accepted on 2026-10-30. The Decision section below binds two repositories other
+than this one: `ComfyUI_frontend` generates the widget data, and
+`comfy-cloud-mcp-server`'s converter consumes the bundle instead of its own
+tables. Neither affected path carries a per-path `CODEOWNERS` entry, so there
+was no single named reviewer to request, and acceptance was taken by the author
+in their capacity as a code owner of both. The two obligations are tracked as
+issues in those repositories (see Notes) and remain open to pushback there on
+implementation and cost; what is settled here is the design.
 
 ## Context
 
