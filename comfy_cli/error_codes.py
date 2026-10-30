@@ -180,6 +180,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass a different `--name`, or drop `--no-overwrite` to replace it",
     ),
     ErrorCode(
+        "saved_file_identity_unavailable",
+        "`comfy workflow save --where cloud` saved the sidebar file, but its write receipt did not return "
+        "a usable canonical userdata UUID for that exact path. `saved_file_id` is null. Surfaced in "
+        "`data.warnings[]`: the save succeeded; a same-name or equal-content workflow record does not "
+        "certify file identity.",
+        "verify the file in Cloud's Workflows sidebar; do not repeat the save or uploads solely to obtain an ID",
+    ),
+    ErrorCode(
         "workflow_record_unresolved",
         "`comfy workflow save --where cloud` saved the file the Workflows sidebar lists, but could not read "
         "back exactly one Cloud workflow record with that name and matching content (none yet, two sharing it, "
