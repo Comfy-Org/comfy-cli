@@ -24,20 +24,23 @@ canvas measures text. Only a rendered-geometry comparison catches
 that, which needs a browser and therefore lives in the frontend's Playwright harness.
 
 Two constants are genuinely browser-fitted and cannot be read from source at all; they
-are listed in BROWSER_FITTED and reported on every run with the date they were fitted,
-so "this guard passed" never reads as "the whole model is verified". `coverage()`
-classifies every numeric constant in layout.py into exactly one of the four buckets and
-`tests/comfy_cli/test_litegraph_parity.py` fails on an unclassified one, so a new fitted
-constant cannot join the unguarded set silently -- which is how these four did.
+are listed in BROWSER_FITTED and reported on every run -- every exit code, not just 0 --
+with the date they were fitted, so "this guard passed" never reads as "the whole model is
+verified". `coverage()` classifies every numeric constant in layout.py into exactly one of
+the four buckets and `tests/comfy_cli/test_litegraph_parity.py` fails on an unclassified
+one, so a new fitted constant cannot join the unguarded set silently -- which is how these
+four did.
 
 Usage:
     python scripts/check_litegraph_parity.py            # fetch from upstream main
     python scripts/check_litegraph_parity.py --ref v1.2 # pin a ref
     python scripts/check_litegraph_parity.py --source-dir /path/to/ComfyUI_frontend
 
-Exit 0 when every constant matches, 1 on a mismatch, 2 when the sources could not be
-read (network, moved file). A fetch failure is deliberately distinct from a mismatch
-so CI can treat "could not check" differently from "constants have drifted".
+Exit 0 when every constant matches, 1 on a mismatch, 2 when a source could not be read
+(network, moved file). A fetch failure is deliberately distinct from a mismatch so CI can
+treat "could not check" differently from "constants have drifted" -- and an unread file
+disables only the checks that depend on it, so a volatile derived source going missing
+cannot hide drift in a stable one.
 """
 
 from __future__ import annotations
@@ -63,6 +66,28 @@ IMAGE_PREVIEW_PATH = "src/scripts/ui/imagePreview.ts"
 STRING_WIDGET_PATH = "src/renderer/extensions/vueNodes/widgets/composables/useStringWidget.ts"
 
 LAYOUT_SOURCE = Path(layout.__file__)
+
+# A COMPLETE numeric literal, and nothing that could extend or combine with it.
+#
+# The naive `(-?[\d.]+)` reads the leading digits of whatever follows and reports the old
+# number: `widgets_height += 8 * scale`, `widget_height + 4 + extraGap`, `+ 4e1`, `4_0`
+# (TypeScript numeric separators are legal) and `elH = 190 * dpr` all parsed as unchanged
+# parity after the value had in fact been reshaped. `4.5.6` was worse -- it reached
+# `float()` and raised, which exits 1 and reads as drift.
+#
+# So the literal must be followed by something that cannot continue an expression: a
+# statement or list terminator, or end of input. `[^\S\n]*` is horizontal whitespace
+# only, so a trailing comment (already blanked by `active_typescript`) still terminates at
+# its newline, while ` * scale` does not. A reshape therefore returns None and the caller
+# reports "could not check", which is the whole contract this guard rests on.
+_NUMBER = r"(-?\d+(?:\.\d+)?)(?=[^\S\n]*(?:[;,)\]}\n]|$))"
+
+# `\b` is not enough to keep an identifier off a longer one here: in `total_widgets_height`
+# the position before `widgets` sits between two word characters, so `\b` does not match --
+# but in `node.widgets_height` it does, and that is a different variable. Exclude the dot
+# as well. Omit it for a property name that is always reached through one.
+_NOT_IDENT = r"(?<![\w$.])"
+_NOT_IDENT_KEEP_DOT = r"(?<![\w$])"
 
 console = Console(highlight=False)
 error_console = Console(stderr=True, highlight=False)
@@ -92,7 +117,10 @@ def find_widget_row_gap(text: str) -> float | None:
     Anchored on the accumulator name and on `widget_height` so it cannot match the
     block pad two lines below, which assigns a bare number to the same accumulator.
     """
-    m = re.search(r"widgets_height\s*\+=\s*widget_height\s*\+\s*(-?[\d.]+)", active_typescript(text))
+    m = re.search(
+        _NOT_IDENT + r"widgets_height\s*\+=\s*" + _NOT_IDENT + r"widget_height\s*\+\s*" + _NUMBER,
+        active_typescript(text),
+    )
     return float(m.group(1)) if m else None
 
 
@@ -100,19 +128,34 @@ def find_widget_block_pad(text: str) -> float | None:
     """The once-per-block pad added after computeSize's widget loop: `widgets_height += 8`.
 
     Requiring a number straight after `+=` is what separates this from the row gap,
-    whose right-hand side starts with an identifier.
+    whose right-hand side starts with an identifier. `_NUMBER` is what stops the
+    separation working only one way round: `widgets_height += 4 + widget_height` would
+    otherwise be read here as a block pad of 4 and reported as drift.
     """
-    m = re.search(r"widgets_height\s*\+=\s*(-?[\d.]+)", active_typescript(text))
+    m = re.search(
+        _NOT_IDENT + r"widgets_height\s*\+=\s*" + _NUMBER,
+        active_typescript(text),
+    )
     return float(m.group(1)) if m else None
 
 
 def find_image_host_min_height(text: str) -> float | None:
     """`createImageHost`'s first-render floor: `if (elH < 190) { elH = 190 }`.
 
-    Matched on the assignment rather than the comparison; `let elH = el.clientHeight`
-    is skipped because the pattern demands a numeric right-hand side.
+    Scoped to the whole guarded block rather than to a bare `elH = <number>`. The file is
+    full of height assignments and `re.search` takes the first match anywhere in it, so an
+    unscoped pattern would read `labelH = 20`, `maxElH = 300` or the earlier
+    `let elH = el.clientHeight` reset as the floor -- false drift, or false parity when
+    the numbers happen to coincide.
+
+    The comparison's own number is matched but deliberately not captured: upstream is free
+    to grow below a different threshold than it grows to, and it is the assigned value that
+    layout.py models.
     """
-    m = re.search(r"elH\s*=\s*(-?[\d.]+)", active_typescript(text))
+    m = re.search(
+        r"if\s*\(\s*" + _NOT_IDENT + r"elH\s*<\s*-?\d+(?:\.\d+)?\s*\)\s*\{?\s*" + _NOT_IDENT + r"elH\s*=\s*" + _NUMBER,
+        active_typescript(text),
+    )
     return float(m.group(1)) if m else None
 
 
@@ -121,9 +164,25 @@ def find_multiline_min_node_width(text: str) -> float | None:
 
     This is the floor a node carrying a textarea is widened to, which is why
     layout.py charges multiline nodes a different minimum width from ordinary ones.
+
+    Today `addMultilineWidget` is the only thing in `useStringWidget.ts` that sets
+    `minNodeSize`, and that uniqueness is what ties the number to the multiline path.
+    Rather than anchor on the enclosing function name -- which is renamed far more often
+    than the option is -- require the match to be the only one in the file: a second
+    `minNodeSize` means this guard can no longer tell which widget's floor it read, so it
+    reports "could not check" instead of comparing against the wrong one.
+
+    Only the WIDTH term has to be a number. The height beside it is a different constant
+    that layout.py does not model, so `[400, MIN_TEXTAREA_H]` must still check the width
+    rather than read as a reshape.
     """
-    m = re.search(r"minNodeSize\s*[:=]\s*\[\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)", active_typescript(text))
-    return float(m.group(1)) if m else None
+    matches = re.findall(
+        _NOT_IDENT_KEEP_DOT + r"minNodeSize\s*[:=]\s*\[\s*" + _NUMBER,
+        active_typescript(text),
+    )
+    if len(matches) != 1:
+        return None
+    return float(matches[0])
 
 
 # Constants upstream states but not as a `NAME = value` declaration, so `find_assignment`
@@ -191,33 +250,122 @@ PLACER_POLICY = frozenset(
         "HEADER_H",
         "PAD_H",
         "MIN_H",
+        # Where the placer starts on an empty canvas, and the footprint it falls back to
+        # when a node's own geometry is absent or unreadable. Neither is a claim about
+        # what the renderer draws -- DEFAULT_SIZE is a last resort chosen so a collision
+        # check still has a finite rectangle to test.
+        "ORIGIN",
+        "DEFAULT_SIZE",
         "_MARGIN",
         "_GUARD",
         "_ORDER_SWEEPS",
     }
 )
 
+# Module-level names in layout.py whose value is an EXPRESSION over other constants rather
+# than a literal. The walker deliberately does not reduce these -- a derived value is
+# already covered by whatever its terms are covered by -- but it must not lose them
+# either, or a shape it cannot read becomes invisible instead of noisy.
+DERIVED_EXPRESSIONS = frozenset({"_WIDGET_PADDING"})
 
-def layout_constants() -> dict[str, float]:
-    """Every module-level numeric literal constant in layout.py, by name.
+GeometryValue = float | tuple[float, ...]
 
-    Read from the AST rather than from `dir(layout)` so an imported number or a value
-    derived from other constants (`_WIDGET_PADDING`) is not demanded to be classified:
-    a derived value is already covered by whatever its terms are covered by.
+
+def _module_assignments(tree: ast.Module) -> list[tuple[list[ast.expr], ast.expr]]:
+    """Every module-level binding, as (targets, value).
+
+    `AnnAssign` is included because `X: float = 1.0` is the same declaration as `X = 1.0`
+    to every reader and a different AST node to this walker; a constant written that way
+    used to be invisible to the coverage gate.
     """
-    tree = ast.parse(LAYOUT_SOURCE.read_text(encoding="utf-8"))
-    found: dict[str, float] = {}
+    out: list[tuple[list[ast.expr], ast.expr]] = []
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        if isinstance(node, ast.Assign):
+            out.append((list(node.targets), node.value))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            out.append(([node.target], node.value))
+    return out
+
+
+def _numeric_literal(node: ast.expr) -> float | None:
+    """A numeric literal, signed or not. None for anything else.
+
+    `-5.0` parses as `UnaryOp(USub, Constant)`, not as a negative constant, so a plain
+    `isinstance(value, ast.Constant)` test silently skips every negative number.
+    """
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            return None
+        return float(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _numeric_literal(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
+    return None
+
+
+def _geometry_literal(node: ast.expr) -> GeometryValue | None:
+    """A number, or a tuple/list of numbers. None if it is neither.
+
+    Geometry is not always scalar here: `ORIGIN` and `DEFAULT_SIZE` are numeric pairs and
+    were invisible to the coverage gate for exactly that reason.
+    """
+    scalar = _numeric_literal(node)
+    if scalar is not None:
+        return scalar
+    if isinstance(node, (ast.Tuple, ast.List)):
+        terms = [_numeric_literal(element) for element in node.elts]
+        if terms and all(term is not None for term in terms):
+            return tuple(term for term in terms if term is not None)
+    return None
+
+
+def constants_in(source: str) -> dict[str, GeometryValue]:
+    """Every module-level numeric constant in `source`, by name.
+
+    Read from the AST rather than from `dir(layout)` so an imported number is not demanded
+    to be classified. Handles the shapes a reader would call a constant and an earlier
+    version of this walker skipped: annotated (`X: float = 1.0`), negative (`-5.0`),
+    chained (`X = Y = 1.0`) and tuple-valued (`ORIGIN`). Expression-valued names are
+    reported separately by `expressions_in`.
+    """
+    found: dict[str, GeometryValue] = {}
+    for targets, value in _module_assignments(ast.parse(source)):
+        geometry = _geometry_literal(value)
+        if geometry is None:
             continue
-        target = node.targets[0]
-        value = node.value
-        if not isinstance(target, ast.Name) or not isinstance(value, ast.Constant):
-            continue
-        if isinstance(value.value, bool) or not isinstance(value.value, (int, float)):
-            continue
-        found[target.id] = float(value.value)
+        for target in targets:
+            if isinstance(target, ast.Name):
+                found[target.id] = geometry
     return found
+
+
+def expressions_in(source: str) -> set[str]:
+    """Module-level names in `source` whose value is an expression carrying a number.
+
+    The counterpart to `constants_in`: between them every module-level binding that
+    mentions a number is accounted for, so a shape neither of them understands shows up as
+    an unexpected name in one of them rather than as silence.
+    """
+    names: set[str] = set()
+    for targets, value in _module_assignments(ast.parse(source)):
+        if _geometry_literal(value) is not None:
+            continue
+        if not any(_numeric_literal(inner) is not None for inner in ast.walk(value)):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def layout_constants() -> dict[str, GeometryValue]:
+    return constants_in(LAYOUT_SOURCE.read_text(encoding="utf-8"))
+
+
+def numeric_expressions() -> set[str]:
+    return expressions_in(LAYOUT_SOURCE.read_text(encoding="utf-8"))
 
 
 def coverage() -> dict[str, set[str]]:
@@ -231,6 +379,7 @@ def coverage() -> dict[str, set[str]]:
         "derived": derived,
         "fitted": fitted,
         "policy": set(PLACER_POLICY),
+        "expressions": numeric_expressions(),
         "unclassified": set(layout_constants()) - classified,
     }
 
@@ -305,7 +454,7 @@ def find_assignment(text: str, symbol: str) -> float | None:
     margin does not match arrowMargin.
     """
     m = re.search(
-        rf"(?:^|\s)(?:static\s+)?{re.escape(symbol)}\s*=\s*(-?[\d.]+)",
+        rf"(?:^|\s)(?:static\s+)?{re.escape(symbol)}\s*=\s*{_NUMBER}",
         active_typescript(text),
     )
     return float(m.group(1)) if m else None
@@ -325,24 +474,58 @@ def find_char_fallback(text: str) -> float | None:
     third factor, or stops multiplying by a constant at all, this returns None and the
     caller reports "could not check" instead of inventing parity.
     """
-    m = re.search(r"font_size\s*\*\s*[^*;\n]+?\*\s*(-?[\d.]+)", active_typescript(text))
+    m = re.search(r"font_size\s*\*\s*[^*;\n]+?\*\s*" + _NUMBER, active_typescript(text))
     return float(m.group(1)) if m else None
 
 
-def main(ref: str = "main", source_dir: str | None = None) -> int:
+def read_sources(ref: str, source_dir: str | None) -> tuple[dict[str, str], dict[str, str]]:
+    """Read every upstream file, per path, reporting failures instead of aborting.
+
+    A single fail-fast loop made the stable LiteGraph constants hostage to the two
+    volatile ones: `imagePreview.ts` and the Vue-nodes `useStringWidget.ts` live outside
+    `lib/litegraph`, so a move, a rename, or an older `--ref` that predates either file
+    returned 2 before a single comparison ran. Real drift in NODE_TITLE_HEIGHT would then
+    go unreported, because exit 2 means "could not check".
+
+    So an unread file disables only the checks that depend on it. The exit code still
+    distinguishes the two outcomes, and a mismatch still outranks a missing source.
+    """
     sources: dict[str, str] = {}
+    unread: dict[str, str] = {}
     needed = {GLOBALS_PATH, WIDGET_PATH, NODE_PATH} | {path for path, *_ in DERIVED_CHECKS}
-    for path in needed:
+    for path in sorted(needed):
         try:
             sources[path] = fetch(path, ref, source_dir)
         except Exception as exc:  # noqa: BLE001 - any read failure is the same outcome here
-            error_console.print(f"could not read {path}: {exc}")
-            return 2
+            unread[path] = str(exc)
+    return sources, unread
+
+
+def report_browser_fitted() -> None:
+    """Say which part of the model this run did not check.
+
+    Printed on EVERY exit path, not only on success. Behind the early returns it appeared
+    only on exit 0, which is the one run where a reader is least likely to need telling --
+    and it made the module docstring's "reported on every run" false.
+    """
+    console.print("\nNOT CHECKED HERE -- browser-fitted, re-verify with a rendered-geometry test:")
+    for name, fitted_at, when, how in BROWSER_FITTED:
+        console.print(f"  {name:20} {fitted_at}   fitted {when}: {how}")
+
+
+def main(ref: str = "main", source_dir: str | None = None) -> int:
+    sources, unread = read_sources(ref, source_dir)
 
     mismatches: list[str] = []
     missing: list[str] = []
 
+    for path, reason in unread.items():
+        error_console.print(f"could not read {path}: {reason}")
+        missing.append(f"{path} could not be read -- moved, renamed, or absent on this ref")
+
     for path, symbol, ours_name, ours in CHECKS:
+        if path in unread:
+            continue
         theirs = find_assignment(sources[path], symbol)
         if theirs is None:
             missing.append(f"{symbol} not found in {path} -- renamed or moved upstream")
@@ -352,6 +535,8 @@ def main(ref: str = "main", source_dir: str | None = None) -> int:
             console.print(f"ok  {symbol:20} {theirs}")
 
     for path, finder, description, ours_name, ours in DERIVED_CHECKS:
+        if path in unread:
+            continue
         theirs = finder(sources[path])
         if theirs is None:
             missing.append(f"{description} not found in {path} -- reshaped upstream")
@@ -360,13 +545,14 @@ def main(ref: str = "main", source_dir: str | None = None) -> int:
         else:
             console.print(f"ok  {ours_name:20} {theirs}   ({description})")
 
-    char_w = find_char_fallback(sources[NODE_PATH])
-    if char_w is None:
-        missing.append(f"compute_text_size glyph fallback not found in {NODE_PATH}")
-    elif char_w != layout._CHAR_W:
-        mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = {layout._CHAR_W}")
-    else:
-        console.print(f"ok  {'_CHAR_W':20} {char_w}")
+    if NODE_PATH not in unread:
+        char_w = find_char_fallback(sources[NODE_PATH])
+        if char_w is None:
+            missing.append(f"compute_text_size glyph fallback not found in {NODE_PATH}")
+        elif char_w != layout._CHAR_W:
+            mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = {layout._CHAR_W}")
+        else:
+            console.print(f"ok  {'_CHAR_W':20} {char_w}")
 
     if missing:
         error_console.print("\nSYMBOLS NOT FOUND (the check could not run, not a proven mismatch):")
@@ -382,15 +568,14 @@ def main(ref: str = "main", source_dir: str | None = None) -> int:
             "overlapping nodes on an agent-built canvas. Update layout.py to match, and\n"
             "re-baseline the quality metrics in tests/comfy_cli/test_layout.py.",
         )
+    if not mismatches and not missing:
+        console.print("\nall upstream-readable geometry constants match")
+    report_browser_fitted()
+
     if mismatches:
         return 1
     if missing:
         return 2
-
-    console.print("\nall upstream-readable geometry constants match")
-    console.print("\nNOT CHECKED HERE -- browser-fitted, re-verify with a rendered-geometry test:")
-    for name, fitted_at, when, how in BROWSER_FITTED:
-        console.print(f"  {name:20} {fitted_at}   fitted {when}: {how}")
     return 0
 
 
