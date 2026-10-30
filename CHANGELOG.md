@@ -73,6 +73,11 @@ history.
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
+- DynamicGroup refusals carry their own `error.code` in the edit, `apply`,
+  `foreach`, `slots`, `validate`, `run` and `decompose` envelopes:
+  `dynamic_group_unsupported`, `dynamic_group_binding_mismatch`,
+  `dynamic_group_count_out_of_range` and `dynamic_group_rows_linked`, in place
+  of `workflow_edit_invalid` and the conversion codes. Messages are unchanged.
 
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`

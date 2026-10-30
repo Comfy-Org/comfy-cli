@@ -37,11 +37,14 @@ def _iter_python_files(root: Path):
             continue
         if "__pycache__" in p.parts:
             continue
-        # engine.py uses internal validation result codes ("unknown_class_type",
-        # "shape_mismatch", etc.) in return-value dicts, not CLI error codes.
-        if p.name == "engine.py" and "cql" in p.parts:
-            continue
         yield p
+
+
+def _is_cql_engine(path: Path) -> bool:
+    """engine.py uses internal validation result codes ("unknown_class_type",
+    "shape_mismatch", etc.) in return-value dicts, not CLI error codes. Only its
+    exception classes' ``code`` attributes (the DynamicGroup refusals) are."""
+    return path.name == "engine.py" and "cql" in path.parts
 
 
 #: ``code=`` is ``renderer.error``'s own kwarg. ``error_code=`` is how
@@ -66,10 +69,15 @@ def _extract_codes_from_call(call: ast.Call) -> list[str]:
     for kw in call.keywords:
         if kw.arg not in _CODE_KWARGS:
             continue
-        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-            value = kw.value.value
-            if error_codes.CODE_PATTERN.match(value):
-                out.append(value)
+        # ``code=e.code or "fallback"``: the literal fallback is raised too.
+        values = kw.value.values if isinstance(kw.value, ast.BoolOp) else [kw.value]
+        for value in values:
+            if (
+                isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+                and error_codes.CODE_PATTERN.match(value.value)
+            ):
+                out.append(value.value)
     # Positional first arg on ``.error("code", "msg")`` — keep the heuristic
     # for the small set of callers that use the positional form.
     func = call.func
@@ -141,14 +149,16 @@ def _collect_raised_codes() -> dict[str, list[Path]]:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
             continue
+        # Class-level ``code = "..."`` (e.g. OAuthError subclasses).
+        for code in _extract_class_code_attrs(tree):
+            raised.setdefault(code, []).append(path)
+        if _is_cql_engine(path):
+            continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             for code in _extract_codes_from_call(node):
                 raised.setdefault(code, []).append(path)
-        # Also pick up class-level ``code = "..."`` (e.g. OAuthError subclasses).
-        for code in _extract_class_code_attrs(tree):
-            raised.setdefault(code, []).append(path)
         # Also pick up ``"code": "..."`` in dict literals (inline error dicts).
         for code in _extract_dict_code_values(tree):
             raised.setdefault(code, []).append(path)

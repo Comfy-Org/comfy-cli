@@ -467,7 +467,8 @@ def _rehint_discarded_batch(e: Exception, pre_batch_hint: str) -> ValueError:
             "Any node id minted by this batch is gone; re-read ids with "
             "`comfy workflow slots` / `ls-nodes` before addressing nodes."
         )
-    return ValueError(msg + suffix)
+    # A DynamicGroup refusal keeps its class, and with it its ``code``.
+    return (type(e) if isinstance(e, DynamicGroupBindingError) else ValueError)(msg + suffix)
 
 
 def _find_by_str(workflow: dict, node_id: Any) -> dict | None:
