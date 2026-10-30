@@ -4,7 +4,16 @@ Date: 2026-10-28
 
 ## Status
 
-Proposed
+Accepted 2026-10-30.
+
+The Decision section below binds two repositories other than this one:
+`ComfyUI_frontend` generates the widget data, and `comfy-cloud-mcp-server`'s
+converter consumes the bundle instead of its own tables. Neither affected path
+carries a per-path `CODEOWNERS` entry, so there was no single named reviewer to
+request, and acceptance was taken by the author in their capacity as a code
+owner of both. The two obligations are tracked as issues in those repositories
+(see Notes) and remain open to pushback there on implementation and cost; what
+is settled here is the design.
 
 ## Context
 
@@ -349,6 +358,11 @@ Standing rules for compliance review, distinct from the alternatives above:
 ## Notes
 
 Roadmap, per-wave acceptance checks and open questions: comfy-cli#1077.
+
+Cross-repo obligations accepted with this ADR, tracked where the work lands:
+ComfyUI_frontend#22420 (generate `widget-layout.json` and
+`widget-type-census.json` from frontend CI) and comfy-cloud-mcp-server#1908
+(converter consumes the shared bundle instead of its own tables).
 
 Evidence this ADR rests on, all measured over the 500 template fixtures that ship
 a frontend `graphToPrompt()` golden in `comfy-cloud-mcp-server`:
