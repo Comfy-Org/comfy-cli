@@ -65,31 +65,70 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # Checked BEFORE the token step so a missing credential names itself.
+      # Every prerequisite is checked HERE, in one step, before anything that
+      # consumes one. Two reasons it is one step and not several.
+      #
       # `create-github-app-token` fails on an empty `private-key` with a generic
       # "input must be set to a non-empty string", which on a daily schedule
       # reads as a mystery red and tells nobody what to do about it. This ran
-      # red every day from 2026-10-21 to 2026-10-29 for exactly that reason,
-      # and the only cost of the vague message was that no one could tell the
-      # difference between an unprovisioned repo and a broken refresh.
-      - name: Verify the bot app credentials are set
+      # red every day from 2026-10-21 for exactly that reason: nobody could tell
+      # an unprovisioned repo from a broken refresh.
+      #
+      # And failing on the FIRST missing item would make an admin fix one
+      # secret, wait for tomorrow's schedule, and meet the next one. None of
+      # these checks needs a checkout or a token, so they all run here and the
+      # job reports the complete list once.
+      #
+      # Values are whitespace-stripped before testing. A variable saved as a
+      # stray space is not empty to `[ -z ]`, but the action trims its inputs,
+      # so it would reach the action as empty and fail with the same generic
+      # error this step exists to replace.
+      - name: Verify every prerequisite is configured
         env:
           APP_ID: ${{ vars.APP_ID }}
           CLOUD_CODE_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+          CLOUD_REPO_READ_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
+          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
+          SRC_PATH: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
         run: |
+          blank() { [ -z "$(printf '%s' "${1:-}" | tr -d '[:space:]')" ]; }
+
           missing=""
-          [ -z "${APP_ID:-}" ] && missing="${missing} vars.APP_ID"
-          [ -z "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" ] && missing="${missing} secrets.CLOUD_CODE_BOT_PRIVATE_KEY"
-          if [ -n "${missing}" ]; then
-            echo "::error::Not configured in this repository:${missing}"
-            echo "This workflow cannot refresh the CQL catalogs without the"
-            echo "CLOUD_CODE_BOT app credentials, which it uses to author the"
-            echo "auto-PR as the bot rather than as a human (see this file's"
-            echo "header for why that matters to the PR's CI)."
+          blank "${APP_ID:-}"                    && missing="${missing}\n  - vars.APP_ID (repository variable): the CLOUD_CODE_BOT app's numeric app id"
+          blank "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" && missing="${missing}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY: that app's PEM private key"
+          blank "${CLOUD_REPO_READ_TOKEN:-}"      && missing="${missing}\n  - secrets.CLOUD_REPO_READ_TOKEN: Contents:Read on the private source repo"
+          blank "${SRC_REPO:-}"                   && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_REPO: that repo's 'owner/name'"
+          blank "${SRC_PATH:-}"                   && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_PATH: path to no_gpu_nodes.json within it"
+
+          # Shape checks only for values that ARE set, so a provisioned-but-wrong
+          # credential also names itself instead of failing downstream.
+          malformed=""
+          if ! blank "${APP_ID:-}" && ! printf '%s' "${APP_ID}" | tr -d '[:space:]' | grep -qE '^[0-9]+$'; then
+            malformed="${malformed}\n  - vars.APP_ID is not numeric (an app id, not the app's name or slug)"
+          fi
+          if ! blank "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" && ! printf '%s' "${CLOUD_CODE_BOT_PRIVATE_KEY}" | grep -q 'BEGIN'; then
+            malformed="${malformed}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY has no PEM header (paste the whole .pem, including the BEGIN line)"
+          fi
+          if ! blank "${SRC_REPO:-}" && ! printf '%s' "${SRC_REPO}" | tr -d '[:space:]' | grep -qE '^[^/]+/[^/]+$'; then
+            malformed="${malformed}\n  - secrets.CQL_NO_GPU_SOURCE_REPO is not in 'owner/name' form"
+          fi
+
+          if [ -n "${missing}${malformed}" ]; then
+            [ -n "${missing}" ]   && printf 'Not configured in this repository:%b\n' "${missing}"
+            [ -n "${malformed}" ] && printf 'Configured but malformed:%b\n' "${malformed}"
             echo
-            echo "A repository admin has to set them; a workflow change cannot."
-            echo "Until then this job fails every day on its schedule, and that"
-            echo "failure is NOT a signal about the catalogs or about main."
+            echo "This workflow refreshes the CQL data files under comfy_cli/cql/data/"
+            echo "from their canonical upstream sources. It needs the CLOUD_CODE_BOT app"
+            echo "credentials to author its auto-PR as the bot rather than as a human"
+            echo "(see this file's header for why that matters to the PR's CI), and the"
+            echo "read token plus coordinates to fetch the private source file."
+            echo
+            echo "A repository admin has to set these under Settings > Secrets and"
+            echo "variables > Actions; a workflow change cannot."
+            echo
+            echo "Until then this job fails every day on its schedule. That failure is"
+            echo "NOT a signal about the catalogs or about main."
+            echo "::error::Refresh prerequisites are not configured; see this step's log for the full list."
             exit 1
           fi
 
@@ -109,54 +148,6 @@ jobs:
           # the `synchronize` event — a GITHUB_TOKEN push would silently skip CI
           # on the auto-PR, leaving its required checks stuck pending.
           token: ${{ steps.app-token.outputs.token }}
-
-      - name: Verify the private-source token and coordinates are set
-        env:
-          CLOUD_REPO_READ_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
-          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
-          SRC_PATH: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
-        run: |
-          if [ -z "${CLOUD_REPO_READ_TOKEN:-}" ]; then
-            echo "::error::CLOUD_REPO_READ_TOKEN secret is not set."
-            echo "This workflow needs a PAT (or app token) with:"
-            echo "  - Contents: Read on the repo named by the CQL_NO_GPU_SOURCE_REPO"
-            echo "    secret (to fetch the canonical no_gpu_nodes.json)"
-            echo "  (PR creation is handled separately by the CLOUD_CODE_BOT app token, not this PAT.)"
-            exit 1
-          fi
-          # Checked HERE, beside the token, rather than at the fetch step: an
-          # unset secret expands to the empty string, so `repos//contents/`
-          # is a 404 that reads like the file moved rather than like a missing
-          # prerequisite. Same FAILS-LOUDLY contract as the token above.
-          if [ -z "${SRC_REPO:-}" ] || [ -z "${SRC_PATH:-}" ]; then
-            echo "::error::CQL_NO_GPU_SOURCE_REPO / CQL_NO_GPU_SOURCE_PATH secrets are not set."
-            echo "Set both under Settings > Secrets and variables > Actions > Secrets:"
-            echo "  - CQL_NO_GPU_SOURCE_REPO: the 'owner/name' of the private source repo"
-            echo "  - CQL_NO_GPU_SOURCE_PATH: the path to no_gpu_nodes.json within it"
-            echo "They are kept out of this file because comfy-cli is public, and"
-            echo "they are secrets rather than variables because Actions echoes"
-            echo "a step's resolved env: block into the (public) run log."
-            exit 1
-          fi
-          # Shape checks. Both values are spliced into a REST path below and are
-          # mutable by anyone with repo admin without code review, so validate
-          # them here rather than letting a malformed value degrade into an
-          # ambiguous 404 — or, worse, silently redirect the fetch. Rejecting
-          # `?` and `#` also protects the `?ref=main` pin: either character would
-          # end the path component and drop the branch pin, so the fetch would
-          # fall back to the source's default branch.
-          # No value is echoed on failure; the message names the setting only.
-          # Bash `[[ =~ ]]` rather than a `grep` pipeline: it anchors against the
-          # whole value, so an embedded newline cannot smuggle a bad segment
-          # past a per-line match.
-          if [[ ! "$SRC_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
-            echo "::error::CQL_NO_GPU_SOURCE_REPO must be a bare 'owner/name' — no URL, no scheme, no extra path segments."
-            exit 1
-          fi
-          if [[ ! "$SRC_PATH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || [[ "$SRC_PATH" == *..* ]]; then
-            echo "::error::CQL_NO_GPU_SOURCE_PATH must be a repo-relative path — no leading '/', no '..', no query or fragment characters."
-            exit 1
-          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
