@@ -519,6 +519,56 @@ def test_walker_rejects_a_tuple_that_is_not_all_numbers():
     assert parity.constants_in("PAIR = (40.0, 'y')\nEMPTY = ()\n") == {}
 
 
+# An unpacking assignment is a third shape with the same silence: a tuple target is not a
+# `Name` for the by-name buckets to key on and not an expression either, so `A, B = 1.0,
+# 2.0` was claimed by NEITHER bucket -- a geometry pair could join layout.py written that
+# way and `test_every_geometry_constant_is_classified` would still pass.
+
+
+def test_walker_sees_an_unpacked_pair_of_constants():
+    """The shape a reader would write for two related numbers, e.g. a gap pair."""
+    found = parity.constants_in("COL_GAP, ROW_GAP = 80.0, 40.0\n[A, B] = 1.0, -2.0\n")
+    assert found == {"COL_GAP": 80.0, "ROW_GAP": 40.0, "A": 1.0, "B": -2.0}
+
+
+def test_walker_sees_a_nested_unpacking():
+    assert parity.constants_in("A, (B, C) = 1.0, (2.0, 3.0)\n") == {"A": 1.0, "B": 2.0, "C": 3.0}
+
+
+def test_unpacking_the_walker_cannot_follow_is_reported_not_dropped():
+    """`A, B = SIZES` binds two numbers this walker cannot attribute, and a guess would be
+    worse than noise. It gets the same "declare it or the gate fails" treatment as a
+    derived expression, so it cannot be silence."""
+    assert parity.expressions_in("A, B = SIZES\n") == {"A", "B"}
+    assert parity.expressions_in("A, B = 1.0, 2.0, 3.0\n") == {"A", "B"}
+    assert parity.constants_in("A, B = SIZES\n") == {}
+
+
+def test_a_target_the_walker_cannot_name_is_reported_rather_than_skipped():
+    """Both buckets are keyed by a plain name, so a number bound to anything else had
+    nowhere to be reported. The gate's only value is that a number cannot join layout.py
+    unnoticed, so an unnameable target has to be loud."""
+    assert parity.unreadable_bindings('SIZES["gap"] = 4.0\nlayout.GAP = 6.0\n') == {
+        "SIZES['gap']",
+        "layout.GAP",
+    }
+
+
+def test_an_unnameable_target_without_a_number_is_not_reported():
+    """The audit is about losing geometry, not about every module-level statement."""
+    assert parity.unreadable_bindings('NAMES["a"] = "b"\n') == set()
+
+
+def test_no_binding_in_layout_is_unnameable():
+    """Live counterpart: every module-level number in layout.py reaches a named bucket."""
+    unreadable = parity.coverage()["unreadable"]
+    assert unreadable == set(), (
+        f"layout.py binds a number to a target the coverage walker cannot name: "
+        f"{sorted(unreadable)}. Give it a plain module-level name so it can be "
+        "classified, or the coverage gate cannot see it at all."
+    )
+
+
 def test_expression_valued_names_are_reported_rather_than_dropped():
     """The counterpart bucket: a derived value is covered by its terms, but losing it
     entirely is how a shape the walker cannot read becomes silence instead of noise."""

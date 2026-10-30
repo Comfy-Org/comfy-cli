@@ -271,20 +271,60 @@ DERIVED_EXPRESSIONS = frozenset({"_WIDGET_PADDING"})
 GeometryValue = float | tuple[float, ...]
 
 
-def _module_assignments(tree: ast.Module) -> list[tuple[list[ast.expr], ast.expr]]:
-    """Every module-level binding, as (targets, value).
+# One module-level binding, reduced to the name being bound: (target, the value that
+# target receives, whether the walker could follow the value to it).
+Binding = tuple[ast.expr, ast.expr, bool]
+
+
+def _unpack(target: ast.expr, value: ast.expr, *, followed: bool = True) -> list[Binding]:
+    """Reduce one binding to the individual names it binds.
+
+    `ORIGIN, DEFAULT_SIZE = (40.0, 60.0), (210.0, 100.0)` binds two geometry constants,
+    and a tuple target is neither a `Name` the by-name buckets can key on nor an
+    expression -- so an unpacking assignment was invisible to `constants_in` AND to
+    `expressions_in`, which is the silence the coverage gate exists to prevent.
+
+    Element-wise when the shapes line up. When they do not (`A, B = SIZES`) the walker
+    cannot say which number each name received, so the pair is marked unfollowed and
+    `expressions_in` claims it on that basis alone -- the same "declare it or the gate
+    fails" treatment a derived expression gets, rather than a guess or a silent skip.
+    """
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return [(target, value, followed)]
+    aligned: list[ast.expr] | None = None
+    if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+        aligned = value.elts
+    pairs: list[Binding] = []
+    for index, element in enumerate(target.elts):
+        pairs.extend(
+            _unpack(
+                element,
+                aligned[index] if aligned else value,
+                followed=followed and aligned is not None,
+            )
+        )
+    return pairs
+
+
+def _module_assignments(tree: ast.Module) -> list[Binding]:
+    """Every module-level binding, reduced to the names it binds.
 
     `AnnAssign` is included because `X: float = 1.0` is the same declaration as `X = 1.0`
     to every reader and a different AST node to this walker; a constant written that way
     used to be invisible to the coverage gate.
     """
-    out: list[tuple[list[ast.expr], ast.expr]] = []
+    out: list[Binding] = []
     for node in tree.body:
         if isinstance(node, ast.Assign):
-            out.append((list(node.targets), node.value))
+            for target in node.targets:
+                out.extend(_unpack(target, node.value))
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            out.append(([node.target], node.value))
+            out.extend(_unpack(node.target, node.value))
     return out
+
+
+def _mentions_a_number(node: ast.expr) -> bool:
+    return any(_numeric_literal(inner) is not None for inner in ast.walk(node))
 
 
 def _numeric_literal(node: ast.expr) -> float | None:
@@ -327,17 +367,16 @@ def constants_in(source: str) -> dict[str, GeometryValue]:
     Read from the AST rather than from `dir(layout)` so an imported number is not demanded
     to be classified. Handles the shapes a reader would call a constant and an earlier
     version of this walker skipped: annotated (`X: float = 1.0`), negative (`-5.0`),
-    chained (`X = Y = 1.0`) and tuple-valued (`ORIGIN`). Expression-valued names are
-    reported separately by `expressions_in`.
+    chained (`X = Y = 1.0`), unpacked (`X, Y = 1.0, 2.0`) and tuple-valued (`ORIGIN`).
+    Expression-valued names are reported separately by `expressions_in`, and a target
+    this walker cannot name at all by `unreadable_bindings`.
     """
     found: dict[str, GeometryValue] = {}
-    for targets, value in _module_assignments(ast.parse(source)):
+    for target, value, followed in _module_assignments(ast.parse(source)):
         geometry = _geometry_literal(value)
-        if geometry is None:
+        if geometry is None or not followed or not isinstance(target, ast.Name):
             continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                found[target.id] = geometry
+        found[target.id] = geometry
     return found
 
 
@@ -349,15 +388,32 @@ def expressions_in(source: str) -> set[str]:
     an unexpected name in one of them rather than as silence.
     """
     names: set[str] = set()
-    for targets, value in _module_assignments(ast.parse(source)):
-        if _geometry_literal(value) is not None:
+    for target, value, followed in _module_assignments(ast.parse(source)):
+        if not isinstance(target, ast.Name):
             continue
-        if not any(_numeric_literal(inner) is not None for inner in ast.walk(value)):
+        if followed and _geometry_literal(value) is not None:
             continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                names.add(target.id)
+        if followed and not _mentions_a_number(value):
+            continue
+        names.add(target.id)
     return names
+
+
+def unreadable_bindings(source: str) -> set[str]:
+    """Module-level bindings that carry a number and that this walker cannot name.
+
+    Both buckets above are keyed by a plain name, so a binding whose target is anything
+    else -- `SIZES["gap"] = 4.0`, `layout.GAP = 4.0` -- holds a geometry number neither of
+    them can report. The coverage gate's whole value is that a number cannot join
+    layout.py unnoticed, so an unnameable shape has to be loud rather than skipped: this
+    returns the unparsed target for the test to fail on.
+    """
+    unreadable: set[str] = set()
+    for target, value, _followed in _module_assignments(ast.parse(source)):
+        if isinstance(target, ast.Name) or not _mentions_a_number(value):
+            continue
+        unreadable.add(ast.unparse(target))
+    return unreadable
 
 
 def layout_constants() -> dict[str, GeometryValue]:
@@ -366,6 +422,10 @@ def layout_constants() -> dict[str, GeometryValue]:
 
 def numeric_expressions() -> set[str]:
     return expressions_in(LAYOUT_SOURCE.read_text(encoding="utf-8"))
+
+
+def unnameable_bindings() -> set[str]:
+    return unreadable_bindings(LAYOUT_SOURCE.read_text(encoding="utf-8"))
 
 
 def coverage() -> dict[str, set[str]]:
@@ -381,6 +441,7 @@ def coverage() -> dict[str, set[str]]:
         "policy": set(PLACER_POLICY),
         "expressions": numeric_expressions(),
         "unclassified": set(layout_constants()) - classified,
+        "unreadable": unnameable_bindings(),
     }
 
 
