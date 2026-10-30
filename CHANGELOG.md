@@ -235,6 +235,12 @@ history.
   written `widgets_values` is the frontend's four-widget shape
   (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
   restored those values by position into viewport state, width and height.
+- Desktop discovery reads both modern and legacy registries. Callers with
+  running-server launch metadata select that exact instance, resolve its model
+  YAML and effective data/input/output paths, and keep ambiguous or relative
+  runtime identities unresolved. The optional discovery fields are documented
+  in the which/env schemas; unrelated launch arguments are excluded.
+
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
@@ -247,6 +253,11 @@ history.
   already finished. Neither old key is published any more. The second exit was
   also skipping the trimming and redaction that key drives, so it emitted the
   full traceback and a `current_inputs` that can hold an api_key.
+- `comfy which` and `comfy env` report Desktop's split code, data and model
+  roots without changing launch/install selection. A nonexistent selected
+  workspace no longer succeeds in `which`; discovery reports malformed Desktop
+  configuration and marks inferred data roots as unverified.
+
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
