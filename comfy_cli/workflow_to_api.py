@@ -39,8 +39,8 @@ from comfy_cli.cql.engine import (
     _validate_dynamic_group_schema,
     load_3d_advanced_has_legacy_buttons,
     saved_sub_order,
-    saved_widget_order as _saved_widget_order,
 )
+from comfy_cli.cql.engine import saved_widget_order as _saved_widget_order
 
 logger = logging.getLogger(__name__)
 
