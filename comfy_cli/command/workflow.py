@@ -1499,17 +1499,11 @@ def _find_mirrored_record(target, record_name: str, workflow_json: dict | None =
 
 def _saved_file_id(info: object, key: str) -> str | None:
     """Use only the actual userdata write receipt, never a mirrored record ID."""
-    from uuid import UUID
+    from comfy_cli.saved_file_identity import canonical_saved_file_id
 
     if not isinstance(info, dict) or info.get("path") != f"{_WORKFLOWS_DIR}/{key}":
         return None
-    identity = info.get("id")
-    if not isinstance(identity, str):
-        return None
-    try:
-        return identity if str(UUID(identity)) == identity else None
-    except ValueError:
-        return None
+    return canonical_saved_file_id(info.get("id"))
 
 
 def _cloud_save(

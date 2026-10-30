@@ -1460,7 +1460,18 @@ class TestListMalformedShape:
 
 
 @pytest.mark.parametrize(
-    "identity", [None, "", 12, True, "not-a-uuid", "a" * 32, "978E5F58-49DC-4A81-8235-A0B91C204A1C"]
+    "identity",
+    [
+        None,
+        "",
+        12,
+        True,
+        "not-a-uuid",
+        "a" * 32,
+        "978E5F58-49DC-4A81-8235-A0B91C204A1C",
+        "11111111-1111-1111-1111-111111111111",
+        "11111111-1111-9111-8111-111111111111",
+    ],
 )
 def test_cloud_save_without_canonical_file_id_keeps_success_and_record_separate(
     cloud_target, tmp_path, monkeypatch, capsys, identity
