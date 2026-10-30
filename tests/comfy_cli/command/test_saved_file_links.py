@@ -214,3 +214,23 @@ def test_legacy_invocation_machine_error_has_regeneration_hint(saved_server, mod
     assert envelope["error"]["details"]["reason"] == "legacy_identity_unsupported"
     assert "--saved-file" in envelope["error"]["message"]
     assert "Workflows" in envelope["error"]["hint"]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 422, 500])
+def test_transport_http_error_retains_status_and_sanitizes_body(saved_server, monkeypatch, status):
+    import urllib.error
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        ui,
+        "request_json",
+        Mock(
+            side_effect=urllib.error.HTTPError(
+                "https://cloud.test/api/userdata-files/private", status, "SECRET PROMPT", {}, None
+            )
+        ),
+    )
+    with pytest.raises(ui.WorkflowUiUnavailable) as failure:
+        ui.verify_workflow_link(FILE_ID, workspace=WORKSPACE, environment="standard")
+    assert failure.value.status == status
+    assert "SECRET" not in str(failure.value)

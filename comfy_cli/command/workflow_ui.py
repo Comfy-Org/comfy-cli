@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 import urllib.parse
 from uuid import UUID
 
@@ -39,7 +40,12 @@ def _refuse(reason: str, message: str) -> None:
 
 
 def _get(target, *parts: str, max_bytes: int = _MAX_CONTROL_BYTES):
-    status, body = request_json(target.url(*parts), target, method="GET", max_bytes=max_bytes, timeout=15)
+    try:
+        status, body = request_json(target.url(*parts), target, method="GET", max_bytes=max_bytes, timeout=15)
+    except urllib.error.HTTPError as error:
+        raise WorkflowUiUnavailable(
+            "unavailable", "Cloud could not verify this saved workflow.", status=error.code
+        ) from error
     if status != 200:
         raise WorkflowUiUnavailable("unavailable", "Cloud could not verify this saved workflow.", status=status)
     return body
