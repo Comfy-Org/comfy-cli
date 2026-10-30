@@ -3007,6 +3007,11 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+        # The rejected value and the violated bound ride on the finding too,
+        # not just the message — same contract as the workflow-level path.
+        above_max = next(w for w in warnings if w["code"] == "above_max")
+        assert above_max["value"] == 99999
+        assert "bound" in above_max
 
 
 class TestSlotSuggestionOnNotFound:

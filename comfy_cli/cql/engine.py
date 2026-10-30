@@ -790,6 +790,10 @@ class Port:
         for w in warnings:
             w.setdefault("severity", finding_severity(w.get("code", "")))
             w.setdefault("value", value)
+            if w.get("code") == "below_min":
+                w.setdefault("bound", self.options.min)
+            elif w.get("code") == "above_max":
+                w.setdefault("bound", self.options.max)
         return warnings
 
 
