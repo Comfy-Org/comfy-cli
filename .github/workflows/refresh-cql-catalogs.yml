@@ -40,7 +40,9 @@ name: Refresh CQL catalogs
 #     logs are world-readable, so a variable would be republished on every run —
 #     exactly what moving them out of the file was meant to prevent. Secrets are
 #     masked in that block. Nothing here echoes either value: the error paths
-#     below name the setting, never its contents.
+#     below name the setting, never its contents, and the trimmed copies the
+#     verify step hands to the fetch step are re-registered with `::add-mask::`
+#     so they stay masked in that block too.
 
 on:
   schedule:
@@ -95,9 +97,11 @@ jobs:
           # Trim surrounding whitespace ONLY. A value saved as a stray space is
           # not empty to `[ -z ]`, but the token action trims its inputs, so it
           # arrives empty and fails with the generic error this step exists to
-          # replace. Internal whitespace is NOT removed: `12 34` must be
-          # reported as malformed here, not silently normalised to `1234` while
-          # the action still receives `12 34`.
+          # replace. Internal whitespace is NOT removed: `12 34` is reported
+          # as malformed here rather than silently normalised to `1234`. The
+          # trimmed values are what every later step consumes (see the
+          # GITHUB_ENV export at the end of this step), so what is validated
+          # here is exactly what the consumer receives.
           trim() { local v="${1:-}"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
 
           APP_ID="$(trim "${APP_ID:-}")"
@@ -164,13 +168,58 @@ jobs:
             exit 1
           fi
 
+          # Hand the VALIDATED values to the steps that consume them. Every
+          # check above ran on the trimmed copy, so the trimmed copy is what
+          # has to arrive downstream; a consumer that re-reads the raw secret
+          # is reading a value this step never validated.
+          #
+          # Without this, a coordinate saved with a stray space or newline
+          # passes here (it is trimmed before testing) and the fetch step still
+          # splices the untrimmed value into `repos/$SRC_REPO/contents/$SRC`,
+          # dying on a 404 that says nothing about the real cause — the exact
+          # failure mode this step exists to replace. The per-step check this
+          # one replaced tested the RAW value and so rejected that case; moving
+          # the checks here is what dropped the rejection.
+          #
+          # `::add-mask::` comes first and is load-bearing, not belt-and-braces.
+          # A secret is masked in the (public) run log by exact string match, so
+          # a trimmed copy is a DIFFERENT string and would print in clear in the
+          # consumer step's resolved `env:` block. Registering it restores the
+          # masking the raw `secrets.*` read had. APP_ID is a repository
+          # variable, never masked and already echoed on every run today, so it
+          # is exported without a mask rather than implying it is a secret.
+          #
+          # Single-line `NAME=value` writes are safe here precisely because the
+          # shape checks above are anchored to [A-Za-z0-9._-] plus `/`: none of
+          # these three can carry the newline that would turn a GITHUB_ENV write
+          # into an injection.
+          #
+          # CLOUD_CODE_BOT_PRIVATE_KEY and CLOUD_REPO_READ_TOKEN are
+          # deliberately NOT re-exported and their consumers keep reading
+          # `secrets.*`. Neither is part of this gap: the PEM is never trimmed
+          # (only its emptiness probe is), and the token's verdict here is the
+          # same trimmed or raw, so both behave exactly as they did before the
+          # checks were consolidated. Re-exporting a trimmed copy of the PAT
+          # would only trade that for a value whose masking depends on the line
+          # above being right.
+          echo "::add-mask::$SRC_REPO"
+          echo "::add-mask::$SRC_PATH"
+          {
+            echo "APP_ID=$APP_ID"
+            echo "SRC_REPO=$SRC_REPO"
+            echo "SRC_PATH=$SRC_PATH"
+          } >> "$GITHUB_ENV"
+
       # Mint a CLOUD_CODE_BOT installation token so the auto-PR is authored by
       # the bot, not by a human — see the header prerequisites for why.
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.APP_ID }}
+          # env.APP_ID, not vars.APP_ID: the verify step validated the trimmed
+          # value, so that is the one to pass. The PEM stays a raw secret read —
+          # it is never trimmed, for the reason given in the verify step.
+          app-id: ${{ env.APP_ID }}
           private-key: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
 
       - uses: actions/checkout@v6
@@ -208,8 +257,12 @@ jobs:
         id: fetch-no-gpu
         env:
           GH_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
-          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
-          SRC: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
+          # The coordinates come from the verify step's GITHUB_ENV export, not
+          # from `secrets.*` directly: those are the trimmed values it actually
+          # validated, so a secret saved with a stray space cannot pass the
+          # check and then reach this `gh api` path untrimmed as a bare 404.
+          SRC_REPO: ${{ env.SRC_REPO }}
+          SRC: ${{ env.SRC_PATH }}
         run: |
           set -euo pipefail
           # Resolve the blob SHA via Contents (explicitly pinned to @main so we
