@@ -84,6 +84,7 @@ jobs:
       # so it would reach the action as empty and fail with the same generic
       # error this step exists to replace.
       - name: Verify every prerequisite is configured
+        shell: bash
         env:
           APP_ID: ${{ vars.APP_ID }}
           CLOUD_CODE_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
@@ -91,26 +92,56 @@ jobs:
           SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
           SRC_PATH: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
         run: |
-          blank() { [ -z "$(printf '%s' "${1:-}" | tr -d '[:space:]')" ]; }
+          # Trim surrounding whitespace ONLY. A value saved as a stray space is
+          # not empty to `[ -z ]`, but the token action trims its inputs, so it
+          # arrives empty and fails with the generic error this step exists to
+          # replace. Internal whitespace is NOT removed: `12 34` must be
+          # reported as malformed here, not silently normalised to `1234` while
+          # the action still receives `12 34`.
+          trim() { local v="${1:-}"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
+
+          APP_ID="$(trim "${APP_ID:-}")"
+          CLOUD_REPO_READ_TOKEN="$(trim "${CLOUD_REPO_READ_TOKEN:-}")"
+          SRC_REPO="$(trim "${SRC_REPO:-}")"
+          SRC_PATH="$(trim "${SRC_PATH:-}")"
+          # The PEM is deliberately NOT trimmed: its surrounding newlines are
+          # part of the value. Emptiness is tested on a stripped copy instead.
+          key_probe="$(printf '%s' "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" | tr -d '[:space:]')"
 
           missing=""
-          blank "${APP_ID:-}"                    && missing="${missing}\n  - vars.APP_ID (repository variable): the CLOUD_CODE_BOT app's numeric app id"
-          blank "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" && missing="${missing}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY: that app's PEM private key"
-          blank "${CLOUD_REPO_READ_TOKEN:-}"      && missing="${missing}\n  - secrets.CLOUD_REPO_READ_TOKEN: Contents:Read on the private source repo"
-          blank "${SRC_REPO:-}"                   && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_REPO: that repo's 'owner/name'"
-          blank "${SRC_PATH:-}"                   && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_PATH: path to no_gpu_nodes.json within it"
+          [ -z "$APP_ID" ]                 && missing="${missing}\n  - vars.APP_ID (repository variable): the CLOUD_CODE_BOT app's numeric app id"
+          [ -z "$key_probe" ]              && missing="${missing}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY: that app's PEM private key"
+          [ -z "$CLOUD_REPO_READ_TOKEN" ]  && missing="${missing}\n  - secrets.CLOUD_REPO_READ_TOKEN: Contents:Read on the private source repo"
+          [ -z "$SRC_REPO" ]               && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_REPO: that repo's 'owner/name'"
+          [ -z "$SRC_PATH" ]               && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_PATH: path to no_gpu_nodes.json within it"
 
-          # Shape checks only for values that ARE set, so a provisioned-but-wrong
-          # credential also names itself instead of failing downstream.
+          # Shape checks for values that ARE set, so a provisioned-but-wrong
+          # credential names itself here instead of failing downstream with an
+          # error about something else.
+          #
+          # `[[ =~ ]]` rather than a `grep` pipeline, and anchored: it matches
+          # against the WHOLE value, so an embedded newline cannot smuggle a bad
+          # segment past a per-line match.
+          #
+          # SRC_REPO and SRC_PATH are spliced into a REST path below and are
+          # mutable by anyone with repo admin without code review. Rejecting `?`
+          # and `#` is not cosmetic: either character ends the path component and
+          # drops the `?ref=main` pin, so the fetch would silently read the
+          # source's default branch instead of the pinned one. `..` is rejected
+          # for the obvious traversal reason. No value is ever echoed; the
+          # message names the setting only.
           malformed=""
-          if ! blank "${APP_ID:-}" && ! printf '%s' "${APP_ID}" | tr -d '[:space:]' | grep -qE '^[0-9]+$'; then
-            malformed="${malformed}\n  - vars.APP_ID is not numeric (an app id, not the app's name or slug)"
+          if [ -n "$APP_ID" ] && [[ ! "$APP_ID" =~ ^[0-9]+$ ]]; then
+            malformed="${malformed}\n  - vars.APP_ID must be the app's numeric id (digits only, no name, slug or spaces)"
           fi
-          if ! blank "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" && ! printf '%s' "${CLOUD_CODE_BOT_PRIVATE_KEY}" | grep -q 'BEGIN'; then
-            malformed="${malformed}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY has no PEM header (paste the whole .pem, including the BEGIN line)"
+          if [ -n "$key_probe" ] && [[ ! "$CLOUD_CODE_BOT_PRIVATE_KEY" =~ -----BEGIN[A-Z\ ]*PRIVATE\ KEY----- ]]; then
+            malformed="${malformed}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY has no PEM private-key header (paste the whole .pem, including its BEGIN line)"
           fi
-          if ! blank "${SRC_REPO:-}" && ! printf '%s' "${SRC_REPO}" | tr -d '[:space:]' | grep -qE '^[^/]+/[^/]+$'; then
-            malformed="${malformed}\n  - secrets.CQL_NO_GPU_SOURCE_REPO is not in 'owner/name' form"
+          if [ -n "$SRC_REPO" ] && [[ ! "$SRC_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            malformed="${malformed}\n  - secrets.CQL_NO_GPU_SOURCE_REPO must be a bare 'owner/name' — no URL, no scheme, no extra path segments"
+          fi
+          if [ -n "$SRC_PATH" ] && { [[ ! "$SRC_PATH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || [[ "$SRC_PATH" == *..* ]]; }; then
+            malformed="${malformed}\n  - secrets.CQL_NO_GPU_SOURCE_PATH must be a repo-relative path — no leading '/', no '..', no query or fragment characters"
           fi
 
           if [ -n "${missing}${malformed}" ]; then
@@ -123,8 +154,9 @@ jobs:
             echo "(see this file's header for why that matters to the PR's CI), and the"
             echo "read token plus coordinates to fetch the private source file."
             echo
-            echo "A repository admin has to set these under Settings > Secrets and"
-            echo "variables > Actions; a workflow change cannot."
+            echo "These are secrets rather than variables because Actions echoes a step's"
+            echo "resolved env: block into the (public) run log. A repository admin has to"
+            echo "set them under Settings > Secrets and variables > Actions."
             echo
             echo "Until then this job fails every day on its schedule. That failure is"
             echo "NOT a signal about the catalogs or about main."
