@@ -1150,17 +1150,35 @@ def _build_args(
         _ensure_open_autogrow_slot(group, inputs, extra)
         annotations.append(_autogrow_annotation(group, inputs))
 
-    if unknown:
+    entries: list | None = None
+    unreadable_layout: str | None = None
+    if not unknown:
+        try:
+            saved_names = saved_widget_order(node, ctx.graph, class_type)
+            entries = (
+                validated_entries
+                if validated_entries is not None
+                else _expand_widget_entries(m, positional, saved_widget_names=saved_names)
+            )
+        except SavedWidgetLayoutError as exc:
+            # The save names a widget today's catalog does not place, so no slot
+            # in this array has a known name. Print the raw values with the same
+            # positional escape hatch an uncatalogued class gets: naming them
+            # from the current order is the misalignment this read prevents.
+            # One such node must not cost the whole render — the rest of the
+            # graph is still readable, and a reader needs it to see which node
+            # is stale.
+            unreadable_layout = str(exc)
+    if unknown or unreadable_layout is not None:
         if positional:
             args.append(f"widgets={py_literal(positional)}")
-        warnings.append(f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally")
-    else:
-        saved_names = saved_widget_order(node, ctx.graph, class_type)
-        entries = (
-            validated_entries
-            if validated_entries is not None
-            else _expand_widget_entries(m, positional, saved_widget_names=saved_names)
-        )
+        if unreadable_layout is not None:
+            warnings.append(f"node {ctx.qualify(nid)}: {unreadable_layout}; widgets printed positionally")
+        else:
+            warnings.append(
+                f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally"
+            )
+    elif entries is not None:
         for idx, entry in enumerate(entries):
             if entry.frontend_injected:
                 # ``upload`` / ``audioUI`` / PREVIEW_3D ``image``: a frontend

@@ -2580,8 +2580,18 @@ class Graph:
     # -- Workflow slot editing --
 
     def get_template_schema(self, template_id: str, workflow: dict) -> dict:
-        """Extract the slot manifest from a frontend-format workflow."""
-        return {"id": template_id, "slots": _extract_frontend_slots(workflow, self)}
+        """Extract the slot manifest from a frontend-format workflow.
+
+        ``warnings`` is present only when a node contributed no slots for a
+        reason a caller should surface — today, a saved widget layout the
+        current catalog cannot reconcile.
+        """
+        warnings: list[dict] = []
+        slots = _extract_frontend_slots(workflow, self, warnings)
+        schema = {"id": template_id, "slots": slots}
+        if warnings:
+            schema["warnings"] = warnings
+        return schema
 
     def apply_slots(self, workflow: dict, overrides: dict[str, Any]) -> tuple[dict, list[dict]]:
         """Apply slot overrides. Returns (modified_workflow, warnings)."""
@@ -4863,7 +4873,7 @@ def _expand_widget_entries(
     return entries
 
 
-def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
+def _node_widget_slots(node: dict, prefix: str, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Surface a regular node's widget inputs as slots under ``prefix``.
 
     ``prefix`` is the addressable node path (``"3"`` at top level, ``"10/9"``
@@ -4871,6 +4881,15 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     about — including a dynamic combo's selector (enum = its option keys) and
     the selected option's ``<name>.<sub>`` sub-inputs. Returns ``[]`` for
     nodes whose type isn't in object_info.
+
+    A save whose recorded layout the current catalog cannot reconcile
+    (:class:`SavedWidgetLayoutError`) also yields ``[]``, with the reason
+    appended to ``warnings``. It owns no RESOLVABLE positions, and re-deriving
+    them from today's order is the misalignment reading the saved layout exists
+    to prevent — so this node advertises nothing rather than a guess. It is
+    reported per node instead of raised because a read must not lose the whole
+    graph to one stale node: every other node still lists, which is what lets a
+    caller see the offending node at all.
     """
     node_type = node.get("type", "")
     m = graph.node(node_type)
@@ -4879,8 +4898,21 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
-    saved_names = saved_widget_order(node, graph, node_type)
-    for idx, entry in enumerate(_expand_widget_entries(m, widgets, saved_widget_names=saved_names)):
+    try:
+        saved_names = saved_widget_order(node, graph, node_type)
+        entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
+    except SavedWidgetLayoutError as exc:
+        if warnings is not None:
+            warnings.append(
+                {
+                    "code": "saved_widget_layout_unreadable",
+                    "message": f"node {prefix}: {exc}; its slots are not listed",
+                    "instance_id": prefix,
+                    "node_type": node_type,
+                }
+            )
+        return []
+    for idx, entry in enumerate(entries):
         if entry.port is None:  # control_after_generate / injected marker — not a slot
             continue
         current = widgets[idx] if idx < len(widgets) else None
@@ -4915,7 +4947,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     return slots
 
 
-def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
+def _extract_frontend_slots(workflow: dict, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Walk workflow nodes and extract tweakable slots.
 
     For every node we surface its widget inputs at ``<nodePath>.<input>``. When
@@ -4930,6 +4962,10 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
     at ``<instanceId>.<name>`` for backward compatibility, but the recursion
     means an agent is never stranded when those proxies are missing or dangle
     (fetched templates routinely point proxyWidgets at deleted interior ids).
+
+    ``warnings``, when given, collects the per-node reasons a node advertised no
+    slots at all (an unreconcilable saved layout). The walk continues past such
+    a node, so one stale save costs its own slots and nothing else.
     """
     defs_by_id = _subgraph_defs_by_id(workflow)
     slots: list[dict] = []
@@ -4955,7 +4991,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             node_type = node.get("type", "")
             sg = defs_by_id.get(node_type)
             if sg is None:
-                for slot in _node_widget_slots(node, node_path, graph):
+                for slot in _node_widget_slots(node, node_path, graph, warnings):
                     if (node_id, slot["name"]) not in exclude:
                         add(slot)
                 continue
@@ -5126,9 +5162,11 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     Returns the widget's current value (which may be ``None`` for a
     legitimately-null widget) or the module-level ``_UNRESOLVED`` sentinel when
     the proxy entry points at a missing/dangling interior node, when the widget
-    name is absent from the node's widget order, or when the index is past the
-    end of ``widgets_values``.  Callers must use ``is _UNRESOLVED`` to test for
-    the unresolvable case so that a real ``None`` value is preserved.
+    name is absent from the node's widget order, when the interior node's saved
+    widget layout cannot be reconciled with the current catalog, or when the
+    index is past the end of ``widgets_values``.  Callers must use
+    ``is _UNRESOLVED`` to test for the unresolvable case so that a real ``None``
+    value is preserved.
     """
     proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
     for entry in proxy:
@@ -5143,8 +5181,15 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
                 continue
             interior_class = inode.get("type", "")
             widgets = _widgets_as_positional(inode.get("widgets_values"), graph, interior_class)
-            saved_names = saved_widget_order(inode, graph, interior_class)
-            order = graph.widget_order_for_node(interior_class, widgets, saved_names)
+            try:
+                saved_names = saved_widget_order(inode, graph, interior_class)
+                order = graph.widget_order_for_node(interior_class, widgets, saved_names)
+            except SavedWidgetLayoutError:
+                # The save records a layout today's catalog cannot reconcile, so
+                # this proxy's slot position is unknown — which is exactly what
+                # the sentinel means. Reading it off the catalog order instead
+                # would hand back a neighbour's value.
+                return _UNRESOLVED
             try:
                 idx = order.index(name)
             except ValueError:
