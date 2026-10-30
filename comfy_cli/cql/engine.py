@@ -790,6 +790,10 @@ class Port:
         for w in warnings:
             w.setdefault("severity", finding_severity(w.get("code", "")))
             w.setdefault("value", value)
+            if w.get("code") == "below_min":
+                w.setdefault("bound", self.options.min)
+            elif w.get("code") == "above_max":
+                w.setdefault("bound", self.options.max)
         return warnings
 
 
@@ -2949,6 +2953,8 @@ def _validate_catalog_value(
                 "code": w["code"],
                 "message": w["message"],
                 "hint": f"use a value {op} {bound}",
+                "value": w["value"],
+                "bound": bound,
             }
             # Only a hard reject on a node the server will run; on a pruned node
             # it stays advisory (matching pre-promotion behavior for that node).
