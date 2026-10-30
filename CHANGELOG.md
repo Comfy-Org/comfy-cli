@@ -230,6 +230,8 @@ history.
 
 ### Fixed
 
+- Workflow conversion sends a promoted subgraph widget's value to every linked
+  input, including socket-only targets in direct and nested fan-outs.
 - Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
   (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
   written `widgets_values` is the frontend's four-widget shape
