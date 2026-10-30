@@ -1497,6 +1497,21 @@ def _find_mirrored_record(target, record_name: str, workflow_json: dict | None =
     return record
 
 
+def _saved_file_id(info: object, key: str) -> str | None:
+    """Use only the actual userdata write receipt, never a mirrored record ID."""
+    from uuid import UUID
+
+    if not isinstance(info, dict) or info.get("path") != f"{_WORKFLOWS_DIR}/{key}":
+        return None
+    identity = info.get("id")
+    if not isinstance(identity, str):
+        return None
+    try:
+        return identity if str(UUID(identity)) == identity else None
+    except ValueError:
+        return None
+
+
 def _cloud_save(
     renderer, target, workflow_file: str, name: str, description: str | None, *, overwrite: bool = True
 ) -> None:
@@ -1516,11 +1531,13 @@ def _cloud_save(
     except (urllib.error.URLError, OSError, _ResponseUnparseable, _ResponseTooLarge) as e:
         raise _handle_cloud_http_error(renderer, e, operation="save") from e
 
+    saved_file_id = _saved_file_id(info, key)
     record_name = _cloud_record_name(key)
     record = _find_mirrored_record(target, record_name, workflow_json) if record_name else None
     latest = record.get("latest_version") if record else None
     payload: dict[str, Any] = {
         "workflow_id": record["id"] if record else None,
+        "saved_file_id": saved_file_id,
         "name": record_name or key,
         "filename": key,
         "latest_version": latest if isinstance(latest, int) and not isinstance(latest, bool) else None,
@@ -1534,6 +1551,15 @@ def _cloud_save(
             {
                 "code": "description_ignored",
                 "message": "--description is ignored: the Cloud Workflows sidebar file has no description field",
+            }
+        )
+    if saved_file_id is None:
+        warnings.append(
+            {
+                "code": "saved_file_identity_unavailable",
+                "message": "The file was saved, but this server did not return its canonical saved_file_id; "
+                "a private saved-file link cannot be certified. Verify the file in the Cloud Workflows sidebar; "
+                "do not repeat the save or uploads to obtain an ID. workflow_id identifies a separate record.",
             }
         )
     if record is None:
@@ -1911,7 +1937,7 @@ def get_cmd(
     help=(
         "Save a workflow JSON as workflows/<name>.json. On Comfy Cloud it appears in the Workflows sidebar "
         "(refresh an open tab) and opens from there; Cloud also keeps a workflow record for it, returned as "
-        "workflow_id. With --where local it lands in the local ComfyUI's /userdata workflows/ folder. "
+        "workflow_id and, when the server returns it, the separate userdata saved_file_id. With --where local it lands in the local ComfyUI's /userdata workflows/ folder. "
         "A save under an existing name replaces it unless --no-overwrite."
     ),
 )
