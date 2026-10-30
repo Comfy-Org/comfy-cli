@@ -36,7 +36,9 @@ history.
   The evidence is the node's own `inputs[]` widget-marker list rather than the
   length of `widgets_values`, so a truncated save whose later widgets ran past
   the end still gets their defaults. Required inputs, socketless widgets, and
-  optional non-widget sockets are never dropped.
+  optional non-widget sockets are never dropped, and neither is anything on a
+  node whose markers omit a widget the save itself filled — the shape a legacy
+  frontend wrote when it marked only the widgets converted to a socket.
 
 ### Added
 

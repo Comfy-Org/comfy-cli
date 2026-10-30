@@ -9,6 +9,7 @@ import pytest
 
 from comfy_cli.workflow_to_api import (
     WorkflowConversionError,
+    _markers_omit_a_filled_widget,
     convert_ui_to_api,
     is_api_format,
     is_subgraph_uuid,
@@ -2972,6 +2973,65 @@ class TestAbsentOptionalWidgetsAreNotSynthesized:
             marker_names=["fps"],
         )
         assert inputs == {"fps": 16, "vae": None}
+
+    def test_a_legacy_converted_but_unconnected_marker_is_not_an_inventory(self):
+        # Legacy ``convertToInput`` added the socket WITHOUT connecting it, so an
+        # unlinked marker is not by itself proof of the linked-inputs model: this
+        # node's only marker is a converted-and-unconnected ``cfg``, and ``steps``
+        # is an ordinary unmarked widget that the save positionally filled.
+        # Markers that omit a widget the save FILLED cannot be an inventory, so
+        # the optional ``denoise`` default must stand.
+        inputs = self._convert(
+            [None, 20],  # legacy hideWidget leaves the converted slot present but empty
+            {"cfg": ["FLOAT", {"default": 8.0}], "steps": ["INT", {"default": 20}]},
+            {"denoise": ["FLOAT", {"default": 1.0}]},
+            marker_names=["cfg"],
+        )
+        assert inputs == {"cfg": None, "steps": 20, "denoise": 1.0}
+
+    def test_an_inventory_naming_every_filled_widget_is_still_trusted(self):
+        # The same shape with complete markers: both filled widgets are named, so
+        # nothing contradicts the inventory and the unnamed optional is dropped.
+        inputs = self._convert(
+            [8.0, 20],
+            {"cfg": ["FLOAT", {"default": 8.0}], "steps": ["INT", {"default": 20}]},
+            {"denoise": ["FLOAT", {"default": 1.0}]},
+            marker_names=["cfg", "steps"],
+        )
+        assert inputs == {"cfg": 8.0, "steps": 20}
+
+    def test_an_unmarked_filled_input_that_is_not_a_widget_does_not_refuse(self):
+        # ``forceInput`` demotes a widget-type input to a connection-only slot, so
+        # it is not a declared widget and its absence from the markers says
+        # nothing about the inventory. The optional is still dropped.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}], "mask": ["INT", {"default": 1, "forceInput": True}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "mask": 1}
+
+    def test_a_dict_widget_marked_per_leaf_counts_as_naming_its_declared_input(self):
+        # A dict widget is DECLARED as ``regions`` but MARKED per leaf
+        # (``regions.face_oval``, ``regions.lips``, ...), so the inventory check
+        # compares against flattened names. Without that, every save carrying one
+        # would be refused and lose the fix on the rest of the node. Measured over
+        # the 500 oracle fixtures this is the only shape where the two differ.
+        schema = {
+            "input": {
+                "required": {"regions": ["COMFY_DYNAMICGROUP_V3", {}]},
+                "optional": {"codec": [["auto", "h264"], {"default": "auto"}]},
+            }
+        }
+        assert (
+            _markers_omit_a_filled_widget(
+                {"regions.face_oval", "regions.lips"}, schema, ["regions", "regions.face_oval"]
+            )
+            is False
+        )
+        # ...while a genuinely unnamed declared widget still refuses.
+        assert _markers_omit_a_filled_widget({"regions.face_oval"}, schema, ["codec"]) is True
 
 
 class TestSeedreamDynamicCombo:
