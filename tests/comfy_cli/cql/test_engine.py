@@ -1736,6 +1736,9 @@ class TestValidateWorkflow:
         errs = [e for e in result["errors"] if e["code"] == "below_min"]
         assert len(errs) == 1
         assert errs[0]["field"] == "width"
+        # The rejected value and the violated bound ride on the finding, not just the message.
+        assert errs[0]["value"] == 0
+        assert "bound" in errs[0]
         # No longer surfaced as a warning.
         assert "below_min" not in [w["code"] for w in result["warnings"]]
 
@@ -1754,6 +1757,8 @@ class TestValidateWorkflow:
         errs = [e for e in result["errors"] if e["code"] == "above_max"]
         assert len(errs) == 1
         assert errs[0]["field"] == "width"
+        assert errs[0]["value"] == 999999
+        assert "bound" in errs[0]
         assert "above_max" not in [w["code"] for w in result["warnings"]]
 
 
@@ -3002,6 +3007,11 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+        # The rejected value and the violated bound ride on the finding too,
+        # not just the message — same contract as the workflow-level path.
+        above_max = next(w for w in warnings if w["code"] == "above_max")
+        assert above_max["value"] == 99999
+        assert "bound" in above_max
 
 
 class TestSlotSuggestionOnNotFound:

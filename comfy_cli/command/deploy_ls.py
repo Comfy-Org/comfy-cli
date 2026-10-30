@@ -54,6 +54,17 @@ def _release_column(deployment: JsonObject) -> str:
     return f"  {release_id}" if isinstance(release_id, str) and release_id else ""
 
 
+def _editor_of(row: JsonObject) -> bool | None:
+    # A comfy-deploy older than the editor switch sends no `editor`.
+    editor = row.get("editor")
+    return editor if isinstance(editor, bool) else None
+
+
+def _editor_column(deployment: JsonObject) -> str:
+    editor = deployment.get("editor")
+    return "" if editor is None else f"  editor {'on' if editor else 'off'}"
+
+
 def run_ls(request: ListRequest) -> None:
     renderer = get_renderer()
     try:
@@ -90,7 +101,7 @@ def run_ls(request: ListRequest) -> None:
                     version = versions[release_id]
                 if not request.include_deleted and row.get("deletedAt") is not None:
                     continue
-                named = {**row, "name": deployment_name(row)}
+                named = {**row, "name": deployment_name(row), "editor": _editor_of(row)}
                 deployments.append(named if version is None else {**named, "releaseVersion": version})
                 if len(deployments) == request.limit:
                     break
@@ -104,7 +115,8 @@ def run_ls(request: ListRequest) -> None:
                 marker = " (deleted)" if deployment.get("deletedAt") is not None else ""
                 renderer.print(
                     f"  {sanitize_markup(deployment['name'] or '-')}  {required_string(deployment, 'id')}"
-                    f"  {required_string(deployment, 'status')}{_release_column(deployment)}{marker}"
+                    f"  {required_string(deployment, 'status')}{_release_column(deployment)}"
+                    f"{_editor_column(deployment)}{marker}"
                 )
         payload_rows: list[JsonValue] = [*deployments]
         renderer.emit({"deployments": payload_rows}, command="deploy ls", changed=False)

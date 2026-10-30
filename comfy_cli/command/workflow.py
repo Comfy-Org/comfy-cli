@@ -1744,6 +1744,66 @@ def delete_cmd(
 # shared implementation below (see cmdline.py).
 
 
+# Above this many pruned nodes, `validate` reports them as ONE warning. A canvas
+# that keeps finished branches around (an 8-scene film workflow, 76 nodes) got up
+# to 66 warnings per call, one per pruned node, and an agent re-reads all of them
+# on every later round of its turn. A handful still get one entry each.
+_UNREACHABLE_PER_NODE_MAX = 3
+_UNREACHABLE_IDS_IN_MESSAGE = 10
+_UNREACHABLE_CODE = "node_not_reachable_from_output"
+
+
+def _collapse_unreachable_warnings(warnings: list[dict], api_workflow: dict) -> list[dict]:
+    """Fold more than _UNREACHABLE_PER_NODE_MAX pruned-node warnings into one.
+
+    Runs after node ids were rewritten to editable addresses, so ``node_ids``
+    speaks the same address space as every other finding; the raw API ids ride
+    alongside in ``api_node_ids`` when any id was rewritten.
+    """
+    unreachable = [w for w in warnings if w.get("code") == _UNREACHABLE_CODE]
+    if len(unreachable) <= _UNREACHABLE_PER_NODE_MAX:
+        return warnings
+    node_ids = [str(w.get("node_id")) for w in unreachable]
+    api_ids = [str(w.get("api_node_id", w.get("node_id"))) for w in unreachable]
+    by_class: dict[str, int] = {}
+    for api_id in api_ids:
+        node = api_workflow.get(api_id)
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        key = str(class_type) if class_type else "unknown"
+        by_class[key] = by_class.get(key, 0) + 1
+    classes = ", ".join(f"{name} x{n}" for name, n in sorted(by_class.items(), key=lambda kv: (-kv[1], kv[0])))
+    shown = ", ".join(node_ids[:_UNREACHABLE_IDS_IN_MESSAGE])
+    if len(node_ids) > _UNREACHABLE_IDS_IN_MESSAGE:
+        shown += f" and {len(node_ids) - _UNREACHABLE_IDS_IN_MESSAGE} more"
+    merged: dict = {
+        "node_id": node_ids[0],
+        "node_ids": node_ids,
+        "count": len(node_ids),
+        "field": None,
+        "code": _UNREACHABLE_CODE,
+        "message": (
+            f"{len(node_ids)} nodes feed no output node — the server prunes them, so they will not run "
+            f"and have no effect on the result: {shown} ({classes})"
+        ),
+        "hint": (
+            "wire each one's output into the chain that reaches a save/preview node, or delete the ones "
+            "you no longer need; a node that reaches no output is skipped entirely"
+        ),
+    }
+    if api_ids != node_ids:
+        merged["api_node_ids"] = api_ids
+    template_ids = {str(w.get("node_id")): w["template_node_id"] for w in unreachable if "template_node_id" in w}
+    if template_ids:
+        merged["template_node_ids"] = template_ids
+    out: list[dict] = []
+    for w in warnings:
+        if w.get("code") != _UNREACHABLE_CODE:
+            out.append(w)
+        elif w is unreachable[0]:
+            out.append(merged)
+    return out
+
+
 def validate_api_workflow(
     workflow: str,
     *,
@@ -1985,6 +2045,8 @@ def validate_api_workflow(
             tid = template_node_id(ui_workflow, issue.get("node_id"))
             if tid is not None:
                 issue["template_node_id"] = tid
+
+    result["warnings"] = _collapse_unreachable_warnings(result["warnings"], wf_data)
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative

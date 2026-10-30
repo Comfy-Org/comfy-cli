@@ -1,5 +1,8 @@
 # Op vocabulary — v1 (frozen)
 
+The accepted architectural role of this frozen, versioned contract is recorded
+in [ADR-OPERATIONS-0002](adr/OPERATIONS-0002-version-structured-workflow-operations.md).
+
 Status: **FROZEN**. This document is the normative contract for the structured-edit
 op vocabulary in `comfy_cli/workflow_ops.py`: the op kinds, their argument shapes,
 their idempotency and conflict rules, and the batch protocol. Downstream
@@ -11,9 +14,8 @@ Machine-readable projection: `workflow_ops.FROZEN_OPS`, `workflow_ops.DEFERRED_O
 enforces that this document, those constants, and the `apply_op` / `apply_specs`
 dispatch tables agree. A change to any of the three without the others fails CI.
 
-This freeze describes the code on the **unmerged branch
-`fix/validate-lowers-ui-to-api`**. Until that branch merges to `master`, a SHA
-citation must point at a commit on that branch.
+This freeze describes code on `main`. A SHA citation points at the commit that
+contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
@@ -41,6 +43,15 @@ document, so they are standalone-only: a batch containing either is rejected
 atomically with its own registered error code —
 `workflow_clear_not_batchable` / `workflow_reset_doc_not_batchable` — and a hint
 naming the standalone command. Nothing from such a batch is applied.
+
+`set_dynamic_group_rows` is a batch spec, not an op kind. It replaces a
+DynamicGroup's rows (`{"op": "set_dynamic_group_rows", "node": ..., "group":
+"loras", "rows": [{...}]}`) and emits only `set_widget` ops: the row count, then
+every widget of each written row, including a field's `<field>.0` control mode.
+Rows with a connected or promoted field keep their index, are not rewritten, and
+are left out of `rows`. comfy-cli's `apply_op` replays these in order because its
+workflow model materializes rows from the count; the shared document accepts them
+in any order. An earlier write to the group in the same batch is refused.
 
 Every op carries the common envelope stamped by `_new_op`:
 
@@ -79,10 +90,14 @@ refused with `node_deprecated` unless it is `true`.
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.
-* Conflict: none — ids are minted leaderlessly (section 6), so two concurrent
-  `add_node` ops never target the same identity.
+* Conflict: ids are minted leaderlessly (section 6), so two concurrent
+  `add_node` ops never target the same identity. Amendment v1.10 adds one
+  explicit ordering conflict between a reused-subgraph add and a concurrent
+  mutation inside the definition it turns from single-instance to shared.
 * Invalid: an unknown `class_type` is rejected at mint time (`UnknownNodeType`,
-  rendered as `node_not_found` with close matches).
+  rendered as `node_not_found` with close matches), except for the exact id of
+  a definition already present with a reusable top-level host instance as
+  specified by amendment v1.10 (§19).
 
 ### 1.2 `connect`
 
@@ -342,8 +357,8 @@ local model can need it.
   their canonical digests in `_applied_op_digests`. An identical retry is a
   no-op; the same `op_id` carrying a different canonical payload rejects with
   `op_id_reuse`. A legacy document with only the list keeps its historical
-  duplicate behavior. See **Amendment v1.10** for the canonical form, the
-  bounds and the ledger contract. **Uniqueness scope is
+  duplicate behavior. See **Amendment v1.11** (§20) for the canonical form,
+  the bounds and the ledger contract. **Uniqueness scope is
   PER-WORKFLOW**: the same `op_id` can exist in two different workflow documents
   without interaction; within one document each op applies exactly once.
 * `_applied_ops`, `_applied_op_digests` (and `_widget_stamps`) are apply-time
@@ -910,7 +925,7 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 ## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
 
-The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+The frontend (ComfyUI_frontend ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted subgraph widget's
 value on the HOST instance — `widgets_values[i]` on the instance, positional
 over the definition's inputs that resolve to an interior widget — and runs
 that value over the interior default. Interior `path` writes (§8.7) therefore
@@ -1231,7 +1246,56 @@ v1.9.
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
 pinning this document by SHA move the SHA together with their comfy-cli pin.
 
-## 19. Amendment v1.10 — 2026-10-24 (canonical op identity: `op_id` binds one payload)
+## 19. Amendment v1.10 — 2026-10-25 (`add_node` reuses an existing subgraph definition)
+
+An `add_node` spec may use the **exact definition id** of a subgraph already in
+the workflow when that definition also has at least one top-level host instance.
+This is an extension of the existing `add_node` kind, not a new operation kind.
+Unknown ids and definitions with no reusable top-level host still fail closed as
+`node_not_found`; definition names are not an authoring alias.
+
+The first matching top-level host in document order is the authoritative schema
+template. Legacy hosts whose `type` is the definition name are resolved through
+the same definition index as the rest of the engine. The fresh host copies the
+template's `inputs`, `outputs`, `properties`, `widgets_values`, optional
+`widgets_values_form`, and valid saved `size`. It clears every input/output link,
+resets `flags`, `order`, and `mode`, mints a fresh collision-free node id, and
+uses the requested position/title. Malformed host containers fail closed rather
+than emitting a partially shaped node. The copied host state is independent;
+the definition is deliberately shared.
+
+The minted op carries the complete authoritative `node` payload as before and
+adds:
+
+```json
+{
+  "subgraph_reuse": {
+    "definition_id": "2454ad83-157c-40dd-9f19-5daaf4041ce0",
+    "existing_instance_paths": [["88"]]
+  }
+}
+```
+
+`existing_instance_paths` is captured before the new host is applied and
+includes nested live paths that resolve to the reused definition. It is
+conflict metadata: `detect_conflict` flags this add against a concurrent
+interior `set_widget`, `connect`, `disconnect`, `delete_node`, or promoted-input
+repair whose mutated definition path is that instance path or a descendant.
+Without that flag, replaying the interior mutation before versus after the new
+shared instance can fork/refuse in different orders (§8.7) and silently diverge.
+The merge consumer must therefore ask for an order for such a pair; all other
+`add_node` identity/idempotency rules remain unchanged.
+
+Batch layout uses the same normalized saved host size as the emitted node,
+including LiteGraph's object form (`{"0": width, "1": height}`), so an
+unpinned sibling in the same batch is not placed through the reused host.
+
+No operation kind is added or removed. `FROZEN_OPS`, `DEFERRED_OPS`, and
+`BATCHABLE_OPS` are unchanged. Downstream consumers that move their pinned
+vocabulary SHA to v1.10 must preserve `subgraph_reuse` conflict metadata even
+though replay itself continues to insert `op.node` opaquely.
+
+## 20. Amendment v1.11 — 2026-10-24 (canonical op identity: `op_id` binds one payload)
 
 **`op_id` identifies one immutable semantic-op envelope, not just one delivery.**
 Before this amendment `apply_op` dropped any op whose `op_id` was already in
@@ -1243,7 +1307,7 @@ documents and no error on either side. This mirrors comfy-multi-player schema
 canonical form, because the digest is the only thing that distinguishes an
 identical retry from reuse.
 
-### 19.1 The canonical form
+### 20.1 The canonical form
 
 Compact JSON over the **whole envelope**:
 
@@ -1272,7 +1336,7 @@ Compact JSON over the **whole envelope**:
 
 The ledger records the lowercase SHA-256 hex digest of that string.
 
-### 19.2 The ledger contract
+### 20.2 The ledger contract
 
 * `_applied_op_digests` maps `op_id` → digest, beside `_applied_ops`. Both are
   stripped by `canonical()` and `strip_internal()`, and `reset_doc` clears both
@@ -1298,7 +1362,7 @@ The ledger records the lowercase SHA-256 hex digest of that string.
   deliberately without digesting the replayed payload first — a non-canonical
   replay must still be the documented no-op rather than a new error.
 
-### 19.3 Bounds
+### 20.3 Bounds
 
 Canonicalization is bounded to **64 levels of nesting**, **1,048,576 entries per
 collection** and **33,554,432 approximate cost units**. These exist only so a

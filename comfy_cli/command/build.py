@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -2487,13 +2488,14 @@ def _builder_client(renderer, builder_url: str | None):
     A caller that already holds a Cloud JWT, such as the Developer Platform agent
     service forwarding the request's token, injects it via ``COMFY_BUILDER_TOKEN``,
     and that explicit token comes first. Otherwise ``from_credentials`` uses a
-    workspace API key from ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the
-    stored sign-in.
+    Cloud JWT from ``COMFY_CLOUD_AUTH_TOKEN`` or a workspace API key from
+    ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the stored sign-in. Empty
+    or whitespace-only values count as unset.
     """
     from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
     base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
-    token = os.environ.get("COMFY_BUILDER_TOKEN")
+    token = (os.environ.get("COMFY_BUILDER_TOKEN") or "").strip()
     if token:
         return BuilderClient(base_url, token)
     try:
@@ -2978,6 +2980,10 @@ def show_cmd(
 
 
 _RELEASE_POLL_SECONDS = 2.0
+#: Failed polls in a row a watch rides out before it ends: transport failures and
+#: answers too damaged to read, counted together. With the backoff in
+#: ``_poll_call``, about a minute of outage.
+_POLL_TRANSPORT_MISSES = 5
 
 
 #: Sorts below every usable timestamp, so a release the builder dated badly loses
@@ -3133,9 +3139,71 @@ def _selected_release_id(renderer, client, scope: _BuildScope, release: str | No
     return _newest_release_id(renderer, client, _resolve_build_id(renderer, client, scope))
 
 
+def _poll_call(renderer, fn, usable=None):
+    """``_builder_call`` for one poll of a watch, which a single timed-out or
+    dropped request must not end: the release keeps building either way. A
+    transport failure sleeps and polls again, up to ``_POLL_TRANSPORT_MISSES`` in
+    a row; the builder's own answer (an ``HTTPError``) and every other failure
+    still end the watch on the first one, through the same envelope.
+
+    The builder client is urllib-only: a connect timeout arrives wrapped in a
+    ``URLError``, a timeout or reset while awaiting the response arrives bare, and
+    a connection closed partway through the body arrives as ``IncompleteRead``.
+    A certificate the CA store refuses also arrives as a ``URLError``, but it
+    will be refused again, so it ends the watch at once with its trust hint.
+    A fixed-length body cut short arrives as no error at all: the HTTP layer
+    returns the partial bytes, which parse as ``{}``. So an answer ``usable``
+    rejects counts as a miss in the same run, and the last one ends the watch."""
+    from comfy_cli.http import tls_verification_failed
+
+    def attempt():
+        for miss in range(1, _POLL_TRANSPORT_MISSES + 1):
+            try:
+                answer = fn()
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
+                if isinstance(e, urllib.error.HTTPError) or tls_verification_failed(e):
+                    raise
+                if miss == _POLL_TRANSPORT_MISSES:
+                    if isinstance(e, urllib.error.URLError):
+                        raise
+                    # Wrapped, or a bare one would escape ``_builder_call`` as a traceback.
+                    raise urllib.error.URLError(e) from e
+                renderer.warn(f"builder unreachable ({e}); polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
+            else:
+                if usable is None or usable(answer):
+                    return answer
+                if miss == _POLL_TRANSPORT_MISSES:
+                    renderer.error(
+                        code="build_builder_error",
+                        message=f"the builder sent no readable answer in {miss} polls in a row.",
+                    )
+                    raise typer.Exit(code=1)
+                renderer.warn(f"builder answer unreadable; polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
+            time.sleep(min(_RELEASE_POLL_SECONDS * 2**miss, 30.0))
+
+    return _builder_call(renderer, attempt)
+
+
+def _readable_log(answer) -> bool:
+    """The builder always sends ``log``, empty when none was captured yet, so an
+    answer without one is a body cut short."""
+    return isinstance(answer, dict) and isinstance(answer.get("log"), str)
+
+
+def _poll_status(renderer, client, release_id: str) -> dict:
+    """One status read of a watch. An answer with no status string is unreadable
+    and polled again; a whole answer naming an unknown status is the builder's
+    word and ends the watch at the caller."""
+    return _poll_call(
+        renderer,
+        lambda: client.get_release(release_id),
+        usable=lambda release: isinstance(release, dict) and isinstance(release.get("status"), str),
+    )
+
+
 def _poll_release(renderer, client, release_id: str) -> dict:
     while True:
-        release = _builder_call(renderer, lambda: client.get_release(release_id))
+        release = _poll_status(renderer, client, release_id)
         status = release.get("status")
         if renderer.is_pretty():
             renderer.info(f"release {release_id}: {status}")
@@ -3323,21 +3391,39 @@ def release_logs(
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     previous_log = ""
     content: dict = {}
+    complete = False
+
+    def read_log() -> dict:
+        return client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu)
+
     while True:
-        content = _builder_call(
-            renderer,
-            lambda: client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu),
-        )
+        # Only a follow is a watch; a single read fails fast like every other command.
+        # A body cut short inside its Content-Length parses as `{}` rather than
+        # raising. Before any whole log is in hand the follow polls again, as for
+        # a status read; after, publishing it would drop the log already read and
+        # fail `build_release_logs.json`, so the last whole log stands until a
+        # later read replaces it.
+        if follow:
+            had_log = _readable_log(content)
+            read = _poll_call(renderer, read_log, usable=lambda answer: had_log or _readable_log(answer))
+        else:
+            read = _builder_call(renderer, read_log)
+        if _readable_log(read) or not content:
+            content = read
+        elif complete:
+            renderer.warn("the final log read came back incomplete; showing the log read before the release completed")
         log = content.get("log", "")
         if renderer.is_pretty() and isinstance(log, str) and log:
             renderer.print(log[len(previous_log) :] if log.startswith(previous_log) else log)
             previous_log = log
-        if not follow:
+        if not follow or complete:
             break
-        detail = _builder_call(renderer, lambda: client.get_release(release_id))
+        detail = _poll_status(renderer, client, release_id)
         match detail.get("status"):
             case "complete":
-                break
+                # The log above may predate completion (a retried status read
+                # widens that gap), so read it once more for the final lines.
+                complete = True
             case "queued" | "building":
                 time.sleep(_RELEASE_POLL_SECONDS)
             case status:

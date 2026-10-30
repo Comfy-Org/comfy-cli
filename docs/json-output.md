@@ -1,5 +1,8 @@
 # `comfy run --json`: Machine-Readable Output (NDJSON)
 
+The accepted architecture for machine-readable output is recorded in
+[ADR-AUTOMATION-0003](adr/AUTOMATION-0003-one-versioned-machine-output-dialect.md).
+
 > **Dialect change (breaking).** The legacy `{"event": …, "schema_version": 1,
 > "error": {"kind": …}}` dialect was removed; `comfy run --json` now emits the
 > CLI-wide renderer stream. Every event line carries `schema: "event/1"` and a
@@ -218,7 +221,7 @@ list of differences:
 | Envelope `where` | `"local"` | `"cloud"` |
 | Envelope target fields | `data.host` (str), `data.port` (int) | `data.base_url` (str) |
 | Envelope `data.cached_node_ids` / `data.executed_node_ids` | Present on `--wait` | Absent — they are derived from the per-node event stream, which the cloud has none of |
-| Envelope `data.warnings` | Absent | Present on `--wait` success: an array of non-fatal warning objects (currently only `partial_execution`, see below). `[]` when there are none |
+| Envelope `data.warnings` | Absent | Present on `--wait` success: an array of non-fatal warning objects (`partial_execution`, and `partial_execution_targets_ignored` under `--output-node-ids`; see below). `[]` when there are none |
 | `prompt_rejected` `details` | `status` (400) and `node_errors` | `node_errors` only — the cloud reports rejected nodes on an otherwise-2xx submit, so there is no 4xx status to report. The `node_errors` value has the same [array-of-records shape](#node_errors-shape) on both targets |
 | Error codes | The local set below | The workflow/pre-flight codes and the node-failure codes (`execution_error`, `transient_auth`, `prompt_rejected`, `cancelled`, `spend_consent_required`) plus the cloud-only codes below. The local-server- and WebSocket-specific codes cannot occur: `server_not_running`, `object_info_unavailable`, `connection_error`, `ws_timeout`, `ws_disconnected`, `invalid_response`, `client_error`, `server_error`, `partner_node_requires_credential` (the cloud injects the caller's credential itself) |
 
@@ -256,6 +259,33 @@ run off as a clean success:
 
 The envelope is still `ok: true` (exit `0`) — the job did run. Agents that
 need all-or-nothing semantics should check `data.warnings` is empty.
+
+With `--output-node-ids`, only the targeted output nodes are counted: an
+untargeted output node that produced nothing is not a warning, and outputs
+from untargeted nodes do not count toward a target that produced nothing. A
+target whose entry is only empty lists (`{"images": []}`) produced nothing.
+The warning then also carries `missing_output_node_ids`, the targeted ids that
+returned no outputs. It is emitted even when the cloud node catalog could not
+be loaded; the ids were then only checked to exist, so the message allows
+that a missing target may not be an output node:
+
+```json
+{"code": "partial_execution", "message": "targeted 1 output node(s) but the cloud returned outputs for only 0; no outputs from node(s) 12 (pruned server-side, likely failed validation)", "submitted_output_nodes": 1, "returned_output_nodes": 0, "missing_output_node_ids": ["12"]}
+```
+
+### `partial_execution_targets_ignored` warning
+
+On a `--output-node-ids` cloud `--wait` run, a node outside the targets and
+the nodes they depend on that still produced outputs means the server ran
+more than was asked for, most likely because it does not support
+`partial_execution_targets` and ran the whole graph:
+
+```json
+{"code": "partial_execution_targets_ignored", "message": "ran with --output-node-ids but node(s) outside the targets also produced outputs: 9; the server likely ignored partial_execution_targets and ran the whole graph", "untargeted_output_node_ids": ["9"]}
+```
+
+A local run has no `data.warnings`; compare `data.executed_node_ids` with the
+targets to check the same thing.
 
 ## Event reference
 
@@ -305,6 +335,10 @@ request's `prompt` field. It does **not** include `client_id` or
 
 Under `--print-prompt` this is the only event: the CLI emits it plus the
 final envelope and exits 0 without queuing.
+
+With `--output-node-ids` the event (and the `--print-prompt` envelope's
+`data`) also carries `partial_execution_targets`, the ids the submit sends in
+the request's top-level field of that name.
 
 ```json
 {"schema": "event/1", "type": "prompt_preview", "prompt": {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}}}}
@@ -553,7 +587,7 @@ On `--wait` success, `data` carries:
 | `outputs_by_item`   | dict            | The same outputs grouped by `compose` foreach item; `{}` when the workflow carried no item map |
 | `cached_node_ids`   | array of str    | **Local only.** Node IDs the server reported as cached  |
 | `executed_node_ids` | array of str    | **Local only.** Node IDs the executor *ran* — the union of every node that appeared in an `executing` or `executed` event, including intermediate compute nodes |
-| `warnings`          | array of dict   | **Cloud only.** Non-fatal warnings about the completed run — see [`partial_execution`](#partial_execution-warning). `[]` when there are none |
+| `warnings`          | array of dict   | **Cloud only.** Non-fatal warnings about the completed run — see [`partial_execution`](#partial_execution-warning) and [`partial_execution_targets_ignored`](#partial_execution_targets_ignored-warning). `[]` when there are none |
 | `elapsed_seconds`   | float \| null   | Wall-clock duration (null when not waiting)            |
 | `host` / `port`     | str / int       | **Local only.** Target server                          |
 | `base_url`          | str             | **Cloud only.** Target cloud endpoint                  |
@@ -729,6 +763,7 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `workflow_invalid_json`   | Workflow file is not valid JSON                                                 | —                                                  | 1 |
 | `workflow_read_error`     | Workflow file exists but isn't readable as text (`OSError`, `UnicodeDecodeError`) | —                                                | 1 |
 | `workflow_not_api_format` | File parses but is neither UI nor API format                                    | —                                                  | 1 |
+| `invalid_output_node_ids` | `--output-node-ids` named no ids, an id not in the submitted API-format workflow, or a node that is not an output node (checked only when the node catalog is available, so not under `--print-prompt` or when it failed to load); nothing was submitted | `unknown_node_ids` (array of str), `non_output_node_ids` (array of str) | 1 |
 | `workflow_empty`          | Workflow has no executable nodes (UI conversion produced `{}`, or API workflow is `{}`) | —                                          | 1 |
 | `conversion_error`        | UI→API converter raised `WorkflowConversionError`                               | —                                                  | 1 |
 | `conversion_crash`        | UI→API converter raised an unexpected exception                                 | `exception_type` (str)                             | 1 |

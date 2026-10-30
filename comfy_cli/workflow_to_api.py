@@ -36,6 +36,7 @@ from comfy_cli.cql.engine import (
     _SubgraphDefs,
     _validate_dynamic_group_layout,
     _validate_dynamic_group_schema,
+    load_3d_advanced_has_legacy_buttons,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,7 +214,7 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     """Apply host-owned promoted widget values onto the expanded interior nodes.
 
     A promoted widget's value lives on the HOST instance (``widgets_values``
-    positional over the widget-backed subgraph inputs — ADR 0009); the
+    positional over the widget-backed subgraph inputs — ADR-SUBGRAPH-PROMOTION-0009); the
     interior widget is only its default. Expansion above copied the interior
     default, so a post-migration save (host prompt filled in, interior
     ``caption`` still ``''``) would submit the wrong prompt. Precedence, as the
@@ -1685,7 +1686,11 @@ def _build_api_node(
 
     link_inputs: dict[str, list] = {}
     primitive_inputs: dict[str, Any] = {}
-    for inp in node.get("inputs") or []:
+    # A malformed node can carry a truthy non-list here (``"inputs": 1``). The
+    # per-node guard in the caller would turn the TypeError into a dropped node;
+    # treating it as "no inputs" converts the widgets instead.
+    raw_node_inputs = node.get("inputs")
+    for inp in raw_node_inputs if isinstance(raw_node_inputs, list) else []:
         if not isinstance(inp, dict):
             continue
         input_name = inp.get("name")
@@ -1905,7 +1910,13 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
     return [option.get("key") for option in options if isinstance(option, dict)]
 
 
-def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[str, Any]]:
+def _schema_widget_pairs(
+    schema: Any,
+    widget_values: list[Any],
+    *,
+    node_type: str | None = None,
+    node: dict | None = None,
+) -> list[tuple[str, Any]]:
     """Pair a schema's widget inputs with their ``widgets_values`` slots.
 
     One ordered walk that unifies name-order and control-marker filtering so the
@@ -1924,6 +1935,11 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
       ``seed``/``noise_seed``), or a legacy stray marker after another seed-like
       INT that the next widget could not hold; sub-inputs recurse the same way.
 
+    A dynamic combo's selected sub-inputs are expanded in the order the SAVE
+    recorded them when ``node`` records one (:func:`_saved_sub_order`), because
+    ``widgets_values`` is positional against the option's sub-input list AT SAVE
+    TIME, not against today's.
+
     Returns ``[]`` when the schema declares no widget inputs, so the caller can
     fall back to node-input inspection exactly as before.
     """
@@ -1934,6 +1950,11 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
     # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
+    if node_type == "Load3DAdvanced" and not load_3d_advanced_has_legacy_buttons(widget_values):
+        # Same predicate the editor's ``load_3d_button_slots`` uses: a lone
+        # marker at the viewport slot is the viewport's own value, not a
+        # legacy button, so skipping it would shift width/height by one.
+        injects_load_3d_buttons = False
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -1996,13 +2017,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 # component widget, so their values sit between ``model_file`` and
                 # this slot. Consuming them here read "upload3dmodel" into the
                 # viewport input and shifted width/height by three.
-                while (
-                    vidx < len(widget_values)
-                    and isinstance(widget_values[vidx], str)
-                    and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
-                ):
+                if node_type == "Load3DAdvanced":
+                    # The shared predicate matched, so the editor placed all
+                    # three button slots here whatever the third value holds;
+                    # skip the same three or the two read different values.
                     legacy_buttons_consumed = True
-                    vidx += 1
+                    vidx = min(vidx + len(LOAD_3D_BUTTON_VALUES), len(widget_values))
+                else:
+                    while (
+                        vidx < len(widget_values)
+                        and isinstance(widget_values[vidx], str)
+                        and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+                    ):
+                        legacy_buttons_consumed = True
+                        vidx += 1
             if vidx >= len(widget_values):
                 if legacy_buttons_consumed:
                     # A save truncated after its button markers still names this
@@ -2027,7 +2055,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 return
             pairs.append((name, value))
             if is_dynamic:
-                subs = _dynamic_combo_selected_subs(name, spec, value)
+                subs = _saved_sub_order(node, name, _dynamic_combo_selected_subs(name, spec, value))
                 if not subs and not any(
                     _dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(spec)
                 ):
@@ -2083,6 +2111,73 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     return pairs
 
 
+def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Expand a dynamic combo's selected sub-inputs in the order the SAVE recorded.
+
+    A ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option contributes its
+    sub-inputs as contiguous ``widgets_values`` slots right after the selector
+    (``dynamicComboWidget.updateWidgets`` -> ``addNodeInput``), and the saved
+    graph names them on its ``inputs[]`` entries, dotted and in that order:
+    ``model.prompt``, ``model.resolution``, ``model.auto_downscale``, ... The
+    option's sub-input list in today's catalog is only today's layout.
+
+    ``ByteDance2ReferenceNode`` (Seedance 2.0) gained an OPTIONAL
+    ``auto_upscale`` after ``auto_downscale``. Expanding the current option
+    shifted every later slot by one, so the seed landed on
+    ``model.auto_upscale`` and the seed's ``control_after_generate`` marker
+    landed on ``seed`` — ten of the public Comfy Hub workflows in the 2026-10
+    conversion audit. Ordering by the saved names puts each value back, and a
+    sub the save never named owns no slot, which is what the frontend does with
+    a widget the node does not have.
+
+    Unlike a node's top-level ``inputs[]``, this order is trustworthy: the
+    frontend splices an option's sub-widgets in contiguously when the selector
+    changes, so their relative order is the option's own, not an artifact of
+    when each socket happened to be created.
+
+    Conservative in both directions. If the save names a dotted sub the current
+    option no longer declares, the two layouts disagree in a way this cannot
+    reconcile and ``subs`` is returned unchanged rather than guessed at. Same
+    when the save records no dotted names for this parent, so a graph without
+    the markers expands exactly as before. A repeated name is taken once, at its
+    first position.
+    """
+    if not isinstance(node, dict) or not subs:
+        return subs
+    raw_inputs = node.get("inputs")
+    if not isinstance(raw_inputs, list):
+        return subs
+    by_name = dict(subs)
+    prefix = f"{parent}."
+    saved: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for inp in raw_inputs:
+        if not isinstance(inp, dict) or not inp.get("widget"):
+            continue
+        name = inp.get("name")
+        if not isinstance(name, str) or not name.startswith(prefix) or name in seen:
+            continue
+        if name not in by_name:
+            # A DESCENDANT of a nested selector among these subs
+            # (``model.variant.width`` under ``model.variant``). It is not this
+            # level's slot, and the recursive ``consume`` orders it with the
+            # nested selector as its own parent, so skip it rather than
+            # abandoning the saved order for every sibling at this level.
+            head = name[len(prefix) :].split(".", 1)[0]
+            if f"{prefix}{head}" in by_name:
+                continue
+            # A sub this option no longer declares at all: the layouts disagree
+            # beyond repair from here.
+            return subs
+        seen.add(name)
+        saved.append((name, by_name[name]))
+    if not saved:
+        return subs
+    # Connection-only subs own no slot either way, so carrying them through
+    # keeps the emitted input set identical to the unordered expansion.
+    return saved + [(n, sp) for n, sp in subs if n not in seen and not _is_widget_input(sp)[0]]
+
+
 def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | None]:
     properties = node.get("properties") or {}
     ue_properties = properties.get("ue_properties") or {}
@@ -2121,6 +2216,7 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
 
 def _filter_control_values(
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
     object_info: dict | None = None,
@@ -2397,7 +2493,7 @@ def _collect_widget_inputs(
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
-    pairs = _schema_widget_pairs(schema, widget_values) if schema else []
+    pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
     schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
@@ -2409,7 +2505,7 @@ def _collect_widget_inputs(
     # No schema, or the schema declares no widget inputs: fall back to the
     # positional control-marker heuristic + node-input name inspection, which
     # matches the reference behavior for unknown node types.
-    filtered = _filter_control_values(widget_values, node_type, node, object_info)
+    filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
     names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
