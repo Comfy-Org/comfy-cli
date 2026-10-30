@@ -234,3 +234,55 @@ def test_transport_http_error_retains_status_and_sanitizes_body(saved_server, mo
         ui.verify_workflow_link(FILE_ID, workspace=WORKSPACE, environment="standard")
     assert failure.value.status == status
     assert "SECRET" not in str(failure.value)
+
+
+@pytest.mark.parametrize("path", ["workflows/.index.json", "workflows/sub/.json", "workflows/sub/.index.json"])
+def test_snapshot_metadata_files_cannot_be_published(saved_server, path):
+    bodies, _ = saved_server
+    bodies[SNAPSHOT_PATH]["path"] = path
+    with pytest.raises(ui.WorkflowUiUnavailable):
+        ui.verify_workflow_link(FILE_ID, workspace=WORKSPACE, environment="standard")
+
+
+@pytest.mark.parametrize(
+    "field,value", [("modified", 9007199254740992), ("size", 9007199254740992), ("modified", 1.5), ("size", 1.5)]
+)
+def test_snapshot_metadata_requires_frontend_safe_integers(saved_server, field, value):
+    bodies, _ = saved_server
+    bodies[SNAPSHOT_PATH][field] = value
+    with pytest.raises(ui.WorkflowUiUnavailable):
+        ui.verify_workflow_link(FILE_ID, workspace=WORKSPACE, environment="standard")
+
+
+def test_snapshot_modified_accepts_frontend_safe_integer_boundary(saved_server):
+    bodies, _ = saved_server
+    bodies[SNAPSHOT_PATH]["modified"] = 9007199254740991
+    assert ui.verify_workflow_link(FILE_ID, workspace=WORKSPACE, environment="standard")["verified"] is True
+
+
+@pytest.mark.parametrize("identity", ["11111111-1111-1111-1111-111111111111", "11111111-1111-9111-8111-111111111111"])
+def test_id_requires_frontend_uuid_variant_and_version(saved_server, identity):
+    bodies, calls = saved_server
+    bodies[f"/api/userdata-files/{identity}"] = {**SNAPSHOT, "id": identity}
+    with pytest.raises(ui.WorkflowUiUnavailable):
+        ui.verify_workflow_link(identity, workspace=WORKSPACE, environment="standard")
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "00000000-0000-0000-0000-000000000000",
+        "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+        FILE_ID.upper(),
+        "11111111-1111-8111-b111-111111111111",
+    ],
+)
+def test_publication_accepts_supported_boundary_ids_and_emits_lowercase(saved_server, identity):
+    bodies, _ = saved_server
+    canonical = identity.lower()
+    bodies[f"/api/userdata-files/{canonical}"] = {**SNAPSHOT, "id": canonical}
+    result = ui.verify_workflow_link(identity, workspace=WORKSPACE, environment="standard")
+    assert result["savedFileId"] == canonical
+    assert parse_qs(urlsplit(result["url"]).query)["savedFile"] == [canonical]

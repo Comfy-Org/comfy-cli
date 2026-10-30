@@ -77,9 +77,13 @@ def verify_workflow_link(
     operation occurs. A capability absent on an older release is a hard refusal.
     """
     try:
-        canonical_id = str(UUID(saved_file_id))
+        identity = UUID(saved_file_id)
+        canonical_id = str(identity)
     except (ValueError, AttributeError, TypeError):
         _refuse("invalid_identity", "Use the exact saved_file_id UUID from the userdata save receipt.")
+    # Match the browser uuid.validate contract: RFC versions1..8, plus nil/max.
+    if identity.int not in (0, (1 << 128) - 1) and identity.version not in range(1, 9):
+        _refuse("invalid_identity", "Cloud editor links require a supported saved-file UUID.")
     if canonical_id != saved_file_id.lower():
         _refuse("invalid_identity", "Use the canonical saved_file_id UUID.")
     if not isinstance(workspace, str) or not _SAFE_ID.fullmatch(workspace):
@@ -120,7 +124,7 @@ def verify_workflow_link(
             not _safe_name(filename)
             or not filename.startswith("workflows/")
             or not filename.endswith(".json")
-            or filename == "workflows/.json"
+            or filename.rsplit("/", 1)[-1] in (".json", ".index.json")
         ):
             _refuse("file_unavailable", "Cloud did not return a safe normal Workflows file path.")
         for key in ("modified", "size"):
