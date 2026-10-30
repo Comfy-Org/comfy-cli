@@ -19,7 +19,7 @@ from __future__ import annotations
 import base64
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field, field
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
