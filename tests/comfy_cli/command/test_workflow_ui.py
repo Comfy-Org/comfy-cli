@@ -183,11 +183,16 @@ def test_record_file_boolean_number_comparison_is_not_identity_evidence(server):
 
 
 @pytest.mark.parametrize("point", ["metadata", "content", "file"])
-def test_old_record_only_or_inaccessible_workflow_has_safe_fallback(server, point):
-    ui, bodies, _, _ = server
-    bodies[f"/api/userdata-files/{WID}"] = urllib.error.HTTPError("https://cloud.test", 404, "missing", {}, None)
-    with pytest.raises(ui.WorkflowUiUnavailable):
-        ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
+def test_legacy_record_surfaces_do_not_affect_actual_id_snapshot(server, point):
+    ui, bodies, calls, _ = server
+    paths = {
+        "metadata": f"/api/workflows/{WID}",
+        "content": f"/api/workflows/{WID}/content",
+        "file": "/api/userdata/workflows%2Fsub%2FMy%20saved%20workflow.json",
+    }
+    bodies[paths[point]] = urllib.error.HTTPError("https://cloud.test", 404, "missing", {}, None)
+    assert ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")["savedFileId"] == WID
+    assert paths[point] not in calls
 
 
 @pytest.mark.parametrize(
@@ -311,7 +316,13 @@ def test_custom_link_real_shared_verifier_passes_and_schema_matches(server, monk
 @pytest.mark.parametrize("location", ["metadata", "content", "userdata", "features"])
 def test_malformed_bodies_are_refused_without_content_in_errors(server, location):
     ui, bodies, _, _ = server
-    bodies["/api/features" if location == "features" else f"/api/userdata-files/{WID}"] = ["SECRET PRIVATE PROMPT"]
+    malformed = {
+        "metadata": None,
+        "content": ["SECRET PRIVATE PROMPT"],
+        "userdata": {"id": WID, "content": ["SECRET PRIVATE PROMPT"]},
+        "features": ["SECRET PRIVATE PROMPT"],
+    }
+    bodies["/api/features" if location == "features" else f"/api/userdata-files/{WID}"] = malformed[location]
     with pytest.raises(ui.WorkflowUiUnavailable) as failure:
         ui.verify_workflow_link(WID, workspace=WORKSPACE, environment="standard")
     assert "SECRET" not in str(failure.value)
