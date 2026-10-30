@@ -17,6 +17,19 @@ history.
 
 ### Fixed
 
+- `Create Bounding Boxes` box edits, `Build JSON Prompt (Ideogram)` colour
+  palettes and old-style `COLOR` inputs (LayerStyle's `LayerMask: MaskByColor`,
+  `LayerUtility: ColorPicker`, `LayerUtility: ExtendCanvas`) keep their widget
+  slot. A `BOUNDING_BOXES`, `COLORS` or `COLOR` input that keeps its socket was
+  read as a link, so it was missing from the widget order and the widget
+  catalog. The Agent's doc host then refused every edit of the box editor
+  (`unknown_widget`); a saved `[width, height, editor_state, last_incoming]`
+  converted with the boxes in `last_incoming`; and a saved MaskByColor put its
+  colour into `color_in_HEX` and shifted every later value. On Comfy Cloud's
+  node catalog this changes exactly those five classes. `forceInput` still makes
+  any of these types a plain link. A connect to one of these inputs is still
+  checked against its declared socket type, and a fresh node starts an
+  undeclared `BOUNDING_BOXES` or `COLORS` value at `[]`, as the frontend does.
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
@@ -36,7 +49,8 @@ history.
   or (when the node catalog is available) are not output nodes, fail with
   `invalid_output_node_ids` before submit, `--print-prompt` included. Preflight
   validation and the local partner-credential check cover only the nodes that
-  run. The `--allow-spend` gate still covers the whole submitted workflow,
+  run, except that a missing or unknown `class_type` anywhere in the workflow
+  fails preflight, as ComfyUI rejects it before applying the targets. The `--allow-spend` gate still covers the whole submitted workflow,
   because a server that ignores the targets runs every branch.
   The cloud `partial_execution` warning counts only the targeted nodes, and
   `partial_execution_targets_ignored` warns when the server ran untargeted
@@ -205,6 +219,11 @@ history.
 - Converting a UI workflow to API format keeps a record widget's saved value,
   such as `ImageCropV2.crop_region`, instead of replacing it with the schema
   default.
+- Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
+  (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
+  written `widgets_values` is the frontend's four-widget shape
+  (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
+  restored those values by position into viewport state, width and height.
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
