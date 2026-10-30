@@ -2949,6 +2949,8 @@ def _validate_catalog_value(
                 "code": w["code"],
                 "message": w["message"],
                 "hint": f"use a value {op} {bound}",
+                "value": w["value"],
+                "bound": bound,
             }
             # Only a hard reject on a node the server will run; on a pruned node
             # it stays advisory (matching pre-promotion behavior for that node).
