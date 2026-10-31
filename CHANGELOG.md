@@ -17,6 +17,11 @@ history.
 
 ### Fixed
 
+- A typed `comfy model download` with no `--relative-path` now saves into the
+  folder the running local ComfyUI scans for that model type, and says where.
+  On Comfy Desktop that is the shared library, not the install's `models/`. With
+  no local server, or one that doesn't answer, it keeps the workspace path.
+
 - `comfy validate` no longer lets a dotted key left over from another
   dynamic-combo selection close a false dependency cycle or pull a pruned node
   back into the run. Checks stay on when the selection can't be resolved.

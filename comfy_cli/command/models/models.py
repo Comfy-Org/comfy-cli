@@ -39,6 +39,8 @@ app = typer.Typer()
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
 
+_MAX_FOLDER_PATHS_BYTES = 1 << 20
+
 _CIVITAI_SUBDOMAIN_SUFFIXES = tuple(f".{h}" for h in constants.CIVITAI_ALLOWED_HOSTS)
 
 
@@ -53,6 +55,47 @@ model_path_map = {
 
 def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
+
+
+def _server_model_folder(kind: str) -> str | None:
+    """The folder the local ComfyUI saves ``kind`` to by default, or None if it won't say.
+
+    Comfy Desktop keeps models in a shared library set by `--extra-model-paths-config`,
+    so `<workspace>/models/<kind>` can be a folder the server never scans (PM-2282).
+    The server lists its default folder first. A download never fails over this: any
+    failure, including no server or one too old for the route, keeps the workspace path.
+    """
+    if not kind:
+        return None
+    from comfy_cli.cql._net import is_loopback_host
+    from comfy_cli.host_port import resolve_host_port
+    from comfy_cli.http import request_json
+    from comfy_cli.target import resolve_target
+
+    try:
+        host, port = resolve_host_port(None, None)
+        target = resolve_target(where=None, host=host, port=port)
+        if target.kind != "local" or not is_loopback_host((target.host or "").strip("[]")):
+            return None
+        _, body = request_json(
+            target.url("internal", "folder_paths"), target, timeout=2.0, max_bytes=_MAX_FOLDER_PATHS_BYTES
+        )
+    except Exception as e:  # noqa: BLE001 - optional lookup; the workspace path still works
+        logger.debug("could not ask the local ComfyUI for its model folders: %s", e)
+        return None
+    folders = body.get(kind) if isinstance(body, dict) else None
+    first = folders[0] if isinstance(folders, list) and folders else None
+    return first if isinstance(first, str) and os.path.isabs(first) else None
+
+
+def _default_destination(model_path: str, basemodel: str) -> str:
+    """Where a typed download goes when the caller gave no `--relative-path`."""
+    folder = _server_model_folder(model_path)
+    if folder is None:
+        return os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+    destination = os.path.join(folder, basemodel)
+    print(f"Saving to {escape(destination)}, the folder the running ComfyUI scans for {escape(model_path)}")
+    return destination
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -433,7 +476,7 @@ def download(
             if model_path is None:
                 model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = _default_destination(model_path, basemodel)
     elif is_civitai_api_url:
         local_filename, url, model_type, basemodel = _resolve_civitai_source(
             lambda: request_civitai_model_version_api(version_id, headers), url
@@ -446,7 +489,7 @@ def download(
             if model_path is None:
                 model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = _default_destination(model_path, basemodel)
     elif is_huggingface_url:
         model_id = "/".join(url.split("/")[-2:])
 
@@ -455,7 +498,7 @@ def download(
         if relative_path is None:
             model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
             basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = _default_destination(model_path, basemodel)
     else:
         # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
         # source: the download proceeds via download_file() below. This is a note,
