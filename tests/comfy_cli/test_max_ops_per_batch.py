@@ -162,11 +162,10 @@ def test_replace_ops_refuses_to_mint_one_op_past_the_limit():
     """Refused as ``NotExpressibleError``, not as a bare ``ValueError``.
 
     That is what the two production callers already catch, and the distinction is
-    behavioural rather than cosmetic: ``templates fetch --emit-ops`` treats it as
-    non-fatal and reports ``ops_skipped`` beside a file it has still written,
-    while ``generate``'s emit path turns it into an ``EmitError``. A bare
-    ``ValueError`` would escape both and crash a fetch that had otherwise
-    succeeded.
+    behavioural rather than cosmetic: both ``templates fetch --emit-ops`` and
+    ``generate``'s emit path treat it as non-fatal and report ``ops_skipped``
+    beside a file they have still written. A bare ``ValueError`` would escape
+    both and crash a fetch that had otherwise succeeded.
     """
     with pytest.raises(ops.NotExpressibleError, match=r"needs 1025 ops, more than the 1024-op batch limit"):
         ops.replace_ops({"nodes": [], "links": []}, _nodes(1025))
