@@ -495,3 +495,123 @@ def test_list_releases_falls_back_to_the_versions_key(monkeypatch):
     client = BuilderClient(_BASE_URL, "jwt-token")
 
     assert client.list_releases("d1") == [{"id": "v1"}]
+
+
+# --- the supplied-definition workflow check -----------------------------------
+#
+# POST /v1/workflows/validate. The answers below are the shapes the builder's own
+# tests pin: `ultimate-sd-upscale` missing from an empty
+# definition, a registry that did not answer for `SilentNode`.
+
+_MISSING_ANSWER = {
+    "format": "api",
+    "complete": False,
+    "covered": 0,
+    "missing": [
+        {
+            "packId": "ultimate-sd-upscale",
+            "name": "Ultimate SD Upscale",
+            "latestVersion": "1.2.0",
+            "classes": ["UltimateSDUpscale", "UltimateSDUpscale"],
+        }
+    ],
+    "unverified": [
+        {"classType": "SilentNode", "reason": "lookupFailed"},
+        {"classType": "SilentNode", "reason": "lookupFailed"},
+    ],
+}
+
+
+def _answering(monkeypatch, status: int, payload) -> list[dict]:
+    import io
+    import json
+    import urllib.error
+
+    calls: list[dict] = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append({"url": url, "method": method, "body": body, "timeout": timeout})
+        if status >= 400:
+            raise urllib.error.HTTPError(url, status, "refused", {}, io.BytesIO(json.dumps(payload).encode()))
+        return status, payload
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    return calls
+
+
+def test_validate_workflow_posts_the_workflow_and_the_supplied_definition(monkeypatch):
+    calls = _answering(monkeypatch, 200, _MISSING_ANSWER)
+    workflow, definition = {"1": {"class_type": "UltimateSDUpscale"}}, {"customNodes": []}
+
+    coverage = BuilderClient(_BASE_URL, "jwt-token").validate_workflow(workflow, definition)
+
+    assert calls == [
+        {
+            "url": f"{_BASE}/v1/workflows/validate",
+            "method": "POST",
+            "body": {"workflow": workflow, "definition": definition},
+            "timeout": 90.0,
+        }
+    ]
+    # Repeated classes are listed once, in the order sent.
+    assert coverage["missing"] == [
+        {
+            "packId": "ultimate-sd-upscale",
+            "classes": ["UltimateSDUpscale"],
+            "name": "Ultimate SD Upscale",
+            "latestVersion": "1.2.0",
+        }
+    ]
+    assert coverage["unverified"] == [{"classType": "SilentNode", "reason": "lookupFailed"}]
+    assert coverage["complete"] is False
+
+
+@pytest.mark.parametrize("status", [404, 405, 501])
+def test_validate_workflow_on_a_builder_without_the_route_is_unavailable(monkeypatch, status):
+    from comfy_cli.builder_api import WorkflowCheckUnavailable
+
+    _answering(monkeypatch, status, {"error": "NOT_FOUND"})
+
+    with pytest.raises(WorkflowCheckUnavailable, match=str(status)):
+        BuilderClient(_BASE_URL, "jwt-token").validate_workflow({}, {})
+
+
+def test_validate_workflow_lets_a_server_error_propagate(monkeypatch):
+    import urllib.error
+
+    _answering(monkeypatch, 503, {"error": "UNAVAILABLE"})
+
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        BuilderClient(_BASE_URL, "jwt-token").validate_workflow({}, {})
+    assert raised.value.code == 503
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(None, id="not-json"),
+        pytest.param([], id="a-list"),
+        pytest.param({**_MISSING_ANSWER, "complete": "false"}, id="complete-not-bool"),
+        pytest.param({k: v for k, v in _MISSING_ANSWER.items() if k != "missing"}, id="no-missing"),
+        pytest.param({k: v for k, v in _MISSING_ANSWER.items() if k != "unverified"}, id="no-unverified"),
+        pytest.param({**_MISSING_ANSWER, "missing": [{"packId": "p", "classes": "A"}]}, id="classes-not-list"),
+        pytest.param({**_MISSING_ANSWER, "unverified": [{"classType": "A"}]}, id="no-reason"),
+        pytest.param({**_MISSING_ANSWER, "covered": "1"}, id="covered-not-int"),
+        pytest.param({**_MISSING_ANSWER, "complete": True}, id="complete-beside-gaps"),
+        pytest.param({**_MISSING_ANSWER, "missing": [], "unverified": []}, id="incomplete-without-gaps"),
+    ],
+)
+def test_validate_workflow_refuses_an_answer_in_another_shape(monkeypatch, payload):
+    from comfy_cli.builder_api import WorkflowCheckUnavailable
+
+    _answering(monkeypatch, 200, payload)
+
+    with pytest.raises(WorkflowCheckUnavailable, match="unreadable result"):
+        BuilderClient(_BASE_URL, "jwt-token").validate_workflow({}, {})
+
+
+def test_validate_build_is_left_the_saved_build_check(recorder):
+    """The new check is its own method; the saved-Build one still posts no body."""
+    BuilderClient(_BASE_URL, "jwt-token").validate_build("d1")
+
+    assert [(call["url"], call["body"]) for call in recorder.calls] == [(f"{_BASE}/v1/builds/d1/validate", None)]
