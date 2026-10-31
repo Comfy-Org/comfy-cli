@@ -51,6 +51,8 @@ sdist/
 var/
 wheels/
 pip-wheel-metadata/
+packages/comfy-cli-docs-search/src/comfy_cli_docs_search/assets/docs-search-pack.tar.gz
+packages/comfy-cli-docs-search/src/comfy_cli_docs_search/assets/manifest.json
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -76,4 +78,3 @@ requirements.compiled
 override.txt
 .coverage
 coverage.xml
-
