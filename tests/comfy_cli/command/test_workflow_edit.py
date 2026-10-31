@@ -977,6 +977,7 @@ class TestSetWidgetSubgraph:
         replayed = workflow_ops.apply_op(copy.deepcopy(base), op, _graph())
         for w in (applied, replayed):
             w.pop("_applied_ops", None)
+            w.pop("_applied_op_digests", None)
             w.pop("_widget_stamps", None)
         assert json.dumps(replayed, sort_keys=True) == json.dumps(applied, sort_keys=True)
 
