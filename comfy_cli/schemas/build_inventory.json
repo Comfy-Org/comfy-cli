@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_inventory.json",
+  "title": "comfy build inventory --json data payload",
+  "description": "What one workflow loads, which of those files are on this machine, and whether Comfy Cloud's standard environment runs it. `cloud`, `local_server`, `models_roots` and `models_not_on_disk` appear only when --cloud, --server and --models-root/--desktop ask for them.",
+  "type": "object",
+  "required": [
+    "workflow",
+    "format",
+    "classes",
+    "packs",
+    "models",
+    "embeddings",
+    "inputs",
+    "skipped",
+    "implicit",
+    "warnings",
+    "node_versions"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "workflow": {
+      "type": "string"
+    },
+    "format": {
+      "enum": [
+        "ui",
+        "api"
+      ]
+    },
+    "classes": {
+      "type": "object",
+      "description": "Active node classes (muted/bypassed nodes excluded): count, the pack that recorded them, and the versions recorded.",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "count",
+          "pack",
+          "ver"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer"
+          },
+          "pack": {
+            "type": "string"
+          },
+          "ver": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "packs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "value",
+          "path",
+          "basename",
+          "subfolder",
+          "node",
+          "node_id"
+        ],
+        "properties": {
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The widget value as saved."
+          },
+          "path": {
+            "type": "string",
+            "description": "`value` with Windows separators turned into `/`."
+          },
+          "basename": {
+            "type": "string"
+          },
+          "subfolder": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "type": "string"
+          },
+          "node_id": {},
+          "local": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "model_hints": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "Unselected template download hints. These are not required model references; verify against the runtime graph/source."
+    },
+    "embeddings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "file",
+          "node"
+        ],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "node_id": {},
+          "local_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where --input-root found the file."
+          },
+          "cloud_name": {
+            "type": "string",
+            "description": "blake3 of the file's bytes plus its extension: the name Cloud stores an upload of it under."
+          },
+          "on_cloud": {
+            "type": "boolean",
+            "description": "cloud_name is listed in the loader's Cloud choices. False means not listed, which is not proof it is absent."
+          }
+        }
+      }
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "implicit": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "class",
+          "note"
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unverified": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "UI bindings requiring a local API export before dependencies can be verified."
+    },
+    "deployment_assets": {
+      "type": "array",
+      "description": "API workflows only: exact local file plan from deploy run's scanner; no file is uploaded.",
+      "items": {
+        "type": "object",
+        "required": ["local_path", "file_path", "bytes"],
+        "properties": {
+          "local_path": {"type": "string"},
+          "file_path": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "deployment_asset_roots": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Resolved automatic and explicit roots used for deployment_assets. Use the same cwd and roots when running."
+    },
+    "node_versions": {
+      "type": "object"
+    },
+    "models_roots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "models_not_on_disk": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "local_server": {
+      "type": "object",
+      "properties": {
+        "launch_paths": {
+          "type": "object",
+          "description": "Known path-only launch arguments; unrelated argv flags and credentials are excluded.",
+          "properties": {
+            "base_directory": {"type": "array", "items": {"type": "string"}},
+            "input_directory": {"type": "array", "items": {"type": "string"}},
+            "output_directory": {"type": "array", "items": {"type": "string"}},
+            "extra_model_paths_config": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      }
+    },
+    "cloud": {
+      "type": "object",
+      "required": [
+        "verdict",
+        "blocking",
+        "missing_classes",
+        "cloud_disabled",
+        "lossless_removable",
+        "models",
+        "unverified"
+      ],
+      "properties": {
+        "verdict": {
+          "enum": [
+            "covered",
+            "covered_after_lossless_fixes",
+            "covered_needs_check",
+            "needs_build_or_lossy_conversion"
+          ]
+        },
+        "blocking": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_classes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cloud_disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "present",
+                  "remap",
+                  "absent",
+                  "node_missing"
+                ]
+              },
+              "weights": {
+                "enum": [
+                  "same_size",
+                  "different_size",
+                  "no_local_copy",
+                  "unknown",
+                  "not_checked",
+                  "ambiguous_local_copies"
+                ],
+                "description": "Local copy vs Cloud's same-named file. different_size proves a mismatch. All other states leave model identity unverified; ambiguous_local_copies means multiple local candidates were not proved identical by SHA256."
+              }
+            }
+          }
+        },
+        "unverified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "description": "Runtime inputs are checked separately from dependency compatibility. Neither status establishes a successful job.",
+          "required": ["status", "unresolved_inputs"],
+          "properties": {
+            "status": {"enum": ["needs_inputs", "not_run"]},
+            "unresolved_inputs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["node_id", "file", "reason"],
+                "properties": {
+                  "node_id": {},
+                  "file": {"type": "string"},
+                  "reason": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "lossless_removable": {
+          "type": "array",
+          "description": "Memory- or speed-only nodes Cloud lacks; removing them does not change the output.",
+          "items": {
+            "type": "object",
+            "required": [
+              "class",
+              "why"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

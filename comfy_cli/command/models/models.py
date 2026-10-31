@@ -18,6 +18,7 @@ from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.command.models import search as models_search_command
+from comfy_cli.command.models.upload import app as model_upload_app
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
@@ -2459,3 +2460,5 @@ def list_command(
 # setup on the whole noun would leak it onto those.
 app.registered_commands.extend(models_search_command.app.registered_commands)
 app.registered_groups.extend(models_search_command.app.registered_groups)
+
+app.registered_commands.extend(model_upload_app.registered_commands)

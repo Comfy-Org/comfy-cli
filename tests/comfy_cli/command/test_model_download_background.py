@@ -4336,8 +4336,12 @@ class TestCancellationReachesTheWorker:
         )
         download_state.write(workspace, state)
 
-        with patch.object(download_state, "is_worker_process", return_value=False):
+        # This legacy record has no creation time, so worker_alive first asks
+        # the OS whether its PID exists. Model the killed worker explicitly;
+        # an unrelated real process may currently hold this fixed test PID.
+        with patch("comfy_cli.utils.is_running", return_value=False) as pid_alive:
             models.download_cancel(None, download_id=state.id)
+        pid_alive.assert_called_once_with(5150)
 
         assert not part.exists(), "a terminal record's orphaned partial is still the user's disk"
         env = json_renderer()
