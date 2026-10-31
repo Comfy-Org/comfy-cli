@@ -459,6 +459,7 @@ def execute(
         extra_data=extra_data,
         output_node_ids=output_node_ids,
         client_id=client_id,
+        run_graph=run_graph,
     )
     # Wire SIGINT → close the WebSocket so the loop exits promptly.
     token = cancellation.get_token()

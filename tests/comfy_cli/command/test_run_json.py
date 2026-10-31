@@ -3229,6 +3229,38 @@ class TestOutputNodeIdsLocal:
         assert exit_code == 1
         assert _envelope(lines)["error"]["details"]["unknown_node_ids"] == ["99"]
 
+    def test_execution_gets_the_run_graph_preflight_checked(self, two_output_workflow_file, capsys):
+        """The targets' subgraph is computed once: preflight and the progress
+        count read the same graph, so they cannot disagree."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate") as preflight,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            MockExec.return_value.borrowed_client_id = False
+            _run_execute_capture(two_output_workflow_file, capsys, wait=True, output_node_ids=["2"])
+        assert MockExec.call_args.kwargs["run_graph"] is preflight.call_args.args[1]
+
+    def test_progress_uses_the_given_run_graph(self, two_output_workflow_file):
+        workflow = json.loads(open(two_output_workflow_file).read())
+        run_graph = {"1": workflow["1"], "2": workflow["2"]}
+        with patch("comfy_cli.command.run.execution.target_subgraph") as recompute:
+            ex = WorkflowExecution(
+                workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"], run_graph=run_graph
+            )
+        assert not recompute.called
+        assert ex.remaining_nodes == {"1", "2"}
+        assert ex.total_nodes == 2
+
+    def test_run_graph_without_targets_counts_the_whole_graph(self, two_output_workflow_file):
+        """Without targets the whole graph is submitted, so a stray subgraph
+        must not shrink the progress count."""
+        workflow = json.loads(open(two_output_workflow_file).read())
+        ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, run_graph={"2": workflow["2"]})
+        assert ex.remaining_nodes == set(workflow)
+
     def test_progress_counts_only_the_targets_subgraph(self, two_output_workflow_file):
         workflow = json.loads(open(two_output_workflow_file).read())
         ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"])

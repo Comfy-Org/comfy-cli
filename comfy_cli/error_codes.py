@@ -743,6 +743,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "(`comfy workflow slots <file>` for exact `<node_id>.<input>` addresses, `comfy nodes search` for class names)",
     ),
     ErrorCode(
+        "unknown_enum_value",
+        "A workflow edit supplied a value outside the live catalog's allowed options. Details carry the value, "
+        "field, valid options and any close match.",
+        "use `details.best_match`, `details.did_you_mean`, or an exact value from `details.valid_options`",
+    ),
+    ErrorCode(
+        "no_options_available",
+        "A workflow edit targeted a catalog field whose live option list is empty.",
+        "install the required option or select a catalog that provides one",
+    ),
+    ErrorCode(
+        "below_min",
+        "A workflow edit supplied a numeric value below the live catalog minimum. Details carry the field and bound.",
+        "raise the value to the minimum reported in details and retry",
+    ),
+    ErrorCode(
+        "above_max",
+        "A workflow edit supplied a numeric value above the live catalog maximum. Details carry the field and bound.",
+        "lower the value to the maximum reported in details and retry",
+    ),
+    ErrorCode(
         "workflow_clear_not_batchable",
         "A batch (`workflow apply` / `workflow foreach`) contained a `clear` op. `clear` wipes the whole "
         "graph and is standalone-only (docs/op-vocabulary-v1.md: batchable = no), so the batch was "

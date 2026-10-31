@@ -45,6 +45,18 @@ _IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN
 # (``AUDIO_RECORD``), ``WebcamCapture.image`` (``WEBCAM``).
 # ``LOAD3D_CAMERA`` is deliberately
 # absent: ``camera_info`` is ``serialize: false`` and writes no slot.
+#
+# ``BOUNDING_BOXES``, ``COLORS`` and ``COLOR`` are here for the inputs that
+# keep their socket: ``CreateBoundingBoxes.editor_state`` and
+# ``BuildJsonPromptIdeogram.color_palette`` (``socketless: false``), and
+# old-style ``["COLOR", {"default": "#FFFFFF"}]`` inputs such as LayerStyle's
+# ``LayerMask: MaskByColor``. The frontend renders a widget for any type it has
+# a constructor for (``widgetStore.inputIsWidget``), and these widgets
+# serialize, so the slot exists with or without a socket. Read as a link,
+# ``editor_state`` fell out of the widget order: the doc host refused every box
+# edit (``unknown_widget``) and the saved boxes decoded into ``last_incoming``;
+# a saved MaskByColor ``["#e64549", "", 100, ...]`` put the colour into
+# ``color_in_HEX`` and shifted every later value.
 _FRONTEND_DOM_WIDGET_TYPES = frozenset(
     {
         "LOAD_3D",
@@ -55,13 +67,30 @@ _FRONTEND_DOM_WIDGET_TYPES = frozenset(
         "WEBCAM",
         "IMAGEUPLOAD",
         "AUDIOUPLOAD",
+        "BOUNDING_BOXES",
+        "COLORS",
+        "COLOR",
     }
 )
 
 # What a fresh node serializes in a DOM-widget slot. ``add_node`` must emit
 # these for NON-trailing slots (``Load3D.image`` sits before ``width``), or the
 # frontend reads ``width`` into the viewport slot.
-_FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {"LOAD_3D": "", "LOAD_3D_ADVANCED": "", "PREVIEW_3D": ""}
+_FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {
+    "LOAD_3D": "",
+    "LOAD_3D_ADVANCED": "",
+    "PREVIEW_3D": "",
+    # The frontend's constructors start these at an empty list
+    # (``useBoundingBoxesWidget`` / ``useColorsWidget``); ComfyUI's own schemas
+    # always declare ``default: []``, but a custom schema may omit it.
+    "BOUNDING_BOXES": [],
+    "COLORS": [],
+}
+
+# Widget types that also keep a TYPED input socket. A connect to one is checked
+# against that type, as the frontend checks it; other widget-to-input conversions
+# take the source type.
+SOCKETED_WIDGET_TYPES = frozenset({"BOUNDING_BOXES", "COLORS", "COLOR"})
 
 # ``getCustomWidgets().LOAD_3D`` adds three button widgets BEFORE its own
 # component widget, and only when the node already carries a ``model_file``
@@ -95,8 +124,8 @@ LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOT
 # An enum finding used to carry the WHOLE option list, twice (``suggestions``
 # and ``valid_options``). On a model loader that is every installed file, so a
 # few bad filenames over a large folder made a huge payload. The closest few
-# options and the count are what a
-# caller acts on; the full list stays one explicit request away.
+# options and the count are what a caller acts on; the full list stays one
+# explicit request away.
 
 #: An option list this short is cheap and is carried whole as ``valid_options``.
 ENUM_INLINE_MAX = 12
@@ -761,6 +790,10 @@ class Port:
         for w in warnings:
             w.setdefault("severity", finding_severity(w.get("code", "")))
             w.setdefault("value", value)
+            if w.get("code") == "below_min":
+                w.setdefault("bound", self.options.min)
+            elif w.get("code") == "above_max":
+                w.setdefault("bound", self.options.max)
         return warnings
 
 
@@ -1224,13 +1257,11 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
             # before), but flagged as declared so validate can say "0 options
             # installed" instead of silently skipping the check.
             return first, bool(options), list(options), port_opts, True, []
-        # Dynamic combo declared WITHOUT the V3 type name: options are
-        # {key, inputs} dicts. It IS a widget (the frontend renders a selector
-        # plus key-dependent sub-widgets) and the selector's choices are the
-        # keys. Detected structurally rather than by type string so a node that
-        # ships the option tree under a plain COMBO still expands its
-        # sub-widgets; without this the sub-inputs vanish from widget_order and
-        # `set-widget <id>.<sub>` reports the widget as unknown.
+        # An option tree under a plain COMBO: {key, inputs} dicts. The frontend
+        # picks its dynamic-combo widget by type name alone, so this renders one
+        # selector and serializes one widgets_values slot, with no sub-widgets.
+        # The selector's choices are the keys; `dynamic_options` keeps the tree
+        # for inspection, and every expansion stays gated on the type name.
         # `enum_declared=True`: the choice list shipped, it just isn't scalar.
         if isinstance(options, list) and options and all(isinstance(v, dict) and "key" in v for v in options):
             return first, True, [v["key"] for v in options], port_opts, True, options
@@ -1814,7 +1845,12 @@ class Graph:
             return []
         return [e.name for e in _expand_widget_entries(m, [], first_key=True)]
 
-    def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:
+    def widget_order_for_node(
+        self,
+        class_name: str,
+        widgets_values: list[Any] | None,
+        saved_widget_names: list[str] | None = None,
+    ) -> list[str]:
         """Value-aware widget order: like ``widget_order`` but at each dynamic
         combo the current selector (read from its positional slot) picks an
         option whose widget-like sub-inputs are expanded in place as
@@ -1824,16 +1860,28 @@ class Graph:
         if m is None:
             return []
         defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
-        return [e.name for e in _expand_widget_entries(m, widgets_values or [], first_key=defaults)]
+        return [
+            e.name
+            for e in _expand_widget_entries(
+                m, widgets_values or [], first_key=defaults, saved_widget_names=saved_widget_names
+            )
+        ]
 
-    def editable_widget_names(self, class_name: str, widgets_values: list[Any] | None = None) -> list[str]:
+    def editable_widget_names(
+        self,
+        class_name: str,
+        widgets_values: list[Any] | None = None,
+        saved_widget_names: list[str] | None = None,
+    ) -> list[str]:
         """The subset of :meth:`widget_order_for_node` a write may target —
         schema-backed slots only, i.e. what ``comfy workflow slots`` advertises."""
         m = self._nodes.get(class_name)
         if m is None:
             return []
         defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
-        return _editable_widget_names(_expand_widget_entries(m, widgets_values or [], first_key=defaults))
+        return _editable_widget_names(
+            _expand_widget_entries(m, widgets_values or [], first_key=defaults, saved_widget_names=saved_widget_names)
+        )
 
     def frontend_injected_widget_names(self, class_name: str) -> list[str]:
         """Names in the widget order that the frontend injects with no schema
@@ -2166,7 +2214,7 @@ class Graph:
                 # made `images.extra` on a plain IMAGE input look declared, and
                 # a malformed link under that decoy hard-failed a prompt the
                 # server runs — it ignores every key a node does not declare.
-                declared_input = _node_declares_input(port_by_name, input_name)
+                declared_input = _node_declares_input(port_by_name, input_name, node_inputs)
 
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
@@ -2534,8 +2582,18 @@ class Graph:
     # -- Workflow slot editing --
 
     def get_template_schema(self, template_id: str, workflow: dict) -> dict:
-        """Extract the slot manifest from a frontend-format workflow."""
-        return {"id": template_id, "slots": _extract_frontend_slots(workflow, self)}
+        """Extract the slot manifest from a frontend-format workflow.
+
+        ``warnings`` is present only when a node contributed no slots for a
+        reason a caller should surface — today, a saved widget layout the
+        current catalog cannot reconcile.
+        """
+        warnings: list[dict] = []
+        slots = _extract_frontend_slots(workflow, self, warnings)
+        schema = {"id": template_id, "slots": slots}
+        if warnings:
+            schema["warnings"] = warnings
+        return schema
 
     def apply_slots(self, workflow: dict, overrides: dict[str, Any]) -> tuple[dict, list[dict]]:
         """Apply slot overrides. Returns (modified_workflow, warnings)."""
@@ -2684,7 +2742,8 @@ def _widget_default(p: Port) -> Any:
     if p.enum_values:
         return p.enum_values[0]
     if p.type in _FRONTEND_DOM_WIDGET_TYPES:
-        return _FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type)
+        # A copy: the list defaults must not be shared between nodes.
+        return copy.deepcopy(_FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type))
     return None
 
 
@@ -2919,6 +2978,8 @@ def _validate_catalog_value(
                 "code": w["code"],
                 "message": w["message"],
                 "hint": f"use a value {op} {bound}",
+                "value": w["value"],
+                "bound": bound,
             }
             # Only a hard reject on a node the server will run; on a pruned node
             # it stays advisory (matching pre-promotion behavior for that node).
@@ -4272,21 +4333,37 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
-def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+def _node_declares_input(port_by_name: dict[str, Port], key: Any, node_inputs: dict) -> bool:
     """Whether a node whose ports are ``port_by_name`` declares ``key``.
 
     The server reads the inputs a class DECLARES (``validate_inputs`` walks
     ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
-    decides whether a key can fail a prompt or be followed as an edge. Only an
-    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
-    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    decides whether a key can fail a prompt or be followed as an edge. Autogrow
+    groups and DynamicGroup controllers take generated dotted slots; a dynamic
+    combo takes only the dotted inputs exposed by its current selection. A
+    stale key from another selection and a dotted suffix on an ordinary port
+    are not declared.
     """
     if not isinstance(key, str):
         return False
     if key in port_by_name:
         return not port_by_name[key].is_dynamic_group
     base = port_by_name.get(key.split(".", 1)[0])
-    return base is not None and (base.is_autogrow or base.is_dynamic_combo or base.is_dynamic_group)
+    if base is None:
+        return False
+    if base.is_autogrow or base.is_dynamic_group:
+        return True
+    if not base.is_dynamic_combo:
+        return False
+    # Only a selection that RESOLVED can call a dotted key stale. When the
+    # selection is unknowable — link-valued, absent-but-required, an options
+    # container this parser can't read, or the depth cap — the server's
+    # expansion is unknown, so reading the key as undeclared would demote its
+    # real dangling_edge/bad_link_shape error to a warning and stop
+    # _declared_link_targets following the edge, which can drop a feeder node
+    # out of `reachable` and hide a cycle. Stay conservative there.
+    port, unresolved = _resolve_dotted_slot(port_by_name, key, node_inputs)
+    return unresolved or port is not None
 
 
 def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
@@ -4310,11 +4387,32 @@ def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
     port_by_name = {p.name: p for p in m.inputs} if m is not None else None
     targets: list[str] = []
     for key, value in node_inputs.items():
-        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+        if port_by_name is not None and not _node_declares_input(port_by_name, key, node_inputs):
             continue
         if isinstance(value, list) and len(value) == 2:
             targets.append(str(value[0]))
     return targets
+
+
+def _resolve_dotted_slot(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> tuple[Port | None, bool]:
+    """``(port, unresolved)`` for a dotted wire key.
+
+    ``unresolved`` is True only when a dynamic combo on the path gave no basis
+    to judge the key at all — the same four cases
+    :func:`_check_dynamic_combo_input` reports as unresolved prefixes (a
+    link-valued selector, an unreadable or newer ``options`` shape, a resolved
+    option with no ``inputs`` dict, and the depth cap), plus a required
+    selector that is absent. It is False for a key the current schema and
+    selections genuinely do NOT declare, which is the case a caller may treat
+    as stale.
+    """
+    base, _, leaf = dotted.partition(".")
+    if not leaf:
+        return None, False
+    port = port_by_name.get(base)
+    if port is None:
+        return None, False
+    return _resolve_dotted_under(port, dotted, node_inputs, 0)
 
 
 def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:
@@ -4326,22 +4424,24 @@ def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: d
     group is nested under a dynamic combo's selected option
     (``model.images.image0``, ``model.mode.budget``).
 
-    Returns ``None`` when the key resolves to nothing the CURRENT schema and
-    selections declare: an unknown group, a sub-key left over from another
-    selection, a dotted suffix on an ordinary port, or a template with no
-    element type. The server ignores all of those, so none may hard-fail.
+    Returns ``None`` when the key resolves to no port to type-check: an unknown
+    group, a sub-key left over from another selection, a dotted suffix on an
+    ordinary port, or a dynamic-combo selection that could not be resolved at
+    all. The server ignores the first three, so none may hard-fail; a caller
+    that must tell the resolvable cases apart from the unresolvable one uses
+    :func:`_resolve_dotted_slot`.
+
+    An autogrow slot whose group declares no element type is NOT one of those
+    cases: it comes back as a ``"*"``-typed port, so the slot keeps its
+    structural link checks and accepts any source type.
     """
-    base, _, leaf = dotted.partition(".")
-    if not leaf:
-        return None
-    port = port_by_name.get(base)
-    if port is None:
-        return None
-    return _resolve_dotted_under(port, dotted, node_inputs, 0)
+    return _resolve_dotted_slot(port_by_name, dotted, node_inputs)[0]
 
 
-def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> Port | None:
+def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> tuple[Port | None, bool]:
     """Walk ``dotted`` down from ``port``, whose name is a prefix of it.
+
+    Returns ``(port, unresolved)`` as :func:`_resolve_dotted_slot` defines them.
 
     The FULL dotted path is carried the whole way: a nested selector is read
     from ``inputs`` under its own full name (``model.mode``), and a nested
@@ -4356,27 +4456,57 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
             try:
                 fields = _dynamic_group_fields(port, f"{port.name}.{index}")
             except DynamicGroupBindingError:
-                return None
-            return next((p for p in fields if p.name == dotted), None)
-        return None
+                return None, False
+            return next((p for p in fields if p.name == dotted), None), False
+        return None, False
     if port.is_autogrow:
         element = port.autogrow_element_type
         if not element:
-            return None
+            # Older/partial catalogs can omit the element schema while still
+            # declaring the generated slot. Preserve structural link checks
+            # and accept any source type, matching the validator's historical
+            # behavior for these otherwise-untyped slots.
+            element = "*"
         # A slot carries the group's element type; the slot NAME is checked
         # elsewhere (autogrow_unknown_slot), so an odd name still gets the
         # type comparison the server will make.
-        return replace(port, name=dotted, type=element)
+        return replace(port, name=dotted, type=element), False
     if port.is_dynamic_combo:
+        # Each early return below mirrors one `unresolved` exit of
+        # _check_dynamic_combo_input, so the two agree about when a selection
+        # is merely UNMATCHED (stale sub-keys, judgeable) and when it is
+        # UNKNOWABLE (nothing can be concluded about the sub-keys at all).
         if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
-            return None
-        selector = node_inputs.get(port.name)
-        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, port.name):
+            return None, True
+        if port.name not in node_inputs:
+            # A required selector that is absent fails at execution and the
+            # expansion is a no-op whose shape we cannot name; an OPTIONAL one
+            # definitely did not expand, so its dotted keys really are
+            # undeclared. Same split _check_dynamic_combo_input makes.
+            return None, port.required
+        selector = node_inputs[port.name]
+        if isinstance(selector, list) and len(selector) == 2:
+            # Wired as a link: which option expands is known only at execution.
+            return None, True
+        if not port.dynamic_options:
+            return None, True
+        option = next(
+            (o for o in port.dynamic_options if _dynamic_combo_key_matches(o.get("key"), selector)),
+            None,
+        )
+        if option is None or not isinstance(option.get("inputs"), dict):
+            # No option matched the selection, or the matched one carries no
+            # readable sub-input schema — either way there is no sub-input set
+            # to check this key against.
+            return None, True
+        for sub in _dynamic_combo_option_ports(option, port.name):
             if sub.name == dotted:
-                return sub
+                return sub, False
             if dotted.startswith(f"{sub.name}."):
                 return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1)
-    return None
+        # The selection resolved and does not declare this key: genuinely stale.
+        return None, False
+    return None, False
 
 
 def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
@@ -4547,7 +4677,12 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
                 raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
         else:
             raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
-    entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
+    saved_names = saved_widget_order(node)
+    entries = _expand_widget_entries(
+        m,
+        source if isinstance(source, (list, dict)) else [],
+        saved_widget_names=saved_names,
+    )
     saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
     if saved_length is not None:
         while len(entries) > saved_length and entries[-1].frontend_injected:
@@ -4567,12 +4702,140 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
     return entries
 
 
+class SavedWidgetLayoutError(ValueError):
+    """A recorded positional widget layout cannot be reconciled safely."""
+
+
+def saved_sub_order(saved_widget_names: list[str] | None, parent: str, sub_names: list[str]) -> list[str] | None:
+    """Reorder a dynamic combo's selected sub-input names to the SAVED layout.
+
+    A ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option contributes its
+    sub-inputs as contiguous ``widgets_values`` slots right after the selector
+    (``dynamicComboWidget.updateWidgets`` -> ``addNodeInput``), and the saved
+    graph names them on its ``inputs[]`` entries, dotted and in that order. The
+    option's sub-input list in today's catalog is only today's layout, so an
+    option that has since gained a sub-input shifts every later slot.
+
+    ``saved_widget_names`` is the node's recorded widget order (the ``widget``
+    markers on ``inputs[]``). Returns the dotted children of ``parent`` in that
+    order, or ``None`` to mean "no usable saved layout, use the catalog order":
+
+    * nothing recorded for this parent;
+    * a recorded child the current option no longer declares, so the two
+      layouts disagree beyond repair from here;
+    * the recorded order already equals the catalog order.
+
+    Returns ONLY the saved names, in saved order. A sub the save did not name
+    owns no ``widgets_values`` slot, because the node the file describes did not
+    have that widget: emitting it anyway is what shifted every later slot. The
+    caller re-adds the subs that own no slot regardless (connection-only ones),
+    since dropping those would change the emitted input set.
+
+    A descendant of a NESTED selector (``model.variant.width`` under
+    ``model.variant``) is skipped rather than treated as a disagreement: it is
+    not this level's slot, and the recursive walk orders it with the nested
+    selector as its own parent. A repeated name is taken once, at its first
+    position.
+
+    Shared by the converter (``workflow_to_api._saved_sub_order``) and the
+    value-aware widget order an edit indexes by (``_expand_widget_entries``).
+    They resolved this independently and disagreed: on a pre-``auto_upscale``
+    Seedance save, ``set-widget seed`` wrote the slot holding ``seed``'s
+    ``control_after_generate`` marker and left the seed untouched.
+    """
+    if not saved_widget_names or not sub_names:
+        return None
+    declared: dict[str, int] = {}
+    for name in sub_names:
+        declared[name] = declared.get(name, 0) + 1
+    prefix = f"{parent}."
+    ordered: list[str] = []
+    seen: dict[str, int] = {}
+    for name in saved_widget_names:
+        if not isinstance(name, str) or not name.startswith(prefix):
+            continue
+        if name not in declared:
+            head = name[len(prefix) :].split(".", 1)[0]
+            direct_parent = f"{prefix}{head}"
+            if direct_parent in declared:
+                occurrence = seen.get(direct_parent, 0)
+                if occurrence < declared[direct_parent]:
+                    seen[direct_parent] = occurrence + 1
+                    ordered.append(direct_parent)
+                continue
+            raise SavedWidgetLayoutError(
+                f"saved widget {name!r} under {parent!r} is absent from the current catalog layout"
+            )
+        occurrence = seen.get(name, 0)
+        if occurrence >= declared[name]:
+            # A duplicated marker cannot create another positional occurrence.
+            continue
+        seen[name] = occurrence + 1
+        ordered.append(name)
+    if not ordered:
+        return None
+    return None if ordered == sub_names else ordered
+
+
+def saved_widget_order(
+    node: dict | None,
+    graph: Graph | None = None,
+    class_type: str | None = None,
+) -> list[str] | None:
+    """The widget names a SAVED node records on its ``inputs[]`` entries, in order.
+
+    ``widgets_values_form.order`` is the explicit A24 layout and wins when it
+    exactly describes a positional array. A name-keyed value object needs no
+    positional recovery, so input markers are ignored for it.
+
+    Legacy arrays may instead record their layout through ``inputs[].widget``.
+    When a graph is supplied, trust those markers only if expanding with them
+    accounts for the complete positional array. CLI-built nodes can acquire a
+    single marker when one widget is promoted or connected; treating that
+    partial marker set as a complete save layout drops unrelated combo slots.
+    """
+    if not isinstance(node, dict):
+        return None
+    values = node.get("widgets_values")
+    form = node.get("widgets_values_form")
+    if isinstance(values, list) and isinstance(form, dict):
+        order = form.get("order")
+        if (
+            set(form) == {"order"}
+            and isinstance(order, list)
+            and len(order) == len(values)
+            and all(isinstance(name, str) and name for name in order)
+            and len(order) == len(set(order))
+        ):
+            return list(order)
+        return None
+    if isinstance(values, dict):
+        return None
+    raw = node.get("inputs")
+    if not isinstance(raw, list):
+        return None
+    names = [
+        inp["name"] for inp in raw if isinstance(inp, dict) and inp.get("widget") and isinstance(inp.get("name"), str)
+    ]
+    if not names:
+        return None
+    if graph is not None and isinstance(values, list):
+        morphism = graph.node(class_type or str(node.get("type", "")))
+        if morphism is None:
+            return None
+        entries = _expand_widget_entries(morphism, values, saved_widget_names=names)
+        if len(entries) != len(values):
+            return None
+    return names
+
+
 def _expand_widget_entries(
     m: Morphism,
     widgets_values: list[Any] | dict[str, Any],
     *,
     first_key: bool = False,
     sub_links: list[Port] | None = None,
+    saved_widget_names: list[str] | None = None,
 ) -> list[_WidgetEntry]:
     """Flatten a node's widget ports into one entry per ``widgets_values`` slot.
 
@@ -4642,7 +4905,26 @@ def _expand_widget_entries(
             else:
                 default = _widget_default(port) if port.options.default is not None else None
                 selector = saved_value(name, idx, default)
-            for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):
+            subs = _dynamic_combo_sub_ports(port.dynamic_options, selector, name)
+            order = saved_sub_order(saved_widget_names, name, [s.name for s in subs])
+            if order is not None:
+                remaining = list(subs)
+                kept: list[Port] = []
+                for saved_name in order:
+                    index = next((i for i, sub in enumerate(remaining) if sub.name == saved_name), None)
+                    if index is not None:
+                        sub = remaining.pop(index)
+                        if sub.is_link:
+                            raise SavedWidgetLayoutError(
+                                f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                            )
+                        kept.append(sub)
+                # A sub the save never named owns no slot. Connection-only subs
+                # own none either way, so carrying them keeps `sub_links`
+                # complete without moving any positional index.
+                kept += [sub for sub in remaining if sub.is_link]
+                subs = kept
+            for sub in subs:
                 if sub.is_link:
                     if sub_links is not None:
                         sub_links.append(sub)
@@ -4664,7 +4946,7 @@ def _expand_widget_entries(
     return entries
 
 
-def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
+def _node_widget_slots(node: dict, prefix: str, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Surface a regular node's widget inputs as slots under ``prefix``.
 
     ``prefix`` is the addressable node path (``"3"`` at top level, ``"10/9"``
@@ -4672,6 +4954,15 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     about — including a dynamic combo's selector (enum = its option keys) and
     the selected option's ``<name>.<sub>`` sub-inputs. Returns ``[]`` for
     nodes whose type isn't in object_info.
+
+    A save whose recorded layout the current catalog cannot reconcile
+    (:class:`SavedWidgetLayoutError`) also yields ``[]``, with the reason
+    appended to ``warnings``. It owns no RESOLVABLE positions, and re-deriving
+    them from today's order is the misalignment reading the saved layout exists
+    to prevent — so this node advertises nothing rather than a guess. It is
+    reported per node instead of raised because a read must not lose the whole
+    graph to one stale node: every other node still lists, which is what lets a
+    caller see the offending node at all.
     """
     node_type = node.get("type", "")
     m = graph.node(node_type)
@@ -4680,7 +4971,21 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
-    for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
+    try:
+        saved_names = saved_widget_order(node, graph, node_type)
+        entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
+    except SavedWidgetLayoutError as exc:
+        if warnings is not None:
+            warnings.append(
+                {
+                    "code": "saved_widget_layout_unreadable",
+                    "message": f"node {prefix}: {exc}; its slots are not listed",
+                    "instance_id": prefix,
+                    "node_type": node_type,
+                }
+            )
+        return []
+    for idx, entry in enumerate(entries):
         if entry.port is None:  # control_after_generate / injected marker — not a slot
             continue
         current = widgets[idx] if idx < len(widgets) else None
@@ -4715,7 +5020,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     return slots
 
 
-def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
+def _extract_frontend_slots(workflow: dict, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Walk workflow nodes and extract tweakable slots.
 
     For every node we surface its widget inputs at ``<nodePath>.<input>``. When
@@ -4730,6 +5035,10 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
     at ``<instanceId>.<name>`` for backward compatibility, but the recursion
     means an agent is never stranded when those proxies are missing or dangle
     (fetched templates routinely point proxyWidgets at deleted interior ids).
+
+    ``warnings``, when given, collects the per-node reasons a node advertised no
+    slots at all (an unreconcilable saved layout). The walk continues past such
+    a node, so one stale save costs its own slots and nothing else.
     """
     defs_by_id = _subgraph_defs_by_id(workflow)
     slots: list[dict] = []
@@ -4755,7 +5064,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             node_type = node.get("type", "")
             sg = defs_by_id.get(node_type)
             if sg is None:
-                for slot in _node_widget_slots(node, node_path, graph):
+                for slot in _node_widget_slots(node, node_path, graph, warnings):
                     if (node_id, slot["name"]) not in exclude:
                         add(slot)
                 continue
@@ -4926,9 +5235,11 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     Returns the widget's current value (which may be ``None`` for a
     legitimately-null widget) or the module-level ``_UNRESOLVED`` sentinel when
     the proxy entry points at a missing/dangling interior node, when the widget
-    name is absent from the node's widget order, or when the index is past the
-    end of ``widgets_values``.  Callers must use ``is _UNRESOLVED`` to test for
-    the unresolvable case so that a real ``None`` value is preserved.
+    name is absent from the node's widget order, when the interior node's saved
+    widget layout cannot be reconciled with the current catalog, or when the
+    index is past the end of ``widgets_values``.  Callers must use
+    ``is _UNRESOLVED`` to test for the unresolvable case so that a real ``None``
+    value is preserved.
     """
     proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
     for entry in proxy:
@@ -4943,7 +5254,15 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
                 continue
             interior_class = inode.get("type", "")
             widgets = _widgets_as_positional(inode.get("widgets_values"), graph, interior_class)
-            order = graph.widget_order_for_node(interior_class, widgets)
+            try:
+                saved_names = saved_widget_order(inode, graph, interior_class)
+                order = graph.widget_order_for_node(interior_class, widgets, saved_names)
+            except SavedWidgetLayoutError:
+                # The save records a layout today's catalog cannot reconcile, so
+                # this proxy's slot position is unknown — which is exactly what
+                # the sentinel means. Reading it off the catalog order instead
+                # would hand back a neighbour's value.
+                return _UNRESOLVED
             try:
                 idx = order.index(name)
             except ValueError:
@@ -4980,7 +5299,9 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     # node before the target exists and its value has validated.
     widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     # The canvas would load a legacy button run into viewport/width/height, so
-    # an edit writes the node back in the frontend's four-widget shape.
+    # an edit writes the node back in the frontend's four-widget shape. This runs
+    # before the saved-layout read below because it can refuse the edit outright,
+    # and because everything downstream expands against this `widgets` list.
     legacy_widgets = widgets
     widgets = strip_legacy_load_3d_buttons(m, widgets)
     if widgets is not legacy_widgets:
@@ -4989,6 +5310,11 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         legacy_entries = _expand_widget_entries(m, legacy_widgets)
         if any(e.frontend_injected and e.name == input_name for e in legacy_entries):
             raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(legacy_entries))
+    # `widgets_values` is positional against the layout the node was SAVED with,
+    # which its `inputs[].widget` markers record. Expanding a dynamic combo's
+    # option from today's catalog instead put every slot after an added
+    # sub-input one place out, so the write landed on a neighbour.
+    saved_names = saved_widget_order(node, graph, node_type)
     if extend:
         button_defaults = dict(load_3d_button_slots(m, widgets))
 
@@ -5012,7 +5338,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # reinterprets it.
         materialized_selectors: set[str] = set()
         while True:
-            entries_now = _expand_widget_entries(m, widgets)
+            entries_now = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
             target_idx = next((idx for idx, entry in enumerate(entries_now) if entry.name == input_name), None)
             missing = next(
                 (
@@ -5044,10 +5370,18 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
                 selector.name,
             )
             widgets.extend(default_values)
-    order = graph.widget_order_for_node(node_type, widgets)
+    order = graph.widget_order_for_node(node_type, widgets, saved_names)
+    # Dynamic-group rows are the only place a REQUESTED name can occupy two
+    # positions, so the ambiguity refusal stays scoped to them. Outside a group
+    # the sole repeated name is the frontend's ``control_after_generate`` marker
+    # — a node with both ``seed`` and ``noise_seed`` carries two — and that name
+    # was editable (first occurrence) long before this saved-layout read, with
+    # no per-widget address to disambiguate it. Threading ``saved_names`` in
+    # cannot add a duplicate either: ``saved_sub_order`` caps every name at the
+    # number of occurrences the catalog declares.
     if has_group and order.count(input_name) > 1:
         raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
-    entries = _expand_widget_entries(m, widgets)
+    entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
     if any(e.frontend_injected and e.name == input_name for e in entries):
         raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
     if group_entries is not None:
@@ -5055,6 +5389,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     try:
         widget_idx = order.index(input_name)
     except ValueError:
+        if saved_names is not None:
+            current_entries = _expand_widget_entries(m, widgets)
+            current = next((entry for entry in current_entries if entry.name == input_name), None)
+            if current is not None and current.port is not None and not current.port.is_link:
+                raise ValueError(
+                    f"widget {input_name!r} exists in the current catalog but not in this saved workflow's layout; "
+                    "the save predates that widget, so no positional slot was guessed or written"
+                )
         warning = _unknown_dynamic_sub_warning(
             m,
             input_name,
@@ -5131,9 +5473,6 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             fatal = next((finding for finding in warnings if finding.get("severity") == SEVERITY_ERROR), None)
             if fatal:
                 raise ValueError(fatal["message"])
-
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
     # A node that declares its own ``widgets_values_form`` (schema A24) is laid
@@ -5289,7 +5628,9 @@ def _write_dynamic_combo_selector(
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
     raw_values = node.get("widgets_values")
-    preserve_named = isinstance(raw_values, dict) and any(e.port and e.port.is_dynamic_group for e in entries)
+    preserve_named = isinstance(raw_values, dict) and (
+        "widgets_values_form" in node or any(e.port and e.port.is_dynamic_group for e in entries)
+    )
     if not any(_dynamic_combo_key_matches(value, key) for key in port.enum_values):
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
@@ -5328,6 +5669,7 @@ def _write_dynamic_combo_selector(
         }
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
+    _clear_dynamic_combo_widget_markers(node, input_name)
     if any(entry.port and entry.port.is_dynamic_group for entry in entries):
         if "widgets_values_form" in node:
             node["widgets_values_form"]["order"] = (
@@ -5353,6 +5695,28 @@ def _write_dynamic_combo_selector(
             ),
         }
     ]
+
+
+def _clear_dynamic_combo_widget_markers(node: dict, parent: str) -> None:
+    """Invalidate legacy markers after rebuilding a combo's positional roster.
+
+    The positional values have just been replaced with today's selected-option
+    layout. Keeping the previous option's dotted markers would make the next
+    read interpret those new values using the old layout. Clear only markers in
+    this selector's subtree and preserve the input objects themselves, including
+    any link/socket metadata. Do not fabricate replacement input objects: CLI-
+    built nodes intentionally keep value widgets out of ``inputs`` and adding
+    them changes their connectable socket surface. With no saved subtree marker,
+    subsequent reads use the same pinned catalog order that built the new array.
+    """
+    inputs = node.get("inputs")
+    if not isinstance(inputs, list) or any(not isinstance(item, dict) for item in inputs):
+        return
+    prefix = f"{parent}."
+    for item in inputs:
+        name = item.get("name")
+        if isinstance(name, str) and name.startswith(prefix):
+            item.pop("widget", None)
 
 
 def _dynamic_combo_default_values(
