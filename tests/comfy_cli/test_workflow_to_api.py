@@ -3033,6 +3033,22 @@ class TestAbsentOptionalWidgetsAreNotSynthesized:
         # ...while a genuinely unnamed declared widget still refuses.
         assert _markers_omit_a_filled_widget({"regions.face_oval"}, schema, ["codec"]) is True
 
+    def test_a_dict_widget_marked_per_leaf_keeps_its_declared_default(self):
+        # The same flattening on the other reader of the marker list. The save
+        # marks ``regions`` only per leaf (``regions.face_oval``) and its value
+        # ran past the end of a truncated ``widgets_values``, so the node HAS
+        # that widget and the frontend sends its default. Comparing the
+        # declared name against the raw marker strings reads the very marker
+        # that proves the input exists as proof that it does not, and drops the
+        # default.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"regions": ["STRING", {"default": "all"}]},
+            marker_names=["fps", "regions.face_oval"],
+        )
+        assert inputs == {"fps": 16, "regions": "all"}
+
 
 class TestSeedreamDynamicCombo:
     """Regression: a pristine ``COMFY_DYNAMICCOMBO_V3`` template must convert to

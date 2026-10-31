@@ -2578,9 +2578,10 @@ def _saved_widget_names(
     by (1). ``schema``/``filled_widget_names`` are optional only so the helper
     stays callable with a node alone; omit them and only (1) applies.
 
-    Compare against *flattened* names: a dict widget is declared as ``regions``
-    but marked per leaf (``regions.face_oval``, ``regions.lips``), so a marker
-    covers its own name and the declared name it is a leaf of.
+    Compare against *flattened* names (``_marker_coverage``): a dict widget is
+    declared as ``regions`` but marked per leaf (``regions.face_oval``,
+    ``regions.lips``), so a marker covers its own name and the declared name it
+    is a leaf of.
     """
     raw = node.get("inputs")
     if not isinstance(raw, list):
@@ -2603,6 +2604,28 @@ def _saved_widget_names(
     return frozenset(names)
 
 
+def _marker_coverage(marker_names: Iterable[str]) -> frozenset[str]:
+    """The declared input names a marker list accounts for.
+
+    A dict widget is DECLARED as ``regions`` but MARKED per leaf
+    (``regions.face_oval``, ``regions.0.lips``), so a marker accounts for its
+    own string and for the declared input it is a leaf of.
+
+    Both readers of a marker list compare against this set: the inventory test
+    below, and the suppression predicate in ``_widget_absent_from_the_save``.
+    They have to agree. A reader doing a flat membership test instead reads the
+    very marker that proves an input EXISTS as proof that it does not, and then
+    drops that input's declared default.
+    """
+    covered: set[str] = set()
+    for name in marker_names:
+        covered.add(name)
+        head = name.split(".", 1)[0]
+        if head:
+            covered.add(head)
+    return frozenset(covered)
+
+
 def _markers_omit_a_filled_widget(
     marker_names: set[str], schema: dict | None, filled_widget_names: Iterable[str]
 ) -> bool:
@@ -2619,11 +2642,7 @@ def _markers_omit_a_filled_widget(
     input_def = _schema_input_def(schema)
     if not input_def:
         return False
-    covered = set(marker_names)
-    for name in marker_names:
-        head = name.split(".", 1)[0]
-        if head:
-            covered.add(head)
+    covered = _marker_coverage(marker_names)
     for name in filled_widget_names:
         if name in covered:
             continue
@@ -2635,7 +2654,7 @@ def _markers_omit_a_filled_widget(
 
 
 def _widget_absent_from_the_save(
-    input_name: str, input_spec: Any, section: str, saved_widget_names: frozenset[str] | None
+    input_name: str, input_spec: Any, section: str, saved_widget_coverage: frozenset[str] | None
 ) -> bool:
     """Whether the saved node proves it never carried this widget.
 
@@ -2661,12 +2680,16 @@ def _widget_absent_from_the_save(
     widget is never dropped either — the branch below exists precisely because
     the frontend submits those from live widget state even when they were never
     serialized.
+
+    The argument is marker COVERAGE (``_marker_coverage``), not the raw marker
+    strings: a dict widget declared ``regions`` is marked per leaf, so
+    ``regions.face_oval`` is what proves the node carried ``regions``.
     """
-    if section != "optional" or saved_widget_names is None:
+    if section != "optional" or saved_widget_coverage is None:
         return False
     if not _is_widget_input(input_spec)[0] or _is_socketless_widget(input_spec):
         return False
-    return input_name not in saved_widget_names
+    return input_name not in saved_widget_coverage
 
 
 def _collect_default_inputs(
@@ -2680,6 +2703,7 @@ def _collect_default_inputs(
         return {}
     input_def = _schema_input_def(schema)
     defaults: dict[str, Any] = {}
+    saved_widget_coverage = None if saved_widget_names is None else _marker_coverage(saved_widget_names)
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
@@ -2689,7 +2713,7 @@ def _collect_default_inputs(
                 continue
             default = _extract_default(input_spec)
             if default is not _MISSING and not _widget_absent_from_the_save(
-                input_name, input_spec, section, saved_widget_names
+                input_name, input_spec, section, saved_widget_coverage
             ):
                 defaults[input_name] = _wrap_widget_value(default)
             elif section == "required" and _is_socketless_widget(input_spec):
