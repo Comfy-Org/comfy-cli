@@ -166,3 +166,41 @@ def test_a_widget_socket_refuses_a_link_of_another_scalar_type(graph):
 
     with pytest.raises(ValueError, match=r"type mismatch: INT output .* FLOAT input 'force_rate'"):
         workflow_ops.connect(workflow, graph, primitive["id"], 0, video["id"], "force_rate")
+
+
+def test_a_saved_node_with_partial_widget_sockets_does_not_misname_its_values(graph):
+    """With no object_info, the widget sockets alone cannot name COMBO-bearing values.
+
+    An agent-built Load Video has sockets for its scalars but not for ``video``,
+    so the sockets do not account for every value. Pairing them by position
+    would send the file name as ``force_rate`` and spill a value onto a link
+    input, so the converter must drop the values and warn instead.
+    """
+    workflow: dict = {"nodes": [], "links": []}
+    video = _add(workflow, graph, "VHS_LoadVideo")
+    video["widgets_values"] = ["clip.mp4", 24.0, 1000, 0]
+
+    api = convert_ui_to_api(workflow, object_info={})
+
+    inputs = api[str(video["id"])]["inputs"]
+    assert "force_rate" not in inputs
+    assert "meta_batch" not in inputs
+    assert "vae" not in inputs
+
+
+def test_a_saved_node_with_a_socket_for_every_widget_still_names_its_values():
+    node = {
+        "id": 7,
+        "type": "NotInCatalog",
+        "inputs": [
+            {"name": "strength", "type": "FLOAT", "widget": {"name": "strength"}, "link": None},
+            {"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": None},
+        ],
+        "outputs": [],
+        "widgets_values": [0.5, 20],
+    }
+    workflow = {"nodes": [node], "links": []}
+
+    api = convert_ui_to_api(workflow, object_info={})
+
+    assert api["7"]["inputs"] == {"strength": 0.5, "steps": 20}
