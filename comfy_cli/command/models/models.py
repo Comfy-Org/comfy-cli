@@ -61,7 +61,7 @@ def _server_model_folder(kind: str) -> str | None:
     """The folder the local ComfyUI saves ``kind`` to by default, or None if it won't say.
 
     Comfy Desktop keeps models in a shared library set by `--extra-model-paths-config`,
-    so `<workspace>/models/<kind>` can be a folder the server never scans (PM-2282).
+    so `<workspace>/models/<kind>` can be a folder the server never scans.
     The server lists its default folder first. A download never fails over this: any
     failure, including no server or one too old for the route, keeps the workspace path.
     """

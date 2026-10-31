@@ -1,4 +1,4 @@
-"""A typed download with no `--relative-path` lands where the running ComfyUI scans (BE-24455).
+"""A typed download with no `--relative-path` lands where the running ComfyUI scans.
 
 Comfy Desktop points ComfyUI at a shared library through
 `--extra-model-paths-config`, so `<workspace>/models/<kind>` is a folder the server never
