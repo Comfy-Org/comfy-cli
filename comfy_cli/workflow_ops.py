@@ -3792,8 +3792,16 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # different orders diverge silently.
     queued = workflow.get("_deferred_widget_ops")
     waiting = queued.get(op_id) if isinstance(queued, dict) else None
-    # Cannot raise: a queued op was canonicalized on the way in.
-    if isinstance(waiting, dict) and _op_digest(waiting) != digest:
+    # ``_applied_digest``, not ``_op_digest``: ``_deferred_widget_ops`` comes off
+    # the DOCUMENT and is never validated on load, so an oversized or deeply
+    # nested queued entry raised its own ``malformed_op:``/``payload_too_deep:``
+    # here — against the incoming op, blocking it (even as an identical
+    # redelivery) with an error naming a payload that is not the one being
+    # applied. ``None`` is a mismatch, and correctly so: the op above was just
+    # digested, so it IS canonical, and an uncanonical queued entry therefore
+    # cannot be the same payload. ``_retry_deferred_widget_ops`` already treats
+    # an uncanonical queued entry as unusable for the same reason.
+    if isinstance(waiting, dict) and _applied_digest(waiting) != digest:
         raise ValueError(f"op_id_reuse: op_id {op_id!r} is already deferred with a different payload")
     had_applied_ops = "_applied_ops" in workflow
     workflow.setdefault("_applied_ops", [])

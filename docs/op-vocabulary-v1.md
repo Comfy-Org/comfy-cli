@@ -1559,3 +1559,19 @@ The legacy case is now decided by MEMBERSHIP, and a present-but-non-string
 digest entry is `malformed_op` — not `op_id_reuse`, because the document's
 bookkeeping is broken rather than the sender's id being reused. It is refused on
 read rather than by walking every ledger entry on every apply.
+
+### 22.5 The deferred-queue digest is taken defensively
+
+§20.2's deferred-queue gate digested the QUEUED entry with the strict
+canonicalizer, under a comment claiming it could not raise because a queued op
+was canonicalized on the way in. `_deferred_widget_ops` comes off the document
+and is never validated on load, so that does not hold: an oversized or deeply
+nested queued entry raised its own `malformed_op:` / `payload_too_deep:` against
+the INCOMING op, blocking a well-formed op with an error naming a payload that
+is not the one being applied.
+
+The queued entry is now digested with the same tolerant helper the retry loop
+uses, and a `None` digest is a mismatch — correctly, because the incoming op has
+already been digested at that point and is therefore canonical, so an
+uncanonical queued entry cannot be the same payload. The refusal is
+`op_id_reuse`, which is what it is.
