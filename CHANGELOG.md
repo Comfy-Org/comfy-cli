@@ -29,6 +29,17 @@ history.
 
 ### Fixed
 
+- Desktop discovery reads both modern and legacy registries. Callers with
+  running-server launch metadata select that exact instance, resolve its model
+  YAML and effective data/input/output paths, and keep ambiguous or relative
+  runtime identities unresolved. The optional discovery fields are documented
+  in the which/env schemas; unrelated launch arguments are excluded.
+
+- `comfy which` and `comfy env` report Desktop's split code, data and model
+  roots without changing launch/install selection. A nonexistent selected
+  workspace no longer succeeds in `which`; discovery reports malformed Desktop
+  configuration and marks inferred data roots as unverified.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.

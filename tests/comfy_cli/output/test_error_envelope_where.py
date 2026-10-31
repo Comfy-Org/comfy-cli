@@ -324,15 +324,19 @@ class TestValidate:
 
     def test_cloud(self, tmp_path):
         err = LoadError("no object_info", details={"hint": "sign in"})
-        with patch("comfy_cli.cql.engine.Graph.load", side_effect=err):
+        with patch("comfy_cli.cql.loader.resilient_load_object_info", side_effect=err) as load:
             env = _run(["--json", "validate", "--workflow", self._workflow(tmp_path), "--where", "cloud"])
+        load.assert_called_once()
+        assert load.call_args.kwargs["mode"] == "cloud"
         assert env["error"]["code"] == "cql_no_graph"
         assert env["where"] == "cloud"
 
     def test_local(self, tmp_path):
         err = LoadError("no object_info", details={"hint": "comfy launch"})
-        with patch("comfy_cli.cql.engine.Graph.load", side_effect=err):
+        with patch("comfy_cli.cql.loader.resilient_load_object_info", side_effect=err) as load:
             env = _run(["--json", "validate", "--workflow", self._workflow(tmp_path), "--where", "local"])
+        load.assert_called_once()
+        assert load.call_args.kwargs["mode"] == "local"
         assert env["error"]["code"] == "cql_no_graph"
         assert env["where"] == "local"
 
