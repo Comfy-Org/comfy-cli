@@ -345,3 +345,329 @@ def test_registry_lists_cloud_payment_required():
     entry = by_code["cloud_payment_required"]
     assert "429" in entry.meaning
     assert "retry" in entry.hint.lower()
+
+
+# --- 403 insufficient_scope → re-login guidance ------------------------------
+
+_SCOPE_HEADERS = {"WWW-Authenticate": 'Bearer error="insufficient_scope", scope="comfy-cloud:secrets:write"'}
+_SCOPE_BODY = b'{"message":"insufficient_scope: comfy-cloud:secrets:write"}'
+
+
+def test_403_insufficient_scope_header_says_relogin():
+    """The enforced scope gate answers RFC 6750 insufficient_scope; refresh
+    cannot widen a grant, so the envelope must point at a fresh login."""
+    renderer = _FakeRenderer()
+    e = urllib.error.HTTPError("https://x/api/secrets", 403, "Forbidden", _SCOPE_HEADERS, io.BytesIO(_SCOPE_BODY))
+
+    exit_exc = _handle(renderer, e)
+
+    assert exit_exc.exit_code == 1
+    (call,) = renderer.calls
+    assert call["code"] == "cloud_unauthorized"
+    assert "predates a permission change" in call["message"]
+    assert "comfy cloud login" in call["message"]
+    assert call["details"]["reason"] == "insufficient_scope"
+    assert call["details"]["required_scope"] == "comfy-cloud:secrets:write"
+    assert call["details"]["operation"] == "cancel"
+
+
+def test_403_insufficient_scope_body_only_still_detected():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, _SCOPE_BODY))
+
+    (call,) = renderer.calls
+    assert call["details"]["reason"] == "insufficient_scope"
+    # The documented body form names the scope too.
+    assert call["details"]["required_scope"] == "comfy-cloud:secrets:write"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"insufficient_scope: comfy-cloud:agent:write",
+        b"insufficient_scope",
+        b'{"error":"insufficient_scope"}',
+        b'{"error":{"code":"insufficient_scope: comfy-cloud:agent:write"}}',
+    ],
+)
+def test_403_documented_body_forms_are_detected(body: bytes):
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, body))
+
+    (call,) = renderer.calls
+    assert call["details"]["reason"] == "insufficient_scope"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"message":"forbidden: this is not an insufficient_scope problem, the workspace is suspended"}',
+        b"Access denied. (Hint: insufficient_scope errors are reported separately.)",
+        b'{"message":"validation failed","details":"node text: insufficient_scope"}',
+    ],
+)
+def test_403_body_merely_mentioning_token_keeps_generic_hint(body: bytes):
+    """A body that only mentions the token in prose, or in a non-error field
+    (e.g. reflected workflow text), is not an insufficient_scope denial."""
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, body))
+
+    (call,) = renderer.calls
+    assert call["message"] == "HTTP 403 during cancel"
+    assert "reason" not in call["details"]
+
+
+@pytest.mark.parametrize(
+    "www_auth",
+    [
+        'Bearer error = "insufficient_scope", scope="comfy-cloud:secrets:write"',
+        "Bearer error=insufficient_scope, scope=comfy-cloud:secrets:write",
+        'Bearer realm="api", error_description="scope=\\"wrong\\"", error="insufficient_scope", '
+        'scope="comfy-cloud:secrets:write"',
+    ],
+)
+def test_403_header_challenge_parsing(www_auth: str):
+    renderer = _FakeRenderer()
+    e = urllib.error.HTTPError("https://x/y", 403, "Forbidden", {"WWW-Authenticate": www_auth}, io.BytesIO(b"denied"))
+
+    _handle(renderer, e)
+
+    (call,) = renderer.calls
+    assert call["details"]["reason"] == "insufficient_scope"
+    assert call["details"]["required_scope"] == "comfy-cloud:secrets:write"
+
+
+def test_403_scope_in_second_challenge_is_found():
+    import email.message
+
+    headers = email.message.Message()
+    headers["WWW-Authenticate"] = 'Basic realm="x"'
+    headers["WWW-Authenticate"] = 'Bearer error="insufficient_scope", scope="comfy-cloud:agent:write"'
+    renderer = _FakeRenderer()
+    _handle(renderer, urllib.error.HTTPError("https://x/y", 403, "Forbidden", headers, io.BytesIO(b"")))
+
+    (call,) = renderer.calls
+    assert call["details"]["required_scope"] == "comfy-cloud:agent:write"
+
+
+def test_403_non_string_header_value_does_not_crash():
+    class _OddHeaders:
+        def get(self, name):
+            return 42
+
+    renderer = _FakeRenderer()
+    e = urllib.error.HTTPError("https://x/y", 403, "Forbidden", _OddHeaders(), io.BytesIO(b'{"message":"forbidden"}'))
+
+    _handle(renderer, e)
+
+    (call,) = renderer.calls
+    assert call["message"] == "HTTP 403 during cancel"
+
+
+@pytest.mark.parametrize("scope", ["x" * 5000, "comfy-cloud:secrets:write\x1b[31m"])
+def test_required_scope_is_bounded_and_sanitized(scope: str):
+    renderer = _FakeRenderer()
+    headers = {"WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{scope}"'}
+    _handle(renderer, urllib.error.HTTPError("https://x/y", 403, "Forbidden", headers, io.BytesIO(b"")))
+
+    (call,) = renderer.calls
+    assert call["details"]["reason"] == "insufficient_scope"
+    assert "required_scope" not in call["details"]
+
+
+def test_insufficient_scope_hint_mentions_scope_override():
+    """A COMFY_CLOUD_SCOPES / cloud_scopes override is sent verbatim, so a
+    re-login alone would request the same narrow grant."""
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, _SCOPE_BODY))
+
+    hint = renderer.calls[0]["hint"]
+    assert "COMFY_CLOUD_SCOPES" in hint
+    assert "cloud_scopes" in hint
+
+
+def test_plain_403_keeps_generic_hint():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, b'{"message":"forbidden"}'))
+
+    (call,) = renderer.calls
+    assert call["message"] == "HTTP 403 during cancel"
+    assert "reason" not in call["details"]
+
+
+def test_401_mentioning_insufficient_scope_is_not_a_scope_error():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(401, _SCOPE_BODY))
+
+    (call,) = renderer.calls
+    assert call["message"] == "HTTP 401 during cancel"
+
+
+def test_emit_status_error_maps_insufficient_scope():
+    """``run`` submit routes its HTTPError through ``emit_status_error``."""
+    from comfy_cli.command._cloud_errors import emit_status_error
+
+    renderer = _FakeRenderer()
+    emit_status_error(
+        renderer,
+        status=403,
+        retry_after=None,
+        operation="submit",
+        message="Cloud server rejected the workflow (HTTP 403)",
+        hint="check the workflow",
+        details={"status": 403, "body": _SCOPE_BODY.decode()},
+    )
+
+    (call,) = renderer.calls
+    assert call["code"] == "cloud_unauthorized"
+    assert call["details"]["reason"] == "insufficient_scope"
+
+
+def test_emit_status_error_poll_detects_scope_without_body_in_details():
+    """``run``'s poll keeps ``details`` to status/prompt_id, so it passes the
+    body and ``WWW-Authenticate`` separately for detection."""
+    from comfy_cli.command._cloud_errors import emit_status_error
+
+    renderer = _FakeRenderer()
+    emit_status_error(
+        renderer,
+        status=403,
+        retry_after=None,
+        operation="poll",
+        message="Cloud server error while polling (HTTP 403)",
+        hint=None,
+        details={"status": 403, "prompt_id": "p1"},
+        scope_body="denied",
+        www_authenticate='Bearer error="insufficient_scope", scope="comfy-cloud:jobs:read"',
+    )
+
+    (call,) = renderer.calls
+    assert call["code"] == "cloud_unauthorized"
+    assert call["details"]["prompt_id"] == "p1"
+    assert call["details"]["required_scope"] == "comfy-cloud:jobs:read"
+    assert "body" not in call["details"]
+
+
+def test_comfy_client_http_error_carries_www_authenticate():
+    from unittest import mock
+
+    from comfy_cli.comfy_client import Client, HTTPError
+    from comfy_cli.target import Target
+
+    client = Client(Target(kind="local", base_url="https://cloud.example.com"))
+    err = urllib.error.HTTPError(
+        "https://cloud.example.com/api/x", 403, "Forbidden", _SCOPE_HEADERS, io.BytesIO(_SCOPE_BODY)
+    )
+    with mock.patch("comfy_cli.comfy_client._OPENER.open", side_effect=err):
+        with pytest.raises(HTTPError) as excinfo:
+            client._request("POST", ["api", "prompt"], body={})
+
+    assert excinfo.value.www_authenticate == (_SCOPE_HEADERS["WWW-Authenticate"],)
+
+
+def test_comfy_client_http_error_keeps_every_www_authenticate_value():
+    """A Bearer challenge in a later header field must still reach detection."""
+    import email.message
+    from unittest import mock
+
+    from comfy_cli.comfy_client import Client, HTTPError
+    from comfy_cli.target import Target
+
+    headers = email.message.Message()
+    headers["WWW-Authenticate"] = 'Basic realm="x"'
+    headers["WWW-Authenticate"] = 'Bearer error="insufficient_scope", scope="comfy-cloud:agent:write"'
+    client = Client(Target(kind="local", base_url="https://cloud.example.com"))
+    err = urllib.error.HTTPError("https://cloud.example.com/api/x", 403, "Forbidden", headers, io.BytesIO(b"denied"))
+    with mock.patch("comfy_cli.comfy_client._OPENER.open", side_effect=err):
+        with pytest.raises(HTTPError) as excinfo:
+            client._request("POST", ["api", "prompt"], body={})
+
+    assert excinfo.value.www_authenticate == (
+        'Basic realm="x"',
+        'Bearer error="insufficient_scope", scope="comfy-cloud:agent:write"',
+    )
+    from comfy_cli.command._cloud_errors import insufficient_scope_error
+
+    found = insufficient_scope_error(403, excinfo.value.body, excinfo.value.www_authenticate)
+    assert found["details"]["required_scope"] == "comfy-cloud:agent:write"
+
+
+@pytest.mark.parametrize(
+    "www_auth, required_scope",
+    [
+        # The scope comes from the challenge that carries the error, not an earlier one.
+        ('Bearer realm="a", scope="old", Bearer error="insufficient_scope", scope="new"', "new"),
+        ('Basic realm="x", Bearer error=insufficient_scope, scope=comfy-cloud:agent:write', "comfy-cloud:agent:write"),
+    ],
+)
+def test_403_scope_is_read_from_the_matching_bearer_challenge(www_auth: str, required_scope: str):
+    from comfy_cli.command._cloud_errors import insufficient_scope_error
+
+    found = insufficient_scope_error(403, "", {"WWW-Authenticate": www_auth})
+
+    assert found["details"]["required_scope"] == required_scope
+
+
+def test_403_insufficient_scope_on_a_non_bearer_challenge_is_ignored():
+    from comfy_cli.command._cloud_errors import insufficient_scope_error
+
+    headers = {"WWW-Authenticate": 'Basic error="insufficient_scope", scope="comfy-cloud:agent:write"'}
+
+    assert insufficient_scope_error(403, '{"message":"forbidden"}', headers) is None
+
+
+def test_cloud_http_handler_maps_insufficient_scope():
+    from comfy_cli.command.cloud_http import handle_cloud_http_error as workflow_handler
+
+    renderer = _FakeRenderer()
+    e = urllib.error.HTTPError("https://x/api/x", 403, "Forbidden", _SCOPE_HEADERS, io.BytesIO(_SCOPE_BODY))
+
+    exit_exc = workflow_handler(renderer, e, operation="save")
+
+    assert exit_exc.exit_code == 1
+    (call,) = renderer.calls
+    assert call["code"] == "cloud_unauthorized"
+    assert call["details"]["required_scope"] == "comfy-cloud:secrets:write"
+    # The server's own explanation stays inspectable.
+    assert call["details"]["body"] == _SCOPE_BODY.decode()
+
+
+# A JSON body whose `insufficient_scope` field sits past the 1000-byte display cap.
+_LONG_SCOPE_BODY = (
+    b'{"detail":"' + b"x" * (2 * _MAX_ERROR_BODY_BYTES) + b'","error":"insufficient_scope: comfy-cloud:agent:write"}'
+)
+
+
+def test_403_scope_field_past_display_cap_is_detected():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, _LONG_SCOPE_BODY))
+
+    (call,) = renderer.calls
+    assert call["details"]["reason"] == "insufficient_scope"
+    assert call["details"]["required_scope"] == "comfy-cloud:agent:write"
+    # Only the rendered body is capped.
+    assert call["details"]["body"] == _LONG_SCOPE_BODY[:_MAX_ERROR_BODY_BYTES].decode()
+
+
+def test_cloud_http_handler_detects_scope_field_past_display_cap():
+    from comfy_cli.command.cloud_http import handle_cloud_http_error as workflow_handler
+
+    renderer = _FakeRenderer()
+    e = urllib.error.HTTPError("https://x/api/x", 403, "Forbidden", {}, io.BytesIO(_LONG_SCOPE_BODY))
+
+    workflow_handler(renderer, e, operation="save")
+
+    (call,) = renderer.calls
+    assert call["details"]["required_scope"] == "comfy-cloud:agent:write"
+    assert call["details"]["body"] == _LONG_SCOPE_BODY[:_MAX_ERROR_BODY_BYTES].decode()
+
+
+def test_unauthorized_body_read_is_bounded_for_detection():
+    from comfy_cli.command._cloud_errors import _MAX_SCOPE_BODY_BYTES, read_unauthorized_body
+
+    e = _http_error(403, b"A" * (5 * 1024 * 1024))
+
+    scope_body, body = read_unauthorized_body(e)
+
+    assert len(scope_body) == _MAX_SCOPE_BODY_BYTES
+    assert body == "A" * _MAX_ERROR_BODY_BYTES
