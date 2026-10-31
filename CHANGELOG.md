@@ -35,29 +35,9 @@ history.
   same two values adjacently and is now keyword-only for the same reason, before
   anything is inserted into it.
 
-- `Create Bounding Boxes` box edits, `Build JSON Prompt (Ideogram)` colour
-  palettes and old-style `COLOR` inputs (LayerStyle's `LayerMask: MaskByColor`,
-  `LayerUtility: ColorPicker`, `LayerUtility: ExtendCanvas`) keep their widget
-  slot. A `BOUNDING_BOXES`, `COLORS` or `COLOR` input that keeps its socket was
-  read as a link, so it was missing from the widget order and the widget
-  catalog. The Agent's doc host then refused every edit of the box editor
-  (`unknown_widget`); a saved `[width, height, editor_state, last_incoming]`
-  converted with the boxes in `last_incoming`; and a saved MaskByColor put its
-  colour into `color_in_HEX` and shifted every later value. On Comfy Cloud's
-  node catalog this changes exactly those five classes. `forceInput` still makes
-  any of these types a plain link. A connect to one of these inputs is still
-  checked against its declared socket type, and a fresh node starts an
-  undeclared `BOUNDING_BOXES` or `COLORS` value at `[]`, as the frontend does.
-- UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
-  the order the workflow was SAVED with, when the saved graph records one,
-  instead of the option's current order. An option that has since gained a
-  sub-input shifted every later slot by one, and once the alignment was off the
-  `control_after_generate` marker was consumed as a real value too — a
-  Seedance 2.0 graph converted with `model.auto_upscale` holding the seed and
-  `seed` holding `"randomize"`. `validate` catches the seed type but not the
-  boolean, so fixing only the seed still submitted the wrong graph. A sub-input
-  the save never carried now takes no slot, and a save that names one the
-  option no longer declares falls back to the current expansion untouched.
+## [1.24.0] - 2026-10-29
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.24.0) · 25 commits since v1.23.0.
 
 ### Added
 
@@ -74,16 +54,6 @@ history.
   `partial_execution_targets_ignored` warns when the server ran untargeted
   nodes anyway. Without the flag the request is unchanged.
 
-- DynamicGroup workflow conversion, row editing and validation, including row
-  templates in node discovery and the widget catalog. Refuse incompatible saved
-  widget layouts and ambiguous names instead of editing a different widget.
-
-- `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
-  deployment waits on and keeps it serving the release it served; `--json`
-  names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
-  with `changed: false`. A watching `up`, `promote` or `rollback` whose update
-  a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
-  release, rather than reading as failed.
 - `comfy deploy up --no-editor` makes or keeps a deployment without the CPU
   server comfy-deploy runs beside it for the editor, for one only called
   through the API; `--editor` turns it back on, and with neither nothing is
@@ -92,60 +62,7 @@ history.
   kept. `comfy deploy ls`
   shows each deployment's `editor` where comfy-deploy answers it, blank where
   it does not.
-- `comfy deploy up --create --name staging` names the deployment it creates,
-  and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
-  A name outside comfy-deploy's rule is refused before any call
-  (`deploy_invalid_name`), and one another deployment holds is named
-  (`deploy_name_taken`). `up`, `rollback` and `rename` refusing two or more
-  deployments list each one's name, release and status in
-  `details.candidates`, and `up --json` carries the deployment's `name`.
-- Every command that takes `--deployment`, and both arguments of `comfy deploy
-  promote`, take a deployment's name as well as its id: `--deployment staging`
-  in a Build's folder, or `--deployment flux-pipeline/staging`, the Build given
-  by its name or id, which needs no folder except for `status`, and `up`
-  without `--release`. A name no live deployment holds is refused with the
-  names held (`deploy_name_not_found`).
-- `comfy deploy ls` leads each row with the deployment's name, and `comfy
-  deploy status` reports `Deployment production (dep-…): ready`. `ls` prints
-  `-` for a deployment with no name and `status` its id alone, and `--json`
-  carries `name`, null where there is none.
-- `comfy deploy rollback [--to vN]` moves a deployment back to an earlier
-  release, keeping its id and URL, and follows the move as `up` does; `comfy
-  deploy history` lists the releases a deployment ran, newest first, with what
-  moved it and who. Both need deployment updates on.
-- `comfy deploy run` prints the version of the release that ran the job,
-  `Deployment job job-1 (release v7) is succeeded`, and `--json` carries it as
-  `job.releaseVersion`, once the platform gateway names it. Against a gateway
-  that does not, the output is as before.
-- `comfy deploy promote --json` and `comfy deploy rollback --json` say
-  `waiting: true` while the move waits for its release's copy, so a
-  `--no-watch` caller can tell a waiting move from one that landed.
-- `comfy deploy promote SOURCE TARGET` moves TARGET onto the release SOURCE
-  serves, keeping TARGET's id and URL, and follows the move as `up` does. It
-  needs deployment updates on (`deploy_updates_unavailable` otherwise).
-- `comfy deploy up` moves the Build's existing deployment onto the new release
-  in a workspace with deployment updates on, keeping its id and URL, and follows
-  the move until it lands (`deploy_update_failed` when it does not). It refuses
-  to pick between two or more deployments (`deploy_ambiguous_deployment`), and
-  `--create` adds a separate deployment instead. Outside that rollout `up`
-  behaves as before.
 
-- `comfy deploy status` shows the update a deployment waits on (`update`: the
-  release, its copy's status, since, and kind) and, where the workspace has
-  deployment updates, says `comfy deploy up` moves the deployment keeping its
-  URL. `comfy deploy events --release v5` keeps one release's events, and
-  `comfy deploy ls` gives each row of a Build its `releaseVersion`.
-- `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
-  that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
-  `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or
-  `null` (e.g. `slots.#(node_type=="CLIPTextEncode")#.address`,
-  `inputs.#(name=="lora_name").choices.#(%"*detail*")#`). The corpus in
-  `tests/data/selector_conformance.json` pins the grammar for other
-  implementations.
-- `comfy workflow connect` wires two nodes inside the same subgraph
-  (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
-  instance `path`. A link that crosses the subgraph boundary is still refused,
-  and so is a link inside a definition shared by several instances.
 - `comfy workflow delete-node` and `delete-nodes` accept the interior paths
   `workflow print` shows (`delete-node 70/2012`). They delete the node from its
   subgraph definition with its interior links, and emit a `delete_node` op
@@ -153,17 +70,7 @@ history.
   node that backs a promoted widget, is refused without writing. Replaying the
   op needs a doc host on comfy-multi-player 0.3.12 or later: older appliers
   ignore `path` and delete the top-level node with the same id.
-- `comfy workflow disconnect <file> <node>.<input>` removes an input link and
-  emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
-  autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
-  identity across replay order; boundary-crossing and shared-definition links
-  remain refused.
-- `comfy workflow validate` reports broken link rows of a canvas workflow as
-  `link_slot_out_of_range` / `link_source_missing` errors, each with the
-  `connect` that repairs it. The UI→API lowering used to drop such a row and
-  validate said the graph was valid.
-- `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
-  (also on `nodes search --expand-top`) list a long option list in full.
+
 - `comfy run --client-id <id>` submits as an already-connected WebSocket client
   instead of a freshly minted one, so ComfyUI addresses the run's execution
   events — node highlights, progress, outputs — to that client. This is what
@@ -187,6 +94,148 @@ history.
   `--client-id` is refused (`reason: "empty"`) as it is on `comfy run`. The
   watch envelope carries `poll_reason` (`borrowed`, `indeterminate` or null) so
   a `--json` consumer can tell why no socket was opened.
+
+### Fixed
+
+- `Create Bounding Boxes` box edits, `Build JSON Prompt (Ideogram)` colour
+  palettes and old-style `COLOR` inputs (LayerStyle's `LayerMask: MaskByColor`,
+  `LayerUtility: ColorPicker`, `LayerUtility: ExtendCanvas`) keep their widget
+  slot. A `BOUNDING_BOXES`, `COLORS` or `COLOR` input that keeps its socket was
+  read as a link, so it was missing from the widget order and the widget
+  catalog. The Agent's doc host then refused every edit of the box editor
+  (`unknown_widget`); a saved `[width, height, editor_state, last_incoming]`
+  converted with the boxes in `last_incoming`; and a saved MaskByColor put its
+  colour into `color_in_HEX` and shifted every later value. On Comfy Cloud's
+  node catalog this changes exactly those five classes. `forceInput` still makes
+  any of these types a plain link. A connect to one of these inputs is still
+  checked against its declared socket type, and a fresh node starts an
+  undeclared `BOUNDING_BOXES` or `COLORS` value at `[]`, as the frontend does.
+
+- UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
+  the order the workflow was SAVED with, when the saved graph records one,
+  instead of the option's current order. An option that has since gained a
+  sub-input shifted every later slot by one, and once the alignment was off the
+  `control_after_generate` marker was consumed as a real value too — a
+  Seedance 2.0 graph converted with `model.auto_upscale` holding the seed and
+  `seed` holding `"randomize"`. `validate` catches the seed type but not the
+  boolean, so fixing only the seed still submitted the wrong graph. A sub-input
+  the save never carried now takes no slot, and a save that names one the
+  option no longer declares falls back to the current expansion untouched.
+
+- Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
+  (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
+  written `widgets_values` is the frontend's four-widget shape
+  (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
+  restored those values by position into viewport state, width and height.
+
+- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
+  accepts a connection and hangs up before answering (a restarting server, a
+  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
+  which `urllib` does not wrap, past the `RuntimeError` net every caller in
+  `jobs` catches.
+
+- A failed `comfy jobs watch` carries the node's failure under
+  `error.details.execution_error` on both of its exits — instead of
+  `error.details.details.error` on the live path, and instead of
+  `error.details.error` on the one that short-circuits because the prompt had
+  already finished. Neither old key is published any more. The second exit was
+  also skipping the trimming and redaction that key drives, so it emitted the
+  full traceback and a `current_inputs` that can hold an api_key.
+
+## [1.23.0] - 2026-10-20
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.23.0) · 59 commits since v1.22.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
+- DynamicGroup workflow conversion, row editing and validation, including row
+  templates in node discovery and the widget catalog. Refuse incompatible saved
+  widget layouts and ambiguous names instead of editing a different widget.
+
+- `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
+  deployment waits on and keeps it serving the release it served; `--json`
+  names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
+  with `changed: false`. A watching `up`, `promote` or `rollback` whose update
+  a newer one replaced exits 1 with `deploy_update_replaced`, naming the newer
+  release, rather than reading as failed.
+
+- `comfy deploy up --create --name staging` names the deployment it creates,
+  and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
+  A name outside comfy-deploy's rule is refused before any call
+  (`deploy_invalid_name`), and one another deployment holds is named
+  (`deploy_name_taken`). `up`, `rollback` and `rename` refusing two or more
+  deployments list each one's name, release and status in
+  `details.candidates`, and `up --json` carries the deployment's `name`.
+
+- Every command that takes `--deployment`, and both arguments of `comfy deploy
+  promote`, take a deployment's name as well as its id: `--deployment staging`
+  in a Build's folder, or `--deployment flux-pipeline/staging`, the Build given
+  by its name or id, which needs no folder except for `status`, and `up`
+  without `--release`. A name no live deployment holds is refused with the
+  names held (`deploy_name_not_found`).
+
+- `comfy deploy ls` leads each row with the deployment's name, and `comfy
+  deploy status` reports `Deployment production (dep-…): ready`. `ls` prints
+  `-` for a deployment with no name and `status` its id alone, and `--json`
+  carries `name`, null where there is none.
+
+- `comfy deploy rollback [--to vN]` moves a deployment back to an earlier
+  release, keeping its id and URL, and follows the move as `up` does; `comfy
+  deploy history` lists the releases a deployment ran, newest first, with what
+  moved it and who. Both need deployment updates on.
+
+- `comfy deploy run` prints the version of the release that ran the job,
+  `Deployment job job-1 (release v7) is succeeded`, and `--json` carries it as
+  `job.releaseVersion`, once the platform gateway names it. Against a gateway
+  that does not, the output is as before.
+
+- `comfy deploy promote --json` and `comfy deploy rollback --json` say
+  `waiting: true` while the move waits for its release's copy, so a
+  `--no-watch` caller can tell a waiting move from one that landed.
+
+- `comfy deploy promote SOURCE TARGET` moves TARGET onto the release SOURCE
+  serves, keeping TARGET's id and URL, and follows the move as `up` does. It
+  needs deployment updates on (`deploy_updates_unavailable` otherwise).
+
+- `comfy deploy up` moves the Build's existing deployment onto the new release
+  in a workspace with deployment updates on, keeping its id and URL, and follows
+  the move until it lands (`deploy_update_failed` when it does not). It refuses
+  to pick between two or more deployments (`deploy_ambiguous_deployment`), and
+  `--create` adds a separate deployment instead. Outside that rollout `up`
+  behaves as before.
+
+- `comfy deploy status` shows the update a deployment waits on (`update`: the
+  release, its copy's status, since, and kind) and, where the workspace has
+  deployment updates, says `comfy deploy up` moves the deployment keeping its
+  URL. `comfy deploy events --release v5` keeps one release's events, and
+  `comfy deploy ls` gives each row of a Build its `releaseVersion`.
+
+- `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
+  that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
+  `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or
+  `null` (e.g. `slots.#(node_type=="CLIPTextEncode")#.address`,
+  `inputs.#(name=="lora_name").choices.#(%"*detail*")#`). The corpus in
+  `tests/data/selector_conformance.json` pins the grammar for other
+  implementations.
+
+- `comfy workflow connect` wires two nodes inside the same subgraph
+  (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
+  instance `path`. A link that crosses the subgraph boundary is still refused,
+  and so is a link inside a definition shared by several instances.
+
+- `comfy workflow disconnect <file> <node>.<input>` removes an input link and
+  emits a replayable `disconnect` op. Concrete, promoted, widget-converted,
+  autogrow, and eligible interior-subgraph inputs retain stable last-write-wins
+  identity across replay order; boundary-crossing and shared-definition links
+  remain refused.
+
+- `comfy workflow validate` reports broken link rows of a canvas workflow as
+  `link_slot_out_of_range` / `link_source_missing` errors, each with the
+  `connect` that repairs it. The UI→API lowering used to drop such a row and
+  validate said the graph was valid.
+
+- `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
+  (also on `nodes search --expand-top`) list a long option list in full.
 
 ### Changed
 
@@ -214,15 +263,18 @@ history.
   builder's message and a hint to delete a build or ask a teammate to. The limit
   counts every member's builds, which `comfy build ls` does not list outside the
   enterprise plan, and its help now says so.
+
 - An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
   closest options in `suggestions` (at most 5) with `option_count`, and carries
   `valid_options` only when the list has 12 options or fewer. It used to carry
   the whole folder listing twice, which made findings on large model folders
   very large.
+
 - `comfy nodes show` and `nodes search --expand-top` cut a combo input's
   `choices` longer than 20 to the first 20, with `choices_total`,
   `choices_truncated` and a `choices_note` naming the `--select` that filters
   the full list. `--select` still projects the full schema.
+
 - `comfy workflow print` renders a graph with broken links instead of refusing
   it: the input prints `None`, the line is marked `BROKEN`, and a warning names
   the `connect` that repairs it. A stale row whose value already reaches the
@@ -234,23 +286,6 @@ history.
 
 ### Fixed
 
-- Editing a `Load3DAdvanced` node saved with the old LOAD_3D button values
-  (`upload3dmodel`, `uploadExtraResources`, `clear`) now drops them, so the
-  written `widgets_values` is the frontend's four-widget shape
-  (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
-  restored those values by position into viewport state, width and height.
-- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
-  accepts a connection and hangs up before answering (a restarting server, a
-  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
-  which `urllib` does not wrap, past the `RuntimeError` net every caller in
-  `jobs` catches.
-- A failed `comfy jobs watch` carries the node's failure under
-  `error.details.execution_error` on both of its exits — instead of
-  `error.details.details.error` on the live path, and instead of
-  `error.details.error` on the one that short-circuits because the prompt had
-  already finished. Neither old key is published any more. The second exit was
-  also skipping the trimming and redaction that key drives, so it emitted the
-  full traceback and a `current_inputs` that can hold an api_key.
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING
@@ -263,6 +298,7 @@ history.
   else is relaxed: a BOOLEAN string (`bool("false")` is true), `"1536.0"` or
   `1536.9` on an INT, a bool, and a non-finite string such as `"nan"` keep their
   existing verdict.
+
 - `comfy run` no longer reports a failure to write its own job-state file as a
   lost connection to the ComfyUI server. The state file is a convenience
   record, written after the server has already accepted the prompt, so a
@@ -275,6 +311,7 @@ history.
   no record was kept; follow the job by its `prompt_id` instead, and run with
   `LOG_LEVEL=DEBUG` to see what the write failed on. Real transport failures
   are reported exactly as before.
+
 - `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
   when the sign-in token it started with expires mid-run. The token lasts
   fifteen minutes, and the run sent the one it started with for every request
@@ -284,6 +321,7 @@ history.
   once and reads again. A workspace API key, or a token injected through
   `COMFY_CLOUD_AUTH_TOKEN`, is sent unchanged. `comfy download` running on the
   stored sign-in likewise re-reads it before each output of a many-file download.
+
 - `comfy build release show .` (and `release logs .`, `release manifest .`)
   reads `.` as the build path, the way `release create .` does, and shows that
   Build's newest release. It used to send `.` to the builder as a release id
@@ -296,6 +334,7 @@ history.
   before a PATH as `build_missing_input`, both before any request. A release id
   the file system cannot look up (longer than a file name, naming a folder you
   cannot read, or `~name` for no such user) still reaches the builder as the id.
+
 - The knowledge capability matcher preserves repeated words in keys, so
   `video-edit`'s alias "Video to Video" no longer collapses to the single word
   "video" and full-matches every query that mentions a video. Repeated query
@@ -304,19 +343,23 @@ history.
   "extend this video"); a phrase that names nothing now resolves to nothing and
   gets the `no curated knowledge for …` nudge, as `_resolve_tokens` already
   documented for "4K video generation".
+
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another
   precision (`*_int8_convrot` → `*_fp16`) and reported under
   `data.model_substitutions`; a file with no such variant is left as is and
   reported under `data.unavailable_models` with its closest options.
+
 - `validate` names that same-model variant on an `unknown_enum_value` model
   finding. A `CustomCombo` choice (options the frontend defines) is no longer
   `no_options_available`, and a BOOLEAN saved as the string `"True"` (which
   the server reads as true) is no longer a shape error.
+
 - `connect`, `delete-node` and `set-node-field` accept a template node id
   (`24`) on a canvas whose ids were remapped by `insert_workflow`
   (`insert:…:root:node:24`), as `set-widget` already did.
+
 - `comfy workflow slots` and `validate` speak the template node id on a canvas
   `get_template` built (`insert:…:root:node:94`), as the edit commands do.
   Such a node's own slot rows (not its subgraph interior's) carry
@@ -330,11 +373,14 @@ history.
   at its full path (`10/5.prompt_text`, `instance_id: "10/5"`). It used to be
   listed at the bare interior id (`5.prompt_text`), which named a different
   top-level node or no node.
+
 - `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
   `speech` is `audio`); with another option selected it names the value to set.
+
 - A number or JSON value written to a STRING widget is written as its text,
   with a `normalized_value` warning. A value written to a link-only input
   (`forceInput`) says to connect a source and names a primitive node for it.
+
 - A cloud request the account's plan does not allow (free generations used up,
   subscription required, a partner node or model that needs a paid plan) is now
   `cloud_payment_required`, carrying the server's message in `message` and its
@@ -343,6 +389,7 @@ history.
   (how the cloud sends it today) was `cloud_rate_limited`, whose "wait, then
   retry" hint could never succeed. A full queue (`QUEUE_LIMIT`) and a
   temporarily unavailable free tier stay `cloud_rate_limited`.
+
 - `comfy skills install --skill <path>` and `comfy skills validate` refuse a
   skill whose frontmatter `name:` is one the CLI ships (`skill_invalid`),
   whether the path is a `SKILL.md` file or a folder carrying that name. Such a
@@ -353,6 +400,7 @@ history.
   install already replaced a shipped skill, a plain `comfy skills install`
   writes the shipped Claude Code and Cursor files back; a `Comfy` block such
   an install added to `AGENTS.md` stays until removed by hand.
+
 - `workflow print`, `slots`, `validate` and the edit commands no longer hang on
   a subgraph whose definition is named after the node class it wraps (gallery
   templates `video_wanmove_480p`, `video_wanmove_480p_hallucination` and
@@ -361,10 +409,12 @@ history.
   node to its own definition, and the nested-promotion walk recursed into it,
   fanning out to its depth cap; it now treats that node as the class it is, and
   the walk stops at any definition already on its stack.
+
 - `validate` and `set-widget` accept a number for a float COMBO option it
   equals: `1` for `scale_factor`'s `1.0`. A frontend-saved workflow writes
   `1.0` as `1`, and the server compares numerically, so this was refused as
   `unknown_enum_value` although it runs.
+
 - `set-widget` (and `apply` set_widget ops) write an aspect-ratio option whose
   `W:H` ratio the value names when exactly one option has it: `'16:9 (Landscape)'`
   or `'16:9'` becomes `'16:9 (Widescreen)'`, with a `normalized_value` warning.
@@ -1099,7 +1149,9 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...HEAD
+[1.24.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...v1.24.0
+[1.23.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...v1.22.0
 [1.21.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.20.0...v1.21.0
 [1.20.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.19.0...v1.20.0
