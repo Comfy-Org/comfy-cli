@@ -15,6 +15,7 @@ from rich.text import Text
 
 from comfy_cli import tracking
 from comfy_cli.caller import detect_caller
+from comfy_cli.http import USAGE_SOURCE_HEADERS
 
 app = typer.Typer()
 console = Console()
@@ -196,6 +197,7 @@ def _fetch_results(query: str, *, agent_origin: bool = False) -> dict:
         # otherwise expand far past the cap before the check fires (a
         # decompression bomb). Refuse compression altogether instead.
         headers={
+            **USAGE_SOURCE_HEADERS,
             "Accept-Encoding": "identity",
             **({"X-Comfy-Code-Search-Origin": "agent"} if agent_origin else {}),
         },
