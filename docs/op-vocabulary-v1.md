@@ -354,11 +354,15 @@ local model can need it.
 * Every op carries `op_id`: uuid4 hex, minted by the **creator, before
   dispatch** (`_new_op`). Receivers never regenerate or rewrite an `op_id`.
 * `apply_op` records applied `op_id`s in the document's `_applied_ops` list and
-  drops any op whose `op_id` is already there. **Uniqueness scope is
+  their canonical digests in `_applied_op_digests`. An identical retry is a
+  no-op; the same `op_id` carrying a different canonical payload rejects with
+  `op_id_reuse`. A legacy document with only the list keeps its historical
+  duplicate behavior. See **Amendment v1.11** (§20) for the canonical form,
+  the bounds and the ledger contract. **Uniqueness scope is
   PER-WORKFLOW**: the same `op_id` can exist in two different workflow documents
   without interaction; within one document each op applies exactly once.
-* `_applied_ops` (and `_widget_stamps`) are apply-time bookkeeping, stripped
-  before serialization to disk (`strip_internal`).
+* `_applied_ops`, `_applied_op_digests` (and `_widget_stamps`) are apply-time
+  bookkeeping, stripped before serialization to disk (`strip_internal`).
 
 ## 3. Conflict rules
 
@@ -1290,3 +1294,314 @@ No operation kind is added or removed. `FROZEN_OPS`, `DEFERRED_OPS`, and
 `BATCHABLE_OPS` are unchanged. Downstream consumers that move their pinned
 vocabulary SHA to v1.10 must preserve `subgraph_reuse` conflict metadata even
 though replay itself continues to insert `op.node` opaquely.
+
+## 20. Amendment v1.11 — 2026-10-24 (canonical op identity: `op_id` binds one payload)
+
+**`op_id` identifies one immutable semantic-op envelope, not just one delivery.**
+Before this amendment `apply_op` dropped any op whose `op_id` was already in
+`_applied_ops` without looking at the payload, so a sender that reused an id
+with a changed payload had its second edit silently discarded — and two
+replicas that received the pair in different orders ended up with different
+documents and no error on either side. This mirrors comfy-multi-player schema
+**Amendment A8**; the two implementations must agree byte-for-byte on the
+canonical form, because the digest is the only thing that distinguishes an
+identical retry from reuse.
+
+### 20.1 The canonical form
+
+Compact JSON over the **whole envelope**:
+
+* object keys sorted by **Unicode code point** at every depth; array order
+  preserved; no insignificant whitespace (`,`/`:` separators, no spaces). The
+  same caveat as 8.1 applies: for ASCII, JS UTF-16 `<` agrees with code-point
+  order, but above the Basic Multilingual Plane it does not, so an
+  implementation must sort by code point and not rely on
+  `Object.keys(...).sort()`'s default comparator. Every key an op envelope
+  carries today is ASCII, so this only bites a dict widget whose own keys are
+  not;
+* **numbers rendered as ECMAScript renders them** (`Number::toString`), not as
+  Python's float repr does. An integral float is `20`, not `20.0`; negative zero
+  is `0`; an exponent is `1e-7`, not `1e-07`. This is load-bearing rather than
+  cosmetic: the counterpart builds the canonical form with `JSON.stringify`, so
+  without it a FLOAT widget op relayed through JS digests differently on the two
+  sides and an identical redelivery is rejected as `op_id_reuse`;
+* **every non-finite number renders as `null`**, which is what `JSON.stringify`
+  does. The alternative — rejecting the op — made a widget whose *current* value
+  is `NaN`/`Infinity` impossible to overwrite, because the op captures that
+  value in `old` (and `json.load` accepts both spellings on the way in);
+* a **lone surrogate** renders as a `\udXXX` escape, matching ES2019
+  well-formed `JSON.stringify`. Emitted raw it cannot be UTF-8 encoded at all,
+  so the digest died with a bare `UnicodeEncodeError` outside the
+  `malformed_op:` prefix callers classify errors by.
+
+The ledger records the lowercase SHA-256 hex digest of that string.
+
+### 20.2 The ledger contract
+
+* `_applied_op_digests` maps `op_id` → digest, beside `_applied_ops`. Both are
+  stripped by `canonical()` and `strip_internal()`, and `reset_doc` clears both
+  as one history barrier.
+* **Rejects before mutation.** `op_id`, `_applied_ops` and `_applied_op_digests`
+  all arrive from untrusted JSON and are all validated before any handler runs:
+  a non-string `op_id`, or a ledger that is not an object/array, is
+  `malformed_op`. So is a payload canonicalization refuses. A document that
+  arrived without a ledger is never left carrying an empty one by a rejected op.
+* **A deferred op is already bound.** A `set_widget` waiting in
+  `_deferred_widget_ops` for a selector to reveal its target has not reached
+  `_applied_ops`, so the gate checks the deferred queue too; a second payload on
+  that `op_id` rejects instead of overwriting the pending entry.
+* **The enriched envelope is what is bound.** A promoted or `legacy_primitive`
+  `set_widget` only learns the host's materialized `host_widgets_values` by
+  reading back the document the write produced, so the ledger entry is corrected
+  to the envelope the caller actually broadcasts. If that enriched envelope is
+  not canonical the earlier digest stands: the document is already written, and
+  reporting failure for an applied op is worse than holding a digest a
+  redelivery will refuse in the pre-mutation branch.
+* **Legacy documents are untouched.** One carrying `_applied_ops` and no
+  `_applied_op_digests` keeps the historical drop-the-duplicate behavior, and
+  deliberately without digesting the replayed payload first — a non-canonical
+  replay must still be the documented no-op rather than a new error.
+
+### 20.3 Bounds
+
+Canonicalization is bounded to **64 levels of nesting**, **4,096 entries per
+collection** and **262,144 approximate cost units**. These are not chosen here:
+they are mirrored exactly from `comfy-multi-player`'s `src/limits.ts` at
+`221b2b2e470c79afaface24b1edcb53cdafc8922` (`MAX_PAYLOAD_DEPTH`,
+`MAX_COLLECTION_ENTRIES`, `MAX_OP_COST`), cited by SHA rather than by branch.
+
+They exist only so a hostile or runaway payload cannot pin a replica inside
+canonicalization, and every ordinary op has to pass. "The digest is computed on
+every apply, not only on a reuse comparison" is true of **both** sides — CMP's
+A8 canonicalizer charges the whole envelope in `applyOps` before its dedupe gate
+— so a looser bound on one side rescues no edit. It only moves where an
+oversized op fails, from a local `malformed_op` to a `malformed_op` from the
+shared package after this side already accepted the payload. A comfy-cli-only
+budget was briefly carried here (1,048,576 / 33,554,432) and is withdrawn as
+exactly the cross-implementation validation drift one shared op package exists
+to prevent. If a real edit needs more room, widen it in `comfy-multi-player` and
+move this pin.
+
+Measured headroom at the shared values: the widest op this vocabulary mints from
+a real workflow fixture is ~1.6K cost units over 13 entries, under 1% of the
+budget. The three edits previously said to need a looser bound bind only well
+past anything observed — `clear`/`reset_doc` at more than 4,096 nodes in one
+document, a hub `delete_node` at more than 4,096 incident links on one node, and
+a widget string at 131,064 characters when the op also captures an equal-sized
+`old` (262,133 without one). The largest workflow in the comfy-cli fixtures has
+11 nodes.
+
+The asymmetric case is the one to keep in mind: `{value: 25}` followed by the
+same `op_id` carrying `{value: 30}` rejects, while the same payload with its keys
+in a different insertion order is an ordinary no-op.
+
+**No change to §§1, 3-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. §2's identity
+bullet now cites this section. Downstream repos pinning this document by SHA
+move the SHA together with their comfy-cli pin, and must move their CMP A8 pin
+with it.
+
+## 21. Amendment v1.12 — 2026-10-31 (a batch is bounded at 1,024 ops)
+
+**A batch carries at most 1,024 ops.** `comfy-multi-player`'s `src/limits.ts` at
+`221b2b2e470c79afaface24b1edcb53cdafc8922` fixes `MAX_OPS_PER_BATCH` at 1024 and
+refuses a longer batch **whole** — `applyOps` checks it before any op is
+processed and returns a `malformed_op` rejection for every op in the batch, and
+`inspectOps` raises `malformed_op` from the storage preflight. comfy-cli had no
+counterpart, so `apply_specs` would accept and apply a batch of any length and
+`replace_ops` would hand a caller one, and the refusal arrived from the shared
+package only after this side had committed to the write.
+
+That is the same mint-then-refuse divergence v1.11 §20.3 closed for the three
+payload bounds, one level up: §4's abort-remainder contract is about which ops in
+a batch apply, and an over-long batch has no answer under it at all because none
+of them do. The bound is therefore mirrored, not chosen here, and cited by SHA
+rather than by branch for the same reason §20.3 gives. If a real edit needs a
+longer batch, widen it in `comfy-multi-player` and move this pin; never widen it
+here alone.
+
+Where it is enforced, and the two different refusals:
+
+* **`apply_specs`** checks it TWICE, because one spec is not one op. On entry
+  it raises `malformed_op: batch of <n> specs exceeds the 1024-op limit;
+  rejected before any op was processed` — before the `at` coercion and before
+  the position planner, both of which are per-spec work, so the message's
+  promise is literally true. That check cannot be the whole bound:
+  `set_dynamic_group_rows` expands into a row-count write plus one `set_widget`
+  per row field, so a spec list within the bound can still mint a batch
+  past it. After the loop, and still inside the batch's discard handler, it
+  raises `malformed_op: batch mints <n> ops, more than the 1024-op limit`;
+  `applied_count` is 0 there like every other mid-batch refusal.
+* **`replace_ops`** raises **`NotExpressibleError`**, the existing "there is no
+  legal batch for this graph" signal, rather than a bare `ValueError`. Its
+  reasons are now *structure no frozen kind can create*, *a translation longer
+  than the bound*, and *one op whose own payload is out of §20.3's bounds* —
+  that last one because these ops are handed to a caller without ever passing
+  through `apply_op`, so nothing else canonicalizes them. All three want the
+  same caller behaviour, which both production callers already implement —
+  `templates fetch --emit-ops` and `generate`'s emit path each report
+  `ops_skipped` beside the file they still wrote. The count binds on the SUM of
+  `old` and `new`, because §8.8's replacement shape emits a `delete_node` per
+  node already in `old` before the adds.
+
+Measured headroom, and what the measurement does NOT cover. Across all 735
+workflows in `Comfy-Org/workflow_templates` — the gallery
+`templates fetch --emit-ops` reads — the longest batch `replace_ops` actually
+mints is **50 ops**, 4.9% of the bound. That measured the `new` side only. The
+`old` side is whatever document the caller is replacing, which is user data and
+is bounded by nothing here: a fetch or an emit into a path already holding a
+workflow of ~1,000 nodes can exceed the bound on the `delete_node` half alone
+while the incoming template is tiny. Both callers degrade rather than fail on
+that case (`ops_skipped` beside a file they still write). 447 of those templates carry a
+subgraph definition, a canvas group or a reroute point and are refused as
+inexpressible before size is considered; across all 735, nodes+links peaks at
+212, so even if every one of them became expressible the worst case stays a fifth
+of the bound. The largest expressible workflow in comfy-cli's own fixtures mints
+3 ops.
+
+The one document-sized payload this bound does **not** cover is a standalone
+`clear` or `reset_doc`, which enumerates every node id inside ONE op rather than
+as one op each. Those are bounded by §20.3's 4,096-entry collection cap instead,
+and §1.5/§1.6 keep them out of `BATCHABLE_OPS`, so no large document turns into a
+long batch behind a caller's back.
+
+**No change to §§1-3, 5-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. §4 gains an outer
+precondition — a batch must be within the bound before abort-remainder has
+anything to say about it — and is otherwise unaltered. Downstream repos pinning
+this document by SHA move the SHA together with their comfy-cli pin.
+
+## 22. Amendment v1.13 — 2026-10-31 (v1.11 corrections: canonical form and ledger edges)
+
+Six corrections to Amendment v1.11, all found by review of the implementation
+rather than by a failure in the field. None of them re-scopes an op kind and none
+needs a change in `comfy-multi-player`; each is comfy-cli coming into line with
+what v1.11 and CMP A8 already say.
+
+### 22.1 An integer past 2^53 is spelled as the double it becomes
+
+**§20.1's "numbers rendered as ECMAScript renders them" covers integers too, and
+comfy-cli did not implement it that way.** It rendered every `int` with Python's
+`str`, which is exact at any magnitude. The counterpart has no such type: JSON
+carries no integer, `JSON.parse` reads every numeric literal as an IEEE-754
+double, and CMP's canonicalizer refuses a `BigInt` payload outright
+(`applier.ts`: `rejectBigIntPayload`). So past 2^53 the other side holds the
+ROUNDED value and `Number::toString` spells that.
+
+The consequence was the failure §20.1's float rule exists to prevent, one type
+over. A seed at an INT widget's `0xffffffffffffffff` maximum spelled
+`18446744073709551615` here and `18446744073709552000` after a relay through JS,
+and `10**21` spelled `1e+21` there — so an **identical** op echoed back through
+the shared package digested differently and was refused as `op_id_reuse`.
+
+The rule, which changes nothing inside the exact range:
+
+* `-2^53 <= n <= 2^53` keeps its exact digits — the two spellings already agree
+  there, and this is every integer any widget, node id, link id or stamp
+  carries;
+* outside it, the value is rendered through the same double path as a float, so
+  it reads as `JSON.stringify(JSON.parse(literal))` would;
+* past the double range entirely (`10**400`), `JSON.parse` yields `Infinity` and
+  `JSON.stringify` renders `null`, matching §20.1's non-finite bullet;
+* an integer **object key** is the one place the two diverge, because a property
+  name is coerced with `String()` rather than rendered by `JSON.stringify`:
+  there the non-finite end is `"Infinity"` / `"-Infinity"`. Only a
+  programmatically built op can reach a non-`str` key at all — parsed JSON
+  always has string keys.
+
+The **cost charge is unchanged** at a flat 8 units per number, deliberately:
+`src/limits.ts` documents the model as "8 per numeric/leaf", so charging a huge
+integer by its digit count would refuse a payload CMP accepts — the same
+validation drift §20.3 withdrew a comfy-cli-only budget to avoid.
+
+CMP already produces these spellings, because it canonicalizes with
+`JSON.stringify`; this records that comfy-cli now agrees with it. The only
+behavioural effect is on an op carrying an integer past 2^53, which now digests
+as its JS spelling.
+
+### 22.2 The cost bound refuses at the charge, not after the render
+
+§20.3's budget exists to cap the WORK a hostile payload costs, and it was
+checked only at the END of each `_canonical_value` call. A string is charged by
+length and then handed to the renderer, which runs `json.dumps` plus a surrogate
+scan over the whole thing and allocates up to ~6x its size for control-heavy
+input — so an oversized string, or an oversized object key at the `+= len(name)`
+charge, was fully rendered before being refused. The bound therefore did not
+bound the work.
+
+Charging and refusing at the same point fixes that, and it does not change
+WHETHER a payload is refused, because the budget only ever grows: every payload
+that exceeded at the end exceeds at the charge that crossed the line, and every
+charge that crosses the line is followed by an end that is also over. The shared
+package already has this property for the same reason — `opBoundsRefusal` walks
+and charges the payload before `normalize` renders anything.
+
+What it can change is WHICH refusal a payload that breaks two bounds at once
+reports. An object with an oversized key AND a value nested past the depth limit
+used to charge every key without checking, reach the values, and report
+`payload_too_deep:`; it now reports the cost budget at the key. Both are
+refusals of the same payload, and the cost-first order is the one CMP's
+depth-first walk already produces, so this moves comfy-cli toward the
+counterpart rather than away from it. No single-violation payload changes its
+code.
+
+### 22.3 Object keys that collide after coercion are `malformed_op`
+
+§20.1 renders an object key as "its string form, matching ECMAScript property
+coercion", and that coercion is not injective: `1` and `"1"`, `True` and
+`"true"`, `None` and `"null"`, `1.5` and `"1.5"` are distinct Python keys naming
+the same JS property. Emitting both members produced an object literal no JS
+object can hold, and because the member sort is stable the digest of such a dict
+then depended on INSERTION order — so the same logical payload could digest two
+ways and §20's whole "one `op_id`, one payload" guarantee had a hole in it.
+
+Such a pair is refused as `malformed_op` rather than merged: there is no intent
+in it a merge would preserve. Only a programmatically built op can reach the
+case at all, since parsed JSON always has `str` keys, so no wire payload
+changes behaviour.
+
+### 22.4 A `null` digest entry is malformed, not a legacy ledger
+
+§20.2's "legacy documents are untouched" rule is keyed on a document having
+`_applied_ops` and **no** `_applied_op_digests` entry for the op. comfy-cli
+decided that with `recorded is None`, which cannot tell a MISSING entry apart
+from an explicit `null` one, and the up-front validation checks the ledger's
+type rather than its values — both arrive from the same untrusted JSON.
+
+So a document carrying `{<op_id>: null}` read as a legacy list-only ledger and
+returned a changed-payload redelivery as a silent no-op, which is precisely the
+divergence v1.11 exists to stop. Every other non-string value failed closed on
+the digest comparison, so `null` was the one shape that failed open.
+
+The legacy case is now decided by MEMBERSHIP, and a present-but-non-string
+digest entry is `malformed_op` — not `op_id_reuse`, because the document's
+bookkeeping is broken rather than the sender's id being reused. It is refused on
+read rather than by walking every ledger entry on every apply.
+
+### 22.5 The deferred-queue digest is taken defensively
+
+§20.2's deferred-queue gate digested the QUEUED entry with the strict
+canonicalizer, under a comment claiming it could not raise because a queued op
+was canonicalized on the way in. `_deferred_widget_ops` comes off the document
+and is never validated on load, so that does not hold: an oversized or deeply
+nested queued entry raised its own `malformed_op:` / `payload_too_deep:` against
+the INCOMING op, blocking a well-formed op with an error naming a payload that
+is not the one being applied.
+
+The queued entry is now digested with the same tolerant helper the retry loop
+uses, and a `None` digest is a mismatch — correctly, because the incoming op has
+already been digested at that point and is therefore canonical, so an
+uncanonical queued entry cannot be the same payload. The refusal is
+`op_id_reuse`, which is what it is.
+
+### 22.6 Kind and `definitions` are validated before the ledger is seeded
+
+§20.2 promises that "a document that arrived without a ledger is never left
+carrying an empty one by a rejected op". Two validations sat on the wrong side of
+that line: the read of the op's `op` field, and the refusal of `definitions` on
+a non-`insert_workflow` op, both ran after `_applied_ops` had been seeded and
+both raise outside the handler rollback. So a first-seen op with no `op` key, or
+a non-insert op carrying `definitions`, was correctly rejected and left
+`{"_applied_ops": []}` behind on a document that had no ledger at all.
+
+Both now run before the seed. No message or code changes.

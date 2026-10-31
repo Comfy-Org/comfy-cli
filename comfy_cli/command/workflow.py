@@ -258,11 +258,18 @@ def slots_cmd(
         "slots": slots,
     }
 
+    warnings: list[dict] = []
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = [
+        warnings.append(
             {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
+        )
+    # A node whose saved widget layout the current catalog cannot reconcile
+    # advertises no slots rather than guessed ones. Say which node and why, or
+    # its absence from the list reads as "this node has nothing to edit".
+    warnings.extend(schema.get("warnings") or [])
+    if warnings:
+        payload["warnings"] = warnings
 
     if select is not None:
         from comfy_cli.selector import emit_selected
