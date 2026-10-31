@@ -678,6 +678,21 @@ def _slot_types(t: Any) -> set[str]:
     return {p.strip() for p in str(t or "").split(",") if p.strip()}
 
 
+_COMBO_SOCKET_SOURCE_TYPES = frozenset({"STRING", "INT", "FLOAT"})
+
+
+def _input_accepts(link_type: Any, input_entry: dict) -> bool:
+    """Whether an output of ``link_type`` may drive ``input_entry``.
+
+    A COMBO widget socket also takes a scalar: that is how a computed file name
+    or option reaches a combo, and a combo's options can be numbers.
+    """
+    dst_type = input_entry.get("type")
+    if dst_type == "COMBO" and input_entry.get("widget") and link_type in _COMBO_SOCKET_SOURCE_TYPES:
+        return True
+    return _types_compatible(link_type, dst_type)
+
+
 def _types_compatible(link_type: Any, dst_type: Any) -> bool:
     """Whether an output of ``link_type`` may drive an input of ``dst_type``.
 
@@ -2301,7 +2316,7 @@ def _connect_impl(
     # link.
     if in_idx is not None:
         dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-        if not _types_compatible(link_type, dst_type):
+        if not _input_accepts(link_type, (dst.get("inputs") or [])[in_idx]):
             raise ValueError(
                 f"type mismatch: {link_type} output of node {from_node} cannot connect to "
                 f"{dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node {to_node}"
@@ -2571,7 +2586,7 @@ def _connect_interior(
             "the node lists; inside a subgraph connect can only wire an existing input"
         )
     dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-    if not _types_compatible(link_type, dst_type):
+    if not _input_accepts(link_type, (dst.get("inputs") or [])[in_idx]):
         raise ValueError(
             f"type mismatch: {link_type} output of node {'/'.join(scope['path'])}/{src.get('id')} cannot connect "
             f"to {dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node "
@@ -4890,7 +4905,34 @@ def strip_internal(workflow: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Widget input types a fresh node gets a socket entry for. The frontend gives
+# every non-socketless widget input a socket and serializes it as
+# ``{"name", "type", "widget": {"name"}}``; without the entry the shared document
+# has no slot for a link a human draws into that socket, so the link never
+# reaches the document.
+_SOCKETED_WIDGET_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"})
+
+
+def _widget_input_entries(m, order: list[str]) -> list[dict]:
+    """Socket entries for every widget in ``order``, or none.
+
+    Without object_info the converter names saved values from these entries by
+    position, so sockets for only some widgets would misname the rest. A node
+    with a widget that has no entry of its own (a dynamic combo, a union type, a
+    socketless widget) keeps the convert-on-connect path instead.
+    """
+    entries = [
+        {"name": p.name, "type": p.type, "widget": {"name": p.name}, "link": None}
+        for p in m.inputs
+        if not p.is_link and not p.is_socketless and p.type in _SOCKETED_WIDGET_TYPES
+    ]
+    if [e["name"] for e in entries] != [name for name in order if name != "control_after_generate"]:
+        return []
+    return entries
+
+
 def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, title: str | None = None) -> dict:
+    # Link inputs first, so their indices are unchanged; widget sockets after.
     inputs = [{"name": p.name, "type": p.type, "link": None} for p in m.inputs if p.is_link]
     outputs = [{"name": p.name, "type": p.type, "links": []} for p in m.outputs]
     # Widget values in positional order, including dynamic-combo selectors and
@@ -4902,6 +4944,7 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, 
     # it, so neither does a fresh node — no phantom trailing ``null``.
     while order and order[-1] not in defaults:
         order = order[:-1]
+    inputs += _widget_input_entries(m, order)
     widgets = [defaults.get(name) for name in order]
     node = {
         "id": node_id,
