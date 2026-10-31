@@ -2363,14 +2363,16 @@ class TestSpendGateStdinAndMarkup:
 
 
 class TestExecuteUiWorkflow:
+    # The conversion success fixture must also be an executable graph:
+    # PreviewImage consumes IMAGE, not an EmptyLatentImage's LATENT output.
     UI = {
         "nodes": [
             {
                 "id": 1,
-                "type": "EmptyLatentImage",
+                "type": "EmptyImage",
                 "inputs": [],
-                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-                "widgets_values": [512, 512, 1],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+                "widgets_values": [512, 512, 1, 0],
                 "mode": 0,
             },
             {
@@ -2384,19 +2386,20 @@ class TestExecuteUiWorkflow:
         "links": [[10, 1, 0, 2, 0, "IMAGE"]],
     }
     OBJECT_INFO = {
-        "EmptyLatentImage": {
+        "EmptyImage": {
             "input": {
                 "required": {
                     "width": ["INT", {"default": 512}],
                     "height": ["INT", {"default": 512}],
                     "batch_size": ["INT", {"default": 1}],
+                    "color": ["INT", {"default": 0}],
                 }
             },
-            "input_order": {"required": ["width", "height", "batch_size"]},
-            "output": ["LATENT"],
-            "output_name": ["LATENT"],
+            "input_order": {"required": ["width", "height", "batch_size", "color"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
             "output_node": False,
-            "display_name": "Empty Latent Image",
+            "display_name": "Empty Image",
         },
         "PreviewImage": {
             "input": {"required": {"images": ["IMAGE"]}},
@@ -2435,7 +2438,7 @@ class TestExecuteUiWorkflow:
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             api_workflow = MockExec.call_args.args[0]
             assert set(api_workflow) == {"1", "2"}
-            assert api_workflow["1"]["class_type"] == "EmptyLatentImage"
+            assert api_workflow["1"]["class_type"] == "EmptyImage"
             assert api_workflow["2"]["inputs"]["images"] == ["1", 0]
             mock_exec.queue.assert_called_once()
 
