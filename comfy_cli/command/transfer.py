@@ -144,6 +144,38 @@ def _assert_download_url(url: str) -> None:
         raise ValueError(f"refusing to download from non-HTTP URL: {url}")
 
 
+def _auth_for_url(url: str, auth_hdrs: dict[str, str], base_url: str) -> dict[str, str]:
+    """Credentials ride only to the target's own origin.
+
+    Output URLs can arrive from untrusted metadata (a piped stdin envelope's
+    ``data.outputs``). Shipping the cloud token to whatever host that
+    metadata names is the one gap vs deploy_download, which refuses unknown
+    output origins outright; this pipe accepts third-party JSON by contract,
+    so it degrades instead of rejecting: a foreign origin gets the fetch,
+    never the credentials. Signed-URL outputs (the common case) work
+    credential-free anyway.
+    """
+    if not auth_hdrs:
+        return auth_hdrs
+    try:
+        url_parts = urllib.parse.urlsplit(url)
+        base_parts = urllib.parse.urlsplit(base_url)
+        default_ports = {"http": 80, "https": 443}
+        url_port = url_parts.port if url_parts.port is not None else default_ports.get(url_parts.scheme)
+        base_port = base_parts.port if base_parts.port is not None else default_ports.get(base_parts.scheme)
+    except ValueError:
+        # malformed URL (bad port, bracketed garbage): never a reason to
+        # attach credentials
+        return {}
+    if (url_parts.scheme, url_parts.hostname, url_port) == (
+        base_parts.scheme,
+        base_parts.hostname,
+        base_port,
+    ):
+        return auth_hdrs
+    return {}
+
+
 def _declared_content_length(resp: Any) -> int | None:
     """Parse the response's Content-Length header; None when absent or invalid.
 
@@ -1031,7 +1063,7 @@ def execute_download(
             item_counters=item_counters,
             short_id=short_id,
             is_local_job=is_local_job,
-            auth_hdrs=auth_hdrs,
+            auth_hdrs=_auth_for_url(url, auth_hdrs, target.base_url),
             renderer=renderer,
         )
         saved_files.append(entry)
