@@ -107,6 +107,29 @@ def workflow_manifest(workflow: dict) -> list[dict]:
     return manifest
 
 
+def target_subgraph(workflow: dict, target_ids: list[str]) -> dict:
+    """The part of ``workflow`` that ``--output-node-ids`` actually runs: the
+    targets plus every node they depend on through input links. This is the
+    graph ComfyUI validates and executes for ``partial_execution_targets``, so
+    checks that should only cover what runs (preflight, partner-node detection,
+    progress) are scoped to it. Links to ids not in ``workflow`` are skipped."""
+    keep: dict = {}
+    stack = [str(t) for t in target_ids]
+    while stack:
+        nid = stack.pop()
+        if nid in keep or not isinstance(workflow.get(nid), dict):
+            continue
+        node = workflow[nid]
+        keep[nid] = node
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        for value in inputs.values():
+            if isinstance(value, list) and len(value) == 2 and isinstance(value[1], int):
+                stack.append(str(value[0]))
+    return keep
+
+
 class ExecutionProgress(Progress):
     def get_renderables(self):
         table_columns = (
@@ -137,7 +160,9 @@ class WorkflowExecution:
         *,
         extra_data: dict | None = None,
         api_key: str | None = None,
+        output_node_ids: list[str] | None = None,
         client_id: str | None = None,
+        run_graph: dict | None = None,
     ):
         self.workflow = workflow
         self.host = host
@@ -160,7 +185,19 @@ class WorkflowExecution:
         # `run --wait` can group outputs by node / foreach item.
         self.output_entries: list[dict] = []
         self.progress = progress
-        self.remaining_nodes = set(self.workflow.keys())
+        # A targeted run only executes the targets' subgraph; the other nodes
+        # never report, so counting them would stall the bar short of 100%.
+        # `run_graph` must be `target_subgraph(workflow, output_node_ids)`: the
+        # subgraph the caller already preflighted, passed in so the progress
+        # count and the checks cannot disagree. Without targets the whole graph
+        # is submitted, so `run_graph` is ignored there.
+        if not output_node_ids:
+            run_nodes = self.workflow
+        elif run_graph is not None:
+            run_nodes = run_graph
+        else:
+            run_nodes = target_subgraph(self.workflow, output_node_ids)
+        self.remaining_nodes = set(run_nodes.keys())
         self.total_nodes = len(self.remaining_nodes)
         if progress is not None:
             self.overall_task = self.progress.add_task("", total=self.total_nodes, progress_type="overall")
@@ -175,6 +212,9 @@ class WorkflowExecution:
         # mirrors what ``comfy_client.submit_prompt`` does for cloud.
         self.extra_data = dict(extra_data) if extra_data else None
         self.api_key = api_key
+        # `--output-node-ids`: run only these output nodes (and what they
+        # depend on). Sent as `partial_execution_targets`; absent → whole graph.
+        self.output_node_ids = list(output_node_ids) if output_node_ids else None
         self.renderer = get_renderer()
         # Aggregated node bookkeeping surfaced in the final envelope:
         # `cached_node_ids` — server said the node came from cache;
@@ -232,6 +272,8 @@ class WorkflowExecution:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:
             data["extra_data"]["api_key_comfy_org"] = self.api_key
+        if self.output_node_ids:
+            data["partial_execution_targets"] = self.output_node_ids
         # This is a safety property, not caller metadata: keep it authoritative
         # in both directions, not just when setting it. A caller-supplied
         # extra_data that happens to carry this key (forwarded from another

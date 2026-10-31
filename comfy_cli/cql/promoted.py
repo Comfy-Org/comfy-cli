@@ -1,6 +1,6 @@
 """Promoted subgraph widgets — the host-owned value model.
 
-The frontend (``ComfyUI_frontend`` ADR 0009 *"Subgraph promoted widgets use
+The frontend (``ComfyUI_frontend`` ADR-SUBGRAPH-PROMOTION-0009 *"Subgraph promoted widgets use
 linked inputs"*, ``SubgraphNode.ts``) represents a promoted widget as a
 **linked subgraph input**:
 
@@ -801,12 +801,21 @@ def host_value(instance: dict, pi: PromotedInput) -> Any:
 
 
 def _interior_widget_value(node: dict, widget: str, graph) -> Any:
-    """Read ``widget`` off an interior node's positional ``widgets_values``."""
-    from comfy_cli.cql.engine import _widgets_as_positional
+    """Read ``widget`` off an interior node's positional ``widgets_values``.
+
+    ``UNSET`` when the node's saved widget layout cannot be reconciled with the
+    current catalog: the slot position is then unknown, and the catalog order
+    would read a neighbour's value rather than this widget's.
+    """
+    from comfy_cli.cql.engine import SavedWidgetLayoutError, _widgets_as_positional, saved_widget_order
 
     node_type = str(node.get("type", ""))
     values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    order = graph.widget_order_for_node(node_type, values) if graph is not None else []
+    try:
+        saved_names = saved_widget_order(node, graph, node_type) if graph is not None else None
+        order = graph.widget_order_for_node(node_type, values, saved_names) if graph is not None else []
+    except SavedWidgetLayoutError:
+        return UNSET
     if widget in order:
         idx = order.index(widget)
         return values[idx] if idx < len(values) else None
@@ -1035,7 +1044,7 @@ def resolve_write(
 ) -> WriteTarget:
     """Resolve a widget address to the place whose value the graph runs.
 
-    * ``<instance>.<promoted>`` — the host instance's own value (ADR 0009)…
+    * ``<instance>.<promoted>`` — the host instance's own value (ADR-SUBGRAPH-PROMOTION-0009)…
       unless an outside link feeds that input, in which case the write follows
       the link to its source (a primitive's single widget, through reroutes);
       a source that is not a primitive is refused by name, because no widget
@@ -1228,7 +1237,14 @@ def trace_upstream_write(
         m = graph.node(src_type) if graph is not None and src_type not in defs else None
         if m is not None:
             widgets = _widgets_as_positional(src.get("widgets_values"), graph, src_type)
-            order = [n for n in graph.widget_order_for_node(src_type, widgets) if n not in FRONTEND_MARKER_SLOTS]
+            from comfy_cli.cql.engine import saved_widget_order
+
+            saved_names = saved_widget_order(src, graph, src_type)
+            order = [
+                name
+                for name in graph.widget_order_for_node(src_type, widgets, saved_names)
+                if name not in FRONTEND_MARKER_SLOTS
+            ]
             if len(order) == 1:
                 return WriteTarget("top", node=src, widget=order[0], redirected_from=redirected_from)
         raise ValueError(
@@ -1244,7 +1260,7 @@ def trace_upstream_write(
 # --------------------------------------------------------------------------- #
 #
 # A port of the frontend's ``flushProxyWidgetMigration``
-# (``src/core/graph/subgraph/migration/proxyWidgetMigration.ts``; ADR 0009
+# (``src/core/graph/subgraph/migration/proxyWidgetMigration.ts``; ADR-SUBGRAPH-PROMOTION-0009
 # "Forward migration", "Primitive-node repair", "Proxy widget error
 # quarantine", "Serialization"). The frontend runs it on every subgraph host
 # when a workflow loads; the CLI runs it on the one instance whose legacy
@@ -1417,16 +1433,26 @@ def _inner_node(sg: dict, node_id: Any) -> dict | None:
 
 
 def _node_widget_names(node: dict, graph) -> list[str]:
-    """The widgets the frontend would find on ``node`` (``node.widgets``)."""
+    """The widgets the frontend would find on ``node`` (``node.widgets``).
+
+    Empty when the node's saved widget layout cannot be reconciled with the
+    current catalog — no name on it has a known position, so every caller's
+    "is this widget here?" answer is honestly no, and the write surfaces that
+    ask raise their own diagnostic instead of landing on a guessed slot.
+    """
     if str(node.get("type", "")) == LEGACY_PRIMITIVE_TYPE:
         return list(_PRIMITIVE_WIDGET_ORDER)
     if graph is None:
         return []
-    from comfy_cli.cql.engine import _widgets_as_positional
+    from comfy_cli.cql.engine import SavedWidgetLayoutError, _widgets_as_positional, saved_widget_order
 
     node_type = str(node.get("type", ""))
     values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    return list(graph.widget_order_for_node(node_type, values))
+    try:
+        saved_names = saved_widget_order(node, graph, node_type)
+        return list(graph.widget_order_for_node(node_type, values, saved_names))
+    except SavedWidgetLayoutError:
+        return []
 
 
 def _node_widget_value(node: dict, widget: str, graph) -> Any:

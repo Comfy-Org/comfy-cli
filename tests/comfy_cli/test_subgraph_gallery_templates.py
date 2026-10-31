@@ -107,7 +107,7 @@ class TestGalleryTemplateSlots:
         'Qwen Image Edit 2509' subgraph instance (node 141). Both are promoted
         widgets, so they live at the instance address with the HOST value —
         the interior KSampler still carries a stale seed (1118877715456453)
-        the frontend never runs (ADR 0009)."""
+        the frontend never runs (ADR-SUBGRAPH-PROMOTION-0009)."""
         by_addr = {s["address"]: s for s in qwen_schema["slots"]}
         assert "141.prompt" in by_addr, f"missing promoted prompt slot; got {sorted(by_addr)}"
         assert by_addr["141.prompt"]["current_value"].startswith("Change the style")
