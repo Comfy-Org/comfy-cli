@@ -1575,3 +1575,15 @@ uses, and a `None` digest is a mismatch — correctly, because the incoming op h
 already been digested at that point and is therefore canonical, so an
 uncanonical queued entry cannot be the same payload. The refusal is
 `op_id_reuse`, which is what it is.
+
+### 22.6 Kind and `definitions` are validated before the ledger is seeded
+
+§20.2 promises that "a document that arrived without a ledger is never left
+carrying an empty one by a rejected op". Two validations sat on the wrong side of
+that line: the read of the op's `op` field, and the refusal of `definitions` on
+a non-`insert_workflow` op, both ran after `_applied_ops` had been seeded and
+both raise outside the handler rollback. So a first-seen op with no `op` key, or
+a non-insert op carrying `definitions`, was correctly rejected and left
+`{"_applied_ops": []}` behind on a document that had no ledger at all.
+
+Both now run before the seed. No message or code changes.

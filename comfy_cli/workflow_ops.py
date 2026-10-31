@@ -3803,11 +3803,17 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # an uncanonical queued entry as unusable for the same reason.
     if isinstance(waiting, dict) and _applied_digest(waiting) != digest:
         raise ValueError(f"op_id_reuse: op_id {op_id!r} is already deferred with a different payload")
-    had_applied_ops = "_applied_ops" in workflow
-    workflow.setdefault("_applied_ops", [])
+    # BEFORE the ``setdefault`` below, because both of these raise OUTSIDE the
+    # rollback: a first-seen op with no ``op`` key, or a non-insert op carrying
+    # ``definitions``, is rejected and used to leave an empty ``_applied_ops``
+    # on a document that arrived without one — contradicting §20.2's "a document
+    # that arrived without a ledger is never left carrying an empty one by a
+    # rejected op".
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
+    had_applied_ops = "_applied_ops" in workflow
+    workflow.setdefault("_applied_ops", [])
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed

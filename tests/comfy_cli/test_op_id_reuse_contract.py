@@ -350,6 +350,30 @@ def test_canonicalization_still_refuses_a_runaway_payload():
 # --- Amendment v1.10: rejecting before mutation -----------------------------
 
 
+@pytest.mark.parametrize(
+    ("mutate", "exc"),
+    [
+        (lambda op: op.pop("op"), KeyError),
+        (lambda op: op.update(definitions={"x": {}}), ValueError),
+    ],
+    ids=["no-op-key", "definitions-on-a-non-insert-op"],
+)
+def test_a_rejected_op_leaves_no_empty_ledger_behind_either(graph, mutate, exc):
+    """Both of these validations raise OUTSIDE ``apply_op``'s rollback, so when
+    they ran after ``setdefault("_applied_ops", [])`` a rejected op left an empty
+    ledger on a document that arrived without one — contradicting the §20.2
+    guarantee the amendment states. Red on the parent, which comes back carrying
+    ``{"_applied_ops": []}``.
+    """
+    workflow = _workflow()
+    before = copy.deepcopy(workflow)
+    bad = _op()
+    mutate(bad)
+    with pytest.raises(exc):
+        ops.apply_op(workflow, bad, graph)
+    assert workflow == before
+
+
 def test_a_rejected_first_seen_op_leaves_no_ledger_behind(graph):
     """ "Rejects before mutation" has to include the ledger itself: a document
     that arrived without ``_applied_ops`` must not come back carrying an empty
