@@ -399,7 +399,7 @@ and `"7"` two registers for one node.
 | update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; a `connect` whose destination is gone is a no-op; a `connect` whose SOURCE is gone still claims its input register and leaves that input empty (v1.2 — otherwise the incumbent's survival depends on when the delete arrives); replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
-| duplicate entity creation | frontend and structured-edit ranges are disjoint, but all structured-edit writers share one random range regardless of `actor`; a collision is unlikely but possible and resolves first-arrival-wins without a collision signal; a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
+| duplicate entity creation | Agent-bound frontend and structured-edit ranges are disjoint; legacy frontend counters seeded from `last_node_id` are outside that guarantee, because `_apply_add_node` raises the mark to any minted id; all structured-edit writers share one random range regardless of `actor`; a collision is unlikely but possible and resolves first-arrival-wins without a collision signal; a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
 | concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; their display order is the one sequence decision a leaderless writer cannot make and is surfaced by `detect_conflict` for the merge consumer | `_apply_connect` (grow path), `detect_conflict` |
 | invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index` |
 
@@ -783,9 +783,11 @@ discard one writer's connection. That target keeps its §3 role as conflict
   gap above, on a target that is deliberately not a register.
 * Two `add_node` ops with the SAME `node_id` and different payloads resolve
   first-writer-wins by arrival (`("node", node_id)` is reserved but ungated).
-  Clearing bit 40 on frontend ids prevents frontend-versus-structured-edit
-  collisions. Different structured-edit actors still share the `mint_id` range,
-  so their random draws can collide; v1 has no collision signal or redraw path.
+  Clearing bit 40 on Agent-bound frontend ids prevents those ids from colliding
+  with structured-edit ones; a legacy frontend counter seeded from
+  `last_node_id` is outside that guarantee. Different structured-edit actors
+  still share the `mint_id` range, so their random draws can collide; v1 has no
+  collision signal or redraw path.
 
 **Batch caveat, now stated.** `apply_specs` stamps every op in one batch with
 the same `base_version`, so two writes to the SAME target inside one batch are
