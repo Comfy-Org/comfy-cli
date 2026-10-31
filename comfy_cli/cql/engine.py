@@ -124,8 +124,8 @@ LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOT
 # An enum finding used to carry the WHOLE option list, twice (``suggestions``
 # and ``valid_options``). On a model loader that is every installed file, so a
 # few bad filenames over a large folder made a huge payload. The closest few
-# options and the count are what a
-# caller acts on; the full list stays one explicit request away.
+# options and the count are what a caller acts on; the full list stays one
+# explicit request away.
 
 #: An option list this short is cheap and is carried whole as ``valid_options``.
 ENUM_INLINE_MAX = 12
