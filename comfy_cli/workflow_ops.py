@@ -95,6 +95,21 @@ _MAX_OP_PAYLOAD_DEPTH = 64
 _MAX_OP_COLLECTION_ENTRIES = 4096
 _MAX_OP_COST = 262_144
 
+# The fourth bound in that same `src/limits.ts` block (`MAX_OPS_PER_BATCH`, also
+# 1024 at 221b2b2e470c79afaface24b1edcb53cdafc8922), and the only one that is
+# about the BATCH rather than about one op's payload. CMP checks it in `applyOps`
+# before any op is processed (`applier.ts`, `batch of N ops exceeds the 1024-op
+# limit; rejected before any op was processed`) and again in `inspectOps`, so a
+# longer batch is refused WHOLE — not truncated, and not partially applied.
+#
+# Without a counterpart here, comfy-cli happily builds and hands out a batch of
+# any length, and the refusal lands on the shared package after comfy-cli has
+# already written the document (`apply_specs`) or already told a caller the batch
+# is the legal translation of its graph (`replace_ops`). That is the same
+# mint-then-refuse shape the three payload bounds above exist to close, one level
+# up. Mirror it, never widen it here alone.
+_MAX_OPS_PER_BATCH = 1024
+
 #: Any surrogate code point in a Python ``str`` is a LONE surrogate — astral
 #: characters are single code points there — so matching the whole block is
 #: enough to find the ones that cannot be UTF-8 encoded.
@@ -2655,13 +2670,20 @@ def reset_doc(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> t
 
 
 class NotExpressibleError(ValueError):
-    """A graph uses structure the frozen v1 vocabulary cannot express.
+    """A graph the frozen v1 vocabulary cannot express as one op batch.
 
     Raised by :func:`replace_ops` INSTEAD of returning a partial batch. A
     partial batch is the dangerous answer: it applies cleanly and leaves a
     document that is not the graph the caller asked for. The caller is expected
     to fall back to whatever whole-document path it had before (the cloud
     agent re-mints), and to say why.
+
+    Two reasons reach it. The graph may use STRUCTURE no frozen op kind can
+    create (a subgraph definition, a canvas group, a reroute point). Or the
+    translation may simply be too LONG — more than ``_MAX_OPS_PER_BATCH`` ops,
+    which the shared applier refuses whole. Both are "there is no legal batch
+    for this graph", and both want the same caller behaviour, so they share the
+    type rather than making every caller learn a second one.
     """
 
 
@@ -2760,7 +2782,8 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
     it reproduces the STRUCTURE (classes + wiring) while the op path reproduces
     the graph exactly, widget values included.
 
-    :raises NotExpressibleError: ``new`` uses structure no frozen op can create.
+    :raises NotExpressibleError: ``new`` uses structure no frozen op can create,
+        or its translation needs more than ``_MAX_OPS_PER_BATCH`` ops.
     """
     reason = _inexpressible_reason(new)
     if reason:
@@ -2847,6 +2870,17 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
                     "to": _slot_ref(by_original_id[to_node], "inputs", to_slot, aliases[to_node]),
                 },
             )
+        )
+    # The batch is counted at the end rather than predicted up front because the
+    # exact length is only known here (a link to a node `new` does not contain is
+    # dropped above, so it costs no op), and nothing has left the function yet —
+    # the ops exist only in this local list. Returning a longer batch would hand
+    # the caller an artifact the shared applier rejects whole as `malformed_op`,
+    # which is the same "it applies cleanly nowhere" answer a partial batch is.
+    if len(ops) > _MAX_OPS_PER_BATCH:
+        raise NotExpressibleError(
+            f"the workflow needs {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op batch limit "
+            "(delete_node per existing node, add_node per node, connect per link)"
         )
     return ops
 
@@ -3363,7 +3397,22 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
 def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
-    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases).
+
+    :raises ValueError: the batch is longer than ``_MAX_OPS_PER_BATCH``.
+    """
+    # FIRST, before the `at` coercion and before `layout.assign_positions` — both
+    # of which are per-spec work — so the refusal really is "before any op was
+    # processed" the way the shared package's is. This is the batch counterpart
+    # of the three payload bounds: `applyOps` refuses an over-long batch WHOLE,
+    # so accepting it here applies the edit locally and has every op in it
+    # rejected downstream. §4's abort-remainder contract has nothing to say about
+    # that case — it describes which ops in a batch apply, and here none do.
+    if len(specs) > _MAX_OPS_PER_BATCH:
+        raise ValueError(
+            f"malformed_op: batch of {len(specs)} ops exceeds the {_MAX_OPS_PER_BATCH}-op limit; "
+            "rejected before any op was processed"
+        )
     # Parse a string `at` up front: layout treats a pinned `at` as an obstacle
     # and reads it as coordinates.
     specs = [

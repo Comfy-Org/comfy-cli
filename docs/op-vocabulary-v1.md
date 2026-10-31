@@ -1400,3 +1400,59 @@ in a different insertion order is an ordinary no-op.
 bullet now cites this section. Downstream repos pinning this document by SHA
 move the SHA together with their comfy-cli pin, and must move their CMP A8 pin
 with it.
+
+## 21. Amendment v1.12 — 2026-10-31 (a batch is bounded at 1,024 ops)
+
+**A batch carries at most 1,024 ops.** `comfy-multi-player`'s `src/limits.ts` at
+`221b2b2e470c79afaface24b1edcb53cdafc8922` fixes `MAX_OPS_PER_BATCH` at 1024 and
+refuses a longer batch **whole** — `applyOps` checks it before any op is
+processed and returns a `malformed_op` rejection for every op in the batch, and
+`inspectOps` raises `malformed_op` from the storage preflight. comfy-cli had no
+counterpart, so `apply_specs` would accept and apply a batch of any length and
+`replace_ops` would hand a caller one, and the refusal arrived from the shared
+package only after this side had committed to the write.
+
+That is the same mint-then-refuse divergence v1.11 §20.3 closed for the three
+payload bounds, one level up: §4's abort-remainder contract is about which ops in
+a batch apply, and an over-long batch has no answer under it at all because none
+of them do. The bound is therefore mirrored, not chosen here, and cited by SHA
+rather than by branch for the same reason §20.3 gives. If a real edit needs a
+longer batch, widen it in `comfy-multi-player` and move this pin; never widen it
+here alone.
+
+Where it is enforced, and the two different refusals:
+
+* **`apply_specs`** raises `malformed_op: batch of <n> ops exceeds the 1024-op
+  limit; rejected before any op was processed`, checked on entry — before the
+  `at` coercion and before the position planner, both of which are per-spec
+  work, so the message's promise is literally true.
+* **`replace_ops`** raises **`NotExpressibleError`**, the existing "there is no
+  legal batch for this graph" signal, rather than a bare `ValueError`. Its two
+  reasons are now *structure no frozen kind can create* and *a translation
+  longer than the bound*; both want the same caller behaviour, which both
+  production callers already implement — `templates fetch --emit-ops` reports
+  `ops_skipped` beside the file it still wrote, and `generate`'s emit path
+  raises `EmitError`. The count binds on the SUM of `old` and `new`, because
+  §8.8's replacement shape emits a `delete_node` per node already in `old`
+  before the adds.
+
+Measured headroom. Across all 735 workflows in `Comfy-Org/workflow_templates` —
+the gallery `templates fetch --emit-ops` reads — the longest batch `replace_ops`
+actually mints is **50 ops**, 4.9% of the bound. 447 of those templates carry a
+subgraph definition, a canvas group or a reroute point and are refused as
+inexpressible before size is considered; across all 735, nodes+links peaks at
+212, so even if every one of them became expressible the worst case stays a fifth
+of the bound. The largest expressible workflow in comfy-cli's own fixtures mints
+3 ops.
+
+The one document-sized payload this bound does **not** cover is a standalone
+`clear` or `reset_doc`, which enumerates every node id inside ONE op rather than
+as one op each. Those are bounded by §20.3's 4,096-entry collection cap instead,
+and §1.5/§1.6 keep them out of `BATCHABLE_OPS`, so no large document turns into a
+long batch behind a caller's back.
+
+**No change to §§1-3, 5-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. §4 gains an outer
+precondition — a batch must be within the bound before abort-remainder has
+anything to say about it — and is otherwise unaltered. Downstream repos pinning
+this document by SHA move the SHA together with their comfy-cli pin.

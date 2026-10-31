@@ -186,6 +186,14 @@ history.
 
 ### Changed
 
+- A structured-edit batch is bounded at 1,024 ops, the limit the shared
+  `comfy-multi-player` applier already enforces. `comfy workflow apply` refuses
+  a longer batch before any spec is processed and writes nothing, and
+  `templates fetch --emit-ops` reports `ops_skipped` beside the workflow file it
+  still writes rather than emitting a batch that would be rejected whole on
+  arrival. Measured over the whole template gallery, the longest batch this path
+  actually produces is 50 ops, so no real workflow is affected.
+
 - Once every model byte is in, the progress line of `comfy deploy up`,
   `comfy deploy status` (with or without `--watch`) and a watching
   `comfy deploy promote` or `rollback` adds "finishing: putting the models in

@@ -168,7 +168,8 @@ def test_the_bounds_mirror_the_shared_op_package_values():
 
     ``comfy-multi-player``'s ``src/limits.ts`` at
     ``221b2b2e470c79afaface24b1edcb53cdafc8922`` fixes ``MAX_PAYLOAD_DEPTH`` at
-    64, ``MAX_COLLECTION_ENTRIES`` at 4096 and ``MAX_OP_COST`` at 262144, and
+    64, ``MAX_COLLECTION_ENTRIES`` at 4096, ``MAX_OP_COST`` at 262144 and
+    ``MAX_OPS_PER_BATCH`` at 1024, and
     its A8 canonicalizer charges the whole envelope on EVERY apply, before the
     dedupe gate (``applyOps`` -> ``opDigest`` -> ``canonicalJson`` ->
     ``opBoundsRefusal``). So a looser bound here cannot rescue an oversized
@@ -179,6 +180,12 @@ def test_the_bounds_mirror_the_shared_op_package_values():
     assert ops._MAX_OP_PAYLOAD_DEPTH == 64
     assert ops._MAX_OP_COLLECTION_ENTRIES == 4096
     assert ops._MAX_OP_COST == 262_144
+    # The fourth bound in the same `src/limits.ts` block bounds the BATCH rather
+    # than one op's payload, so it is enforced at `apply_specs`/`replace_ops`
+    # instead of in the canonicalizer and is pinned, with its boundary cases, in
+    # `test_max_ops_per_batch.py`. Asserted here too so that reading this list
+    # cannot suggest only three of the four are mirrored.
+    assert ops._MAX_OPS_PER_BATCH == 1024
 
 
 def test_ordinary_large_payloads_are_not_rejected_by_the_canonicalization_bounds():
