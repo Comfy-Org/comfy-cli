@@ -3754,13 +3754,27 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     recorded_digests = workflow.get("_applied_op_digests")
     recorded_ops = workflow.get("_applied_ops")
     if op_id in (recorded_ops or ()):
-        recorded = (recorded_digests or {}).get(op_id)
-        if recorded is None:
+        ledger = recorded_digests if isinstance(recorded_digests, dict) else {}
+        # MEMBERSHIP, not ``.get(...) is None``: a document carrying
+        # ``{<op_id>: null}`` has a digest entry, it just has a malformed one.
+        # Reading its absence as "legacy list-only ledger" made a
+        # changed-payload redelivery a silent no-op on exactly the shape the
+        # up-front check does not cover — every other non-string value failed
+        # closed on the ``!=`` below, so null was the one that failed open.
+        if op_id not in ledger:
             # A legacy list-only ledger keeps its historical duplicate
             # behaviour, and deliberately WITHOUT digesting the payload first:
             # a replay whose envelope is not canonical must still be the
             # documented no-op rather than a ``malformed_op``.
             return workflow
+        recorded = ledger[op_id]
+        # The up-front check validates the ledger's TYPE, not its values, and
+        # both arrive from the same untrusted JSON. Refused on read rather than
+        # by walking every entry on every apply.
+        if not isinstance(recorded, str):
+            raise ValueError(
+                f"malformed_op: _applied_op_digests[{op_id!r}] must be a string digest, got {type(recorded).__name__}"
+            )
         if recorded != _op_digest(op):
             raise ValueError(f"op_id_reuse: op_id {op_id!r} was already applied with a different payload")
         return workflow

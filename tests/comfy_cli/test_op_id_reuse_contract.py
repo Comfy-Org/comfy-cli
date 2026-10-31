@@ -398,6 +398,54 @@ def test_a_truthy_non_dict_ledger_is_refused_on_the_reuse_branch_too(graph):
         ops.apply_op(workflow, applied, graph)
 
 
+def test_a_null_digest_entry_is_not_read_as_a_legacy_ledger(graph):
+    """``recorded is None`` could not tell a MISSING digest apart from an
+    explicit ``null`` one, and the up-front check validates the ledger's type
+    rather than its values.
+
+    So a document carrying ``{<op_id>: null}`` read as "legacy list-only ledger"
+    and returned a changed-payload redelivery as a silent no-op — the exact
+    divergence Amendment v1.11 exists to stop. Every other non-string value
+    failed closed on the digest comparison, so ``null`` was the one shape that
+    failed OPEN. Red on the parent, which returns the workflow unchanged.
+    """
+    workflow = _workflow()
+    ops.apply_op(workflow, _op(25), graph)
+    workflow["_applied_op_digests"][_op()["op_id"]] = None
+    before = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match=r"^malformed_op: _applied_op_digests\[.*\] must be a string digest"):
+        ops.apply_op(workflow, _op(30), graph)
+    assert workflow == before
+
+
+@pytest.mark.parametrize("recorded", [None, 7, ["digest"], {"d": 1}, True])
+def test_a_non_string_digest_entry_is_malformed_not_a_mismatch(graph, recorded):
+    """``malformed_op``, not ``op_id_reuse``: the document's bookkeeping is
+    broken, which is not the same finding as a sender reusing an id. An
+    IDENTICAL redelivery is refused too — there is no recorded digest to
+    recognise it by.
+    """
+    workflow = _workflow()
+    applied = _op(25)
+    ops.apply_op(workflow, applied, graph)
+    workflow["_applied_op_digests"][applied["op_id"]] = recorded
+    with pytest.raises(ValueError, match="^malformed_op: _applied_op_digests"):
+        ops.apply_op(workflow, applied, graph)
+
+
+def test_a_legacy_list_only_ledger_is_still_a_silent_no_op(graph):
+    """The complement: a document with ``_applied_ops`` and NO digest entry
+    keeps its historical drop-the-duplicate behaviour, and keeps it without
+    digesting the replayed payload first."""
+    workflow = _workflow()
+    applied = _op(25)
+    ops.apply_op(workflow, applied, graph)
+    del workflow["_applied_op_digests"][applied["op_id"]]
+    assert ops.apply_op(workflow, _op(30), graph) is workflow
+    assert workflow["nodes"][0]["widgets_values"] == [25]
+
+
 @pytest.mark.parametrize("op_id", [["a"], {"a": 1}, 7, None])
 def test_a_non_string_op_id_is_refused_before_the_handler_runs(graph, op_id):
     workflow = _workflow()

@@ -1541,3 +1541,21 @@ Such a pair is refused as `malformed_op` rather than merged: there is no intent
 in it a merge would preserve. Only a programmatically built op can reach the
 case at all, since parsed JSON always has `str` keys, so no wire payload
 changes behaviour.
+
+### 22.4 A `null` digest entry is malformed, not a legacy ledger
+
+§20.2's "legacy documents are untouched" rule is keyed on a document having
+`_applied_ops` and **no** `_applied_op_digests` entry for the op. comfy-cli
+decided that with `recorded is None`, which cannot tell a MISSING entry apart
+from an explicit `null` one, and the up-front validation checks the ledger's
+type rather than its values — both arrive from the same untrusted JSON.
+
+So a document carrying `{<op_id>: null}` read as a legacy list-only ledger and
+returned a changed-payload redelivery as a silent no-op, which is precisely the
+divergence v1.11 exists to stop. Every other non-string value failed closed on
+the digest comparison, so `null` was the one shape that failed open.
+
+The legacy case is now decided by MEMBERSHIP, and a present-but-non-string
+digest entry is `malformed_op` — not `op_id_reuse`, because the document's
+bookkeeping is broken rather than the sender's id being reused. It is refused on
+read rather than by walking every ledger entry on every apply.
