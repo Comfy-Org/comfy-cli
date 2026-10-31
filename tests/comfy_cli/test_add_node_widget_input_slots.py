@@ -1,4 +1,4 @@
-"""Agent-built nodes carry a socket entry for every scalar widget input.
+"""Agent-built nodes carry a socket entry for every widget input.
 
 Reported: the agent said ``frame_load_cap`` on an agent-built Load Video (VHS)
 and an agent-made custom node was a plain widget = 1000, while the user had
@@ -45,6 +45,7 @@ def _node(required: dict, outputs: list[str], optional: dict | None = None, name
 
 OBJECT_INFO = {
     "PrimitiveInt": _node({"value": ["INT", {"default": 0}]}, ["INT"]),
+    "PrimitiveString": _node({"value": ["STRING", {"default": ""}]}, ["STRING"]),
     "VHS_LoadVideo": _node(
         {
             "video": [["clip.mp4"]],
@@ -90,7 +91,7 @@ def _built(graph: Graph) -> tuple[dict, dict, dict]:
     return workflow, primitive, video
 
 
-def test_add_node_writes_a_widget_socket_for_each_scalar_widget_input(graph):
+def test_add_node_writes_a_widget_socket_for_each_widget_input(graph):
     workflow: dict = {"nodes": [], "links": []}
     video = _add(workflow, graph, "VHS_LoadVideo")
     csv = _add(workflow, graph, "CSVCVColumn")
@@ -98,7 +99,7 @@ def test_add_node_writes_a_widget_socket_for_each_scalar_widget_input(graph):
     assert [(i["name"], i["type"]) for i in video["inputs"][:2]] == LOAD_VIDEO_LINK_INPUTS
     for name, slot_type in [("force_rate", "FLOAT"), ("frame_load_cap", "INT"), ("skip_first_frames", "INT")]:
         assert _input(video, name) == [{"name": name, "type": slot_type, "widget": {"name": name}, "link": None}]
-    assert _input(video, "video") == []
+    assert _input(video, "video") == [{"name": "video", "type": "COMBO", "widget": {"name": "video"}, "link": None}]
     for name, slot_type in [("csv_path", "STRING"), ("enabled", "BOOLEAN"), ("frame_load_cap", "INT")]:
         assert _input(csv, name) == [{"name": name, "type": slot_type, "widget": {"name": name}, "link": None}]
 
@@ -168,24 +169,63 @@ def test_a_widget_socket_refuses_a_link_of_another_scalar_type(graph):
         workflow_ops.connect(workflow, graph, primitive["id"], 0, video["id"], "force_rate")
 
 
-def test_a_saved_node_with_partial_widget_sockets_does_not_misname_its_values(graph):
-    """With no object_info, the widget sockets alone cannot name COMBO-bearing values.
-
-    An agent-built Load Video has sockets for its scalars but not for ``video``,
-    so the sockets do not account for every value. Pairing them by position
-    would send the file name as ``force_rate`` and spill a value onto a link
-    input, so the converter must drop the values and warn instead.
-    """
+def test_an_agent_built_node_keeps_its_value_names_without_object_info(graph):
+    """Every widget has a socket, so the sockets alone name the saved values."""
     workflow: dict = {"nodes": [], "links": []}
     video = _add(workflow, graph, "VHS_LoadVideo")
     video["widgets_values"] = ["clip.mp4", 24.0, 1000, 0]
 
     api = convert_ui_to_api(workflow, object_info={})
 
-    inputs = api[str(video["id"])]["inputs"]
-    assert "force_rate" not in inputs
-    assert "meta_batch" not in inputs
-    assert "vae" not in inputs
+    assert api[str(video["id"])]["inputs"] == {
+        "video": "clip.mp4",
+        "force_rate": 24.0,
+        "frame_load_cap": 1000,
+        "skip_first_frames": 0,
+    }
+
+
+def test_a_string_into_a_combo_socket_is_a_concrete_connect_that_converges(graph):
+    workflow: dict = {"nodes": [], "links": []}
+    text = _add(workflow, graph, "PrimitiveString")
+    video = _add(workflow, graph, "VHS_LoadVideo")
+    base = copy.deepcopy(workflow)
+
+    _, first_op = workflow_ops.connect(copy.deepcopy(base), graph, text["id"], 0, video["id"], "video")
+    _, second_op = workflow_ops.connect(copy.deepcopy(base), graph, text["id"], 0, video["id"], "video")
+
+    assert "grow" not in first_op
+    converged = []
+    for order in ([first_op, second_op], [second_op, first_op]):
+        replica = copy.deepcopy(base)
+        for op in order:
+            workflow_ops.apply_op(replica, op, graph)
+        node = next(n for n in replica["nodes"] if n["id"] == video["id"])
+        converged.append(_input(node, "video"))
+    assert converged[0] == converged[1]
+    assert len(converged[0]) == 1
+
+
+def test_a_combo_socket_still_refuses_a_link_of_another_type(graph):
+    workflow, primitive, video = _built(graph)
+
+    with pytest.raises(ValueError, match=r"type mismatch: INT output .* COMBO input 'video'"):
+        workflow_ops.connect(workflow, graph, primitive["id"], 0, video["id"], "video")
+
+
+def test_a_node_with_a_widget_that_cannot_have_a_socket_gets_none():
+    """Sockets for only some widgets would misname saved values, so it is all or none."""
+    union = {
+        "Mixed": _node(
+            {"strength": ["FLOAT,INT", {"widgetType": "FLOAT"}], "steps": ["INT", {"default": 0}]},
+            ["INT"],
+        )
+    }
+    workflow: dict = {"nodes": [], "links": []}
+
+    node = _add(workflow, Graph.from_object_info(union), "Mixed")
+
+    assert node["inputs"] == []
 
 
 def test_a_saved_node_with_a_socket_for_every_widget_still_names_its_values():

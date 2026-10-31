@@ -2208,11 +2208,9 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
             widget_flagged.append(name)
 
     if widget_flagged:
-        # Sockets name values only when there is one for every value. An
-        # agent-built node has sockets for its scalars but none for a COMBO, so
-        # pairing a shorter list by position would misname the values after it.
         if len(widget_values) > len(widget_flagged):
-            return []
+            extras = [n for n in all_inputs if n not in connected and n not in widget_flagged]
+            return widget_flagged + extras[: len(widget_values) - len(widget_flagged)]
         return list(widget_flagged)
 
     unconnected = [n for n in all_inputs if n not in connected]
