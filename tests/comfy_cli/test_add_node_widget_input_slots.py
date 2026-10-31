@@ -206,24 +206,38 @@ def test_a_string_into_a_combo_socket_is_a_concrete_connect_that_converges(graph
     assert len(converged[0]) == 1
 
 
+def test_a_number_can_drive_a_numeric_combo_socket():
+    catalog = dict(OBJECT_INFO, BitDepth=_node({"bits": [[8, 16, 32]]}, ["INT"]))
+    graph = Graph.from_object_info(catalog)
+    workflow: dict = {"nodes": [], "links": []}
+    primitive = _add(workflow, graph, "PrimitiveInt")
+    bits = _add(workflow, graph, "BitDepth")
+
+    workflow_ops.connect(workflow, graph, primitive["id"], 0, bits["id"], "bits")
+
+    assert _input(next(n for n in workflow["nodes"] if n["id"] == bits["id"]), "bits")[0]["link"] is not None
+
+
 def test_a_combo_socket_still_refuses_a_link_of_another_type(graph):
-    workflow, primitive, video = _built(graph)
+    workflow, _primitive, video = _built(graph)
+    source = _add(workflow, graph, "VHS_LoadVideo")
 
-    with pytest.raises(ValueError, match=r"type mismatch: INT output .* COMBO input 'video'"):
-        workflow_ops.connect(workflow, graph, primitive["id"], 0, video["id"], "video")
+    with pytest.raises(ValueError, match=r"type mismatch: IMAGE output .* COMBO input 'video'"):
+        workflow_ops.connect(workflow, graph, source["id"], 0, video["id"], "video")
 
 
-def test_a_node_with_a_widget_that_cannot_have_a_socket_gets_none():
+@pytest.mark.parametrize(
+    "required",
+    [
+        {"strength": ["FLOAT,INT", {"widgetType": "FLOAT"}], "steps": ["INT", {"default": 0}]},
+        {"hidden": ["INT", {"default": 0, "socketless": True}], "steps": ["INT", {"default": 0}]},
+    ],
+)
+def test_a_node_with_a_widget_that_cannot_have_a_socket_gets_none(required):
     """Sockets for only some widgets would misname saved values, so it is all or none."""
-    union = {
-        "Mixed": _node(
-            {"strength": ["FLOAT,INT", {"widgetType": "FLOAT"}], "steps": ["INT", {"default": 0}]},
-            ["INT"],
-        )
-    }
     workflow: dict = {"nodes": [], "links": []}
 
-    node = _add(workflow, Graph.from_object_info(union), "Mixed")
+    node = _add(workflow, Graph.from_object_info({"Mixed": _node(required, ["INT"])}), "Mixed")
 
     assert node["inputs"] == []
 
