@@ -188,6 +188,30 @@ def test_a_stalling_server_cannot_hold_up_the_download(local_url, library, monke
         release.set()
 
 
+def test_a_hung_filesystem_cannot_hold_up_the_download_either(local_url, library, monkeypatch):
+    """The folder check is a filesystem call on a server-chosen path, so it has to run
+    inside the deadline too — `os.path.isdir` on an unresponsive hard mount blocks
+    uninterruptibly, and on the caller thread it would outlive the bound entirely."""
+    monkeypatch.setattr(models, "_FOLDER_PATHS_DEADLINE_S", 0.05)
+    entered = threading.Event()
+    release = threading.Event()
+    real_isdir = os.path.isdir
+
+    def hangs(path):
+        if str(path) == str(library):
+            entered.set()
+            release.wait(30)
+        return real_isdir(path)
+
+    monkeypatch.setattr(os.path, "isdir", hangs)
+    local_url(json.dumps({"loras": [str(library)]}).encode())
+    try:
+        assert _default_destination("loras", "SDXL") == os.path.join("models", "loras", "SDXL")
+        assert entered.wait(5), "the folder check never ran"
+    finally:
+        release.set()
+
+
 def test_a_typed_download_lands_in_the_library_and_says_so(local_url, library, tmp_path):
     local_url(json.dumps({"loras": [str(library)]}).encode())
     fake_download = Mock()

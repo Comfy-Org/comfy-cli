@@ -90,6 +90,12 @@ def _usable_model_folder(folder: object) -> str | None:
       requiring the directory to exist means a responder that is not ComfyUI at
       all cannot make the CLI *create* a tree at a path of its choosing.
 
+    The final ``os.path.isdir`` is a filesystem call on a path the server chose,
+    so it can block uninterruptibly on an unresponsive hard-mounted network
+    filesystem. That is why this runs inside
+    :func:`_server_model_folder_within_deadline`'s worker rather than on the
+    caller — see that docstring.
+
     Residual, stated rather than closed: an existing directory is still accepted
     when it is a symlink, and a process that controls the loopback port can name
     any existing directory the user can write to. Narrowing further would need a
@@ -138,8 +144,22 @@ def _folder_paths_body() -> dict | list | None:
     return body
 
 
-def _folder_paths_within_deadline() -> dict | list | None:
-    """:func:`_folder_paths_body` under a wall-clock cap, or None.
+def _probe_server_model_folder(kind: str) -> str | None:
+    """Ask the local ComfyUI for its ``kind`` folder and check it. Blocking.
+
+    The server lists its default folder for a kind first, so only the first entry
+    is considered: a later one is another configured root, and preferring it on
+    the strength of existing locally is how a container path with a familiar name
+    gets picked over the workspace.
+    """
+    body = _folder_paths_body()
+    folders = body.get(kind) if isinstance(body, dict) else None
+    first = folders[0] if isinstance(folders, list) and folders else None
+    return _usable_model_folder(first)
+
+
+def _server_model_folder_within_deadline(kind: str) -> str | None:
+    """:func:`_probe_server_model_folder` under a wall-clock cap, or None.
 
     ``request_json``'s ``timeout`` is urllib's *per-socket-operation* inactivity
     timeout, not a deadline: a listener that dribbles a byte inside every window
@@ -148,16 +168,22 @@ def _folder_paths_within_deadline() -> dict | list | None:
     request therefore runs on a daemon thread and the caller stops waiting at
     :data:`_FOLDER_PATHS_DEADLINE_S` no matter what the socket is doing.
 
-    Abandoning that thread is safe: it writes nothing, owns nothing but its own
+    The *whole* probe goes on that thread, the folder check included, and that is
+    not tidiness. :func:`_usable_model_folder` ends in ``os.path.isdir`` on a path
+    the server chose, which on an unresponsive hard-mounted network filesystem
+    blocks uninterruptibly — so leaving it on the caller would reintroduce the
+    unbounded stall one call after bounding it.
+
+    Abandoning the thread is safe: it writes nothing, owns nothing but its own
     socket, is still bounded by the per-socket timeout, and being a daemon never
     delays interpreter exit.
     """
-    answered: list[dict | list | None] = []
+    answered: list[str | None] = []
     failed: list[Exception] = []
 
     def run() -> None:
         try:
-            answered.append(_folder_paths_body())
+            answered.append(_probe_server_model_folder(kind))
         except Exception as e:  # noqa: BLE001 - optional lookup; the workspace path still works
             failed.append(e)
 
@@ -193,10 +219,7 @@ def _server_model_folder(kind: str) -> str | None:
     if workspace_manager.workspace_type is WorkspaceType.SPECIFIED:
         logger.debug("--workspace was given explicitly; not asking a local server where to save")
         return None
-    body = _folder_paths_within_deadline()
-    folders = body.get(kind) if isinstance(body, dict) else None
-    first = folders[0] if isinstance(folders, list) and folders else None
-    return _usable_model_folder(first)
+    return _server_model_folder_within_deadline(kind)
 
 
 def _default_destination(model_path: str, basemodel: str) -> str:
