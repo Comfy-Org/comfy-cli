@@ -125,6 +125,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use ComfyUI's `File > Export (API)`",
     ),
     ErrorCode(
+        "invalid_output_node_ids",
+        "`comfy run --output-node-ids` named no ids, a node id that is not in the submitted "
+        "API-format workflow (`details.unknown_node_ids`), or a node that is not an output node "
+        "(`details.non_output_node_ids`; checked only when the node catalog is available). "
+        "Nothing was submitted.",
+        "pass ids of output nodes (e.g. SaveImage) from `comfy run --print-prompt`'s graph",
+    ),
+    ErrorCode(
         "workflow_read_error",
         "Workflow file exists but isn't readable as UTF-8 text (OSError / UnicodeDecodeError).",
         "check file permissions and encoding",
@@ -405,6 +413,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "failed validation). Surfaced as a non-fatal warning in `data.warnings`.",
         "inspect the pruned branch's inputs; validate with `comfy --json validate` "
         "against `--where cloud` before re-running",
+    ),
+    ErrorCode(
+        "partial_execution_targets_ignored",
+        "A `comfy run --output-node-ids` cloud run returned outputs from node(s) outside the "
+        "targets and their dependencies — the server likely ignored `partial_execution_targets` "
+        "and ran the whole graph. Surfaced as a non-fatal warning in `data.warnings`.",
+        "check whether the skipped branches had side effects; run against a server that supports "
+        "partial execution, or remove the branches from the workflow",
     ),
     # --- models / templates introspection ------------------------------------
     ErrorCode(
@@ -727,6 +743,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "(`comfy workflow slots <file>` for exact `<node_id>.<input>` addresses, `comfy nodes search` for class names)",
     ),
     ErrorCode(
+        "unknown_enum_value",
+        "A workflow edit supplied a value outside the live catalog's allowed options. Details carry the value, "
+        "field, valid options and any close match.",
+        "use `details.best_match`, `details.did_you_mean`, or an exact value from `details.valid_options`",
+    ),
+    ErrorCode(
+        "no_options_available",
+        "A workflow edit targeted a catalog field whose live option list is empty.",
+        "install the required option or select a catalog that provides one",
+    ),
+    ErrorCode(
+        "below_min",
+        "A workflow edit supplied a numeric value below the live catalog minimum. Details carry the field and bound.",
+        "raise the value to the minimum reported in details and retry",
+    ),
+    ErrorCode(
+        "above_max",
+        "A workflow edit supplied a numeric value above the live catalog maximum. Details carry the field and bound.",
+        "lower the value to the maximum reported in details and retry",
+    ),
+    ErrorCode(
         "workflow_clear_not_batchable",
         "A batch (`workflow apply` / `workflow foreach`) contained a `clear` op. `clear` wipes the whole "
         "graph and is standalone-only (docs/op-vocabulary-v1.md: batchable = no), so the batch was "
@@ -1010,8 +1047,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "download_no_outputs",
-        "The job has no output files (yet).",
-        "wait for the job to complete before downloading",
+        "The job has no output files: still running, failed, text output only, or nothing new saved (details.job_status says which when known).",
+        "running: wait for the job to complete; completed or failed: check `comfy jobs status <prompt_id>` — waiting will not help",
     ),
     ErrorCode(
         "download_no_prompt",

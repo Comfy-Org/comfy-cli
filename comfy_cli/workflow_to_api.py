@@ -28,6 +28,7 @@ from comfy_cli.cql.engine import (
     _FRONTEND_DOM_WIDGET_TYPES,
     LOAD_3D_BUTTON_VALUES,
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _dynamic_combo_server_key_matches,
     _dynamic_group_fields,
     _dynamic_group_row_count,
@@ -36,7 +37,10 @@ from comfy_cli.cql.engine import (
     _SubgraphDefs,
     _validate_dynamic_group_layout,
     _validate_dynamic_group_schema,
+    load_3d_advanced_has_legacy_buttons,
+    saved_sub_order,
 )
+from comfy_cli.cql.engine import saved_widget_order as _saved_widget_order
 
 logger = logging.getLogger(__name__)
 
@@ -1685,7 +1689,11 @@ def _build_api_node(
 
     link_inputs: dict[str, list] = {}
     primitive_inputs: dict[str, Any] = {}
-    for inp in node.get("inputs") or []:
+    # A malformed node can carry a truthy non-list here (``"inputs": 1``). The
+    # per-node guard in the caller would turn the TypeError into a dropped node;
+    # treating it as "no inputs" converts the widgets instead.
+    raw_node_inputs = node.get("inputs")
+    for inp in raw_node_inputs if isinstance(raw_node_inputs, list) else []:
         if not isinstance(inp, dict):
             continue
         input_name = inp.get("name")
@@ -1905,7 +1913,13 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
     return [option.get("key") for option in options if isinstance(option, dict)]
 
 
-def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[str, Any]]:
+def _schema_widget_pairs(
+    schema: Any,
+    widget_values: list[Any],
+    *,
+    node_type: str | None = None,
+    node: dict | None = None,
+) -> list[tuple[str, Any]]:
     """Pair a schema's widget inputs with their ``widgets_values`` slots.
 
     One ordered walk that unifies name-order and control-marker filtering so the
@@ -1924,6 +1938,17 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
       ``seed``/``noise_seed``), or a legacy stray marker after another seed-like
       INT that the next widget could not hold; sub-inputs recurse the same way.
 
+    A dynamic combo's selected sub-inputs are expanded in the order the SAVE
+    recorded them when ``node`` records one (:func:`_saved_sub_order`), because
+    ``widgets_values`` is positional against the option's sub-input list AT SAVE
+    TIME, not against today's. A save that names only SOME of the option's
+    sub-inputs is a partial layout, not a historical one: it consumes too few
+    slots and shifts every later widget. Such a walk accounts for fewer than all
+    the values, so when neither stream shape is exact under the saved order the
+    walk is retried on the catalog order and taken only if THAT is exact — a
+    short or extra ``widgets_values`` array is also inexact, and there the saved
+    order is still the better guess.
+
     Returns ``[]`` when the schema declares no widget inputs, so the caller can
     fall back to node-input inspection exactly as before.
     """
@@ -1934,6 +1959,11 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
     # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
+    if node_type == "Load3DAdvanced" and not load_3d_advanced_has_legacy_buttons(widget_values):
+        # Same predicate the editor's ``load_3d_button_slots`` uses: a lone
+        # marker at the viewport slot is the viewport's own value, not a
+        # legacy button, so skipping it would shift width/height by one.
+        injects_load_3d_buttons = False
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -1969,7 +1999,9 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             names = listed + [n for n in names if n not in listed]
         ordered.extend((n, section_def[n]) for n in names)
 
-    def walk(strict: bool) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+    def walk(strict: bool, saved_node: dict | None = node) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+        # ``saved_node`` is the node whose recorded widget order sub-inputs are
+        # expanded in; ``None`` means "ignore the save, use the catalog order".
         # ``strict`` assumes the current frontend's slot layout: every exact
         # ``seed``/``noise_seed`` INT is followed by its companion slot, so a
         # control keyword there is always consumed. Returns the pairs and
@@ -1996,13 +2028,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 # component widget, so their values sit between ``model_file`` and
                 # this slot. Consuming them here read "upload3dmodel" into the
                 # viewport input and shifted width/height by three.
-                while (
-                    vidx < len(widget_values)
-                    and isinstance(widget_values[vidx], str)
-                    and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
-                ):
+                if node_type == "Load3DAdvanced":
+                    # The shared predicate matched, so the editor placed all
+                    # three button slots here whatever the third value holds;
+                    # skip the same three or the two read different values.
                     legacy_buttons_consumed = True
-                    vidx += 1
+                    vidx = min(vidx + len(LOAD_3D_BUTTON_VALUES), len(widget_values))
+                else:
+                    while (
+                        vidx < len(widget_values)
+                        and isinstance(widget_values[vidx], str)
+                        and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+                    ):
+                        legacy_buttons_consumed = True
+                        vidx += 1
             if vidx >= len(widget_values):
                 if legacy_buttons_consumed:
                     # A save truncated after its button markers still names this
@@ -2027,7 +2066,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 return
             pairs.append((name, value))
             if is_dynamic:
-                subs = _dynamic_combo_selected_subs(name, spec, value)
+                subs = _saved_sub_order(saved_node, name, _dynamic_combo_selected_subs(name, spec, value))
                 if not subs and not any(
                     _dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(spec)
                 ):
@@ -2077,10 +2116,71 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     # take a keyword the next COMBO lists.
     pairs, exact, warnings = walk(strict=True)
     if not exact:
-        pairs, _exact, warnings = walk(strict=False)
+        pairs, exact, warnings = walk(strict=False)
+    if not exact and node is not None:
+        # Neither stream shape accounts for the array under the SAVED sub-order.
+        # One cause is a partial set of ``widget`` markers: a save that names
+        # only some of an option's sub-inputs makes ``_saved_sub_order`` consume
+        # too few slots, so every later widget reads a shifted one. Retrying on
+        # the catalog order recovers that — but only when the catalog walk is
+        # itself exact. ``exact`` is also false for an unrelated short or extra
+        # ``widgets_values`` array, where both orders leave values over and the
+        # saved one is still the better guess; retrying unconditionally there
+        # would discard a valid saved order and shift the earlier sub-values.
+        #
+        # This is the gate every OTHER reader of the saved layout already has.
+        # ``engine.saved_widget_order`` refuses a saved order whose expansion
+        # does not account for the whole array (``len(entries) != len(values)``
+        # -> ``None`` -> catalog order), but it can only run that check with a
+        # Graph, and conversion has none here. ``exact`` is the same question
+        # answered from the walk itself, so an edit and a conversion resolve a
+        # partially-marked save the same way instead of disagreeing — the
+        # failure this function's saved-order rule exists to prevent.
+        for catalog_strict in (True, False):
+            catalog_pairs, catalog_exact, catalog_warnings = walk(strict=catalog_strict, saved_node=None)
+            if catalog_exact:
+                pairs, warnings = catalog_pairs, catalog_warnings
+                break
     for warning in warnings:
         logger.warning(*warning)
     return pairs
+
+
+def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
+    """Expand a dynamic combo's selected sub-inputs in the order the SAVE recorded.
+
+    Thin adapter over :func:`comfy_cli.cql.engine.saved_sub_order`, which is the
+    one implementation of this rule. The edit path (``_write_widget``, the order
+    ``set-widget`` indexes by) resolves through the same function, because the
+    two resolved it independently and disagreed: on a Seedance save made before
+    its option gained ``auto_upscale``, conversion read the seed from one slot
+    while an edit wrote to the next one along, clobbering the seed's
+    ``control_after_generate`` marker.
+
+    A sub the save did not name owns no ``widgets_values`` slot. Connection-only
+    subs own none either way, so they are carried through to keep the emitted
+    input set identical to the unordered expansion.
+    """
+    if not subs:
+        return subs
+    try:
+        order = saved_sub_order(_saved_widget_order(node), parent, [name for name, _spec in subs])
+    except SavedWidgetLayoutError as exc:
+        raise WorkflowConversionError(str(exc)) from exc
+    if order is None:
+        return subs
+    remaining = list(subs)
+    kept: list[tuple[str, Any]] = []
+    for saved_name in order:
+        index = next((i for i, (name, _spec) in enumerate(remaining) if name == saved_name), None)
+        if index is not None:
+            pair = remaining.pop(index)
+            if not _is_widget_input(pair[1])[0]:
+                raise WorkflowConversionError(
+                    f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                )
+            kept.append(pair)
+    return kept + [(name, spec) for name, spec in remaining if not _is_widget_input(spec)[0]]
 
 
 def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | None]:
@@ -2121,6 +2221,7 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
 
 def _filter_control_values(
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
     object_info: dict | None = None,
@@ -2397,7 +2498,7 @@ def _collect_widget_inputs(
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
-    pairs = _schema_widget_pairs(schema, widget_values) if schema else []
+    pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
     schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
@@ -2409,7 +2510,7 @@ def _collect_widget_inputs(
     # No schema, or the schema declares no widget inputs: fall back to the
     # positional control-marker heuristic + node-input name inspection, which
     # matches the reference behavior for unknown node types.
-    filtered = _filter_control_values(widget_values, node_type, node, object_info)
+    filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
     names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
