@@ -14,6 +14,7 @@ collide; widgets are addressed by name, not array index. See ``workflow_ops``.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -49,8 +50,36 @@ HostOpt = Annotated[str | None, typer.Option(show_default=False)]
 PortOpt = Annotated[int | None, typer.Option(show_default=False)]
 WhereOpt = Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")]
 
+# Dynamic catalog findings promoted to envelope error codes. The literal-code
+# manifest is also what the registry contract test discovers.
+TYPED_FINDING_ERROR_MANIFEST = (
+    {"code": "unknown_enum_value"},
+    {"code": "no_options_available"},
+    {"code": "below_min"},
+    {"code": "above_max"},
+)
+TYPED_FINDING_ERROR_CODES = frozenset(item["code"] for item in TYPED_FINDING_ERROR_MANIFEST)
 
-def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
+
+def _json_safe_evidence(value: Any) -> Any:
+    """Make finding evidence strict-JSON-safe without losing the operand."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe_evidence(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_evidence(item) for item in value]
+    return value
+
+
+def _emit_edit_error(
+    renderer,
+    e: ValueError,
+    *,
+    hint: str,
+    message_prefix: str = "",
+    extra_details: dict[str, Any] | None = None,
+) -> None:
     """Emit an edit failure, preferring the typed form when one is available.
 
     A :class:`workflow_ops.FatalFindingError` carries the catalog finding, so
@@ -60,19 +89,27 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
     """
     if isinstance(e, workflow_ops.FatalFindingError):
         f = e.finding
-        if f.get("best_match") is not None:
+        code = str(f.get("code") or "workflow_edit_invalid")
+        if code not in TYPED_FINDING_ERROR_CODES:
+            code = "workflow_edit_invalid"
+        if code == "no_options_available":
+            finding_hint = "install the required option or select a catalog that provides one"
+        elif f.get("best_match") is not None:
             # One option shares the rejected value's leading token (the ratio
             # in '16:9 (Landscape)'): lead with it rather than a flat list.
-            finding_hint = f"use {f['best_match']!r} — the only option with the same leading token"
+            finding_hint = f"use {f['best_match']!r} — the only option with the same leading token; {hint}"
         elif f.get("did_you_mean"):
-            finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?"
+            finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}? {hint}"
         else:
             finding_hint = hint
+        details = {k: _json_safe_evidence(v) for k, v in f.items() if k != "message"}
+        if extra_details:
+            details.update(_json_safe_evidence(extra_details))
         renderer.error(
-            code=f.get("code", "workflow_edit_invalid"),
-            message=f.get("message", str(e)),
+            code=code,
+            message=f"{message_prefix}{f.get('message', str(e))}",
             hint=finding_hint,
-            details={k: v for k, v in f.items() if k != "message"},
+            details=details,
         )
         return
     renderer.error(code="workflow_edit_invalid", message=str(e), hint=hint)
@@ -199,6 +236,14 @@ def add_node_cmd(
             "--allow-deprecated", show_default=False, help="Add the node even though the catalog marks it deprecated."
         ),
     ] = False,
+    text: Annotated[
+        str | None,
+        typer.Option(
+            "--text",
+            show_default=False,
+            help="Body text for a Note / MarkdownNote (annotation nodes; no catalog entry). Invalid for other classes.",
+        ),
+    ] = None,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -232,6 +277,7 @@ def add_node_cmd(
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
+            text=text,
         )
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
@@ -245,12 +291,16 @@ def add_node_cmd(
         # Same envelope shape as `nodes show` so a caller can self-correct from
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
-        if e.ui_only and e.class_type in workflow_ops.NOTE_NODE_TYPES:
-            hint = workflow_ops.note_insert_hint(e.class_type)
-        elif e.ui_only:
-            hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
+        if e.ui_only:
+            hint = (
+                "use a real node class; to annotate the graph, add a `Note` or `MarkdownNote` with --text "
+                "(the only UI-only classes this surface can mint)"
+            )
         elif e.subgraph_id:
-            hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
+            hint = (
+                "reuse the exact definition id from `comfy workflow ls-nodes <file>` only in the workflow that "
+                "already contains that definition and an instance, or pick a node class with `comfy nodes search <text>`"
+            )
         elif e.close_matches:
             hint = f"did you mean: {', '.join(e.close_matches)}?"
         else:
@@ -470,7 +520,7 @@ def disconnect_cmd(
 @tracking.track_command("workflow")
 def delete_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    node: Annotated[str, typer.Argument(help="Node id to delete.")],
+    node: Annotated[str, typer.Argument(help="Node id or interior path to delete (for example 70/22).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -507,7 +557,7 @@ def delete_cmd(
 @tracking.track_command("workflow")
 def delete_nodes_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    nodes: Annotated[list[str], typer.Argument(help="Node ids to delete (one or more).")],
+    nodes: Annotated[list[str], typer.Argument(help="Node ids or interior paths to delete (one or more).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -746,8 +796,8 @@ def ls_nodes_cmd(
         # A row's `type` reads like an addable class. Two kinds are not: a
         # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
         # instance, whose `type` is its definition uuid. Both stay listed (the
-        # graph must still be understood); the flag says `add-node` / `nodes
-        # show` cannot take that type. Only set when true, like `mode`.
+        # graph must still be understood); the flag distinguishes them from
+        # catalog classes. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
             if workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
@@ -965,6 +1015,28 @@ def apply_cmd(
             message=f"batch failed: {e}",
             hint=e.hint,
             details={"requested": e.class_type, "replacement": e.replacement},
+        )
+        raise typer.Exit(code=1) from e
+    except workflow_ops.FatalFindingError as e:
+        # ``apply_specs`` preserves typed catalog refusals while re-hinting
+        # them against the pre-batch graph. Emit the same operand evidence as
+        # a standalone edit, plus the atomic-batch failure position.
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {
+                    "index": e.spec_index,
+                    "op": e.spec_op,
+                    "code": e.finding.get("code", "workflow_edit_invalid"),
+                },
+                "applied_count": e.applied_count,
+            }
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="correct the rejected value and retry the whole batch",
+            message_prefix="batch failed: ",
+            extra_details=details,
         )
         raise typer.Exit(code=1) from e
     except (ValueError, KeyError) as e:

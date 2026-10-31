@@ -386,7 +386,7 @@ def test_unwired_declared_subgraph_output_prints_as_none():
                     "id": uuid,
                     "name": "Partially wired",
                     "inputs": [],
-                    "outputs": [{"name": "IMAGE"}, {"name": "MASK"}],
+                    "outputs": [{"name": "IMAGE", "linkIds": [1]}, {"name": "MASK"}],
                     "nodes": [
                         {
                             "id": 3,

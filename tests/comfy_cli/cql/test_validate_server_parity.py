@@ -10,6 +10,7 @@ costs a submit; a crash is worse, because `--json` then emits nothing at all.
 from __future__ import annotations
 
 import math
+import shlex
 from typing import Any
 
 import pytest
@@ -158,7 +159,7 @@ def _object_info() -> dict[str, Any]:
                                 },
                                 {
                                     "key": "scale dimensions",
-                                    "inputs": {"required": {"width": ["INT", {"default": 512}]}},
+                                    "inputs": {"required": {"width": ["INT", {"default": 512, "max": 2048}]}},
                                 },
                             ]
                         },
@@ -422,6 +423,188 @@ class TestNonFiniteNumbers:
         result = graph.validate_workflow(wf)
         assert not result["valid"]
         assert "shape_mismatch" in _codes(result)
+
+
+class TestServerConvertedLiterals:
+    """The server converts a literal before checking it: `int(val)` on an INT
+    input, `float(val)` on a FLOAT one, `str(val)` on a STRING one
+    (execution.py `validate_inputs`), and the node runs with the result. A
+    template saved with `"1536"` on an INT therefore runs, and the validator
+    rejected it as `shape_mismatch`. What the server cannot convert, or
+    converts into something else (`bool("false")` is true), is still an error.
+    """
+
+    @pytest.fixture
+    def tune_graph(self) -> Graph:
+        info = _object_info()
+        info["Tune"] = {
+            "input": {
+                "required": {
+                    "image": "IMAGE",
+                    "target_resolution": ["INT", {"default": 1024, "min": 64, "max": 2048}],
+                    "strength": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}],
+                    "label": ["STRING", {"default": ""}],
+                    "sharpen": ["BOOLEAN", {"default": False}],
+                    "method": [["lanczos", "bicubic"]],
+                }
+            },
+            "input_order": {"required": ["image", "target_resolution", "strength", "label", "sharpen", "method"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "output_node": False,
+            "python_module": "nodes",
+        }
+        return Graph.from_object_info(info)
+
+    @staticmethod
+    def _wf(*, reachable: bool = True, **values: Any) -> dict:
+        inputs = {
+            "image": ["1", 0],
+            "target_resolution": 1024,
+            "strength": 0.5,
+            "label": "",
+            "sharpen": False,
+            "method": "lanczos",
+            **values,
+        }
+        return {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "Tune", "inputs": inputs},
+            "3": {"class_type": "ShowImage", "inputs": {"images": ["2" if reachable else "1", 0]}},
+        }
+
+    @staticmethod
+    def _coercible(result: dict) -> list[dict]:
+        return [w for w in result["warnings"] if w["code"] == "coercible_type"]
+
+    def test_an_integer_string_on_an_int_input_is_a_warning(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(target_resolution="1536"))
+
+        assert result["valid"], result["errors"]
+        [finding] = self._coercible(result)
+        assert (finding["node_id"], finding["severity"]) == ("2", "warning")
+        assert (finding["value"], finding["coerced_value"]) == ("1536", 1536)
+        assert "comfy workflow set-widget <file> [options] 2.target_resolution -- 1536" in finding["hint"]
+
+    def test_set_widget_hint_quotes_the_complete_address(self, tune_graph: Graph) -> None:
+        hostile_id = "x; echo pwned"
+        wf = self._wf(target_resolution="1536")
+        wf[hostile_id] = wf.pop("2")
+        wf["3"]["inputs"]["images"][0] = hostile_id
+
+        [finding] = self._coercible(tune_graph.validate_workflow(wf))
+        command = finding["hint"].split("`", 2)[1]
+
+        assert shlex.split(command)[5] == f"{hostile_id}.target_resolution"
+
+    def test_a_converted_int_is_still_range_checked(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(target_resolution="4096"))
+
+        assert not result["valid"]
+        assert _codes(result) == ["above_max"]
+        [finding] = self._coercible(result)
+        assert finding["coerced_value"] == 4096
+        assert "set-widget" not in finding["hint"]
+
+    def test_a_converted_int_out_of_range_on_a_pruned_node_stays_advisory(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(reachable=False, target_resolution="4096"))
+
+        assert result["valid"], result["errors"]
+        assert "above_max" in [w["code"] for w in result["warnings"]]
+        assert "set-widget" not in self._coercible(result)[0]["hint"]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("target_resolution", "abc", id="int-word"),
+            pytest.param("target_resolution", "1536.0", id="int-decimal-string"),
+            pytest.param("target_resolution", True, id="int-bool"),
+            pytest.param("strength", "nan", id="float-nan-string"),
+            pytest.param("label", True, id="string-bool"),
+            pytest.param("sharpen", "false", id="boolean-false-string"),
+            pytest.param("method", True, id="combo-bool"),
+        ],
+    )
+    def test_a_value_the_server_cannot_convert_is_still_an_error(
+        self, tune_graph: Graph, field: str, value: Any
+    ) -> None:
+        result = tune_graph.validate_workflow(self._wf(**{field: value}))
+
+        assert not result["valid"]
+        assert _codes(result) == ["shape_mismatch"]
+        assert self._coercible(result) == []
+
+    @pytest.mark.parametrize(
+        ("field", "value", "coerced"),
+        [
+            pytest.param("target_resolution", " 1536 ", 1536, id="int-padded"),
+            pytest.param("target_resolution", "1_024", 1024, id="int-underscore"),
+            pytest.param("target_resolution", "+512", 512, id="int-signed"),
+            pytest.param("strength", "1e-1", 0.1, id="float-exponent"),
+            pytest.param("label", 1e20, "1e+20", id="string-from-float"),
+        ],
+    )
+    def test_the_conversion_is_the_servers_own(self, tune_graph: Graph, field: str, value: Any, coerced: Any) -> None:
+        result = tune_graph.validate_workflow(self._wf(**{field: value}))
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == [coerced]
+
+    @pytest.mark.parametrize("value", ["inf", "-inf", "1e400"])
+    def test_a_non_finite_float_string_is_still_an_error(self, tune_graph: Graph, value: str) -> None:
+        assert _codes(tune_graph.validate_workflow(self._wf(strength=value))) == ["shape_mismatch"]
+
+    def test_a_converted_float_is_still_range_checked(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(strength="1.5"))
+
+        assert _codes(result) == ["above_max"]
+
+    def test_a_numeric_string_on_a_float_input_is_a_warning(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(strength="0.5"))
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == [0.5]
+
+    def test_a_number_on_a_string_input_is_a_warning(self, tune_graph: Graph) -> None:
+        result = tune_graph.validate_workflow(self._wf(label=1024))
+
+        assert result["valid"], result["errors"]
+        [finding] = self._coercible(result)
+        assert finding["coerced_value"] == "1024"
+        # Preserve the JSON quotes through shell parsing so set-widget receives
+        # a string rather than reparsing the argument as an integer.
+        assert "-- '\"1024\"'`" in finding["hint"]
+
+    def test_a_numeric_string_on_a_dynamic_combo_sub_input_is_a_warning(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {
+                "class_type": "ResizeNode",
+                "inputs": {"image": ["1", 0], "resize_type": "scale dimensions", "resize_type.width": "512"},
+            },
+            "3": {"class_type": "ShowImage", "inputs": {"images": ["2", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+
+        assert result["valid"], result["errors"]
+        assert [w["coerced_value"] for w in self._coercible(result)] == [512]
+
+    def test_an_out_of_range_dynamic_sub_input_on_a_pruned_node_stays_advisory(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {
+                "class_type": "ResizeNode",
+                "inputs": {"image": ["1", 0], "resize_type": "scale dimensions", "resize_type.width": "4096"},
+            },
+            "3": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+
+        result = graph.validate_workflow(wf)
+
+        assert result["valid"], result["errors"]
+        findings = {w["code"]: w for w in result["warnings"]}
+        assert findings["above_max"]["field"] == "2.ResizeNode.resize_type.width"
+        assert "set-widget" not in findings["coercible_type"]["hint"]
 
 
 class TestErrorPointsAtTheRealProblem:
@@ -832,6 +1015,39 @@ class TestDecoyKeysAreNotFollowed:
     the validator reported `dependency_cycle: 2 -> 3 -> 2`.
     """
 
+    @staticmethod
+    def _dynamic_graph(type_id: str = "COMFY_DYNAMICCOMBO_V3") -> Graph:
+        return Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                type_id,
+                                {
+                                    "options": [
+                                        {"key": "A", "inputs": {"required": {"value": ["STRING", {}]}}},
+                                        {"key": "B", "inputs": {"required": {"other": ["STRING", {}]}}},
+                                    ]
+                                },
+                            ]
+                        }
+                    },
+                    "input_order": {"required": ["model"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+
     def test_a_cycle_that_exists_only_through_a_decoy_key_is_not_reported(self, graph: Graph) -> None:
         wf = {
             "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
@@ -859,3 +1075,165 @@ class TestDecoyKeysAreNotFollowed:
         }
         result = graph.validate_workflow(wf)
         assert result["valid"], result["errors"]
+
+    def test_a_stale_dynamic_combo_key_cannot_close_a_cycle(self) -> None:
+        graph = self._dynamic_graph()
+        wf = {
+            "1": {
+                "class_type": "DynamicPass",
+                "inputs": {"model": "A", "model.value": "ready", "model.other": ["2", 0]},
+            },
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_the_same_dynamic_combo_key_closes_a_cycle_when_selected(self) -> None:
+        graph = self._dynamic_graph()
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": "B", "model.other": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))
+
+    @pytest.mark.parametrize("selection", ["A", "B"])
+    def test_a_plain_combo_takes_no_dotted_keys_under_any_selection(self, selection: str) -> None:
+        # The frontend picks its dynamic-combo widget by type name, so a plain
+        # COMBO has one slot and no sub-inputs even when `options` is a tree.
+        graph = self._dynamic_graph("COMBO")
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": selection, "model.other": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        assert "dependency_cycle" not in _codes(graph.validate_workflow(wf))
+
+
+class TestUnresolvedDynamicComboSelections:
+    """A dotted sub-key is only STALE when the selection it belongs to actually
+    resolved. When the selection is unknowable — the selector is wired, its
+    option schema does not parse, the resolved option carries no ``inputs``
+    dict, or the nesting hits the depth cap — the server's expansion is
+    unknown, so the validator must stay conservative and keep the checks it
+    would otherwise run.
+
+    Reading those keys as undeclared demoted real ``dangling_edge`` /
+    ``bad_link_shape`` errors to warnings and stopped ``_declared_link_targets``
+    following the edge, which can drop a feeder node out of ``reachable`` and
+    hide a cycle the server rejects.
+    """
+
+    @staticmethod
+    def _graph(options: Any) -> Graph:
+        return Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {
+                            "model": ["COMFY_DYNAMICCOMBO_V3", {"options": options}],
+                            "seed": ["INT", {"default": 0}],
+                        }
+                    },
+                    "input_order": {"required": ["model", "seed"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+
+    _OPTIONS = [
+        {"key": "A", "inputs": {"required": {"value": ["STRING", {}]}}},
+        {"key": "B", "inputs": {"required": {"other": ["STRING", {}]}}},
+    ]
+
+    def test_a_dangling_edge_under_a_wired_selector_stays_an_error(self) -> None:
+        """The selector is a link, so which option expands is known only at
+        execution — the sub-key may well be one the server declares, and its
+        link points at a node that does not exist. The server rejects that."""
+        graph = self._graph(self._OPTIONS)
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": ["2", 0], "model.value": ["99", 0], "seed": 0}},
+            "2": {"class_type": "StringSink", "inputs": {"text": "x"}},
+            "3": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dangling_edge" in _codes(result), result
+
+    def test_a_bad_link_shape_under_an_unreadable_option_schema_stays_an_error(self) -> None:
+        """``options`` is a shape this parser cannot read, so no selection can
+        be resolved — a malformed link under it must not be downgraded."""
+        graph = self._graph({"not": "a list"})
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": "A", "model.value": ["2"], "seed": 0}},
+            "2": {"class_type": "StringSink", "inputs": {"text": "x"}},
+            "3": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "bad_link_shape" in _codes(result), result
+
+    def test_a_cycle_through_a_wired_selectors_sub_key_is_still_reported(self) -> None:
+        """``_declared_link_targets`` must keep following the edge: the feeder
+        is reachable only through the sub-key, and the server would reject the
+        cycle it closes."""
+        graph = self._graph(self._OPTIONS)
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": ["3", 0], "model.value": ["2", 0], "seed": 0}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+            "3": {"class_type": "StringSink", "inputs": {"text": "x"}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))
+
+    def test_a_resolved_selection_still_treats_the_other_options_key_as_stale(self) -> None:
+        """The conservative rule above must not swallow the PR's own case: a
+        selection that DID resolve can still call a leftover key stale."""
+        graph = self._graph(self._OPTIONS)
+        wf = {
+            "1": {
+                "class_type": "DynamicPass",
+                "inputs": {"model": "A", "model.value": "ready", "model.other": ["2", 0], "seed": 0},
+            },
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_an_absent_optional_selector_still_treats_its_sub_keys_as_stale(self) -> None:
+        """An absent OPTIONAL selector definitely did not expand, so its dotted
+        keys really are undeclared — the same split ``_check_dynamic_combo_input``
+        makes between a required and an optional absence."""
+        graph = Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {"seed": ["INT", {"default": 0}]},
+                        "optional": {"model": ["COMFY_DYNAMICCOMBO_V3", {"options": self._OPTIONS}]},
+                    },
+                    "input_order": {"required": ["seed"], "optional": ["model"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"seed": 0, "model.value": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]

@@ -112,11 +112,19 @@ _SENSITIVE_EXACT = frozenset(
         "from_workflow",
         "workflow",
         "capability",
+        # A ComfyUI clientId is capability-bearing: anyone who can reach the
+        # server and knows it both receives that client's execution events and
+        # evicts its socket by connecting as it. Redacted rather than dropped,
+        # so "was --client-id used" stays measurable.
+        "client_id",
         "query",
         "repo",
         "repository",
         "commit",
         "file",
+        # `workflow add-node --text`: a note body is verbatim user content, like
+        # `--prompt` — analytics only learns that the option was supplied.
+        "text",
     }
 )
 

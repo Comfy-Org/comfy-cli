@@ -22,8 +22,53 @@ from comfy_cli.cql.engine import (
     _count_instances,
     _extract_frontend_slots,
     _subgraph_defs_by_id,
+    _SubgraphDefs,
     _write_widget,
 )
+
+
+def test_subgraph_definition_registration_uses_identity_refcounts():
+    definitions = _SubgraphDefs()
+    shared = {"id": "shared"}
+    replacement = {"id": "replacement"}
+    definitions["id"] = shared
+    definitions["alias"] = shared
+
+    definitions["id"] = replacement
+    assert id(shared) in definitions.registered_definition_ids
+    assert definitions._registered_definition_refcounts[id(shared)] == 1
+
+    del definitions["alias"]
+    assert id(shared) not in definitions.registered_definition_ids
+    assert id(replacement) in definitions.registered_definition_ids
+
+
+@pytest.mark.parametrize("mutation", ["overwrite", "delete", "pop", "popitem", "clear"])
+def test_subgraph_definition_membership_changes_invalidate_derived_caches(mutation):
+    definitions = _SubgraphDefs()
+    original = {"id": "original", "inputs": [], "nodes": [], "links": []}
+    definitions["id"] = original
+    definitions.promotion_visit_limits[id(original)] = 7
+    definitions.promotion_inputs[id(original)] = (original, ["stale"])
+    definitions.promotion_budget_roots["promotion_inputs_budget"] = {id(original)}
+    definitions.promotion_inputs_budget = [99]
+
+    if mutation == "overwrite":
+        definitions["id"] = {"id": "replacement"}
+    elif mutation == "delete":
+        del definitions["id"]
+    elif mutation == "pop":
+        definitions.pop("id")
+    elif mutation == "popitem":
+        definitions.popitem()
+    else:
+        definitions.clear()
+
+    assert definitions.promotion_visit_limits == {}
+    assert definitions.promotion_inputs == {}
+    assert definitions.promotion_budget_roots == {}
+    assert definitions.promotion_inputs_budget is None
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a small but realistic object_info
@@ -1691,6 +1736,9 @@ class TestValidateWorkflow:
         errs = [e for e in result["errors"] if e["code"] == "below_min"]
         assert len(errs) == 1
         assert errs[0]["field"] == "width"
+        # The rejected value and the violated bound ride on the finding, not just the message.
+        assert errs[0]["value"] == 0
+        assert "bound" in errs[0]
         # No longer surfaced as a warning.
         assert "below_min" not in [w["code"] for w in result["warnings"]]
 
@@ -1709,6 +1757,8 @@ class TestValidateWorkflow:
         errs = [e for e in result["errors"] if e["code"] == "above_max"]
         assert len(errs) == 1
         assert errs[0]["field"] == "width"
+        assert errs[0]["value"] == 999999
+        assert "bound" in errs[0]
         assert "above_max" not in [w["code"] for w in result["warnings"]]
 
 
@@ -2957,6 +3007,11 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+        # The rejected value and the violated bound ride on the finding too,
+        # not just the message — same contract as the workflow-level path.
+        above_max = next(w for w in warnings if w["code"] == "above_max")
+        assert above_max["value"] == 99999
+        assert "bound" in above_max
 
 
 class TestSlotSuggestionOnNotFound:
@@ -3346,7 +3401,7 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
     monkeypatch.setattr(
         graph,
         "widget_order_for_node",
-        lambda nt, wv: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv),
+        lambda nt, wv, sn=None: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv, sn),
     )
 
     wf = {

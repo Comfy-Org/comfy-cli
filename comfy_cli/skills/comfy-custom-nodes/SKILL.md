@@ -18,6 +18,7 @@ comfy --json knowledge authoring troubleshooting
 comfy --json knowledge authoring packaging-publishing
 comfy --json knowledge authoring frontend-extension
 comfy --json knowledge authoring v1-to-v3-migration
+comfy --json knowledge authoring execution-caching
 ```
 
 Start with `invocation` to decide the path. Add `ecosystem-reference` only when an
@@ -27,9 +28,10 @@ unfamiliar failure makes public implementation evidence material. Add
 claiming it works, `dependencies-capabilities` for packages/network/filesystem
 or local-versus-Cloud questions, and `troubleshooting` only after a stage fails.
 Add `packaging-publishing` for `pyproject.toml` or `comfy node publish`,
-`frontend-extension` for `WEB_DIRECTORY` and browser assets, and
+`frontend-extension` for `WEB_DIRECTORY` and browser assets,
 `v1-to-v3-migration` when moving a pack between registration generations or
-retiring a node id.
+retiring a node id, and `execution-caching` for `IS_CHANGED` or
+`fingerprint_inputs`, or when a node recomputes every run.
 
 Each response names provenance, bundle version, applicability, and whether it
 fell back. Say when `degraded` is true; do not hide weaker evidence. The installed catalog and validator remain authority
@@ -50,6 +52,7 @@ comfy-custom-nodes-troubleshooting
 comfy-custom-nodes-packaging
 comfy-custom-nodes-frontend
 comfy-custom-nodes-migration
+comfy-custom-nodes-caching
 ```
 
 Do not repeat a returned slice or code-search result in later tool prompts.

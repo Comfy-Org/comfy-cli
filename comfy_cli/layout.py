@@ -8,6 +8,8 @@ layout only chooses positions for nodes being minted in the current call.
 
 from __future__ import annotations
 
+import math
+
 COL_GAP = 80.0
 ROW_GAP = 40.0
 NODE_W = 240.0
@@ -20,6 +22,12 @@ PAD_H = 12.0
 MIN_H = 60.0
 ORIGIN = (40.0, 60.0)
 DEFAULT_SIZE = (210.0, 100.0)
+# The two UI-only node types add_node can mint without a catalog entry: pure
+# annotation nodes with no slots and one positional multiline `text` widget.
+# Defined here (the leaf module) so both the planner and workflow_ops read one
+# constant; workflow_ops re-exports it. The full UI-only set lives in
+# workflow_ops.UI_ONLY_NODE_TYPES — this is the authorable subset of it.
+AUTHORABLE_VIRTUAL_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
 _MARGIN = 10.0
 _GUARD = 1000  # bounded collision-shift loop
 _ORDER_SWEEPS = 4  # barycentre passes for crossing reduction; converges well before this
@@ -259,6 +267,18 @@ def estimate_size(
     return [w, max(h, MIN_H)]
 
 
+def note_size(class_type: str) -> list[float]:
+    """Persisted size for an authorable annotation node (`Note` / `MarkdownNote`).
+
+    These have no catalog entry, no slots, and one multiline text widget, so the
+    catalog-driven path in `estimate_size` cannot be fed from `graph.node`. Both
+    `workflow_ops.add_node` and `assign_positions` call this so the planner's
+    footprint and the size stamped onto the node agree — the same invariant the
+    catalog path keeps by calling `estimate_size` with identical arguments.
+    """
+    return estimate_size(0, 0, 1, n_multiline=1, title=class_type, widget_labels=("text",))
+
+
 def _pair(value) -> tuple[float, float] | None:
     """Read a geometry pair, tolerating both shapes litegraph serialises.
 
@@ -273,10 +293,32 @@ def _pair(value) -> tuple[float, float] | None:
             return float(value["0"]), float(value["1"])
         except (KeyError, TypeError, ValueError):
             return None
+    if not isinstance(value, (list, tuple)):
+        return None
     try:
         return float(value[0]), float(value[1])
     except (TypeError, ValueError, IndexError, KeyError):
         return None
+
+
+def normalized_size(value) -> list[float]:
+    """Return a usable LiteGraph body size in its canonical list form.
+
+    Saved workflows legitimately contain either ``[width, height]`` or
+    ``{"0": width, "1": height}``.  A missing or malformed value falls back
+    to the same default the placement planner uses; finite positive dimensions
+    are required because a zero/NaN footprint defeats collision detection.
+    """
+    try:
+        raw_pair = (value.get("0"), value.get("1")) if isinstance(value, dict) else (value[0], value[1])
+    except (TypeError, IndexError, KeyError):
+        raw_pair = ()
+    if any(isinstance(item, bool) for item in raw_pair):
+        return list(DEFAULT_SIZE)
+    pair = _pair(value)
+    if pair is None or any(not math.isfinite(item) or item <= 0 for item in pair):
+        return list(DEFAULT_SIZE)
+    return [pair[0], pair[1]]
 
 
 def occupied(pos, size) -> tuple[float, float, float, float]:
@@ -388,7 +430,7 @@ def rebase_template(existing_nodes: list, template: dict) -> None:
         group["bounding"] = [gx + dx, gy + dy, *bounding[2:]]
 
 
-def assign_positions(workflow: dict, graph, specs: list) -> list:
+def assign_positions(workflow: dict, graph, specs: list, *, unknown_size_resolver=None) -> list:
     """Fill `at` on every add_node spec that lacks one, using the batch's own
     connects for dataflow layering. Returns spec copies; non-add specs and
     explicit `at` values pass through untouched. Pure: same inputs → same output."""
@@ -398,8 +440,16 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
     for i, spec in enumerate(out):
         if not (isinstance(spec, dict) and spec.get("op") == "add_node"):
             continue
-        m = graph.node(spec.get("class_type") or "")
-        if m is not None:
+        class_type = spec.get("class_type")
+        # Name decides before the catalog (mirrors workflow_ops.add_node): a
+        # backend class that happens to be called "Note" still sizes as a note.
+        # `isinstance` first — a malformed spec (`class_type: ["Note"]`) must
+        # fall to DEFAULT_SIZE and let apply_specs report it, not TypeError here.
+        is_note = isinstance(class_type, str) and class_type in AUTHORABLE_VIRTUAL_NODE_TYPES
+        m = None if is_note else graph.node(class_type or "")
+        if is_note:
+            size = note_size(class_type)
+        elif m is not None:
             widget_names = tuple(graph.widget_order(spec["class_type"]))
             # object_info already marks multiline inputs; the catalog parses it into
             # PortOptions.multiline. Match by name because widget_order is the render
@@ -424,7 +474,8 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 widget_labels=widget_names,
             )
         else:
-            size = list(DEFAULT_SIZE)  # unknown type: apply_specs will error later
+            resolved_size = unknown_size_resolver(class_type) if unknown_size_resolver is not None else None
+            size = resolved_size if resolved_size is not None else list(DEFAULT_SIZE)
         key = spec.get("as") or f"__new{i}"
         adds[key] = {"i": i, "size": size, "depth": 0, "pinned": spec.get("at")}
         order.append(key)

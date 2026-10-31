@@ -1,6 +1,6 @@
 ---
 name: comfy-agent-permissions
-description: Use when a permission blocks the local comfy agent — a folder it cannot read or write, a host a download was refused for, a shell it does not have — to know what the agent may reach by default, how a request is recorded (request_path, request_host) and how only the user approves it (`comfy agent allow --approve`, a panel button), the start-time settings, and what can never be granted.
+description: Use when a permission blocks the local comfy agent — a folder it cannot read or write, a host a download was refused for, a shell it does not have — to know what the agent may reach by default, how a request is recorded (request_path, request_host) and how only the user approves it (the agent panel or the in-chat card), the start-time settings, and what can never be granted.
 ---
 
 # Permissions on the local comfy agent
@@ -34,43 +34,87 @@ ask; it can never make the answer.
 
 | Blocked | Do | Then |
 |---|---|---|
-| A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting and how to approve it; retry only after it is approved |
+| A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting in the agent panel; retry only after it is approved |
 | A host (`egress denied: <host>`; from a CLI command, `Tunnel connection failed: 403`, which is the same refusal) | call `request_host` with the host and what the download or install is for. The host is missing from the list and does not indicate the shell is cut off from the network | same; rerun the command after the approval |
-| A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: approving is refused, so the request would wait forever | say the host stays refused and find another source, or ask the user for the file |
+| A host the proxy never opens (telemetry: `t.comfy.org`, `api.mixpanel.com`; shared object storage anyone can write to: `storage.googleapis.com`, `r2.cloudflarestorage.com`) | do **not** call `request_host`: approving is refused, so the request would stay pending until the user denies it | say the host stays refused and find another source, or ask the user for the file |
 | No shell on this machine | say that the environment block names the start-time setting that enables one | the user restarts the agent with it |
 
-The user approves or refuses from a terminal, naming the request by the id
-the tool returned, or from a panel button when the frontend ships one:
+**While an agent is running the user answers in the agent panel, or on the
+card in chat — not from a terminal.** A running agent is the only writer of
+its permission files, so it
+answers requests only through its own API, which the panel and the card call.
+Point the user there: the request you recorded is waiting with the id the tool
+returned, and they approve or deny that exact target.
+
+**While the agent is running, do not hand the user `comfy agent allow
+--approve <id>`.** It never sees that edit, so the card stays pending and the
+approval they thought they gave is gone at the agent's next save. The CLI
+refuses it for the same reason: with an agent answering on its port,
+`comfy agent allow` and `comfy agent deny` exit with `agent_running` and write
+nothing. They also refuse with `agent_unconfirmed` when the data dir names a
+port but nothing answers on it as this agent — the refusal errs that way on
+purpose, because a write that a running agent then overwrites leaves nothing
+behind to show the approval was lost. That one names the stale `agent.json`
+the user deletes if no agent is in fact running. You cannot run these commands
+either — your comfy tool and the shell broker refuse every `comfy agent`
+command, and that refusal is the guard that stops injected text from approving
+the request it made you ask for.
+
+**If the session has no panel and no in-chat card** (an older frontend, a
+headless or API client, a plain chat surface), say so plainly: the only way to
+answer is for the user to stop the agent, answer from their own terminal, and
+start it again. `permissions` lists what is waiting and the other two answer
+it — a `--path` or `--host` grant below approves a target but leaves the
+request itself pending:
 
 ```
-comfy agent permissions                       # what is waiting (id, kind, target, reason, age), what is approved
-comfy agent allow --approve <id>              # approve that request's exact target
-comfy agent deny <id>                         # drop it; nothing is approved
+comfy agent permissions            # the waiting requests: id, kind, target, reason, age
+comfy agent allow --approve <id>   # approve that request's exact target
+comfy agent deny <id>              # drop it; nothing is approved
 ```
 
-**Hand over the command the CLI prints, not one you compose.** Run
-`comfy --json agent permissions` yourself and copy `grant.approve` /
-`grant.deny`, replacing `<id>`. Those strings already name this CLI the way it
-can be called and carry `--data-dir` whenever the agent's dir is not the one a
-bare terminal resolves (`AGENT_DATA_DIR`, else `~/.comfy-agent`) — without it
-their `--approve` answers `agent_unknown_request` and `permissions` shows the
-agent `not running`, though the request is waiting. Point to a panel button
-only when you know this panel has one; otherwise the command is the way.
+Add `--data-dir "<that dir>"` to each when the agent's data dir is not the
+default (below). Do not point the user at UI that is not there, and do not
+wait on a request that nothing in the session can answer.
 
 Approving vets the target the way a direct grant does (below) and then records
-it; a target that can never be granted stays pending until denied. The user
-can also grant outright, without a request (hand over `grant.path` /
-`grant.host`, for the same reason):
+it; a target that can never be granted stays pending until the user denies it.
+Nothing expires a request on its own.
+
+An approval is remembered for every later start (`<data dir>/permissions.json`,
+`<data dir>/egress-allow.json`). From the panel or the card it takes effect at
+once, because the agent itself recorded it; answered from a terminal instead,
+it takes effect when the agent is started again. Retry once after the user
+reports approving it, not in a loop — and if that retry is still refused, the
+approval has not landed, so ask rather than retrying again. A bare "yes" in
+chat is still not an approval and is not a trigger to retry.
+
+The user can also grant a folder or host outright, with no request waiting —
+but only while **no agent is running**, since the CLI writes the files directly
+and a running agent neither reads nor keeps those edits. Hand this over for a
+next start, never as a way to unblock the turn you are in:
 
 ```
 comfy agent allow --path "C:\Users\me\Pictures" --reason "reference photos"
 comfy agent allow --host models.example.com --reason "a VAE the user asked for"
 ```
 
-An approval is remembered for every later start (`<data dir>/permissions.json`,
-`<data dir>/egress-allow.json`). A running agent applies it within about
-20 seconds; until then the folder or host is still refused, so wait for the
-approval to land (retry once after the pause, not in a loop) before continuing.
+These, `allow --approve <id>` and `deny <id>` all edit the permission files
+directly, so all four are for a terminal with no agent running and all four
+apply at the agent's next start.
+
+**Every one of these commands needs the agent's own data dir.** It defaults to
+`AGENT_DATA_DIR` when that is set in the user's terminal, else
+`~/.comfy-agent`. A launcher that starts the agent with a different data dir
+does not set it in their shell, so a command typed there reads and writes the
+wrong file: a grant lands where the next start never looks, `--approve`
+answers `agent_unknown_request`, and `permissions` shows no waiting request at
+all. When the agent's data dir is not the default, include it:
+
+```
+comfy agent allow --data-dir "<that dir>" --approve <id>
+comfy agent allow --data-dir "<that dir>" --path "<folder>" --reason "<why>"
+```
 
 ## Start-time settings (the user sets them, then restarts the agent)
 

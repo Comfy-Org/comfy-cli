@@ -808,6 +808,31 @@ class TestMalformedInputHardening:
                     },
                 },
             ),
+            (
+                "subgraph_linkIds_scalar",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "11111111-2222-3333-4444-555555555555",
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ],
+                    "links": [],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": "11111111-2222-3333-4444-555555555555",
+                                "nodes": [],
+                                "links": [],
+                                "inputs": [{"name": "x", "linkIds": 1}],
+                                "outputs": [],
+                            }
+                        ]
+                    },
+                },
+            ),
         ]
         for _label, workflow in cases:
             # Should not raise — each malformed link is silently skipped.
@@ -909,6 +934,58 @@ class TestMalformedInputHardening:
         }
         # Should not raise.
         convert_ui_to_api(workflow, object_info)
+
+    def test_overlay_accepts_scalar_definition_nodes_and_instance_inputs(self, object_info):
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": 1, "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [{"id": sg_uuid, "nodes": 1, "links": [], "inputs": []}]},
+        }
+
+        assert convert_ui_to_api(workflow, object_info) == {}
+
+    def test_definition_expansion_metrics_are_computed_once_per_definition(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {"id": sg_uuid, "nodes": [0, 0, 0], "links": [0, 0], "inputs": [], "outputs": []}
+        calls = 0
+        original = converter._definition_expansion_metrics
+
+        def counted(candidate):
+            nonlocal calls
+            calls += 1
+            return original(candidate)
+
+        monkeypatch.setattr(converter, "_definition_expansion_metrics", counted)
+        converter._expand_subgraphs(
+            [{"id": index, "type": sg_uuid, "inputs": [], "outputs": []} for index in range(20)],
+            [],
+            {sg_uuid: definition},
+        )
+
+        assert calls == 1
+
+    def test_promoted_overlay_has_one_per_conversion_visit_budget(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {
+            "id": sg_uuid,
+            "nodes": [{"id": 1, "type": "Foo"}, {"id": 2, "type": "Foo"}],
+            "links": [],
+            "inputs": [],
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": [], "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [definition]},
+        }
+        monkeypatch.setattr(converter, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 2)
+
+        with pytest.raises(WorkflowConversionError, match="overlay exceeded"):
+            converter._overlay_promoted_host_values({}, workflow, {sg_uuid: definition})
 
     def test_v3_combo_option_with_non_dict_inputs_keeps_node(self):
         # A V3 dynamic combo option whose ``inputs`` field is malformed
@@ -2938,6 +3015,32 @@ class TestLoad3DInjectedButtonSlots:
         )
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_current_advanced_variant_maps_without_legacy_buttons(self, object_info_3d):
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_advanced_variant_single_marker_is_the_viewport_value(self, object_info_3d):
+        # Only two consecutive markers mark the legacy layout (the editor's
+        # rule). A lone marker is the viewport's value, so width/height stay put.
+        ui = self._workflow("Load3DAdvanced", ["m.fbx", "upload3dmodel", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "upload3dmodel", "width": 800, "height": 600}
+
+    def test_load3d_still_skips_a_single_marker_run(self, object_info_3d):
+        # Plain Load3D always carries its buttons, so the run-skip is unchanged.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 800, "height": 600}
+
+    def test_truncated_legacy_advanced_variant_keeps_its_viewport_input(self, object_info_3d):
+        # A legacy save cut off after the button markers still describes a
+        # LOAD_3D slot; omitting viewport_state would leave a required input
+        # missing. The engine pads the same shape before a named edit.
+        ui = self._workflow("Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources"])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 1024, "height": 1024}
 
     def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
         # No model_file widget -> no injected buttons. Skipping three slots
