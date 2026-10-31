@@ -17,6 +17,10 @@ history.
 
 ### Fixed
 
+- `comfy validate` no longer lets a dotted key left over from another
+  dynamic-combo selection close a false dependency cycle or pull a pruned node
+  back into the run. Checks stay on when the selection can't be resolved.
+
 - `_schema_widget_pairs` takes `node_type` and `node` keyword-only, so a caller
   that passes a node where `node_type` is expected now raises rather than
   converting the wrong thing. `node_type` was added as the third positional

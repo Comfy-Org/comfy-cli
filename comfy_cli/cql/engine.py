@@ -322,16 +322,15 @@ class Port:
 
     @property
     def is_dynamic_combo(self) -> bool:
-        """Dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
+        """V3 dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
         ONE selector input, but the option the selector names carries its own
         ``INPUT_TYPES`` block, which the frontend — and ``convert_ui_to_api`` —
         lower into dotted slot keys (``model.size_preset``, ``model.width``, …).
 
-        Most servers use a ``COMFY_*COMBO*`` type, while some partner schemas
-        expose the same option tree under a plain ``COMBO``. Parsing retains
-        that tree in ``dynamic_options``, so its presence is authoritative.
-        """
-        return bool(self.dynamic_options) or (self.type.startswith("COMFY_") and "COMBO" in self.type)
+        Deliberately the same test the converter applies
+        (``workflow_to_api._is_widget_input``), so validation expands exactly the
+        tree the converter lowered."""
+        return self.type.startswith("COMFY_") and "COMBO" in self.type
 
     def autogrow_slot_example(self) -> str:
         """Slot-key example for hints: the first two slot names this group
@@ -985,17 +984,8 @@ def _literal_expected(port: Port, value: Any) -> bool:
 
 def _is_dynamic_combo_type(type_id: str) -> bool:
     """V3 dynamic-combo types (e.g. ``COMFY_DYNAMICCOMBO_V3``): a selector
-    widget whose chosen option contributes its own sub-inputs.
-
-    A TYPE-NAME test only, for the two places that have a bare type string and
-    no parsed port: the parser deciding how to read ``options``, and raw
-    edge-type comparison. It is NOT the rule for "does this port expand an
-    option tree" — a partner schema ships the same tree under a plain
-    ``COMBO``, so that question is :attr:`Port.is_dynamic_combo` (equivalently,
-    a populated ``Port.dynamic_options``). Using this instead is what let the
-    converter, the widget walk, the ``nodes show`` payload and the validator
-    disagree about those ports.
-    """
+    widget whose chosen option contributes its own sub-inputs. Same rule the
+    UI→API converter applies (``workflow_to_api._is_widget_input``)."""
     return type_id.startswith("COMFY_") and "COMBO" in type_id
 
 
@@ -1267,13 +1257,11 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
             # before), but flagged as declared so validate can say "0 options
             # installed" instead of silently skipping the check.
             return first, bool(options), list(options), port_opts, True, []
-        # Dynamic combo declared WITHOUT the V3 type name: options are
-        # {key, inputs} dicts. It IS a widget (the frontend renders a selector
-        # plus key-dependent sub-widgets) and the selector's choices are the
-        # keys. Detected structurally rather than by type string so a node that
-        # ships the option tree under a plain COMBO still expands its
-        # sub-widgets; without this the sub-inputs vanish from widget_order and
-        # `set-widget <id>.<sub>` reports the widget as unknown.
+        # An option tree under a plain COMBO: {key, inputs} dicts. The frontend
+        # picks its dynamic-combo widget by type name alone, so this renders one
+        # selector and serializes one widgets_values slot, with no sub-widgets.
+        # The selector's choices are the keys; `dynamic_options` keeps the tree
+        # for inspection, and every expansion stays gated on the type name.
         # `enum_declared=True`: the choice list shipped, it just isn't scalar.
         if isinstance(options, list) and options and all(isinstance(v, dict) and "key" in v for v in options):
             return first, True, [v["key"] for v in options], port_opts, True, options
@@ -1936,7 +1924,7 @@ class Graph:
                         continue
                     widgets.append(sub.name)
                     defaults[sub.name] = _widget_default(sub)
-                    if sub.dynamic_options:
+                    if sub.dynamic_options and _is_dynamic_combo_type(sub.type):
                         describe(sub, sub.name, depth + 1)
                     elif _has_control_after_generate_slot(sub):
                         widgets.append("control_after_generate")
@@ -1946,7 +1934,7 @@ class Graph:
             out[name] = {"default": str(default) if default is not None else None, "options": options}
 
         for p in m.inputs:
-            if not p.is_link and p.dynamic_options:
+            if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
                 describe(p, p.name, 0)
         return out
 
@@ -1971,7 +1959,7 @@ class Graph:
             combos = {}
             for entry in _expand_widget_entries(m, widgets_values):
                 port = entry.port
-                if port is None or not port.dynamic_options:
+                if port is None or not port.dynamic_options or not _is_dynamic_combo_type(port.type):
                     continue
                 options: list[tuple[Any, dict[str, Any]]] = []
                 for option in port.dynamic_options:
@@ -2007,7 +1995,7 @@ class Graph:
             return None
         for entry in _expand_widget_entries(m, widgets_values or []):
             if entry.name == widget and entry.port is not None:
-                if entry.port.dynamic_options:
+                if entry.port.dynamic_options and _is_dynamic_combo_type(entry.port.type):
                     return _widget_default(entry.port) if entry.port.options.default is not None else None
                 return _widget_default(entry.port)
         return None
@@ -2474,27 +2462,16 @@ class Graph:
                     }
                     (errors if node_id in reachable else warnings).append(finding)
                     continue
-                # A dynamic-combo SELECTOR is judged once, by
-                # ``_check_dynamic_combos`` above, which resolves the chosen
-                # option and reports a miss as an ``unknown_enum_value`` error.
-                # ``validate_catalog`` would report the same field a second
-                # time — and disagree about it, since its COMBO arm (which a
-                # tree-bearing plain ``COMBO`` now reaches, because its type
-                # literally IS ``"COMBO"`` and its keys populate
-                # ``enum_values``) matches on the stringified value, so ``"8"``
-                # passes against key ``8`` where the server's own expansion
-                # uses ``==``. Keep the stricter, server-accurate one.
-                if not port.is_dynamic_combo:
-                    # Shape check (hard error, or a warning when the server converts
-                    # the value), then catalog checks (enum membership, etc.). Range
-                    # violations are a hard reject only on a node the server will
-                    # actually run; on a pruned (output-unreachable) node they stay
-                    # advisory warnings.
-                    cat_errors, cat_warnings = _validate_literal_value(
-                        node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
-                    )
-                    errors.extend(cat_errors)
-                    warnings.extend(cat_warnings)
+                # Shape check (hard error, or a warning when the server converts
+                # the value), then catalog checks (enum membership, etc.). Range
+                # violations are a hard reject only on a node the server will
+                # actually run; on a pruned (output-unreachable) node they stay
+                # advisory warnings.
+                cat_errors, cat_warnings = _validate_literal_value(
+                    node_id, class_type, input_name, port, value, range_is_error=node_id in reachable
+                )
+                errors.extend(cat_errors)
+                warnings.extend(cat_warnings)
 
             # dyn_warnings are advisory (stray-dotted-key / catalog-membership
             # notices), the same class as the ungated shape/catalog checks the
@@ -2810,7 +2787,7 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
         entry["wire_as"] = p.autogrow_slot_example()
     if p.is_dynamic_combo:
         entry["selection_keys"] = list(p.enum_values)
-    if p.dynamic_options and depth < _MAX_DYNAMIC_COMBO_DEPTH:
+    if p.dynamic_options and _is_dynamic_combo_type(p.type) and depth < _MAX_DYNAMIC_COMBO_DEPTH:
         entry["dynamic_options"] = [
             {
                 "key": key,
@@ -4297,7 +4274,7 @@ def _widgets_as_positional(widgets_values: Any, graph: Graph | None, class_type:
                 if entry.port:
                     if entry.port.is_dynamic_group:
                         default = 0
-                    elif entry.port.dynamic_options:
+                    elif _is_dynamic_combo_type(entry.port.type) and entry.port.dynamic_options:
                         default = entry.port.options.default
                 values.append(widgets_values.get(entry.name, default))
             return values
@@ -4919,7 +4896,7 @@ def _expand_widget_entries(
             for row in range(count):
                 for sub in _dynamic_group_widgets(port, f"{name}.{row}"):
                     entries.append(_WidgetEntry(name=sub.name, port=sub, owner=name))
-        elif port.dynamic_options:
+        elif port.dynamic_options and _is_dynamic_combo_type(port.type):
             if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
                 return
             idx = len(entries) - 1
@@ -5343,7 +5320,11 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
 
         def entry_default(entry: _WidgetEntry) -> Any:
             if entry.port is not None:
-                if entry.port.dynamic_options and _declared_dynamic_default(entry.port) is None:
+                if (
+                    entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and _declared_dynamic_default(entry.port) is None
+                ):
                     return None
                 return _widget_default(entry.port)
             if entry.name == "control_after_generate":
@@ -5366,6 +5347,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
                     if idx >= len(widgets)
                     and entry.port is not None
                     and entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
                     and entry.port.options.default is not None
                     and (input_name.startswith(f"{entry.name}.") or (target_idx is not None and idx < target_idx))
                 ),
@@ -5446,13 +5428,21 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         button_defaults = dict(load_3d_button_slots(m, widgets))
         # Leave a missing dynamic selector target absent so its writer sees a
         # real option change and materializes that option's complete roster.
-        padding_stop = widget_idx if port is not None and port.dynamic_options else widget_idx + 1
+        padding_stop = (
+            widget_idx
+            if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options
+            else widget_idx + 1
+        )
         for gap_idx in range(len(widgets), padding_stop):
             entry = entries[gap_idx] if gap_idx < len(entries) else None
             if entry is None:
                 widgets.append(None)
             elif entry.port is not None:
-                if entry.port.dynamic_options and _declared_dynamic_default(entry.port) is None:
+                if (
+                    entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and _declared_dynamic_default(entry.port) is None
+                ):
                     widgets.append(None)
                 else:
                     widgets.append(_widget_default(entry.port))
@@ -5461,7 +5451,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             else:
                 widgets.append(button_defaults.get(entry.name))
 
-    if port is not None and port.dynamic_options:
+    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
         return _write_dynamic_combo_selector(
             node,
             port,
@@ -5584,7 +5574,7 @@ def _unknown_dynamic_sub_warning(
         return None
     base = input_name.split(".", 1)[0]
     base_port = next((p for p in m.inputs if p.name == base), None)
-    if base_port is None or not base_port.is_dynamic_combo or base not in order:
+    if base_port is None or not _is_dynamic_combo_type(base_port.type) or base not in order:
         return None
     # A nested selector (`model.mode` for `model.mode.refine`) is the one to
     # name when the node's current outer option has it. Otherwise fall back to
@@ -5743,7 +5733,7 @@ def _dynamic_combo_default_values(
         default = _widget_default(sub)
         values.append(default)
         names.append(sub.name)
-        if sub.dynamic_options:
+        if _is_dynamic_combo_type(sub.type) and sub.dynamic_options:
             if depth < _MAX_DYNAMIC_COMBO_DEPTH:
                 nested_values, nested_names = _dynamic_combo_default_values(
                     sub.dynamic_options, default, sub.name, depth + 1

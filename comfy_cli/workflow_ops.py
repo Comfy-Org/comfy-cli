@@ -4978,7 +4978,7 @@ def _resolve_dynamic_link_input(
     node_type = str(node.get("type", ""))
     m = graph.node(node_type)
     port = next((p for p in m.inputs if p.name == selector), None) if m is not None and dot else None
-    if port is None or not port.dynamic_options:
+    if port is None or not port.dynamic_options or not _engine._is_dynamic_combo_type(port.type):
         return None
     values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
     saved_names = _engine.saved_widget_order(node, graph, node_type)
