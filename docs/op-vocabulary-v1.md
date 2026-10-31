@@ -1364,15 +1364,32 @@ The ledger records the lowercase SHA-256 hex digest of that string.
 
 ### 20.3 Bounds
 
-Canonicalization is bounded to **64 levels of nesting**, **1,048,576 entries per
-collection** and **33,554,432 approximate cost units**. These exist only so a
-hostile or runaway payload cannot pin a replica inside canonicalization; every
-ordinary op has to pass, because the digest is computed on every apply and not
-only on a reuse comparison. The first pair of bounds (4,096 entries / 262,144
-units) was tight enough to reject real edits: `clear` and `reset_doc` enumerate
-every node id in `removed_nodes`, a `delete_node` on a hub node enumerates every
-incident link, and a prompt value — or the `old` value an op captures — runs
-past 256K characters routinely.
+Canonicalization is bounded to **64 levels of nesting**, **4,096 entries per
+collection** and **262,144 approximate cost units**. These are not chosen here:
+they are mirrored exactly from `comfy-multi-player`'s `src/limits.ts` at
+`221b2b2e470c79afaface24b1edcb53cdafc8922` (`MAX_PAYLOAD_DEPTH`,
+`MAX_COLLECTION_ENTRIES`, `MAX_OP_COST`), cited by SHA rather than by branch.
+
+They exist only so a hostile or runaway payload cannot pin a replica inside
+canonicalization, and every ordinary op has to pass. "The digest is computed on
+every apply, not only on a reuse comparison" is true of **both** sides — CMP's
+A8 canonicalizer charges the whole envelope in `applyOps` before its dedupe gate
+— so a looser bound on one side rescues no edit. It only moves where an
+oversized op fails, from a local `malformed_op` to a `malformed_op` from the
+shared package after this side already accepted the payload. A comfy-cli-only
+budget was briefly carried here (1,048,576 / 33,554,432) and is withdrawn as
+exactly the cross-implementation validation drift one shared op package exists
+to prevent. If a real edit needs more room, widen it in `comfy-multi-player` and
+move this pin.
+
+Measured headroom at the shared values: the widest op this vocabulary mints from
+a real workflow fixture is ~1.6K cost units over 13 entries, under 1% of the
+budget. The three edits previously said to need a looser bound bind only well
+past anything observed — `clear`/`reset_doc` at more than 4,096 nodes in one
+document, a hub `delete_node` at more than 4,096 incident links on one node, and
+a widget string at 131,064 characters when the op also captures an equal-sized
+`old` (262,133 without one). The largest workflow in the comfy-cli fixtures has
+11 nodes.
 
 The asymmetric case is the one to keep in mind: `{value: 25}` followed by the
 same `op_id` carrying `{value: 30}` rejects, while the same payload with its keys

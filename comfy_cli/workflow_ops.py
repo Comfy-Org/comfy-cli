@@ -76,17 +76,24 @@ from comfy_cli.cql.engine import (
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
 
+# Mirrored EXACTLY from comfy-multi-player's `src/limits.ts` at
+# 221b2b2e470c79afaface24b1edcb53cdafc8922 (`MAX_PAYLOAD_DEPTH` 64,
+# `MAX_COLLECTION_ENTRIES` 4096, `MAX_OP_COST` 262_144) — cited by SHA, not by
+# branch, because the whole point is that the two implementations agree.
+#
+# These are not a local policy choice. CMP's A8 canonicalizer applies the same
+# budget to the whole envelope on EVERY apply, before its dedupe gate
+# (`applier.ts`: `applyOps` -> `opDigest` -> `canonicalJson` -> `opBoundsRefusal`),
+# so "the digest is computed on every apply" is equally true there and a looser
+# bound HERE rescues nothing — it only moves where an oversized op fails, from a
+# local `malformed_op` to a `malformed_op` from the shared package after
+# comfy-cli already accepted the payload. Re-deriving a second, looser budget is
+# exactly the validation drift the one shared op package exists to prevent. If a
+# real edit ever needs more room, widen it in comfy-multi-player and move this
+# pin; never widen it here alone.
 _MAX_OP_PAYLOAD_DEPTH = 64
-# Bounded only so a hostile or runaway payload cannot pin a replica inside
-# canonicalization. Every ORDINARY op has to pass, because the digest is now
-# computed on every apply rather than only on a reuse comparison, and the first
-# bounds (4,096 entries / 262,144 cost units) were tight enough to reject real
-# edits: `clear` / `reset_doc` enumerate every node id in `removed_nodes`, a
-# `delete_node` on a hub node enumerates every incident link, and a prompt
-# widget value (or the `old` value an op captures) routinely runs past 256K
-# characters.
-_MAX_OP_COLLECTION_ENTRIES = 1_048_576
-_MAX_OP_COST = 33_554_432
+_MAX_OP_COLLECTION_ENTRIES = 4096
+_MAX_OP_COST = 262_144
 
 #: Any surrogate code point in a Python ``str`` is a LONE surrogate — astral
 #: characters are single code points there — so matching the whole block is

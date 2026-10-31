@@ -163,16 +163,60 @@ def test_a_lone_surrogate_digests_instead_of_dying_on_the_utf8_encode():
     assert len(ops._op_digest(op)) == 64
 
 
-def test_ordinary_large_payloads_are_not_rejected_by_the_canonicalization_bounds():
-    """The bounds exist to stop a runaway payload, not to cap a real edit. The
-    first pair (4,096 entries / 262,144 cost units) rejected edits that used to
-    succeed: ``clear``/``reset_doc`` enumerate every node id, ``delete_node``
-    on a hub node enumerates every incident link, and a prompt value runs past
-    256K characters.
+def test_the_bounds_mirror_the_shared_op_package_values():
+    """These are MIRRORED from the shared op package, not chosen here.
+
+    ``comfy-multi-player``'s ``src/limits.ts`` at
+    ``221b2b2e470c79afaface24b1edcb53cdafc8922`` fixes ``MAX_PAYLOAD_DEPTH`` at
+    64, ``MAX_COLLECTION_ENTRIES`` at 4096 and ``MAX_OP_COST`` at 262144, and
+    its A8 canonicalizer charges the whole envelope on EVERY apply, before the
+    dedupe gate (``applyOps`` -> ``opDigest`` -> ``canonicalJson`` ->
+    ``opBoundsRefusal``). So a looser bound here cannot rescue an oversized
+    edit; it only lets comfy-cli accept a payload the shared package then
+    refuses as ``malformed_op``. Widen it there and move this pin — never here
+    alone.
     """
-    assert len(ops._op_digest({"removed_nodes": list(range(20_000))})) == 64
-    assert len(ops._op_digest({"removed_links": [[i, 1, 0, 2, 0, "T"] for i in range(10_000)]})) == 64
-    assert len(ops._op_digest({"value": "x" * 1_000_000})) == 64
+    assert ops._MAX_OP_PAYLOAD_DEPTH == 64
+    assert ops._MAX_OP_COLLECTION_ENTRIES == 4096
+    assert ops._MAX_OP_COST == 262_144
+
+
+def test_ordinary_large_payloads_are_not_rejected_by_the_canonicalization_bounds():
+    """The bounds exist to stop a runaway payload, not to cap a real edit, and
+    at the shared values they still clear every real edit by two orders of
+    magnitude. The widest op the frozen vocabulary mints from an actual
+    workflow fixture in this repo measures ~1.6K cost units and 13 entries.
+
+    The three edits cited as needing a looser bound are exercised here at sizes
+    far past anything observed: a ``clear`` enumerating a thousand node ids, a
+    hub ``delete_node`` enumerating a thousand incident links, and a 60K-char
+    prompt value whose op also captures an equal-sized ``old``.
+    """
+    assert len(ops._op_digest({"op": "clear", "removed_nodes": list(range(1_000))})) == 64
+    assert len(ops._op_digest({"op": "delete_node", "node_id": 7, "removed_links": list(range(1_000))})) == 64
+    assert len(ops._op_digest({"op": "set_widget", "value": "x" * 60_000, "old": "y" * 60_000})) == 64
+
+
+def test_the_shared_bounds_bind_only_past_any_observed_workflow():
+    """Where the mirrored bounds actually bite, pinned so the next reader does
+    not have to re-derive it before deciding whether an edit is really capped.
+
+    ``removed_nodes``/``removed_links`` are flat lists, so the ENTRY cap is what
+    binds them, at 4,097 — a workflow with more than 4,096 nodes, or a single
+    node carrying more than 4,096 incident links. The largest workflow in this
+    repo's fixtures has 11 nodes. A widget string is charged by length, so the
+    COST budget binds it, and an op that captures an equal-sized ``old`` halves
+    the headroom: 131,064 characters for the bare value/old pair, a little less
+    once the envelope's own fields are charged. That is a 128 KiB string in one
+    widget.
+    """
+    assert len(ops._op_digest({"removed_nodes": [0] * ops._MAX_OP_COLLECTION_ENTRIES})) == 64
+    with pytest.raises(ValueError, match="^malformed_op: array exceeds"):
+        ops._op_digest({"removed_nodes": [0] * (ops._MAX_OP_COLLECTION_ENTRIES + 1)})
+
+    assert len(ops._op_digest({"value": "x" * 131_064, "old": "y" * 131_064})) == 64
+    with pytest.raises(ValueError, match="cost budget$"):
+        ops._op_digest({"value": "x" * 131_065, "old": "y" * 131_065})
 
 
 def test_canonicalization_still_refuses_a_runaway_payload():
@@ -183,8 +227,10 @@ def test_canonicalization_still_refuses_a_runaway_payload():
         ops._op_digest({"v": nested})
     with pytest.raises(ValueError, match="^malformed_op: array exceeds"):
         ops._op_digest({"v": [0] * (ops._MAX_OP_COLLECTION_ENTRIES + 1)})
+    # Cost-only overflow: 64 entries is well inside the entry cap, so this
+    # reaches the cost branch rather than tripping the entry branch first.
     with pytest.raises(ValueError, match="cost budget$"):
-        ops._op_digest({"v": ["x" * 4096] * 16_384})
+        ops._op_digest({"v": ["x" * 4096] * 64})
     with pytest.raises(ValueError, match="^malformed_op: op payload is not canonical JSON:"):
         ops._op_digest({"v": object()})
 
