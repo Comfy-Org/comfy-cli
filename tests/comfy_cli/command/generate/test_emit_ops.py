@@ -304,7 +304,7 @@ def test_ops_fold_multiple_images_through_image_batch():
 
 def test_write_frontend_workflow_writes_frontend_and_returns_replace_batch(tmp_path):
     out = tmp_path / "workflow.json"
-    wf, ops = emit.write_frontend_workflow(
+    wf, ops, _skipped = emit.write_frontend_workflow(
         "nano-banana",
         {"prompt": "add sunglasses", "image": "cat.png"},
         out,
@@ -322,14 +322,52 @@ def test_write_frontend_workflow_writes_frontend_and_returns_replace_batch(tmp_p
 
 def test_write_frontend_workflow_emits_delete_half_over_a_previous_graph(tmp_path):
     out = tmp_path / "workflow.json"
-    _wf1, _ops1 = emit.write_frontend_workflow(
+    _wf1, _ops1, _s1 = emit.write_frontend_workflow(
         "flux-2", {"prompt": "first"}, out, _graph(), actor="agent", base_version=0
     )
-    _wf2, ops2 = emit.write_frontend_workflow(
+    _wf2, ops2, _s2 = emit.write_frontend_workflow(
         "nano-banana", {"prompt": "second", "image": "cat.png"}, out, _graph(), actor="agent", base_version=1
     )
     deletes = [o for o in ops2 if o["op"] == "delete_node"]
     assert deletes, "replacing an existing canvas must delete what it replaces, like templates fetch"
+
+
+def test_a_large_existing_file_skips_the_batch_instead_of_discarding_the_workflow(tmp_path):
+    """``replace_ops`` emits a ``delete_node`` per node ALREADY at the target
+    path, so a target holding a big workflow pushes the batch past the 1,024-op
+    bound even though the graph being written is tiny.
+
+    That is ordinary user data at a path the user named, not a bug in the built
+    graph. Raising turned it into an ``EmitError`` before the write, so nothing
+    was saved at all and the umbrella hint told the caller to check the model
+    name and its required inputs — for a failure neither of them caused.
+    ``templates fetch --emit-ops`` already degrades on the same condition, and
+    this now matches it: the file is written, ``ops`` is ``None``, and
+    ``ops_skipped`` says why. Red on the parent with ``EmitError``.
+    """
+    out = tmp_path / "workflow.json"
+    out.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": i + 1, "type": "LoadImage", "widgets_values": ["example.png"], "inputs": [], "outputs": []}
+                    for i in range(workflow_ops._MAX_OPS_PER_BATCH + 1)
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    wf, ops, ops_skipped = emit.write_frontend_workflow(
+        "flux-2", {"prompt": "first"}, out, _graph(), actor="agent", base_version=0
+    )
+
+    assert ops is None
+    assert "1024-op batch limit" in ops_skipped
+    # The workflow itself is good and is on disk, which is the deliverable.
+    assert json.loads(out.read_text()) == wf
+    assert isinstance(wf.get("nodes"), list) and wf["nodes"]
 
 
 def test_write_frontend_workflow_unsupported_model_still_raises(tmp_path):
@@ -454,7 +492,7 @@ def test_write_frontend_workflow_strips_apply_bookkeeping_before_write_and_batch
     next edit. Strip BEFORE ``replace_ops`` so the returned workflow, the
     file and the batch all describe the same document."""
     out = tmp_path / "workflow.json"
-    wf, ops = emit.write_frontend_workflow(
+    wf, ops, _skipped = emit.write_frontend_workflow(
         "nano-banana", {"prompt": "ORIGINAL", "image": "cat.png"}, out, _graph(), actor="agent", base_version=7
     )
     on_disk = json.loads(out.read_text())
@@ -502,7 +540,7 @@ def test_write_frontend_workflow_materializes_nano_banana_pro_from_the_nightly_i
     options for model — closest: gemini-2.5-flash-image" — because emit built
     GeminiImageNode. #921 routes that model to GeminiImage2Node; this replays
     that input through the same frontend (canvas-ops) path."""
-    wf, ops = emit.write_frontend_workflow(
+    wf, ops, _skipped = emit.write_frontend_workflow(
         "nano-banana",
         {
             "prompt": "Redraw this character as 16-bit pixel art.",

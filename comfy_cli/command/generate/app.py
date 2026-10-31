@@ -593,6 +593,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
             renderer = get_renderer()
             ops: list | None = None
+            ops_skipped: str | None = None
             from comfy_cli import workflow_ops
 
             try:
@@ -625,7 +626,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                         # is left without its terminal event.
                         _track_error("emit", e)
                         raise
-                    workflow, ops = emit.write_frontend_workflow(
+                    workflow, ops, ops_skipped = emit.write_frontend_workflow(
                         name,
                         values,
                         Path(emit_path).expanduser(),
@@ -691,6 +692,12 @@ def _generate(model: str, extra_args: list[str]) -> None:
             }
             if ops is not None:
                 payload["ops"] = ops
+            elif ops_skipped:
+                # Same envelope key `templates fetch --emit-ops` uses: the file
+                # was written, the batch was not minted, and this says why so a
+                # consumer can fall back to the whole-document path instead of
+                # guessing from a missing key.
+                payload["ops_skipped"] = ops_skipped
             renderer.emit(payload, command="generate emit-workflow")
             return
 
