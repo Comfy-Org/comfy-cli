@@ -174,6 +174,33 @@ def test_object_keys_sort_by_code_point_not_by_utf16_code_unit():
     assert ops._canonical_op({"\U0001f600": 1, "\uff00": 2}) == '{"\uff00":2,"\U0001f600":1}'
 
 
+@pytest.mark.parametrize(
+    ("payload", "name"),
+    [
+        ({1: "a", "1": "b"}, "1"),
+        ({True: "a", "true": "b"}, "true"),
+        ({None: "a", "null": "b"}, "null"),
+        ({1.5: "a", "1.5": "b"}, "1.5"),
+    ],
+)
+def test_keys_that_collide_after_coercion_are_refused(payload, name):
+    """Coercion is not injective, and a canonical form that is not well defined
+    is not canonical.
+
+    Emitting both members produces an object literal no JS object can hold, and
+    because the member sort is stable the digest of such a dict would depend on
+    INSERTION order — so the same logical payload could digest two ways and an
+    identical redelivery could be read as reuse. Refused rather than merged:
+    there is no intent here a merge would preserve. Only a programmatically
+    built op can reach it, since parsed JSON always has ``str`` keys.
+    """
+    with pytest.raises(ValueError, match=rf"^malformed_op: object keys .* both canonicalize to {name!r}"):
+        ops._canonical_op({"v": payload})
+
+    # The ordinary case is untouched: a `str` key that merely LOOKS numeric.
+    assert ops._canonical_op({"v": {name: "b"}}) == f'{{"v":{{"{name}":"b"}}}}'
+
+
 def test_a_float_widget_relayed_through_js_digests_the_same(graph):
     """A FLOAT op whose value is integral comes back from a JS relay as an int.
     Both spellings have to digest identically, or the identical redelivery is

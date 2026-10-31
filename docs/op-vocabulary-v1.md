@@ -1526,3 +1526,18 @@ because the budget only ever grows: every payload that exceeded at the end
 exceeds at the charge that crossed the line. The shared package already has this
 property for the same reason — `opBoundsRefusal` walks and charges the payload
 before `normalize` renders anything.
+
+### 22.3 Object keys that collide after coercion are `malformed_op`
+
+§20.1 renders an object key as "its string form, matching ECMAScript property
+coercion", and that coercion is not injective: `1` and `"1"`, `True` and
+`"true"`, `None` and `"null"`, `1.5` and `"1.5"` are distinct Python keys naming
+the same JS property. Emitting both members produced an object literal no JS
+object can hold, and because the member sort is stable the digest of such a dict
+then depended on INSERTION order — so the same logical payload could digest two
+ways and §20's whole "one `op_id`, one payload" guarantee had a hole in it.
+
+Such a pair is refused as `malformed_op` rather than merged: there is no intent
+in it a merge would preserve. Only a programmatically built op can reach the
+case at all, since parsed JSON always has `str` keys, so no wire payload
+changes behaviour.

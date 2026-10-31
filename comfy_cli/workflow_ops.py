@@ -290,9 +290,23 @@ def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
             raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
         _charge(budget, 4)
         members = []
+        # Coercion is not injective: `1` and `"1"`, `True` and `"true"`, `None`
+        # and `"null"` are distinct Python keys that name the same JS property.
+        # Emitting both produces an object literal no JS object can hold, and
+        # because `members.sort` is stable the digest of such a dict then depends
+        # on INSERTION order — so the canonical form would not be canonical.
+        # Only a programmatically built op can reach it (parsed JSON always has
+        # `str` keys), which is why it is refused rather than silently merged:
+        # there is no payload here whose intent a merge would preserve.
+        coerced: dict[str, Any] = {}
         for key in value:
             name = _canonical_key(key)
             _charge(budget, len(name))
+            if name in coerced:
+                raise ValueError(
+                    f"malformed_op: object keys {coerced[name]!r} and {key!r} both canonicalize to {name!r}"
+                )
+            coerced[name] = key
             members.append((name, value[key]))
         # Unicode code point order at every depth: Python sorts `str` that way.
         members.sort(key=lambda member: member[0])
