@@ -54,3 +54,65 @@ class TestLaunchResolvesWorkspacePython:
         mock_resolve.assert_called_once_with("/fake/workspace")
         mock_launch_comfyui.assert_called_once()
         assert mock_launch_comfyui.call_args[1]["python"] == "/resolved/python"
+
+
+class TestBackgroundLaunchReexec:
+    def test_reexecs_the_invoked_binary_not_path_comfy(self, tmp_path, monkeypatch):
+        """Regression test for #691: `comfy launch --background` must re-exec the
+        binary that is running. A bare "comfy" resolves through PATH and dies with
+        FileNotFoundError when comfy-cli was invoked by its own path from a venv
+        that isn't on PATH."""
+        invoked = tmp_path / "venv" / "bin" / "comfy"
+        invoked.parent.mkdir(parents=True)
+        invoked.write_text("#!/bin/sh" + chr(10))
+        monkeypatch.setattr(sys, "argv", [str(invoked), "launch", "--background"])
+        monkeypatch.setattr(launch.ConfigManager, "background", property(lambda self: None), raising=False)
+        monkeypatch.setattr(launch.utils, "is_running", lambda *a, **k: False)
+        monkeypatch.setattr(launch, "check_comfy_server_running", lambda port: False)
+        captured = {}
+
+        async def fake_monitor(cmd, *args, **kwargs):
+            captured["cmd"] = cmd
+            return None
+
+        monkeypatch.setattr(launch, "launch_and_monitor", fake_monitor)
+        monkeypatch.setattr(launch, "_hard_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+        with pytest.raises(SystemExit):
+            launch.background_launch(extra=[])
+
+        assert captured["cmd"][0] == str(invoked)
+
+    def test_module_invocation_falls_back_to_path(self, tmp_path, monkeypatch):
+        """`python -m comfy_cli` has a .py in argv[0]; PATH resolution stays the fallback."""
+        monkeypatch.setattr(sys, "argv", [str(tmp_path / "comfy_cli" / "__main__.py")])
+        monkeypatch.setattr(launch.ConfigManager, "background", property(lambda self: None), raising=False)
+        monkeypatch.setattr(launch.utils, "is_running", lambda *a, **k: False)
+        monkeypatch.setattr(launch, "check_comfy_server_running", lambda port: False)
+        monkeypatch.setattr(launch.shutil, "which", lambda name: "/found/on/path/comfy")
+        captured = {}
+
+        async def fake_monitor(cmd, *args, **kwargs):
+            captured["cmd"] = cmd
+            return None
+
+        monkeypatch.setattr(launch, "launch_and_monitor", fake_monitor)
+        monkeypatch.setattr(launch, "_hard_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+
+        with pytest.raises(SystemExit):
+            launch.background_launch(extra=[])
+
+        assert captured["cmd"][0] == "/found/on/path/comfy"
+
+
+class TestResolveComfyExec:
+    def test_keeps_the_invoked_console_script(self, tmp_path):
+        exe = tmp_path / "venv" / "bin" / "comfy"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh" + chr(10))
+        assert launch._resolve_comfy_exec(str(exe)) == str(exe)
+
+    def test_module_and_missing_paths_fall_back_to_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(launch.shutil, "which", lambda name: "/found/on/path/comfy")
+        assert launch._resolve_comfy_exec(str(tmp_path / "comfy_cli" / "__main__.py")) == "/found/on/path/comfy"
+        assert launch._resolve_comfy_exec(str(tmp_path / "nope")) == "/found/on/path/comfy"

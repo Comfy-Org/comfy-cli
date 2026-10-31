@@ -4,6 +4,7 @@ import asyncio
 import glob
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -442,6 +443,11 @@ def launch(
     # Update the recent workspace
     workspace_manager.set_recent_workspace(resolved_workspace)
 
+    # Anchor a relative argv[0] (`./venv/bin/comfy`) to the caller's cwd
+    # BEFORE the chdir below; after it, the relative path would silently
+    # resolve inside the workspace and the relaunch would still die (#691).
+    invoked = os.path.abspath(sys.argv[0])
+
     os.chdir(resolved_workspace)
     python = resolve_workspace_python(resolved_workspace)
 
@@ -451,12 +457,25 @@ def launch(
         extra = (extra or []) + manager_flags
 
     if background:
-        background_launch(extra, frontend_pr)
+        background_launch(extra, frontend_pr, invoked=invoked)
     else:
         launch_comfyui(extra, frontend_pr, python=python)
 
 
-def background_launch(extra, frontend_pr=None):
+def _resolve_comfy_exec(source: str) -> str:
+    """The binary to re-exec for a background relaunch.
+
+    ``source`` is the console-script path this process was started with
+    (``sys.argv[0]``); anything else — ``python -m comfy_cli``'s
+    ``__main__.py``, an unresolvable argv[0] — falls back to the old PATH
+    lookup, which is fine when ``comfy`` is on PATH by definition.
+    """
+    if os.path.isfile(source) and not source.endswith(".py"):
+        return os.path.abspath(source)
+    return shutil.which("comfy") or "comfy"
+
+
+def background_launch(extra, frontend_pr=None, invoked=None):
     renderer = get_renderer()
     config_background = ConfigManager().background
     if config_background is not None and utils.is_running(config_background[2]):
@@ -526,8 +545,13 @@ def background_launch(extra, frontend_pr=None):
             )
         raise typer.Exit(code=1)
 
+    # Re-exec the exact binary this process is running as. A bare "comfy"
+    # resolves through PATH, which raises FileNotFoundError when comfy-cli was
+    # invoked by its own path from a venv that isn't on PATH (GitHub #691).
+    comfy_exec = _resolve_comfy_exec(invoked or sys.argv[0])
+
     cmd = [
-        "comfy",
+        comfy_exec,
         f"--workspace={os.path.abspath(os.getcwd())}",
         "launch",
     ]
