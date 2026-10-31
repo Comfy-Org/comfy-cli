@@ -1847,7 +1847,12 @@ class Graph:
             return []
         return [e.name for e in _expand_widget_entries(m, [], first_key=True)]
 
-    def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:
+    def widget_order_for_node(
+        self,
+        class_name: str,
+        widgets_values: list[Any] | None,
+        saved_widget_names: list[str] | None = None,
+    ) -> list[str]:
         """Value-aware widget order: like ``widget_order`` but at each dynamic
         combo the current selector (read from its positional slot) picks an
         option whose widget-like sub-inputs are expanded in place as
@@ -1857,16 +1862,28 @@ class Graph:
         if m is None:
             return []
         defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
-        return [e.name for e in _expand_widget_entries(m, widgets_values or [], first_key=defaults)]
+        return [
+            e.name
+            for e in _expand_widget_entries(
+                m, widgets_values or [], first_key=defaults, saved_widget_names=saved_widget_names
+            )
+        ]
 
-    def editable_widget_names(self, class_name: str, widgets_values: list[Any] | None = None) -> list[str]:
+    def editable_widget_names(
+        self,
+        class_name: str,
+        widgets_values: list[Any] | None = None,
+        saved_widget_names: list[str] | None = None,
+    ) -> list[str]:
         """The subset of :meth:`widget_order_for_node` a write may target —
         schema-backed slots only, i.e. what ``comfy workflow slots`` advertises."""
         m = self._nodes.get(class_name)
         if m is None:
             return []
         defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
-        return _editable_widget_names(_expand_widget_entries(m, widgets_values or [], first_key=defaults))
+        return _editable_widget_names(
+            _expand_widget_entries(m, widgets_values or [], first_key=defaults, saved_widget_names=saved_widget_names)
+        )
 
     def frontend_injected_widget_names(self, class_name: str) -> list[str]:
         """Names in the widget order that the frontend injects with no schema
@@ -2567,8 +2584,18 @@ class Graph:
     # -- Workflow slot editing --
 
     def get_template_schema(self, template_id: str, workflow: dict) -> dict:
-        """Extract the slot manifest from a frontend-format workflow."""
-        return {"id": template_id, "slots": _extract_frontend_slots(workflow, self)}
+        """Extract the slot manifest from a frontend-format workflow.
+
+        ``warnings`` is present only when a node contributed no slots for a
+        reason a caller should surface — today, a saved widget layout the
+        current catalog cannot reconcile.
+        """
+        warnings: list[dict] = []
+        slots = _extract_frontend_slots(workflow, self, warnings)
+        schema = {"id": template_id, "slots": slots}
+        if warnings:
+            schema["warnings"] = warnings
+        return schema
 
     def apply_slots(self, workflow: dict, overrides: dict[str, Any]) -> tuple[dict, list[dict]]:
         """Apply slot overrides. Returns (modified_workflow, warnings)."""
@@ -4583,7 +4610,12 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
                 raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
         else:
             raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
-    entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
+    saved_names = saved_widget_order(node)
+    entries = _expand_widget_entries(
+        m,
+        source if isinstance(source, (list, dict)) else [],
+        saved_widget_names=saved_names,
+    )
     saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
     if saved_length is not None:
         while len(entries) > saved_length and entries[-1].frontend_injected:
@@ -4603,12 +4635,140 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
     return entries
 
 
+class SavedWidgetLayoutError(ValueError):
+    """A recorded positional widget layout cannot be reconciled safely."""
+
+
+def saved_sub_order(saved_widget_names: list[str] | None, parent: str, sub_names: list[str]) -> list[str] | None:
+    """Reorder a dynamic combo's selected sub-input names to the SAVED layout.
+
+    A ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option contributes its
+    sub-inputs as contiguous ``widgets_values`` slots right after the selector
+    (``dynamicComboWidget.updateWidgets`` -> ``addNodeInput``), and the saved
+    graph names them on its ``inputs[]`` entries, dotted and in that order. The
+    option's sub-input list in today's catalog is only today's layout, so an
+    option that has since gained a sub-input shifts every later slot.
+
+    ``saved_widget_names`` is the node's recorded widget order (the ``widget``
+    markers on ``inputs[]``). Returns the dotted children of ``parent`` in that
+    order, or ``None`` to mean "no usable saved layout, use the catalog order":
+
+    * nothing recorded for this parent;
+    * a recorded child the current option no longer declares, so the two
+      layouts disagree beyond repair from here;
+    * the recorded order already equals the catalog order.
+
+    Returns ONLY the saved names, in saved order. A sub the save did not name
+    owns no ``widgets_values`` slot, because the node the file describes did not
+    have that widget: emitting it anyway is what shifted every later slot. The
+    caller re-adds the subs that own no slot regardless (connection-only ones),
+    since dropping those would change the emitted input set.
+
+    A descendant of a NESTED selector (``model.variant.width`` under
+    ``model.variant``) is skipped rather than treated as a disagreement: it is
+    not this level's slot, and the recursive walk orders it with the nested
+    selector as its own parent. A repeated name is taken once, at its first
+    position.
+
+    Shared by the converter (``workflow_to_api._saved_sub_order``) and the
+    value-aware widget order an edit indexes by (``_expand_widget_entries``).
+    They resolved this independently and disagreed: on a pre-``auto_upscale``
+    Seedance save, ``set-widget seed`` wrote the slot holding ``seed``'s
+    ``control_after_generate`` marker and left the seed untouched.
+    """
+    if not saved_widget_names or not sub_names:
+        return None
+    declared: dict[str, int] = {}
+    for name in sub_names:
+        declared[name] = declared.get(name, 0) + 1
+    prefix = f"{parent}."
+    ordered: list[str] = []
+    seen: dict[str, int] = {}
+    for name in saved_widget_names:
+        if not isinstance(name, str) or not name.startswith(prefix):
+            continue
+        if name not in declared:
+            head = name[len(prefix) :].split(".", 1)[0]
+            direct_parent = f"{prefix}{head}"
+            if direct_parent in declared:
+                occurrence = seen.get(direct_parent, 0)
+                if occurrence < declared[direct_parent]:
+                    seen[direct_parent] = occurrence + 1
+                    ordered.append(direct_parent)
+                continue
+            raise SavedWidgetLayoutError(
+                f"saved widget {name!r} under {parent!r} is absent from the current catalog layout"
+            )
+        occurrence = seen.get(name, 0)
+        if occurrence >= declared[name]:
+            # A duplicated marker cannot create another positional occurrence.
+            continue
+        seen[name] = occurrence + 1
+        ordered.append(name)
+    if not ordered:
+        return None
+    return None if ordered == sub_names else ordered
+
+
+def saved_widget_order(
+    node: dict | None,
+    graph: Graph | None = None,
+    class_type: str | None = None,
+) -> list[str] | None:
+    """The widget names a SAVED node records on its ``inputs[]`` entries, in order.
+
+    ``widgets_values_form.order`` is the explicit A24 layout and wins when it
+    exactly describes a positional array. A name-keyed value object needs no
+    positional recovery, so input markers are ignored for it.
+
+    Legacy arrays may instead record their layout through ``inputs[].widget``.
+    When a graph is supplied, trust those markers only if expanding with them
+    accounts for the complete positional array. CLI-built nodes can acquire a
+    single marker when one widget is promoted or connected; treating that
+    partial marker set as a complete save layout drops unrelated combo slots.
+    """
+    if not isinstance(node, dict):
+        return None
+    values = node.get("widgets_values")
+    form = node.get("widgets_values_form")
+    if isinstance(values, list) and isinstance(form, dict):
+        order = form.get("order")
+        if (
+            set(form) == {"order"}
+            and isinstance(order, list)
+            and len(order) == len(values)
+            and all(isinstance(name, str) and name for name in order)
+            and len(order) == len(set(order))
+        ):
+            return list(order)
+        return None
+    if isinstance(values, dict):
+        return None
+    raw = node.get("inputs")
+    if not isinstance(raw, list):
+        return None
+    names = [
+        inp["name"] for inp in raw if isinstance(inp, dict) and inp.get("widget") and isinstance(inp.get("name"), str)
+    ]
+    if not names:
+        return None
+    if graph is not None and isinstance(values, list):
+        morphism = graph.node(class_type or str(node.get("type", "")))
+        if morphism is None:
+            return None
+        entries = _expand_widget_entries(morphism, values, saved_widget_names=names)
+        if len(entries) != len(values):
+            return None
+    return names
+
+
 def _expand_widget_entries(
     m: Morphism,
     widgets_values: list[Any] | dict[str, Any],
     *,
     first_key: bool = False,
     sub_links: list[Port] | None = None,
+    saved_widget_names: list[str] | None = None,
 ) -> list[_WidgetEntry]:
     """Flatten a node's widget ports into one entry per ``widgets_values`` slot.
 
@@ -4678,7 +4838,26 @@ def _expand_widget_entries(
             else:
                 default = _widget_default(port) if port.options.default is not None else None
                 selector = saved_value(name, idx, default)
-            for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):
+            subs = _dynamic_combo_sub_ports(port.dynamic_options, selector, name)
+            order = saved_sub_order(saved_widget_names, name, [s.name for s in subs])
+            if order is not None:
+                remaining = list(subs)
+                kept: list[Port] = []
+                for saved_name in order:
+                    index = next((i for i, sub in enumerate(remaining) if sub.name == saved_name), None)
+                    if index is not None:
+                        sub = remaining.pop(index)
+                        if sub.is_link:
+                            raise SavedWidgetLayoutError(
+                                f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                            )
+                        kept.append(sub)
+                # A sub the save never named owns no slot. Connection-only subs
+                # own none either way, so carrying them keeps `sub_links`
+                # complete without moving any positional index.
+                kept += [sub for sub in remaining if sub.is_link]
+                subs = kept
+            for sub in subs:
                 if sub.is_link:
                     if sub_links is not None:
                         sub_links.append(sub)
@@ -4700,7 +4879,7 @@ def _expand_widget_entries(
     return entries
 
 
-def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
+def _node_widget_slots(node: dict, prefix: str, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Surface a regular node's widget inputs as slots under ``prefix``.
 
     ``prefix`` is the addressable node path (``"3"`` at top level, ``"10/9"``
@@ -4708,6 +4887,15 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     about — including a dynamic combo's selector (enum = its option keys) and
     the selected option's ``<name>.<sub>`` sub-inputs. Returns ``[]`` for
     nodes whose type isn't in object_info.
+
+    A save whose recorded layout the current catalog cannot reconcile
+    (:class:`SavedWidgetLayoutError`) also yields ``[]``, with the reason
+    appended to ``warnings``. It owns no RESOLVABLE positions, and re-deriving
+    them from today's order is the misalignment reading the saved layout exists
+    to prevent — so this node advertises nothing rather than a guess. It is
+    reported per node instead of raised because a read must not lose the whole
+    graph to one stale node: every other node still lists, which is what lets a
+    caller see the offending node at all.
     """
     node_type = node.get("type", "")
     m = graph.node(node_type)
@@ -4716,7 +4904,21 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
-    for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
+    try:
+        saved_names = saved_widget_order(node, graph, node_type)
+        entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
+    except SavedWidgetLayoutError as exc:
+        if warnings is not None:
+            warnings.append(
+                {
+                    "code": "saved_widget_layout_unreadable",
+                    "message": f"node {prefix}: {exc}; its slots are not listed",
+                    "instance_id": prefix,
+                    "node_type": node_type,
+                }
+            )
+        return []
+    for idx, entry in enumerate(entries):
         if entry.port is None:  # control_after_generate / injected marker — not a slot
             continue
         current = widgets[idx] if idx < len(widgets) else None
@@ -4751,7 +4953,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     return slots
 
 
-def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
+def _extract_frontend_slots(workflow: dict, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Walk workflow nodes and extract tweakable slots.
 
     For every node we surface its widget inputs at ``<nodePath>.<input>``. When
@@ -4766,6 +4968,10 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
     at ``<instanceId>.<name>`` for backward compatibility, but the recursion
     means an agent is never stranded when those proxies are missing or dangle
     (fetched templates routinely point proxyWidgets at deleted interior ids).
+
+    ``warnings``, when given, collects the per-node reasons a node advertised no
+    slots at all (an unreconcilable saved layout). The walk continues past such
+    a node, so one stale save costs its own slots and nothing else.
     """
     defs_by_id = _subgraph_defs_by_id(workflow)
     slots: list[dict] = []
@@ -4791,7 +4997,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             node_type = node.get("type", "")
             sg = defs_by_id.get(node_type)
             if sg is None:
-                for slot in _node_widget_slots(node, node_path, graph):
+                for slot in _node_widget_slots(node, node_path, graph, warnings):
                     if (node_id, slot["name"]) not in exclude:
                         add(slot)
                 continue
@@ -4962,9 +5168,11 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     Returns the widget's current value (which may be ``None`` for a
     legitimately-null widget) or the module-level ``_UNRESOLVED`` sentinel when
     the proxy entry points at a missing/dangling interior node, when the widget
-    name is absent from the node's widget order, or when the index is past the
-    end of ``widgets_values``.  Callers must use ``is _UNRESOLVED`` to test for
-    the unresolvable case so that a real ``None`` value is preserved.
+    name is absent from the node's widget order, when the interior node's saved
+    widget layout cannot be reconciled with the current catalog, or when the
+    index is past the end of ``widgets_values``.  Callers must use
+    ``is _UNRESOLVED`` to test for the unresolvable case so that a real ``None``
+    value is preserved.
     """
     proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
     for entry in proxy:
@@ -4979,7 +5187,15 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
                 continue
             interior_class = inode.get("type", "")
             widgets = _widgets_as_positional(inode.get("widgets_values"), graph, interior_class)
-            order = graph.widget_order_for_node(interior_class, widgets)
+            try:
+                saved_names = saved_widget_order(inode, graph, interior_class)
+                order = graph.widget_order_for_node(interior_class, widgets, saved_names)
+            except SavedWidgetLayoutError:
+                # The save records a layout today's catalog cannot reconcile, so
+                # this proxy's slot position is unknown — which is exactly what
+                # the sentinel means. Reading it off the catalog order instead
+                # would hand back a neighbour's value.
+                return _UNRESOLVED
             try:
                 idx = order.index(name)
             except ValueError:
@@ -5016,7 +5232,9 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     # node before the target exists and its value has validated.
     widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     # The canvas would load a legacy button run into viewport/width/height, so
-    # an edit writes the node back in the frontend's four-widget shape.
+    # an edit writes the node back in the frontend's four-widget shape. This runs
+    # before the saved-layout read below because it can refuse the edit outright,
+    # and because everything downstream expands against this `widgets` list.
     legacy_widgets = widgets
     widgets = strip_legacy_load_3d_buttons(m, widgets)
     if widgets is not legacy_widgets:
@@ -5025,6 +5243,11 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         legacy_entries = _expand_widget_entries(m, legacy_widgets)
         if any(e.frontend_injected and e.name == input_name for e in legacy_entries):
             raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(legacy_entries))
+    # `widgets_values` is positional against the layout the node was SAVED with,
+    # which its `inputs[].widget` markers record. Expanding a dynamic combo's
+    # option from today's catalog instead put every slot after an added
+    # sub-input one place out, so the write landed on a neighbour.
+    saved_names = saved_widget_order(node, graph, node_type)
     if extend:
         button_defaults = dict(load_3d_button_slots(m, widgets))
 
@@ -5048,7 +5271,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # reinterprets it.
         materialized_selectors: set[str] = set()
         while True:
-            entries_now = _expand_widget_entries(m, widgets)
+            entries_now = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
             target_idx = next((idx for idx, entry in enumerate(entries_now) if entry.name == input_name), None)
             missing = next(
                 (
@@ -5080,10 +5303,18 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
                 selector.name,
             )
             widgets.extend(default_values)
-    order = graph.widget_order_for_node(node_type, widgets)
+    order = graph.widget_order_for_node(node_type, widgets, saved_names)
+    # Dynamic-group rows are the only place a REQUESTED name can occupy two
+    # positions, so the ambiguity refusal stays scoped to them. Outside a group
+    # the sole repeated name is the frontend's ``control_after_generate`` marker
+    # — a node with both ``seed`` and ``noise_seed`` carries two — and that name
+    # was editable (first occurrence) long before this saved-layout read, with
+    # no per-widget address to disambiguate it. Threading ``saved_names`` in
+    # cannot add a duplicate either: ``saved_sub_order`` caps every name at the
+    # number of occurrences the catalog declares.
     if has_group and order.count(input_name) > 1:
         raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
-    entries = _expand_widget_entries(m, widgets)
+    entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
     if any(e.frontend_injected and e.name == input_name for e in entries):
         raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
     if group_entries is not None:
@@ -5091,6 +5322,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     try:
         widget_idx = order.index(input_name)
     except ValueError:
+        if saved_names is not None:
+            current_entries = _expand_widget_entries(m, widgets)
+            current = next((entry for entry in current_entries if entry.name == input_name), None)
+            if current is not None and current.port is not None and not current.port.is_link:
+                raise ValueError(
+                    f"widget {input_name!r} exists in the current catalog but not in this saved workflow's layout; "
+                    "the save predates that widget, so no positional slot was guessed or written"
+                )
         warning = _unknown_dynamic_sub_warning(
             m,
             input_name,
@@ -5325,7 +5564,9 @@ def _write_dynamic_combo_selector(
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
     raw_values = node.get("widgets_values")
-    preserve_named = isinstance(raw_values, dict) and any(e.port and e.port.is_dynamic_group for e in entries)
+    preserve_named = isinstance(raw_values, dict) and (
+        "widgets_values_form" in node or any(e.port and e.port.is_dynamic_group for e in entries)
+    )
     if not any(_dynamic_combo_key_matches(value, key) for key in port.enum_values):
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
@@ -5364,6 +5605,7 @@ def _write_dynamic_combo_selector(
         }
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
+    _clear_dynamic_combo_widget_markers(node, input_name)
     if any(entry.port and entry.port.is_dynamic_group for entry in entries):
         if "widgets_values_form" in node:
             node["widgets_values_form"]["order"] = (
@@ -5389,6 +5631,28 @@ def _write_dynamic_combo_selector(
             ),
         }
     ]
+
+
+def _clear_dynamic_combo_widget_markers(node: dict, parent: str) -> None:
+    """Invalidate legacy markers after rebuilding a combo's positional roster.
+
+    The positional values have just been replaced with today's selected-option
+    layout. Keeping the previous option's dotted markers would make the next
+    read interpret those new values using the old layout. Clear only markers in
+    this selector's subtree and preserve the input objects themselves, including
+    any link/socket metadata. Do not fabricate replacement input objects: CLI-
+    built nodes intentionally keep value widgets out of ``inputs`` and adding
+    them changes their connectable socket surface. With no saved subtree marker,
+    subsequent reads use the same pinned catalog order that built the new array.
+    """
+    inputs = node.get("inputs")
+    if not isinstance(inputs, list) or any(not isinstance(item, dict) for item in inputs):
+        return
+    prefix = f"{parent}."
+    for item in inputs:
+        name = item.get("name")
+        if isinstance(name, str) and name.startswith(prefix):
+            item.pop("widget", None)
 
 
 def _dynamic_combo_default_values(

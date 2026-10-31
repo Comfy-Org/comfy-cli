@@ -3401,7 +3401,7 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
     monkeypatch.setattr(
         graph,
         "widget_order_for_node",
-        lambda nt, wv: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv),
+        lambda nt, wv, sn=None: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv, sn),
     )
 
     wf = {
