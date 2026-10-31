@@ -1257,13 +1257,11 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
             # before), but flagged as declared so validate can say "0 options
             # installed" instead of silently skipping the check.
             return first, bool(options), list(options), port_opts, True, []
-        # Dynamic combo declared WITHOUT the V3 type name: options are
-        # {key, inputs} dicts. It IS a widget (the frontend renders a selector
-        # plus key-dependent sub-widgets) and the selector's choices are the
-        # keys. Detected structurally rather than by type string so a node that
-        # ships the option tree under a plain COMBO still expands its
-        # sub-widgets; without this the sub-inputs vanish from widget_order and
-        # `set-widget <id>.<sub>` reports the widget as unknown.
+        # An option tree under a plain COMBO: {key, inputs} dicts. The frontend
+        # picks its dynamic-combo widget by type name alone, so this renders one
+        # selector and serializes one widgets_values slot, with no sub-widgets.
+        # The selector's choices are the keys; `dynamic_options` keeps the tree
+        # for inspection, and every expansion stays gated on the type name.
         # `enum_declared=True`: the choice list shipped, it just isn't scalar.
         if isinstance(options, list) and options and all(isinstance(v, dict) and "key" in v for v in options):
             return first, True, [v["key"] for v in options], port_opts, True, options
@@ -2216,7 +2214,7 @@ class Graph:
                 # made `images.extra` on a plain IMAGE input look declared, and
                 # a malformed link under that decoy hard-failed a prompt the
                 # server runs — it ignores every key a node does not declare.
-                declared_input = _node_declares_input(port_by_name, input_name)
+                declared_input = _node_declares_input(port_by_name, input_name, node_inputs)
 
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
@@ -4335,21 +4333,37 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
-def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+def _node_declares_input(port_by_name: dict[str, Port], key: Any, node_inputs: dict) -> bool:
     """Whether a node whose ports are ``port_by_name`` declares ``key``.
 
     The server reads the inputs a class DECLARES (``validate_inputs`` walks
     ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
-    decides whether a key can fail a prompt or be followed as an edge. Only an
-    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
-    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    decides whether a key can fail a prompt or be followed as an edge. Autogrow
+    groups and DynamicGroup controllers take generated dotted slots; a dynamic
+    combo takes only the dotted inputs exposed by its current selection. A
+    stale key from another selection and a dotted suffix on an ordinary port
+    are not declared.
     """
     if not isinstance(key, str):
         return False
     if key in port_by_name:
         return not port_by_name[key].is_dynamic_group
     base = port_by_name.get(key.split(".", 1)[0])
-    return base is not None and (base.is_autogrow or base.is_dynamic_combo or base.is_dynamic_group)
+    if base is None:
+        return False
+    if base.is_autogrow or base.is_dynamic_group:
+        return True
+    if not base.is_dynamic_combo:
+        return False
+    # Only a selection that RESOLVED can call a dotted key stale. When the
+    # selection is unknowable — link-valued, absent-but-required, an options
+    # container this parser can't read, or the depth cap — the server's
+    # expansion is unknown, so reading the key as undeclared would demote its
+    # real dangling_edge/bad_link_shape error to a warning and stop
+    # _declared_link_targets following the edge, which can drop a feeder node
+    # out of `reachable` and hide a cycle. Stay conservative there.
+    port, unresolved = _resolve_dotted_slot(port_by_name, key, node_inputs)
+    return unresolved or port is not None
 
 
 def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
@@ -4373,11 +4387,32 @@ def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
     port_by_name = {p.name: p for p in m.inputs} if m is not None else None
     targets: list[str] = []
     for key, value in node_inputs.items():
-        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+        if port_by_name is not None and not _node_declares_input(port_by_name, key, node_inputs):
             continue
         if isinstance(value, list) and len(value) == 2:
             targets.append(str(value[0]))
     return targets
+
+
+def _resolve_dotted_slot(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> tuple[Port | None, bool]:
+    """``(port, unresolved)`` for a dotted wire key.
+
+    ``unresolved`` is True only when a dynamic combo on the path gave no basis
+    to judge the key at all — the same four cases
+    :func:`_check_dynamic_combo_input` reports as unresolved prefixes (a
+    link-valued selector, an unreadable or newer ``options`` shape, a resolved
+    option with no ``inputs`` dict, and the depth cap), plus a required
+    selector that is absent. It is False for a key the current schema and
+    selections genuinely do NOT declare, which is the case a caller may treat
+    as stale.
+    """
+    base, _, leaf = dotted.partition(".")
+    if not leaf:
+        return None, False
+    port = port_by_name.get(base)
+    if port is None:
+        return None, False
+    return _resolve_dotted_under(port, dotted, node_inputs, 0)
 
 
 def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:
@@ -4389,22 +4424,24 @@ def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: d
     group is nested under a dynamic combo's selected option
     (``model.images.image0``, ``model.mode.budget``).
 
-    Returns ``None`` when the key resolves to nothing the CURRENT schema and
-    selections declare: an unknown group, a sub-key left over from another
-    selection, a dotted suffix on an ordinary port, or a template with no
-    element type. The server ignores all of those, so none may hard-fail.
+    Returns ``None`` when the key resolves to no port to type-check: an unknown
+    group, a sub-key left over from another selection, a dotted suffix on an
+    ordinary port, or a dynamic-combo selection that could not be resolved at
+    all. The server ignores the first three, so none may hard-fail; a caller
+    that must tell the resolvable cases apart from the unresolvable one uses
+    :func:`_resolve_dotted_slot`.
+
+    An autogrow slot whose group declares no element type is NOT one of those
+    cases: it comes back as a ``"*"``-typed port, so the slot keeps its
+    structural link checks and accepts any source type.
     """
-    base, _, leaf = dotted.partition(".")
-    if not leaf:
-        return None
-    port = port_by_name.get(base)
-    if port is None:
-        return None
-    return _resolve_dotted_under(port, dotted, node_inputs, 0)
+    return _resolve_dotted_slot(port_by_name, dotted, node_inputs)[0]
 
 
-def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> Port | None:
+def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> tuple[Port | None, bool]:
     """Walk ``dotted`` down from ``port``, whose name is a prefix of it.
+
+    Returns ``(port, unresolved)`` as :func:`_resolve_dotted_slot` defines them.
 
     The FULL dotted path is carried the whole way: a nested selector is read
     from ``inputs`` under its own full name (``model.mode``), and a nested
@@ -4419,27 +4456,57 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
             try:
                 fields = _dynamic_group_fields(port, f"{port.name}.{index}")
             except DynamicGroupBindingError:
-                return None
-            return next((p for p in fields if p.name == dotted), None)
-        return None
+                return None, False
+            return next((p for p in fields if p.name == dotted), None), False
+        return None, False
     if port.is_autogrow:
         element = port.autogrow_element_type
         if not element:
-            return None
+            # Older/partial catalogs can omit the element schema while still
+            # declaring the generated slot. Preserve structural link checks
+            # and accept any source type, matching the validator's historical
+            # behavior for these otherwise-untyped slots.
+            element = "*"
         # A slot carries the group's element type; the slot NAME is checked
         # elsewhere (autogrow_unknown_slot), so an odd name still gets the
         # type comparison the server will make.
-        return replace(port, name=dotted, type=element)
+        return replace(port, name=dotted, type=element), False
     if port.is_dynamic_combo:
+        # Each early return below mirrors one `unresolved` exit of
+        # _check_dynamic_combo_input, so the two agree about when a selection
+        # is merely UNMATCHED (stale sub-keys, judgeable) and when it is
+        # UNKNOWABLE (nothing can be concluded about the sub-keys at all).
         if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
-            return None
-        selector = node_inputs.get(port.name)
-        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, port.name):
+            return None, True
+        if port.name not in node_inputs:
+            # A required selector that is absent fails at execution and the
+            # expansion is a no-op whose shape we cannot name; an OPTIONAL one
+            # definitely did not expand, so its dotted keys really are
+            # undeclared. Same split _check_dynamic_combo_input makes.
+            return None, port.required
+        selector = node_inputs[port.name]
+        if isinstance(selector, list) and len(selector) == 2:
+            # Wired as a link: which option expands is known only at execution.
+            return None, True
+        if not port.dynamic_options:
+            return None, True
+        option = next(
+            (o for o in port.dynamic_options if _dynamic_combo_key_matches(o.get("key"), selector)),
+            None,
+        )
+        if option is None or not isinstance(option.get("inputs"), dict):
+            # No option matched the selection, or the matched one carries no
+            # readable sub-input schema — either way there is no sub-input set
+            # to check this key against.
+            return None, True
+        for sub in _dynamic_combo_option_ports(option, port.name):
             if sub.name == dotted:
-                return sub
+                return sub, False
             if dotted.startswith(f"{sub.name}."):
                 return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1)
-    return None
+        # The selection resolved and does not declare this key: genuinely stale.
+        return None, False
+    return None, False
 
 
 def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
@@ -5406,9 +5473,6 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             fatal = next((finding for finding in warnings if finding.get("severity") == SEVERITY_ERROR), None)
             if fatal:
                 raise ValueError(fatal["message"])
-
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
     # A node that declares its own ``widgets_values_form`` (schema A24) is laid
