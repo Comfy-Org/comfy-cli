@@ -1473,7 +1473,7 @@ this document by SHA move the SHA together with their comfy-cli pin.
 
 ## 22. Amendment v1.13 — 2026-10-31 (v1.11 corrections: canonical form and ledger edges)
 
-Five corrections to Amendment v1.11, all found by review of the implementation
+Six corrections to Amendment v1.11, all found by review of the implementation
 rather than by a failure in the field. None of them re-scopes an op kind and none
 needs a change in `comfy-multi-player`; each is comfy-cli coming into line with
 what v1.11 and CMP A8 already say.
