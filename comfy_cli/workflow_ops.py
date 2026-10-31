@@ -3446,18 +3446,25 @@ def apply_specs(
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases).
 
-    :raises ValueError: the batch is longer than ``_MAX_OPS_PER_BATCH``.
+    :raises ValueError: the batch mints more than ``_MAX_OPS_PER_BATCH`` ops.
     """
-    # FIRST, before the `at` coercion and before `layout.assign_positions` — both
-    # of which are per-spec work — so the refusal really is "before any op was
-    # processed" the way the shared package's is. This is the batch counterpart
-    # of the three payload bounds: `applyOps` refuses an over-long batch WHOLE,
-    # so accepting it here applies the edit locally and has every op in it
-    # rejected downstream. §4's abort-remainder contract has nothing to say about
-    # that case — it describes which ops in a batch apply, and here none do.
+    # The bound is on the OPS, and one spec is not one op — `set_dynamic_group_rows`
+    # expands into a row-count write plus one `set_widget` per row field. So this
+    # entry check is the cheap half: a spec list already longer than the bound
+    # cannot mint a batch within it (every spec mints at least one op), and
+    # catching it here refuses before the `at` coercion and before
+    # `layout.assign_positions`, both of which are per-spec work. The half that
+    # actually binds is the `len(ops)` check after the loop below; a batch of
+    # 1,000 specs that expands past 1,024 ops passes this one and is caught there.
+    #
+    # Either way the refusal is whole-batch, because `applyOps` refuses an
+    # over-long batch WHOLE: accepting it here applies the edit locally and has
+    # every op in it rejected downstream. §4's abort-remainder contract has
+    # nothing to say about that case — it describes which ops in a batch apply,
+    # and here none do.
     if len(specs) > _MAX_OPS_PER_BATCH:
         raise ValueError(
-            f"malformed_op: batch of {len(specs)} ops exceeds the {_MAX_OPS_PER_BATCH}-op limit; "
+            f"malformed_op: batch of {len(specs)} specs exceeds the {_MAX_OPS_PER_BATCH}-op limit; "
             "rejected before any op was processed"
         )
     # Parse a string `at` up front: layout treats a pinned `at` as an obstacle
@@ -3610,6 +3617,17 @@ def apply_specs(
                     )
                 input_targets.add(encoded_target)
             ops.append(op)
+        # The entry check above counted specs. This one counts what they
+        # actually minted, which is what `applyOps` bounds: a batch of 1,000
+        # specs carrying a few `set_dynamic_group_rows` clears the entry check
+        # and still returns more than 1,024 ops, and the shared applier then
+        # refuses every one of them as `malformed_op` after comfy-cli has
+        # already written the document. Inside the `try` so the discard rehint
+        # below records `spec_index`/`applied_count` like every other refusal
+        # in this batch, and `applied_count` is 0 — the caller discards the
+        # whole batch, so nothing this loop wrote survives.
+        if len(ops) > _MAX_OPS_PER_BATCH:
+            raise ValueError(f"malformed_op: batch mints {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op limit")
     except (NotBatchableError, DeprecatedNodeType):
         # Already carries a registered code and a hint that says what to do
         # instead — don't wrap it into a generic hint.

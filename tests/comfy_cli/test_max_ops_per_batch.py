@@ -17,6 +17,7 @@ bounds exist to close one level down.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,31 @@ def _add_node_specs(count: int) -> list[dict]:
     return [{"op": "add_node", "class_type": "KSampler"} for _ in range(count)]
 
 
+_DYNAMIC_GROUP_FIXTURE = json.loads((_FIXTURES / "dynamic_group.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def graph_with_group() -> Graph:
+    """A catalog carrying a DynamicGroup class, so a batch can be built whose op
+    count is larger than its spec count."""
+    return Graph.from_object_info(copy.deepcopy(_DYNAMIC_GROUP_FIXTURE["object_info"]))
+
+
+def _group_specs(pairs: int) -> list[dict]:
+    """``pairs`` × (one ``add_node``, one three-row ``set_dynamic_group_rows``).
+
+    Each pair is 2 specs and 11 ops — 1 for the node, then the row count plus
+    three row fields (``lora_name``, ``strength``, ``enabled``) × 3 rows. A
+    group may only be written once per batch, hence one fresh node per write.
+    """
+    rows = [{"lora_name": "A.safetensors", "strength": 1.0} for _ in range(3)]
+    specs: list[dict] = []
+    for i in range(pairs):
+        specs.append({"op": "add_node", "class_type": "DevToolsNodeWithDynamicGroup", "as": f"n{i}"})
+        specs.append({"op": "set_dynamic_group_rows", "node": f"$n{i}", "group": "loras", "rows": rows})
+    return specs
+
+
 # --- the constant is mirrored, not chosen here ------------------------------
 
 
@@ -95,12 +121,37 @@ def test_apply_specs_accepts_a_batch_of_exactly_the_limit(graph):
 
 def test_apply_specs_refuses_one_op_past_the_limit(graph):
     workflow = {"nodes": [], "links": []}
-    with pytest.raises(ValueError, match=r"^malformed_op: batch of 1025 ops exceeds the 1024-op limit"):
+    with pytest.raises(ValueError, match=r"^malformed_op: batch of 1025 specs exceeds the 1024-op limit"):
         ops.apply_specs(workflow, graph, _add_node_specs(1025))
     # "Rejected before any op was processed", the same promise the shared
     # package's message makes: the document the caller handed in is untouched,
     # including by the position planner that runs on every spec.
     assert workflow == {"nodes": [], "links": []}
+
+
+def test_apply_specs_counts_the_ops_the_specs_expand_into_not_the_specs(graph_with_group):
+    """One spec is not one op, so the entry check on ``len(specs)`` is only the
+    cheap half of the bound.
+
+    ``set_dynamic_group_rows`` expands into a row-count write plus one
+    ``set_widget`` per row field, so 200 specs here mint 1,100 ops: comfortably
+    past the entry check and comfortably past the bound. Without the second
+    check this batch applies locally and is handed to a caller, and ``applyOps``
+    then refuses every op in it as ``malformed_op`` — the mint-then-refuse shape
+    this bound exists to close. Red on the parent, which returns 1,100 ops.
+    """
+    with pytest.raises(ValueError, match=r"^malformed_op: batch mints 1100 ops, more than the 1024-op limit") as exc:
+        ops.apply_specs({"nodes": [], "links": []}, graph_with_group, _group_specs(100))
+    # Refused like every other mid-batch failure, so a summary-receipt caller
+    # reads the same structured position and the same "nothing was written".
+    assert exc.value.applied_count == 0
+
+
+def test_a_batch_whose_expansion_stays_within_the_bound_still_applies(graph_with_group):
+    """The complement of the test above: the second check bounds the expansion,
+    it does not refuse an expanding batch as such."""
+    _workflow, minted, _aliases = ops.apply_specs({"nodes": [], "links": []}, graph_with_group, _group_specs(90))
+    assert len(minted) == 990
 
 
 def test_replace_ops_mints_a_batch_of_exactly_the_limit():

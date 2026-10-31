@@ -1422,10 +1422,16 @@ here alone.
 
 Where it is enforced, and the two different refusals:
 
-* **`apply_specs`** raises `malformed_op: batch of <n> ops exceeds the 1024-op
-  limit; rejected before any op was processed`, checked on entry — before the
-  `at` coercion and before the position planner, both of which are per-spec
-  work, so the message's promise is literally true.
+* **`apply_specs`** checks it TWICE, because one spec is not one op. On entry
+  it raises `malformed_op: batch of <n> specs exceeds the 1024-op limit;
+  rejected before any op was processed` — before the `at` coercion and before
+  the position planner, both of which are per-spec work, so the message's
+  promise is literally true. That check cannot be the whole bound:
+  `set_dynamic_group_rows` expands into a row-count write plus one `set_widget`
+  per row field, so a spec list within the bound can still mint a batch
+  past it. After the loop, and still inside the batch's discard handler, it
+  raises `malformed_op: batch mints <n> ops, more than the 1024-op limit`;
+  `applied_count` is 0 there like every other mid-batch refusal.
 * **`replace_ops`** raises **`NotExpressibleError`**, the existing "there is no
   legal batch for this graph" signal, rather than a bare `ValueError`. Its two
   reasons are now *structure no frozen kind can create* and *a translation
