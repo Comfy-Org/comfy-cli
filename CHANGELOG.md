@@ -19,8 +19,15 @@ history.
 
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
-  On Comfy Desktop that is the shared library, not the install's `models/`. With
-  no local server, or one that doesn't answer, it keeps the workspace path.
+  On Comfy Desktop that is the shared library, not the install's `models/`.
+  "The running ComfyUI" is whichever local server the CLI is already pointed at
+  (`COMFY_LOCAL_URL`, a `comfy launch --background` server, else
+  `127.0.0.1:8188`), and the folder is used only when it already exists on this
+  machine — so a server in Docker, WSL, or behind `ssh -L` reporting paths from
+  its own filesystem changes nothing. An explicit `--workspace` always wins. In
+  every other case the workspace path is kept, as before. `comfy model list` and
+  `comfy model remove` still read `<workspace>/models`, so a model saved into a
+  shared library is not listed by them.
 
 - `comfy validate` no longer lets a dotted key left over from another
   dynamic-combo selection close a false dependency cycle or pull a pruned node

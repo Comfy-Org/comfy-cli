@@ -7,6 +7,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from typing import Annotated
@@ -30,7 +31,7 @@ from comfy_cli.file_utils import (
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.output.sanitize import sanitize_markup
-from comfy_cli.workspace_manager import WorkspaceManager
+from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,12 @@ workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
 
 _MAX_FOLDER_PATHS_BYTES = 1 << 20
+
+# Per-socket inactivity timeout and the wall-clock ceiling on the whole
+# model-folder lookup. The second is not redundant: see
+# :func:`_folder_paths_within_deadline`.
+_FOLDER_PATHS_SOCKET_TIMEOUT_S = 2.0
+_FOLDER_PATHS_DEADLINE_S = 3.0
 
 _CIVITAI_SUBDOMAIN_SUFFIXES = tuple(f".{h}" for h in constants.CIVITAI_ALLOWED_HOSTS)
 
@@ -57,6 +64,115 @@ def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
 
 
+def _usable_model_folder(folder: object) -> str | None:
+    """``folder`` as a directory we are willing to save a model into, or None.
+
+    The value is whatever process is listening on the loopback port chose to
+    return, so it is checked rather than trusted, and every check fails closed
+    onto the workspace path:
+
+    * **It must be a non-empty absolute path.** A relative folder would be a
+      guess at the server's working directory, and `os.path.join` would resolve
+      it against *ours* instead.
+    * **A UNC or device path is refused before any filesystem call.** On Windows
+      ``\\\\host\\share\\loras`` satisfies ``isabs``, and merely stat-ing it opens an
+      outbound SMB connection that can hand the user's NTLM credentials to
+      whoever named the host; ``\\\\?\\`` / ``\\\\.\\`` device paths are refused
+      alongside it. The check is on the raw string, since the filesystem call is
+      itself the thing being avoided.
+    * **It must already exist as a directory.** This is the load-bearing one,
+      for two separate reasons. A loopback reply is not proof of a shared
+      filesystem: ComfyUI in Docker (``-p 8188:8188``), behind ``ssh -L``, or in
+      WSL answers on 127.0.0.1 and reports *its* paths
+      (``/root/ComfyUI/models/loras``) — which on this machine are absent, so the
+      download would fail on ``mkdir`` or, running as root, land in a host
+      directory the server never scans while the CLI claimed otherwise. And
+      requiring the directory to exist means a responder that is not ComfyUI at
+      all cannot make the CLI *create* a tree at a path of its choosing.
+
+    Residual, stated rather than closed: an existing directory is still accepted
+    when it is a symlink, and a process that controls the loopback port can name
+    any existing directory the user can write to. Narrowing further would need a
+    notion of "a known model root", which Desktop's user-chosen shared library
+    does not have. Both require something already listening on the port the CLI
+    was pointed at.
+    """
+    if not isinstance(folder, str) or not folder or not os.path.isabs(folder):
+        return None
+    if folder[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return None
+    normalized = os.path.normpath(folder)
+    return normalized if os.path.isdir(normalized) else None
+
+
+def _folder_paths_body() -> dict | list | None:
+    """``/internal/folder_paths`` from the ComfyUI on this machine, or None.
+
+    The Target is built with :func:`target.local_target` rather than resolved
+    through ``where``: this is a filesystem question about the local server, and
+    ``resolve_target(where=None, ...)`` answers it with the *cloud* target
+    whenever a session, ``COMFY_WHERE`` or ``where_default`` says cloud — which
+    both skips the server we meant to ask and spends a credential refresh (and,
+    on a fatal refresh, the stored session) on a Target that is then discarded.
+    """
+    from comfy_cli.cql._net import is_loopback_host
+    from comfy_cli.env_checker import _unbracket_host
+    from comfy_cli.host_port import resolve_host_port
+    from comfy_cli.http import request_json
+    from comfy_cli.target import local_target
+
+    # `resolve_host_port` brackets IPv6 literals for URL use; `local_target`
+    # re-brackets idempotently and `Target.host` is documented as the raw
+    # literal, so the bare form is what goes in.
+    host, port = resolve_host_port(None, None)
+    bare_host = _unbracket_host(host)
+    if not is_loopback_host(bare_host):
+        return None
+    target = local_target(bare_host, port)
+    _, body = request_json(
+        target.url("internal", "folder_paths"),
+        target,
+        timeout=_FOLDER_PATHS_SOCKET_TIMEOUT_S,
+        max_bytes=_MAX_FOLDER_PATHS_BYTES,
+    )
+    return body
+
+
+def _folder_paths_within_deadline() -> dict | list | None:
+    """:func:`_folder_paths_body` under a wall-clock cap, or None.
+
+    ``request_json``'s ``timeout`` is urllib's *per-socket-operation* inactivity
+    timeout, not a deadline: a listener that dribbles a byte inside every window
+    resets it indefinitely, so an optional lookup — and every typed download
+    waiting on it — could stall for far longer than the budget suggests. The
+    request therefore runs on a daemon thread and the caller stops waiting at
+    :data:`_FOLDER_PATHS_DEADLINE_S` no matter what the socket is doing.
+
+    Abandoning that thread is safe: it writes nothing, owns nothing but its own
+    socket, is still bounded by the per-socket timeout, and being a daemon never
+    delays interpreter exit.
+    """
+    answered: list[dict | list | None] = []
+    failed: list[Exception] = []
+
+    def run() -> None:
+        try:
+            answered.append(_folder_paths_body())
+        except Exception as e:  # noqa: BLE001 - optional lookup; the workspace path still works
+            failed.append(e)
+
+    worker = threading.Thread(target=run, name="comfy-folder-paths", daemon=True)
+    worker.start()
+    worker.join(_FOLDER_PATHS_DEADLINE_S)
+    if failed:
+        logger.debug("could not ask the local ComfyUI for its model folders: %s", failed[0])
+        return None
+    if not answered:
+        logger.debug("the local ComfyUI did not answer with its model folders within %ss", _FOLDER_PATHS_DEADLINE_S)
+        return None
+    return answered[0]
+
+
 def _server_model_folder(kind: str) -> str | None:
     """The folder the local ComfyUI saves ``kind`` to by default, or None if it won't say.
 
@@ -64,28 +180,23 @@ def _server_model_folder(kind: str) -> str | None:
     so `<workspace>/models/<kind>` can be a folder the server never scans.
     The server lists its default folder first. A download never fails over this: any
     failure, including no server or one too old for the route, keeps the workspace path.
+
+    An explicit `--workspace` wins outright and the server is not asked at all.
+    Nothing ties the probed server to the selected workspace — it comes from
+    `--host`/`--port`, `COMFY_LOCAL_URL`, the recorded background server or the
+    default `127.0.0.1:8188` — so with another install serving (Desktop, a second
+    workspace's server), honoring its folder would silently override the one
+    place the user said where to put the file.
     """
     if not kind:
         return None
-    from comfy_cli.cql._net import is_loopback_host
-    from comfy_cli.host_port import resolve_host_port
-    from comfy_cli.http import request_json
-    from comfy_cli.target import resolve_target
-
-    try:
-        host, port = resolve_host_port(None, None)
-        target = resolve_target(where=None, host=host, port=port)
-        if target.kind != "local" or not is_loopback_host((target.host or "").strip("[]")):
-            return None
-        _, body = request_json(
-            target.url("internal", "folder_paths"), target, timeout=2.0, max_bytes=_MAX_FOLDER_PATHS_BYTES
-        )
-    except Exception as e:  # noqa: BLE001 - optional lookup; the workspace path still works
-        logger.debug("could not ask the local ComfyUI for its model folders: %s", e)
+    if workspace_manager.workspace_type is WorkspaceType.SPECIFIED:
+        logger.debug("--workspace was given explicitly; not asking a local server where to save")
         return None
+    body = _folder_paths_within_deadline()
     folders = body.get(kind) if isinstance(body, dict) else None
     first = folders[0] if isinstance(folders, list) and folders else None
-    return first if isinstance(first, str) and os.path.isabs(first) else None
+    return _usable_model_folder(first)
 
 
 def _default_destination(model_path: str, basemodel: str) -> str:
@@ -94,7 +205,11 @@ def _default_destination(model_path: str, basemodel: str) -> str:
     if folder is None:
         return os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     destination = os.path.join(folder, basemodel)
-    print(f"Saving to {escape(destination)}, the folder the running ComfyUI scans for {escape(model_path)}")
+    # `sanitize_markup`, not `escape`: the folder is server-supplied text, so it
+    # needs the control-character strip as well as the markup escape — `escape`
+    # alone leaves an ANSI/OSC sequence intact to repaint the terminal and spoof
+    # the very line that is reporting where the file went.
+    print(f"Saving to {sanitize_markup(destination)}, the folder the running ComfyUI scans for {escape(model_path)}")
     return destination
 
 
@@ -439,6 +554,16 @@ def download(
         ),
     ] = False,
 ):
+    """Download a model file, resolving where to put it before any bytes move.
+
+    `--relative-path` is honored verbatim (only `expanduser`-ed) and is the one
+    way to name the destination exactly. Without it, a typed CivitAI or Hugging
+    Face download asks :func:`_default_destination` — which prefers the folder
+    the running local ComfyUI scans for that model type and otherwise keeps
+    `<workspace>/models/<kind>/<basemodel>`. Everything after that (the
+    in-flight scan, the destination claim, foreground vs `--background`) is
+    keyed on the resolved destination, so it is settled first.
+    """
     if relative_path is not None:
         relative_path = os.path.expanduser(relative_path)
 
@@ -722,9 +847,13 @@ def download(
                         details={"url": _scrub_url(url), "path": str(local_filepath)},
                     ) from None
 
-            print(f"Model downloaded successfully to: {escape(str(output_path))}")
+            # `sanitize_markup`, not `escape`: with no `--relative-path` the
+            # destination can be a folder the local server named, so the path is
+            # partly server-supplied text and needs the control-character strip
+            # too. `escape` alone leaves an ANSI/OSC sequence intact.
+            print(f"Model downloaded successfully to: {sanitize_markup(output_path)}")
         else:
-            print(f"Start downloading URL: {escape(_scrub_url(url))} into {escape(str(local_filepath))}")
+            print(f"Start downloading URL: {escape(_scrub_url(url))} into {sanitize_markup(local_filepath)}")
             try:
                 download_file(
                     url,
