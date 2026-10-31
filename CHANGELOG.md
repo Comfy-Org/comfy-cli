@@ -124,7 +124,10 @@ history.
   `latest_version` are read back from it by name; when exactly one record by
   that name with matching content can't be read back they are null, with a
   `workflow_record_unresolved` warning, and the save still succeeds. `--json`
-  also carries `filename`, `size` and `modified`. A same-name save replaces the
+  also carries `filename`, `size` and `modified`. `saved_file_id` identifies
+  the actual userdata file, separately from `workflow_id`; it is null with
+  `saved_file_identity_unavailable` when the server write receipt cannot
+  certify it. A same-name save replaces the
   workflow, as the Cloud editor's Save does, where it used to add a second
   record with the same name; the new `--no-overwrite` refuses it with
   `workflow_exists` instead, on both routes. On Cloud `--description` is now
