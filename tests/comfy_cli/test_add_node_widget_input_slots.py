@@ -258,3 +258,17 @@ def test_a_saved_node_with_a_socket_for_every_widget_still_names_its_values():
     api = convert_ui_to_api(workflow, object_info={})
 
     assert api["7"]["inputs"] == {"strength": 0.5, "steps": 20}
+
+
+def test_a_combo_value_named_like_a_control_marker_survives_without_object_info():
+    """A socket for every value means no value is a control_after_generate marker."""
+    graph = Graph.from_object_info(
+        {"Picker": _node({"mode": [["fixed", "random"]], "steps": ["INT", {"default": 0}]}, ["INT"])}
+    )
+    workflow: dict = {"nodes": [], "links": []}
+    node = _add(workflow, graph, "Picker")
+    node["widgets_values"] = ["fixed", 5]
+
+    api = convert_ui_to_api(workflow, object_info={})
+
+    assert api[str(node["id"])]["inputs"] == {"mode": "fixed", "steps": 5}

@@ -2510,7 +2510,13 @@ def _collect_widget_inputs(
     # No schema, or the schema declares no widget inputs: fall back to the
     # positional control-marker heuristic + node-input name inspection, which
     # matches the reference behavior for unknown node types.
-    filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
+    # A socket for every value leaves no room for a control marker, so a COMBO
+    # value that reads "fixed" stays a value.
+    sockets = [i for i in node.get("inputs") or [] if isinstance(i, dict) and i.get("widget")]
+    if len(sockets) == len(widget_values):
+        filtered = widget_values
+    else:
+        filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
     names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
