@@ -5174,6 +5174,12 @@ def _declared_subgraph_slots(
         }
         if linked_from is not None:
             slot["linked_from"] = linked_from
+        if pi is not None and pi.is_widget:
+            source_address = _promoted_source_address(
+                instance_id, sg, pi, defs, graph, instance, scope if scope is not None else workflow
+            )
+            if source_address is not None:
+                slot["source_address"] = source_address
         declared.append(slot)
     if workflow is not None:
         # Legacy ``proxyWidgets`` promotions the definition does not back
@@ -5191,17 +5197,128 @@ def _declared_subgraph_slots(
             if current is _promoted.UNSET:
                 all_resolved = False
                 continue
-            declared.append(
-                {
-                    "address": f"{instance_id}.{entry.name}",
-                    "name": entry.name,
-                    "type": str(entry.type),
-                    "current_value": current,
-                    "instance_id": instance_id,
-                    "node_type": instance.get("type", ""),
-                }
-            )
+            slot = {
+                "address": f"{instance_id}.{entry.name}",
+                "name": entry.name,
+                "type": str(entry.type),
+                "current_value": current,
+                "instance_id": instance_id,
+                "node_type": instance.get("type", ""),
+            }
+            # A primitive bypass's value lives on an interior PrimitiveNode
+            # that may feed several widgets; source_address names one concrete
+            # widget, so these rows omit it (documented in SKILL.md).
+            if entry.plan == _promoted.PLAN_CREATE:
+                source_address = _promoted_source_address(
+                    instance_id,
+                    sg,
+                    entry.as_promoted_input(sg),
+                    defs,
+                    graph,
+                    instance,
+                    scope if scope is not None else workflow,
+                )
+                if source_address is not None:
+                    slot["source_address"] = source_address
+            declared.append(slot)
     return declared, (any_declared and all_resolved)
+
+
+def _promoted_source_address(
+    instance_id: str,
+    sg: dict,
+    pi: Any,
+    defs: dict[str, dict],
+    graph: Graph,
+    instance: dict | None = None,
+    scope: dict | None = None,
+) -> str | None:
+    """``<instance>/<interior>[/<deeper>…].<widget>`` — the concrete interior
+    widget a promoted row stands for, through any nested promotion chain.
+    Informational only: the row is still edited at ``<instance>.<name>``.
+    ``None`` when the chain does not resolve to a live interior widget: a
+    missing interior node, or a widget the catalog says that class lacks (a
+    class the catalog does not know is trusted as saved). A dynamic-combo
+    sub-widget is checked against the option execution selects — a promoted
+    selector's host value (``instance`` in ``scope``) over the interior one."""
+    from comfy_cli.cql import promoted as _promoted
+
+    target = _promoted.deepest_source(sg, pi, defs)
+    if target is None:
+        return None
+    path, widget = target
+    class_type, port = promoted_source_port(sg, pi, defs, graph)
+    if port is None:
+        if not class_type:
+            return None
+        m = graph.node(class_type)
+        if m is not None:
+            # A dynamic-combo sub-widget (``model.size_preset``) is not a
+            # top-level port; its selector is.
+            head = widget.split(".", 1)[0]
+            if head == widget or not any(p.name == head and p.is_dynamic_combo for p in m.inputs):
+                return None
+            # …and only the SELECTED option's sub-widgets exist on the node.
+            node = _promoted_source_node(sg, path, defs)
+            values = _widgets_as_positional(node.get("widgets_values") if node else None, graph, class_type)
+            selected = _promoted_selector_value(instance, scope, sg, path, head, defs)
+            order = graph.widget_order_for_node(class_type, values)
+            if selected is not _promoted.UNSET and head in order and order.index(head) < len(values):
+                values = list(values)
+                values[order.index(head)] = selected
+                order = graph.widget_order_for_node(class_type, values)
+            if widget not in order:
+                return None
+    return f"{_SUBGRAPH_PATH_SEP.join([instance_id, *path])}.{widget}"
+
+
+def _promoted_selector_value(
+    instance: dict | None, scope: dict | None, sg: dict, path: list[str], selector: str, defs: dict[str, dict]
+) -> Any:
+    """The host value execution writes over the interior dynamic-combo
+    ``selector`` at the end of ``path`` when that selector is itself promoted
+    — outermost host first, as the converter's overlay lets an outer host win.
+    :data:`promoted.UNSET` when no host materializes it, or when a live link
+    feeds it (its value is only known at run time), so the caller keeps the
+    interior's saved selection."""
+    from comfy_cli.cql import promoted as _promoted
+
+    current_instance, current_scope, current_sg = instance, scope, sg
+    for depth in range(len(path)):
+        if current_instance is None or current_scope is None:
+            break
+        remaining = path[depth:]
+        for spi in _promoted.promoted_inputs(current_sg, defs):
+            if not spi.is_widget or _promoted.deepest_source(current_sg, spi, defs) != (remaining, selector):
+                continue
+            if _promoted.live_external_link(current_scope, current_instance, spi.name, current_sg) is not None:
+                return _promoted.UNSET
+            value = _promoted.host_value(current_instance, spi)
+            if value is not _promoted.UNSET:
+                return value
+        inner = _promoted._inner_node(current_sg, remaining[0])
+        inner_def = defs.get(str(inner.get("type", ""))) if inner is not None else None
+        if inner_def is None:
+            break
+        current_instance, current_scope, current_sg = inner, current_sg, inner_def
+    return _promoted.UNSET
+
+
+def _promoted_source_node(sg: dict, path: list[str], defs: dict[str, dict]) -> dict | None:
+    """The terminal interior node at the end of a promoted source ``path``,
+    descending into nested subgraph definitions; ``None`` if any hop is missing."""
+    from comfy_cli.cql import promoted as _promoted
+
+    current_sg = sg
+    node: dict | None = None
+    for seg in path:
+        node = _promoted._inner_node(current_sg, seg)
+        if node is None:
+            return None
+        nxt = defs.get(str(node.get("type", "")))
+        if nxt is not None:
+            current_sg = nxt
+    return node
 
 
 def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph) -> tuple[str, Port | None]:
@@ -5213,16 +5330,10 @@ def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph)
     if target is None:
         return "", None
     path, widget = target
-    current_sg = sg
-    node: dict | None = None
-    for seg in path:
-        node = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == seg), None)
-        if node is None:
-            return "", None
-        nxt = defs.get(str(node.get("type", "")))
-        if nxt is not None:
-            current_sg = nxt
-    class_type = str(node.get("type", "")) if node else ""
+    node = _promoted_source_node(sg, path, defs)
+    if node is None:
+        return "", None
+    class_type = str(node.get("type", ""))
     m = graph.node(class_type)
     if m is None:
         return class_type, None
