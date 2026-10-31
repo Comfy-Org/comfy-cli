@@ -472,6 +472,88 @@ def test_cli_emit_ops_writes_frontend_and_envelope_ops(tmp_path, monkeypatch, ru
     assert isinstance(on_disk.get("nodes"), list), "the written file is canvas-editable frontend format"
 
 
+def test_cli_emit_ops_says_so_in_pretty_mode_when_no_batch_was_minted(tmp_path, monkeypatch):
+    """A skipped batch has to be visible to a human, not only to `--json`.
+
+    `ops_skipped` travels in the envelope, and `Renderer.emit` prints nothing in
+    pretty mode — so a pretty-mode run that asked for `--emit-ops` and got no
+    batch printed exactly what a successful one prints ("Wrote workflow"), with
+    no way to tell the two apart. The condition here is the ordinary one: the
+    target path already holds a workflow large enough that the `delete_node` per
+    existing node pushes the batch past the 1,024-op bound.
+    """
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+    out.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": i + 1, "type": "LoadImage", "widgets_values": ["example.png"], "inputs": [], "outputs": []}
+                    for i in range(workflow_ops._MAX_OPS_PER_BATCH + 1)
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # `COMFY_OUTPUT` rather than a TTY probe: under CliRunner stdout is not a
+    # TTY, so mode resolution (`Renderer.resolve` rule 6) picks JSON and the
+    # pretty branch under test is never reached. `NO_COLOR`/`COLUMNS` keep Rich
+    # from wrapping or styling the warning mid-assertion.
+    result = CliRunner().invoke(
+        app,
+        [
+            "generate",
+            "nano-banana",
+            "--prompt",
+            "add sunglasses",
+            "--image",
+            "cat.png",
+            "--emit-workflow",
+            str(out),
+            "--emit-ops",
+        ],
+        env={"COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Wrote workflow" in result.output
+    assert "--emit-ops" in result.output and "no batch was minted" in result.output
+    assert "1024-op batch limit" in result.output
+    # The file is still the deliverable and is still the newly built graph.
+    on_disk = json.loads(out.read_text())
+    assert len(on_disk["nodes"]) <= workflow_ops._MAX_OPS_PER_BATCH
+
+
+def test_cli_emit_ops_is_quiet_in_pretty_mode_when_the_batch_was_minted(tmp_path, monkeypatch):
+    """The complement: the warning is conditional, not printed on every run."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+
+    result = CliRunner().invoke(
+        app,
+        ["generate", "nano-banana", "--prompt", "x", "--image", "cat.png", "--emit-workflow", str(out), "--emit-ops"],
+        env={"COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Wrote workflow" in result.output
+    assert "no batch was minted" not in result.output
+
+
 def test_cli_emit_ops_without_emit_workflow_is_an_error(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 

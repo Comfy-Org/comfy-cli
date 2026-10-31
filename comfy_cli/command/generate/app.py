@@ -684,6 +684,17 @@ def _generate(model: str, extra_args: list[str]) -> None:
             if renderer.is_pretty():
                 rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
                 rprint(f"  run it: comfy run --workflow {emit_path}")
+                if ops_skipped:
+                    # `--emit-ops` is a request, and this is the one path where
+                    # it silently went unanswered: the batch is reported as
+                    # `ops_skipped` in the envelope below, which `emit()` does
+                    # not print in pretty mode. Without this the user asked for
+                    # ops, saw only "Wrote workflow", and had no way to tell the
+                    # batch apart from one that was minted.
+                    renderer.warn(
+                        f"--emit-ops: no batch was minted — {ops_skipped}",
+                        hint="the workflow file above is complete; apply it as a whole document",
+                    )
             payload = {
                 "out": str(Path(emit_path).expanduser()),
                 "model": name,
