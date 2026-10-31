@@ -97,6 +97,21 @@ _MAX_OP_PAYLOAD_DEPTH = 64
 _MAX_OP_COLLECTION_ENTRIES = 4096
 _MAX_OP_COST = 262_144
 
+# The fourth bound in that same `src/limits.ts` block (`MAX_OPS_PER_BATCH`, also
+# 1024 at 221b2b2e470c79afaface24b1edcb53cdafc8922), and the only one that is
+# about the BATCH rather than about one op's payload. CMP checks it in `applyOps`
+# before any op is processed (`applier.ts`, `batch of N ops exceeds the 1024-op
+# limit; rejected before any op was processed`) and again in `inspectOps`, so a
+# longer batch is refused WHOLE — not truncated, and not partially applied.
+#
+# Without a counterpart here, comfy-cli happily builds and hands out a batch of
+# any length, and the refusal lands on the shared package after comfy-cli has
+# already written the document (`apply_specs`) or already told a caller the batch
+# is the legal translation of its graph (`replace_ops`). That is the same
+# mint-then-refuse shape the three payload bounds above exist to close, one level
+# up. Mirror it, never widen it here alone.
+_MAX_OPS_PER_BATCH = 1024
+
 #: Any surrogate code point in a Python ``str`` is a LONE surrogate — astral
 #: characters are single code points there — so matching the whole block is
 #: enough to find the ones that cannot be UTF-8 encoded.
@@ -146,6 +161,39 @@ def _es_number(value: float) -> str:
     return f"{mantissa}e{'+' if e >= 0 else '-'}{abs(e)}"
 
 
+#: ECMAScript holds an integer exactly only up to here. JSON has no integer type
+#: on the other side of the wire — `JSON.parse` reads every numeric literal as an
+#: IEEE-754 double, and comfy-multi-player's canonicalizer refuses a `BigInt`
+#: payload outright (`applier.ts`: `rejectBigIntPayload`) — so past this bound the
+#: value ARRIVES there rounded and `Number::toString` spells the rounded number.
+_ES_EXACT_INT = 2**53
+
+
+def _es_int(value: int) -> str:
+    """Render one ``int`` as ECMAScript renders the number ``JSON.parse`` makes
+    of the same literal.
+
+    Inside ``_ES_EXACT_INT`` the two spellings already agree, so the exact digits
+    are kept. Outside it they do not, and the disagreement is not cosmetic: a
+    seed at a FLOAT/INT widget's ``0xffffffffffffffff`` maximum renders
+    ``18446744073709551615`` here and ``18446744073709552000`` after a relay
+    through JS, and ``10**21`` renders as ``1e+21`` there — so an IDENTICAL op
+    echoed back through the shared package digests differently and is refused as
+    ``op_id_reuse``. That is the failure :func:`_es_number` exists to prevent,
+    one type over, which is why the rendering goes through the same double path.
+    """
+    if -_ES_EXACT_INT <= value <= _ES_EXACT_INT:
+        return str(value)
+    try:
+        as_double = float(value)
+    except OverflowError:
+        # Past the double range `JSON.parse` yields Infinity, which
+        # `JSON.stringify` renders as `null` — the same spelling the non-finite
+        # float branch below uses.
+        return "null"
+    return _es_number(as_double)
+
+
 def _canonical_string(value: str) -> str:
     """One JSON string literal, escaped the way ``JSON.stringify`` escapes it.
 
@@ -171,7 +219,17 @@ def _canonical_key(key: Any) -> str:
     if isinstance(key, bool):  # before int: bool is an int subclass
         return "true" if key else "false"
     if isinstance(key, int):
-        return str(key)
+        if -_ES_EXACT_INT <= key <= _ES_EXACT_INT:
+            return str(key)
+        # Past the exact range the property name is coerced from the DOUBLE
+        # `JSON.parse` produced, so fall through to the float path below rather
+        # than spelling out digits no JS object key would ever carry. Note the
+        # Infinity spelling there, not `_es_int`'s `null`: a KEY is coerced with
+        # `String()`, not rendered by `JSON.stringify`.
+        try:
+            key = float(key)
+        except OverflowError:
+            key = math.inf if key > 0 else -math.inf
     if isinstance(key, float):
         if math.isnan(key):
             return "NaN"
@@ -183,21 +241,41 @@ def _canonical_key(key: Any) -> str:
     raise ValueError(f"malformed_op: object key of type {type(key).__name__} is not canonical JSON")
 
 
+def _charge(budget: list[int], units: int) -> None:
+    """Charge ``units`` against the cost budget and refuse AT the charge.
+
+    Checking only at the end of :func:`_canonical_value` left the bound not
+    actually bounding the work: a string is charged by length and then handed to
+    ``_canonical_string``, which runs ``json.dumps`` plus a surrogate scan over
+    the whole thing and allocates up to ~6x its size for control-heavy input, so
+    an oversized payload was fully rendered before being refused. The shared
+    package has the same property for the same reason — ``opBoundsRefusal`` walks
+    and charges the payload BEFORE ``normalize`` renders anything — and the
+    refusal is unchanged either way, because the budget only ever grows.
+    """
+    budget[0] += units
+    if budget[0] > _MAX_OP_COST:
+        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
+
+
 def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
     if depth > _MAX_OP_PAYLOAD_DEPTH:
         raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
-    budget[0] += 1
+    _charge(budget, 1)
     if value is None:
-        budget[0] += 8
+        _charge(budget, 8)
         rendered = "null"
     elif isinstance(value, bool):  # before int: bool is an int subclass
-        budget[0] += 8
+        _charge(budget, 8)
         rendered = "true" if value else "false"
     elif isinstance(value, int):
-        budget[0] += 8
-        rendered = str(value)
+        # Still a flat 8, deliberately: the cost model is mirrored from the
+        # shared package ("8 per numeric/leaf", `src/limits.ts`), so charging a
+        # huge int by its digit count would refuse a payload CMP accepts.
+        _charge(budget, 8)
+        rendered = _es_int(value)
     elif isinstance(value, float):
-        budget[0] += 8
+        _charge(budget, 8)
         # ``JSON.stringify`` renders every non-finite number as ``null``, so
         # doing the same is what makes the two canonical forms agree. It also
         # un-breaks overwriting a widget whose CURRENT value is NaN/Infinity
@@ -205,16 +283,30 @@ def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
         # ``old``), which the previous ``allow_nan=False`` rejected outright.
         rendered = _es_number(value) if math.isfinite(value) else "null"
     elif isinstance(value, str):
-        budget[0] += len(value)
+        _charge(budget, len(value))
         rendered = _canonical_string(value)
     elif isinstance(value, dict):
         if len(value) > _MAX_OP_COLLECTION_ENTRIES:
             raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
-        budget[0] += 4
+        _charge(budget, 4)
         members = []
+        # Coercion is not injective: `1` and `"1"`, `True` and `"true"`, `None`
+        # and `"null"` are distinct Python keys that name the same JS property.
+        # Emitting both produces an object literal no JS object can hold, and
+        # because `members.sort` is stable the digest of such a dict then depends
+        # on INSERTION order — so the canonical form would not be canonical.
+        # Only a programmatically built op can reach it (parsed JSON always has
+        # `str` keys), which is why it is refused rather than silently merged:
+        # there is no payload here whose intent a merge would preserve.
+        coerced: dict[str, Any] = {}
         for key in value:
             name = _canonical_key(key)
-            budget[0] += len(name)
+            _charge(budget, len(name))
+            if name in coerced:
+                raise ValueError(
+                    f"malformed_op: object keys {coerced[name]!r} and {key!r} both canonicalize to {name!r}"
+                )
+            coerced[name] = key
             members.append((name, value[key]))
         # Unicode code point order at every depth: Python sorts `str` that way.
         members.sort(key=lambda member: member[0])
@@ -224,12 +316,10 @@ def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
     elif isinstance(value, list | tuple):
         if len(value) > _MAX_OP_COLLECTION_ENTRIES:
             raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
-        budget[0] += 4
+        _charge(budget, 4)
         rendered = "[" + ",".join(_canonical_value(child, depth + 1, budget) for child in value) + "]"
     else:
         raise ValueError(f"malformed_op: op payload is not canonical JSON: {type(value).__name__} is not serializable")
-    if budget[0] > _MAX_OP_COST:
-        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
     return rendered
 
 
@@ -2693,13 +2783,20 @@ def reset_doc(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> t
 
 
 class NotExpressibleError(ValueError):
-    """A graph uses structure the frozen v1 vocabulary cannot express.
+    """A graph the frozen v1 vocabulary cannot express as one op batch.
 
     Raised by :func:`replace_ops` INSTEAD of returning a partial batch. A
     partial batch is the dangerous answer: it applies cleanly and leaves a
     document that is not the graph the caller asked for. The caller is expected
     to fall back to whatever whole-document path it had before (the cloud
     agent re-mints), and to say why.
+
+    Two reasons reach it. The graph may use STRUCTURE no frozen op kind can
+    create (a subgraph definition, a canvas group, a reroute point). Or the
+    translation may simply be too LONG — more than ``_MAX_OPS_PER_BATCH`` ops,
+    which the shared applier refuses whole. Both are "there is no legal batch
+    for this graph", and both want the same caller behaviour, so they share the
+    type rather than making every caller learn a second one.
     """
 
 
@@ -2798,7 +2895,8 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
     it reproduces the STRUCTURE (classes + wiring) while the op path reproduces
     the graph exactly, widget values included.
 
-    :raises NotExpressibleError: ``new`` uses structure no frozen op can create.
+    :raises NotExpressibleError: ``new`` uses structure no frozen op can create,
+        or its translation needs more than ``_MAX_OPS_PER_BATCH`` ops.
     """
     reason = _inexpressible_reason(new)
     if reason:
@@ -2886,6 +2984,32 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
                 },
             )
         )
+    # The batch is counted at the end rather than predicted up front because the
+    # exact length is only known here (a link to a node `new` does not contain is
+    # dropped above, so it costs no op), and nothing has left the function yet —
+    # the ops exist only in this local list. Returning a longer batch would hand
+    # the caller an artifact the shared applier rejects whole as `malformed_op`,
+    # which is the same "it applies cleanly nowhere" answer a partial batch is.
+    if len(ops) > _MAX_OPS_PER_BATCH:
+        raise NotExpressibleError(
+            f"the workflow needs {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op batch limit "
+            "(delete_node per existing node, add_node per node, connect per link)"
+        )
+    # The batch length is only the outer bound. These ops are built here and
+    # handed straight to a caller — unlike `apply_specs`', every one of which
+    # goes through `apply_op` and is canonicalized there — so nothing had
+    # checked the PER-OP payload bounds (§20.3: depth 64, 4,096 entries, 262,144
+    # cost). A node with an outsized `widgets_values`, or a `delete_node` whose
+    # `removed_links` runs past the entry cap, produced a batch this function
+    # presented as the legal translation of the graph and the shared applier
+    # then refused as `malformed_op`: the same mint-then-refuse shape one level
+    # down. Canonicalized rather than digested, since the refusal is the whole
+    # point and the hash is not needed.
+    for i, minted in enumerate(ops):
+        try:
+            _canonical_op(minted)
+        except ValueError as e:
+            raise NotExpressibleError(f"op #{i} ({minted['op']}) is not a legal op payload: {e}") from e
     return ops
 
 
@@ -3410,7 +3534,29 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
 def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
-    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases).
+
+    :raises ValueError: the batch mints more than ``_MAX_OPS_PER_BATCH`` ops.
+    """
+    # The bound is on the OPS, and one spec is not one op — `set_dynamic_group_rows`
+    # expands into a row-count write plus one `set_widget` per row field. So this
+    # entry check is the cheap half: a spec list already longer than the bound
+    # cannot mint a batch within it (every spec mints at least one op), and
+    # catching it here refuses before the `at` coercion and before
+    # `layout.assign_positions`, both of which are per-spec work. The half that
+    # actually binds is the `len(ops)` check after the loop below; a batch of
+    # 1,000 specs that expands past 1,024 ops passes this one and is caught there.
+    #
+    # Either way the refusal is whole-batch, because `applyOps` refuses an
+    # over-long batch WHOLE: accepting it here applies the edit locally and has
+    # every op in it rejected downstream. §4's abort-remainder contract has
+    # nothing to say about that case — it describes which ops in a batch apply,
+    # and here none do.
+    if len(specs) > _MAX_OPS_PER_BATCH:
+        raise ValueError(
+            f"malformed_op: batch of {len(specs)} specs exceeds the {_MAX_OPS_PER_BATCH}-op limit; "
+            "rejected before any op was processed"
+        )
     # Parse a string `at` up front: layout treats a pinned `at` as an obstacle
     # and reads it as coordinates.
     specs = [
@@ -3561,6 +3707,17 @@ def apply_specs(
                     )
                 input_targets.add(encoded_target)
             ops.append(op)
+        # The entry check above counted specs. This one counts what they
+        # actually minted, which is what `applyOps` bounds: a batch of 1,000
+        # specs carrying a few `set_dynamic_group_rows` clears the entry check
+        # and still returns more than 1,024 ops, and the shared applier then
+        # refuses every one of them as `malformed_op` after comfy-cli has
+        # already written the document. Inside the `try` so the discard rehint
+        # below records `spec_index`/`applied_count` like every other refusal
+        # in this batch, and `applied_count` is 0 — the caller discards the
+        # whole batch, so nothing this loop wrote survives.
+        if len(ops) > _MAX_OPS_PER_BATCH:
+            raise ValueError(f"malformed_op: batch mints {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op limit")
     except (NotBatchableError, DeprecatedNodeType):
         # Already carries a registered code and a hint that says what to do
         # instead — don't wrap it into a generic hint.
@@ -3612,13 +3769,27 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     recorded_digests = workflow.get("_applied_op_digests")
     recorded_ops = workflow.get("_applied_ops")
     if op_id in (recorded_ops or ()):
-        recorded = (recorded_digests or {}).get(op_id)
-        if recorded is None:
+        ledger = recorded_digests if isinstance(recorded_digests, dict) else {}
+        # MEMBERSHIP, not ``.get(...) is None``: a document carrying
+        # ``{<op_id>: null}`` has a digest entry, it just has a malformed one.
+        # Reading its absence as "legacy list-only ledger" made a
+        # changed-payload redelivery a silent no-op on exactly the shape the
+        # up-front check does not cover — every other non-string value failed
+        # closed on the ``!=`` below, so null was the one that failed open.
+        if op_id not in ledger:
             # A legacy list-only ledger keeps its historical duplicate
             # behaviour, and deliberately WITHOUT digesting the payload first:
             # a replay whose envelope is not canonical must still be the
             # documented no-op rather than a ``malformed_op``.
             return workflow
+        recorded = ledger[op_id]
+        # The up-front check validates the ledger's TYPE, not its values, and
+        # both arrive from the same untrusted JSON. Refused on read rather than
+        # by walking every entry on every apply.
+        if not isinstance(recorded, str):
+            raise ValueError(
+                f"malformed_op: _applied_op_digests[{op_id!r}] must be a string digest, got {type(recorded).__name__}"
+            )
         if recorded != _op_digest(op):
             raise ValueError(f"op_id_reuse: op_id {op_id!r} was already applied with a different payload")
         return workflow
@@ -3636,14 +3807,28 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # different orders diverge silently.
     queued = workflow.get("_deferred_widget_ops")
     waiting = queued.get(op_id) if isinstance(queued, dict) else None
-    # Cannot raise: a queued op was canonicalized on the way in.
-    if isinstance(waiting, dict) and _op_digest(waiting) != digest:
+    # ``_applied_digest``, not ``_op_digest``: ``_deferred_widget_ops`` comes off
+    # the DOCUMENT and is never validated on load, so an oversized or deeply
+    # nested queued entry raised its own ``malformed_op:``/``payload_too_deep:``
+    # here — against the incoming op, blocking it (even as an identical
+    # redelivery) with an error naming a payload that is not the one being
+    # applied. ``None`` is a mismatch, and correctly so: the op above was just
+    # digested, so it IS canonical, and an uncanonical queued entry therefore
+    # cannot be the same payload. ``_retry_deferred_widget_ops`` already treats
+    # an uncanonical queued entry as unusable for the same reason.
+    if isinstance(waiting, dict) and _applied_digest(waiting) != digest:
         raise ValueError(f"op_id_reuse: op_id {op_id!r} is already deferred with a different payload")
-    had_applied_ops = "_applied_ops" in workflow
-    workflow.setdefault("_applied_ops", [])
+    # BEFORE the ``setdefault`` below, because both of these raise OUTSIDE the
+    # rollback: a first-seen op with no ``op`` key, or a non-insert op carrying
+    # ``definitions``, is rejected and used to leave an empty ``_applied_ops``
+    # on a document that arrived without one — contradicting §20.2's "a document
+    # that arrived without a ledger is never left carrying an empty one by a
+    # rejected op".
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
+    had_applied_ops = "_applied_ops" in workflow
+    workflow.setdefault("_applied_ops", [])
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed

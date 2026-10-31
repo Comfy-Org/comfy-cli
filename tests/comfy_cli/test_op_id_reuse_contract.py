@@ -110,6 +110,59 @@ def test_numbers_are_rendered_the_way_ecmascript_renders_them():
     assert ops._canonical_op({"v": 5e-324}) == '{"v":5e-324}'
 
 
+def test_an_integer_past_the_exact_range_is_spelled_the_way_js_spells_it():
+    """``JSON.parse`` has no integer type: it reads every numeric literal as an
+    IEEE-754 double, and CMP's canonicalizer refuses a ``BigInt`` payload
+    outright (``applier.ts``: ``rejectBigIntPayload``). So past 2**53 the other
+    side holds the ROUNDED value and ``Number::toString`` spells that, while
+    ``str(value)`` here would spell the exact digits.
+
+    These are the spellings ``JSON.stringify(JSON.parse(literal))`` produces,
+    taken from a real engine, not from the spec text.
+    """
+    assert ops._canonical_op({"v": 2**53}) == '{"v":9007199254740992}'
+    assert ops._canonical_op({"v": 2**53 + 1}) == '{"v":9007199254740992}'
+    # A legal INT-widget maximum: a seed at 0xffffffffffffffff.
+    assert ops._canonical_op({"v": 18446744073709551615}) == '{"v":18446744073709552000}'
+    assert ops._canonical_op({"v": -18446744073709551615}) == '{"v":-18446744073709552000}'
+    # At 1e21 JS switches to exponent form for an integer too.
+    assert ops._canonical_op({"v": 10**21}) == '{"v":1e+21}'
+    assert ops._canonical_op({"v": 10**20}) == '{"v":100000000000000000000}'
+    # Past the double range `JSON.parse` yields Infinity, which stringifies as
+    # `null` — the same spelling the non-finite float branch uses.
+    assert ops._canonical_op({"v": 10**400}) == '{"v":null}'
+    # Inside the exact range nothing changed: the digits are kept.
+    assert ops._canonical_op({"v": 20}) == '{"v":20}'
+    assert ops._canonical_op({"v": -(2**53)}) == '{"v":-9007199254740992}'
+
+
+def test_a_max_seed_relayed_through_js_digests_the_same(graph):
+    """The failure the test above prevents, end to end. Without the rounding an
+    op carrying ``0xffffffffffffffff`` digests one way here and another after a
+    JS relay, so the IDENTICAL op echoed back is refused as ``op_id_reuse`` —
+    exactly what the float spelling was fixed to stop.
+    """
+    workflow = _workflow()
+    exact = _op(18446744073709551615)
+    ops.apply_op(workflow, exact, graph)
+    relayed = _op(18446744073709552000)  # what `JSON.parse(JSON.stringify(op))` yields
+    assert ops._op_digest(relayed) == ops._op_digest(exact)
+    assert ops.apply_op(workflow, relayed, graph) is workflow
+
+
+def test_an_integer_object_key_past_the_exact_range_coerces_like_a_js_key():
+    """A key is coerced with ``String()``, not rendered by ``JSON.stringify``, so
+    the two differ on the non-finite end: ``String(Infinity)`` is ``"Infinity"``
+    where ``JSON.stringify(Infinity)`` is ``null``. Only a programmatically built
+    op reaches a non-``str`` key at all — parsed JSON always has string keys.
+    """
+    assert ops._canonical_op({"v": {18446744073709551615: 1}}) == '{"v":{"18446744073709552000":1}}'
+    assert ops._canonical_op({"v": {10**21: 1}}) == '{"v":{"1e+21":1}}'
+    assert ops._canonical_op({"v": {10**400: 1}}) == '{"v":{"Infinity":1}}'
+    assert ops._canonical_op({"v": {-(10**400): 1}}) == '{"v":{"-Infinity":1}}'
+    assert ops._canonical_op({"v": {7: 1}}) == '{"v":{"7":1}}'
+
+
 def test_object_keys_sort_by_code_point_not_by_utf16_code_unit():
     """§8.1's caveat applies to the key sort too: for ASCII, JS UTF-16 ``<``
     agrees with code-point order, but above the Basic Multilingual Plane it does
@@ -119,6 +172,33 @@ def test_object_keys_sort_by_code_point_not_by_utf16_code_unit():
     every key an op envelope carries is ASCII.
     """
     assert ops._canonical_op({"\U0001f600": 1, "\uff00": 2}) == '{"\uff00":2,"\U0001f600":1}'
+
+
+@pytest.mark.parametrize(
+    ("payload", "name"),
+    [
+        ({1: "a", "1": "b"}, "1"),
+        ({True: "a", "true": "b"}, "true"),
+        ({None: "a", "null": "b"}, "null"),
+        ({1.5: "a", "1.5": "b"}, "1.5"),
+    ],
+)
+def test_keys_that_collide_after_coercion_are_refused(payload, name):
+    """Coercion is not injective, and a canonical form that is not well defined
+    is not canonical.
+
+    Emitting both members produces an object literal no JS object can hold, and
+    because the member sort is stable the digest of such a dict would depend on
+    INSERTION order — so the same logical payload could digest two ways and an
+    identical redelivery could be read as reuse. Refused rather than merged:
+    there is no intent here a merge would preserve. Only a programmatically
+    built op can reach it, since parsed JSON always has ``str`` keys.
+    """
+    with pytest.raises(ValueError, match=rf"^malformed_op: object keys .* both canonicalize to {name!r}"):
+        ops._canonical_op({"v": payload})
+
+    # The ordinary case is untouched: a `str` key that merely LOOKS numeric.
+    assert ops._canonical_op({"v": {name: "b"}}) == f'{{"v":{{"{name}":"b"}}}}'
 
 
 def test_a_float_widget_relayed_through_js_digests_the_same(graph):
@@ -168,7 +248,8 @@ def test_the_bounds_mirror_the_shared_op_package_values():
 
     ``comfy-multi-player``'s ``src/limits.ts`` at
     ``221b2b2e470c79afaface24b1edcb53cdafc8922`` fixes ``MAX_PAYLOAD_DEPTH`` at
-    64, ``MAX_COLLECTION_ENTRIES`` at 4096 and ``MAX_OP_COST`` at 262144, and
+    64, ``MAX_COLLECTION_ENTRIES`` at 4096, ``MAX_OP_COST`` at 262144 and
+    ``MAX_OPS_PER_BATCH`` at 1024, and
     its A8 canonicalizer charges the whole envelope on EVERY apply, before the
     dedupe gate (``applyOps`` -> ``opDigest`` -> ``canonicalJson`` ->
     ``opBoundsRefusal``). So a looser bound here cannot rescue an oversized
@@ -179,6 +260,12 @@ def test_the_bounds_mirror_the_shared_op_package_values():
     assert ops._MAX_OP_PAYLOAD_DEPTH == 64
     assert ops._MAX_OP_COLLECTION_ENTRIES == 4096
     assert ops._MAX_OP_COST == 262_144
+    # The fourth bound in the same `src/limits.ts` block bounds the BATCH rather
+    # than one op's payload, so it is enforced at `apply_specs`/`replace_ops`
+    # instead of in the canonicalizer and is pinned, with its boundary cases, in
+    # `test_max_ops_per_batch.py`. Asserted here too so that reading this list
+    # cannot suggest only three of the four are mirrored.
+    assert ops._MAX_OPS_PER_BATCH == 1024
 
 
 def test_ordinary_large_payloads_are_not_rejected_by_the_canonicalization_bounds():
@@ -219,6 +306,31 @@ def test_the_shared_bounds_bind_only_past_any_observed_workflow():
         ops._op_digest({"value": "x" * 131_065, "old": "y" * 131_065})
 
 
+def test_an_oversized_string_is_refused_before_it_is_rendered(monkeypatch):
+    """The cost bound exists to cap the WORK a hostile payload costs, so it has
+    to refuse at the charge rather than after the render.
+
+    ``_canonical_string`` runs ``json.dumps`` plus a surrogate scan over the
+    whole string and allocates up to ~6x its size for control-heavy input, so
+    checking the budget only at the end of the call meant the oversized value
+    was fully rendered first. The shared package charges before it renders for
+    the same reason (``opBoundsRefusal`` walks the payload ahead of
+    ``normalize``). The refusal itself is unchanged — the budget only grows.
+    """
+    rendered: list[str] = []
+    real = ops._canonical_string
+    monkeypatch.setattr(ops, "_canonical_string", lambda value: (rendered.append(value), real(value))[1])
+    oversized = "x" * (ops._MAX_OP_COST + 1)
+
+    with pytest.raises(ValueError, match=f"^malformed_op: payload exceeds the {ops._MAX_OP_COST}-unit cost budget"):
+        ops._canonical_op({"v": oversized})
+
+    assert oversized not in rendered
+    # Charged per key too, so a dict of oversized keys cannot slip past either.
+    with pytest.raises(ValueError, match="cost budget"):
+        ops._canonical_op({"k" * (ops._MAX_OP_COST + 1): 1})
+
+
 def test_canonicalization_still_refuses_a_runaway_payload():
     nested: Any = "leaf"
     for _ in range(ops._MAX_OP_PAYLOAD_DEPTH + 2):
@@ -236,6 +348,30 @@ def test_canonicalization_still_refuses_a_runaway_payload():
 
 
 # --- Amendment v1.10: rejecting before mutation -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("mutate", "exc"),
+    [
+        (lambda op: op.pop("op"), KeyError),
+        (lambda op: op.update(definitions={"x": {}}), ValueError),
+    ],
+    ids=["no-op-key", "definitions-on-a-non-insert-op"],
+)
+def test_a_rejected_op_leaves_no_empty_ledger_behind_either(graph, mutate, exc):
+    """Both of these validations raise OUTSIDE ``apply_op``'s rollback, so when
+    they ran after ``setdefault("_applied_ops", [])`` a rejected op left an empty
+    ledger on a document that arrived without one — contradicting the §20.2
+    guarantee the amendment states. Red on the parent, which comes back carrying
+    ``{"_applied_ops": []}``.
+    """
+    workflow = _workflow()
+    before = copy.deepcopy(workflow)
+    bad = _op()
+    mutate(bad)
+    with pytest.raises(exc):
+        ops.apply_op(workflow, bad, graph)
+    assert workflow == before
 
 
 def test_a_rejected_first_seen_op_leaves_no_ledger_behind(graph):
@@ -284,6 +420,54 @@ def test_a_truthy_non_dict_ledger_is_refused_on_the_reuse_branch_too(graph):
     workflow["_applied_op_digests"] = "not a mapping"
     with pytest.raises(ValueError, match="^malformed_op: _applied_op_digests must be an object"):
         ops.apply_op(workflow, applied, graph)
+
+
+def test_a_null_digest_entry_is_not_read_as_a_legacy_ledger(graph):
+    """``recorded is None`` could not tell a MISSING digest apart from an
+    explicit ``null`` one, and the up-front check validates the ledger's type
+    rather than its values.
+
+    So a document carrying ``{<op_id>: null}`` read as "legacy list-only ledger"
+    and returned a changed-payload redelivery as a silent no-op — the exact
+    divergence Amendment v1.11 exists to stop. Every other non-string value
+    failed closed on the digest comparison, so ``null`` was the one shape that
+    failed OPEN. Red on the parent, which returns the workflow unchanged.
+    """
+    workflow = _workflow()
+    ops.apply_op(workflow, _op(25), graph)
+    workflow["_applied_op_digests"][_op()["op_id"]] = None
+    before = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match=r"^malformed_op: _applied_op_digests\[.*\] must be a string digest"):
+        ops.apply_op(workflow, _op(30), graph)
+    assert workflow == before
+
+
+@pytest.mark.parametrize("recorded", [None, 7, ["digest"], {"d": 1}, True])
+def test_a_non_string_digest_entry_is_malformed_not_a_mismatch(graph, recorded):
+    """``malformed_op``, not ``op_id_reuse``: the document's bookkeeping is
+    broken, which is not the same finding as a sender reusing an id. An
+    IDENTICAL redelivery is refused too — there is no recorded digest to
+    recognise it by.
+    """
+    workflow = _workflow()
+    applied = _op(25)
+    ops.apply_op(workflow, applied, graph)
+    workflow["_applied_op_digests"][applied["op_id"]] = recorded
+    with pytest.raises(ValueError, match="^malformed_op: _applied_op_digests"):
+        ops.apply_op(workflow, applied, graph)
+
+
+def test_a_legacy_list_only_ledger_is_still_a_silent_no_op(graph):
+    """The complement: a document with ``_applied_ops`` and NO digest entry
+    keeps its historical drop-the-duplicate behaviour, and keeps it without
+    digesting the replayed payload first."""
+    workflow = _workflow()
+    applied = _op(25)
+    ops.apply_op(workflow, applied, graph)
+    del workflow["_applied_op_digests"][applied["op_id"]]
+    assert ops.apply_op(workflow, _op(30), graph) is workflow
+    assert workflow["nodes"][0]["widgets_values"] == [25]
 
 
 @pytest.mark.parametrize("op_id", [["a"], {"a": 1}, 7, None])

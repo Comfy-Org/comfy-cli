@@ -600,6 +600,44 @@ def test_a_deferred_write_is_bound_to_its_canonical_payload_once_applied(graph):
     assert wf == before
 
 
+def test_an_uncanonical_queued_entry_does_not_block_with_the_wrong_error(graph):
+    """``_deferred_widget_ops`` comes off the DOCUMENT and is never validated on
+    load, so the queued entry is not guaranteed canonical the way the comment
+    here used to claim.
+
+    Digesting it with ``_op_digest`` raised its own ``payload_too_deep:`` /
+    ``malformed_op:`` against the INCOMING op — an error naming a payload that
+    is not the one being applied, on an op that may be perfectly well formed.
+    ``_applied_digest`` returns ``None`` instead, which is a mismatch: the
+    incoming op was already digested above, so it is canonical, and an
+    uncanonical queued entry cannot be the same payload. The refusal is
+    therefore ``op_id_reuse``, which is what it actually is.
+    """
+    wf, node_id = _fresh(graph)
+    hidden_write = workflow_ops._new_op(
+        "set_widget",
+        "agent-a",
+        1,
+        node_id=node_id,
+        widget="model.prompt_expansion_mode",
+        value="quality",
+    )
+    workflow_ops.apply_op(wf, hidden_write, graph)
+    assert hidden_write["op_id"] in wf["_deferred_widget_ops"]
+
+    # Only a hand-edited document can get here, which is the point: nothing
+    # validates this on load.
+    nested = "leaf"
+    for _ in range(workflow_ops._MAX_OP_PAYLOAD_DEPTH + 2):
+        nested = [nested]
+    wf["_deferred_widget_ops"][hidden_write["op_id"]]["value"] = nested
+    before = copy.deepcopy(wf)
+
+    with pytest.raises(ValueError, match="^op_id_reuse:"):
+        workflow_ops.apply_op(wf, copy.deepcopy(hidden_write), graph)
+    assert wf == before
+
+
 def test_a_second_payload_on_a_deferred_op_id_is_refused_rather_than_overwriting_it(graph):
     """The reuse gate used to read ``_applied_ops`` only. A deferred write sits
     in ``_deferred_widget_ops`` and nowhere else, so a second op carrying the
