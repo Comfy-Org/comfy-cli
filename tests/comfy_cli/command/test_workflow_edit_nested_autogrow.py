@@ -463,14 +463,16 @@ def test_a_real_widget_name_outranks_the_bare_element_guess():
 
 
 def test_a_real_combo_widget_name_outranks_the_bare_element_guess():
-    """A COMBO widget has no socket entry on an agent-built node, so it takes
-    the widget→input conversion, still ahead of the group's element guess."""
+    """A node saved before COMBO widgets had socket entries takes the
+    widget→input conversion, still ahead of the group's element guess."""
     oi = json.loads(FIXTURE.read_text())
     oi["BatchImagesNode"]["input"]["required"]["image0"] = [["a", "b"]]
     oi["BatchImagesNode"]["input_order"]["required"].append("image0")
     g = Graph.from_object_info(oi)
     wf, batch = _add_loader(_empty(), g, "BatchImagesNode")
-    _idx, grow = workflow_ops._resolve_input_target(_node(wf, batch), g, "image0", "STRING")
+    node = _node(wf, batch)
+    node["inputs"] = [i for i in node["inputs"] if i["name"] != "image0"]
+    _idx, grow = workflow_ops._resolve_input_target(node, g, "image0", "STRING")
     assert grow == {"name": "image0", "type": "STRING", "widget": "image0"}
 
 

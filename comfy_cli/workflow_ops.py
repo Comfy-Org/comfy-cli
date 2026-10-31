@@ -678,6 +678,18 @@ def _slot_types(t: Any) -> set[str]:
     return {p.strip() for p in str(t or "").split(",") if p.strip()}
 
 
+def _input_accepts(link_type: Any, input_entry: dict) -> bool:
+    """Whether an output of ``link_type`` may drive ``input_entry``.
+
+    A COMBO widget socket also takes a STRING: that is how a computed file name
+    or option reaches a combo.
+    """
+    dst_type = input_entry.get("type")
+    if dst_type == "COMBO" and input_entry.get("widget") and link_type == "STRING":
+        return True
+    return _types_compatible(link_type, dst_type)
+
+
 def _types_compatible(link_type: Any, dst_type: Any) -> bool:
     """Whether an output of ``link_type`` may drive an input of ``dst_type``.
 
@@ -2301,7 +2313,7 @@ def _connect_impl(
     # link.
     if in_idx is not None:
         dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-        if not _types_compatible(link_type, dst_type):
+        if not _input_accepts(link_type, (dst.get("inputs") or [])[in_idx]):
             raise ValueError(
                 f"type mismatch: {link_type} output of node {from_node} cannot connect to "
                 f"{dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node {to_node}"
@@ -2571,7 +2583,7 @@ def _connect_interior(
             "the node lists; inside a subgraph connect can only wire an existing input"
         )
     dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-    if not _types_compatible(link_type, dst_type):
+    if not _input_accepts(link_type, (dst.get("inputs") or [])[in_idx]):
         raise ValueError(
             f"type mismatch: {link_type} output of node {'/'.join(scope['path'])}/{src.get('id')} cannot connect "
             f"to {dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node "
@@ -4890,22 +4902,26 @@ def strip_internal(workflow: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-# Widget inputs a fresh node gets a socket entry for: the scalar types a
-# primitive can drive. The frontend gives every non-socketless widget input a
-# socket and serializes it as ``{"name", "type", "widget": {"name"}}``; without
-# the entry the shared document has no slot for a link a human draws into that
-# socket, so the link never reaches the document. COMBO is left on
-# the convert-on-connect path: the concrete type check would refuse the STRING
-# output that commonly drives it.
-_SOCKETED_WIDGET_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN"})
+# Widget input types a fresh node gets a socket entry for. The frontend gives
+# every non-socketless widget input a socket and serializes it as
+# ``{"name", "type", "widget": {"name"}}``; without the entry the shared document
+# has no slot for a link a human draws into that socket, so the link never
+# reaches the document.
+_SOCKETED_WIDGET_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"})
 
 
 def _widget_input_entries(m) -> list[dict]:
-    return [
-        {"name": p.name, "type": p.type, "widget": {"name": p.name}, "link": None}
-        for p in m.inputs
-        if not p.is_link and not p.is_socketless and p.type in _SOCKETED_WIDGET_TYPES
-    ]
+    """Socket entries for every widget of ``m``, or none.
+
+    Without object_info the converter names saved values from these entries by
+    position, so sockets for only some widgets would misname the rest. A node
+    with a widget that has no entry of its own (a dynamic combo or a union type)
+    keeps the convert-on-connect path instead.
+    """
+    widgets = [p for p in m.inputs if not p.is_link and not p.is_socketless]
+    if any(p.type not in _SOCKETED_WIDGET_TYPES for p in widgets):
+        return []
+    return [{"name": p.name, "type": p.type, "widget": {"name": p.name}, "link": None} for p in widgets]
 
 
 def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, title: str | None = None) -> dict:
