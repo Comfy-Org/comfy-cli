@@ -144,7 +144,7 @@ history.
 
 ## [1.23.0] - 2026-10-20
 
-[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.23.0) · 59 commits since v1.22.0. Breaking changes are marked **Breaking** under Changed.
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.23.0) · 59 commits since v1.22.0.
 
 ### Added
 
