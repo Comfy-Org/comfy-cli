@@ -2363,6 +2363,19 @@ class TestSpendGateStdinAndMarkup:
 
 
 class TestExecuteUiWorkflow:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Validate against the complete conversion fixture without a live server."""
+        from copy import deepcopy
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", lambda *a, **k: deepcopy(self.OBJECT_INFO))
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
     # The conversion success fixture must also be an executable graph:
     # PreviewImage consumes IMAGE, not an EmptyLatentImage's LATENT output.
     UI = {
