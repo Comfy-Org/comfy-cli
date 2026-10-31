@@ -255,6 +255,40 @@ def test_non_pep440_installed_version_is_unknown_not_a_crash(tmp_path, monkeypat
     assert reqs["weirdpkg"]["status"] == "satisfied"
 
 
+@pytest.mark.parametrize(
+    "specifier, installed, expected",
+    [
+        ("===foobar", "foobar", "satisfied"),
+        ("===FOOBAR", "foobar", "satisfied"),
+        ("===foobar", "FOOBAR", "satisfied"),
+        ("===foobar", "other", "mismatch"),
+        ("===foo", "foobar", "mismatch"),
+        ("===foobar,===FOOBAR", "foobar", "satisfied"),
+        ("===foobar,===other", "foobar", "mismatch"),
+        ("===v1.0", "v1.0", "satisfied"),
+        ("===1.0", "v1.0", "mismatch"),
+        ("===1.0", "1.0.0", "mismatch"),
+        ("===1.0", "1.0+local", "mismatch"),
+        ("===1.0.*", "1.0.1", "mismatch"),
+    ],
+)
+def test_arbitrary_equality_compares_raw_installed_values(specifier, installed, expected):
+    """Literal pins compare strings, including legacy values, without normalization."""
+    row = node_deps_cmd._classify("weirdpkg" + specifier, {"weirdpkg": installed})
+
+    assert row["status"] == expected
+    assert row["installed"] == installed
+
+
+@pytest.mark.parametrize("specifier", [">=1", "===foobar,>=1", ">=1,===foobar"])
+def test_non_pep440_installed_version_stays_unknown_with_nonliteral_constraints(specifier):
+    """A literal clause must not bypass validation required by another operator."""
+    row = node_deps_cmd._classify("weirdpkg" + specifier, {"weirdpkg": "foobar"})
+
+    assert row["status"] == "unknown"
+    assert row["installed"] == "foobar"
+
+
 def test_pip_list_runs_once_for_the_whole_report(workspace, fake_pip):
     node_deps_cmd.build_report(str(workspace), python="/fake/python")
 

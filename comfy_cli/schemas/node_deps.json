@@ -85,7 +85,7 @@
                 "status": {
                   "type": "string",
                   "enum": ["satisfied", "mismatch", "missing", "unparseable", "unknown"],
-                  "description": "`unparseable` covers pip options (-r, --extra-index-url) and bare VCS/URL lines; `unknown` means the comparison could not be made (the pip probe failed, or the installed dist records a non-PEP-440 version)."
+                  "description": "`unparseable` covers pip options (-r, --extra-index-url) and bare VCS/URL lines; `unknown` means the comparison could not be made (the pip probe failed, or the installed dist records a non-PEP-440 version and the requirement includes an operator other than ===). Pure === constraints compare raw strings case-insensitively."
                 }
               },
               "required": ["raw", "name", "specifier", "source", "installed", "status"]

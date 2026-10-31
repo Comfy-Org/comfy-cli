@@ -30,7 +30,9 @@ history.
 ### Fixed
 
 - `comfy node deps` reports malformed installed package versions as `unknown`
-  consistently across supported `packaging` versions.
+  consistently across supported `packaging` versions. Pure `===` constraints
+  compare raw version strings case-insensitively, including legacy versions,
+  without version normalization.
 
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.

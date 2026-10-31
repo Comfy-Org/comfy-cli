@@ -33,7 +33,8 @@ Statuses:
 - ``unknown``     — the comparison could not be made: either the installed-
   packages probe failed (``pip list`` and its ``importlib.metadata`` fallback;
   accompanied by an ``installed_versions_unavailable`` warning on the report)
-  or the installed dist records a version that isn't PEP 440.
+  or the installed dist records a version that isn't PEP 440 and the requirement
+  includes an operator other than literal ``===`` equality.
 
 Known caveat: pyproject dependencies are read through the shared registry
 parser (:func:`comfy_cli.command.pack_scan.read_pyproject`), which drops the
@@ -276,8 +277,12 @@ def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, 
         from packaging.version import InvalidVersion, Version
 
         try:
-            Version(installed)
-            contains = req.specifier.contains(installed, prereleases=True)
+            if all(spec.operator == "===" for spec in req.specifier):
+                # Arbitrary equality compares raw strings, including legacy versions.
+                contains = all(installed.lower() == spec.version.lower() for spec in req.specifier)
+            else:
+                Version(installed)
+                contains = req.specifier.contains(installed, prereleases=True)
         except InvalidVersion:
             # A dist whose recorded version isn't PEP 440 (rare, but a broken
             # `.dist-info` will do it) can't be compared. Say so rather than
