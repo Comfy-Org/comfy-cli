@@ -150,8 +150,45 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the saved workflow is unexpectedly large; inspect it directly on the server",
     ),
     ErrorCode(
+        "workflow_exists",
+        "`comfy workflow save --no-overwrite` found a saved workflow file with that name already (HTTP 409 "
+        "from the `/userdata` write), so nothing was written. `details.filename` is the file under "
+        "`workflows/`.",
+        "pass a different `--name`, or drop `--no-overwrite` to replace it",
+    ),
+    ErrorCode(
+        "saved_file_identity_unavailable",
+        "`comfy workflow save --where cloud` saved the sidebar file, but its write receipt did not return "
+        "a usable canonical userdata UUID for that exact path. `saved_file_id` is null. Surfaced in "
+        "`data.warnings[]`: the save succeeded; a same-name or equal-content workflow record does not "
+        "certify file identity.",
+        "verify the file in Cloud's Workflows sidebar; do not repeat the save or uploads solely to obtain an ID",
+    ),
+    ErrorCode(
+        "workflow_record_unresolved",
+        "`comfy workflow save --where cloud` saved the file the Workflows sidebar lists, but could not read "
+        "back exactly one Cloud workflow record with that name and matching content (none yet, two sharing it, "
+        "stale mirrored content, or the `/api/workflows` read failed), so `workflow_id` is null. "
+        "Surfaced in `data.warnings[]`, not as an "
+        "error envelope: the save succeeded, so do not re-run it.",
+        "find the record with `comfy --json workflow list --name <name>`",
+    ),
+    ErrorCode(
+        "workflow_filename_ambiguous",
+        "Cloud `workflow delete` found a sidebar file but could not safely associate it with the requested "
+        "record (duplicate names or an unresolved lookup). Nothing was deleted.",
+        "inspect same-name records; remove the intended file in the Cloud sidebar before deleting its record",
+    ),
+    ErrorCode(
+        "workflow_delete_incomplete",
+        "Cloud `workflow delete` removed the sidebar file, but could not confirm cleanup of its workflow "
+        "record. `details.file_deleted` is true; `details.workflow_id` identifies the record to check.",
+        "check `comfy --json workflow list`, then retry deleting the record if it remains",
+    ),
+    ErrorCode(
         "workflow_unparseable",
-        "A cloud `/api/workflows` call returned a non-empty 200 body that couldn't be decoded as JSON "
+        "A cloud `/api/workflows` call, or the cloud `/userdata` write `workflow save` makes, returned a "
+        "non-empty 200 body that couldn't be decoded as JSON "
         "(non-UTF-8 bytes or a non-JSON body such as an HTML proxy/error page). Distinct from an empty "
         "body (legitimately no data): the malformed body is surfaced as a hard error rather than a "
         "misleading empty list / null id. `details.operation` carries the verb.",
@@ -923,10 +960,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "description_ignored",
-        "`comfy workflow save --where local --description` was given a description, but the local "
-        "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
-        "(not as an error envelope) so the save still succeeds.",
-        "descriptions are a Comfy Cloud feature; drop `--description` on the local path",
+        "`comfy workflow save --description` was given a description, but the saved workflow is a "
+        "`/userdata` file (on Cloud, the one the Workflows sidebar lists) with nowhere to keep it. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) so the save still succeeds.",
+        "drop `--description`; put notes in the workflow itself, e.g. a Note node",
     ),
     ErrorCode(
         "cql_query_invalid",
