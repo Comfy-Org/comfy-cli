@@ -36,6 +36,7 @@ class DeployFixtureKind(Enum):
     STATUS = "status"
     LS = "ls"
     SHOW = "show"
+    UI = "ui"
     LOGS = "logs"
     EVENTS = "events"
     SCALE = "scale"
@@ -165,6 +166,23 @@ class JobRecordingTransport:
         }
 
 
+class EditorRecordingTransport:
+    """Cloud membership/editor reads, separately from the deployment control plane."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def request(self, client, method: str, parts: tuple[str, ...], **kwargs):
+        assert client.target.auth_token == "tok_test"
+        assert client.target.api_key is None
+        self.calls.append((method, parts))
+        assert method == "GET"
+        if parts == ("workspaces", "current"):
+            return {"id": "workspace-matrix"}
+        assert parts == ("workspaces", "workspace-matrix", "deployments")
+        return {"items": [{"deployment_id": DEPLOYMENT_ID, "status": "ready", "release_id": RELEASE_ID}]}
+
+
 def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
     match kind:
         case DeployFixtureKind.UP:
@@ -185,7 +203,7 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
         case DeployFixtureKind.LS:
             write_spec(root, build_id=BUILD_ID, models=[], nodes=[])
             return ["deploy", "ls", str(root)]
-        case DeployFixtureKind.SHOW | DeployFixtureKind.LOGS | DeployFixtureKind.EVENTS:
+        case DeployFixtureKind.SHOW | DeployFixtureKind.UI | DeployFixtureKind.LOGS | DeployFixtureKind.EVENTS:
             return ["deploy", kind.value, "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.SCALE:
             # Both bounds: `scale` refuses one without the other before it looks
@@ -243,6 +261,7 @@ def invoke_deploy(args: list[str], token: str | None):
             "COMFY_DEPLOY_TOKEN": token,
             "COMFY_BUILDER_URL": "https://builder.test",
             "COMFY_DEPLOY_URL": "https://control.test",
+            "COMFY_CLOUD_BASE_URL": "https://api.comfy.org",
         },
     )
 

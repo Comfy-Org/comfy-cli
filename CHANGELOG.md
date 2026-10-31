@@ -61,6 +61,15 @@ history.
 
 ### Added
 
+- `comfy model upload` previews an import into the standard environment and
+  uploads only the approved file digest to the approved workspace. It verifies
+  model-folder capabilities, collisions and returned content identity, and sends
+  a private snapshot of the approved bytes.
+- Read-only `comfy deploy ui` and `comfy workflow ui` return editor links only
+  after checking the workspace, supported capability and exact saved target.
+  Workflow links require a matching normal saved document and explicitly select
+  the requested standard or custom environment. Canvas validation follows the
+  frontend schemas and WHATWG URL semantics for model metadata.
 - `comfy run --output-node-ids 9,12` (repeatable) runs only the named output
   nodes and the nodes they depend on, locally and with `--where cloud` (sent to
   `/prompt` as `partial_execution_targets`). Ids that are not in the workflow,
@@ -77,7 +86,37 @@ history.
 - DynamicGroup workflow conversion, row editing and validation, including row
   templates in node discovery and the widget catalog. Refuse incompatible saved
   widget layouts and ambiguous names instead of editing a different widget.
-
+- A `comfy-run-on-cloud` skill, installed by default, takes one local workflow
+  onto Comfy Cloud. It checks Comfy Cloud's standard environment with the
+  original dependencies, including supported user model/LoRA uploads, then
+  reuses a compatible existing custom environment (a workspace Build) before
+  considering conversion. Lossless conversions (the same file in another folder,
+  removing memory- or speed-only nodes, exact core equivalents) happen without
+  asking; a lossy one (a different model, LoRA, upscaler or implementation)
+  needs the user's yes, with a custom environment offered as the exact alternative and
+  its costs stated. It pre-flights every converted copy on the server, asks once
+  per file before uploading models or inputs from disk on every route, and
+  verifies a real job on the selected target before handoff. It asks before freeing
+  a release, Build or deployment slot only when the planned operation needs it.
+  Its reference skill `comfy-run-on-cloud-local-install` covers finding the install behind a
+  workflow, Comfy Desktop's split layout included.
+- `comfy build inventory <workflow>` (hidden while the skill above is its only
+  caller) reports what one workflow loads: active classes and the packs and
+  versions it recorded, model values with their subfolders, `embedding:`
+  references, input files, muted and bypassed nodes, and loaders that pull
+  weights no widget names. `--models-root` (repeatable), `--desktop` and
+  `--hash` find each model on disk; `--input-root` hashes each input file to the
+  name Cloud stores an upload of it under; `--server` joins a running ComfyUI's
+  classes. `--cloud` reports `covered`, `covered_after_lossless_fixes` (folder
+  remaps with a ready `set_widget`, removable memory-only nodes),
+  `covered_needs_check` or `needs_build_or_lossy_conversion`, compares each
+  local model's size with Cloud's same-named file (`weights: different_size` is
+  a different model; matching sizes still require identity verification), and
+  says whether each input is already on Cloud. Only active subgraph instances
+  contribute dependencies, each model use is checked against its loader, and
+  ambiguous input basenames are not guessed. API inventories include the exact
+  deployment asset-upload plan, including custom-node file inputs, so approvals
+  can cover every file before a smoke run.
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0
@@ -239,6 +278,23 @@ history.
   written `widgets_values` is the frontend's four-widget shape
   (`model_file`, `viewport_state`, `width`, `height`). Before, the canvas
   restored those values by position into viewport state, width and height.
+- Run-on-Cloud inventories resolve the selected Desktop instance's effective
+  paths, retain uncertain dependencies, distinguish runtime inputs from model
+  coverage, and report missing or conflicting model identity. Verified private
+  models now pass Cloud model-enum preflight without relaxing other validation.
+- Run-on-Cloud guidance reuses compatible Builds before conversion, binds file
+  approval to the reviewed bytes and destination, and stops build repair when
+  the proposed package has no verified installation mechanism. The installed
+  wheel now includes the skill's prompt template.
+- Successful previews using bundled ffmpeg no longer report a false trust error.
+  Cloud asset listings encode multiple tags using the server's supported query
+  format, and CLI subprocess tests isolate their credential stores.
+- Desktop discovery reads both modern and legacy registries. Callers with
+  running-server launch metadata select that exact instance, resolve its model
+  YAML and effective data/input/output paths, and keep ambiguous or relative
+  runtime identities unresolved. The optional discovery fields are documented
+  in the which/env schemas; unrelated launch arguments are excluded.
+
 - `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
   accepts a connection and hangs up before answering (a restarting server, a
   reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
@@ -251,6 +307,49 @@ history.
   already finished. Neither old key is published any more. The second exit was
   also skipping the trimming and redaction that key drives, so it emitted the
   full traceback and a `current_inputs` that can hold an api_key.
+- Parallel build and deploy requests rejected on an old access token now adopt
+  a peer's refreshed token under the shared refresh lock instead of rotating it
+  again. Each rejected request retries at most once. If session recovery still
+  fails while a refreshable sign-in remains stored, the watch reports that the
+  remote work may continue instead of telling you to sign in again.
+  `comfy build release create --watch`, `comfy deploy up`, `promote`,
+  `rollback` and `comfy deploy status --watch` now end with the new code
+  `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint
+  names the command that reads the release or deployment again. A 401 before
+  anything was accepted, on a workspace API key, or when no refreshable sign-in
+  remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
+- `comfy build push --dry-run` now runs the push's registry-pin check, so a
+  pin the builder cannot place fails the dry run with the push's own
+  `build_registry_pin_missing` error instead of passing it. A version the
+  registry has Flagged was the common case: the dry run passed, and the push
+  was refused only after the plan had been disclosed. The check asks the
+  builder's snapshot importer to place each public pack, a read that writes
+  nothing, and the dry run still uploads and saves nothing. A spec that pins
+  a public pack now needs sign-in for its dry run (`build_not_signed_in`
+  otherwise); a spec whose packs are all local still sends no request.
+
+- `comfy workflow save --where cloud` saves the workflow where the Cloud
+  Workflows sidebar lists it, as `workflows/<name>.json`, so it shows there and
+  opens from it. It used to create only an `/api/workflows` record, which the
+  sidebar never shows. Cloud keeps a record for the file, and `workflow_id` and
+  `latest_version` are read back from it by name; when exactly one record by
+  that name with matching content can't be read back they are null, with a
+  `workflow_record_unresolved` warning, and the save still succeeds. `--json`
+  also carries `filename`, `size` and `modified`. A same-name save replaces the
+  workflow, as the Cloud editor's Save does, where it used to add a second
+  record with the same name; the new `--no-overwrite` refuses it with
+  `workflow_exists` instead, on both routes. On Cloud `--description` is now
+  ignored with a `description_ignored` warning, since the file has no
+  description field. A save named `.index.json`, the folder's favorites file,
+  is refused, as are Cloud dotfiles or hidden folders that the sidebar never
+  lists. Cloud deletion now removes the sidebar file as well as its record;
+  ambiguous same-name records are refused before deletion, and partial cleanup
+  reports `workflow_delete_incomplete` with the file's deletion state.
+- `comfy which` and `comfy env` report Desktop's split code, data and model
+  roots without changing launch/install selection. A nonexistent selected
+  workspace no longer succeeds in `which`; discovery reports malformed Desktop
+  configuration and marks inferred data roots as unverified.
+
 - `comfy workflow validate` (and `comfy run`'s pre-submit check) accepts a
   literal the server converts before checking it: an integer string on an INT
   input (`"1536"`), a numeric string on a FLOAT input, a number on a STRING

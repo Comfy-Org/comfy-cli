@@ -123,6 +123,9 @@ def _preflight_validate(
 
     graph = Graph.from_object_info(object_info)
     validation = graph.validate_workflow(workflow)
+    from comfy_cli.cloud_model_validation import resolve_cloud_model_errors
+
+    validation = resolve_cloud_model_errors(validation, workflow, where=where)
     errors = list(validation.get("errors", [])) if not validation.get("valid", True) else []
     if submitted_workflow is not None and submitted_workflow is not workflow:
         skipped = graph.validate_workflow({k: v for k, v in submitted_workflow.items() if k not in workflow})

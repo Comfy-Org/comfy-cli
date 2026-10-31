@@ -934,3 +934,22 @@ def test_remote_validate_treats_a_list_naming_no_folder_as_unread(
     assert said.count(_FOLDER_CASE_UNCHECKED) == 1, pretty.output
     assert agent.exit_code == 0, agent.output
     assert _envelope(agent)["data"]["folder_case_checked"] is False
+
+
+@pytest.mark.parametrize("kind", ["model", "node"])
+@pytest.mark.parametrize("override", [False, True], ids=["default-base", "explicit-base"])
+def test_missing_local_path_names_effective_asset_base(workspace, kind, override):
+    models = [local_model(localPath="checkpoints/missing.safetensors")] if kind == "model" else []
+    nodes = [local_node(localPath="missing-node")] if kind == "node" else []
+    write_spec(workspace, models=models, nodes=nodes)
+    base = workspace / ("models" if kind == "model" else "custom_nodes")
+    options = []
+    if override:
+        base = workspace.parent / "separate-assets"
+        base.mkdir()
+        options = ["--models-dir" if kind == "model" else "--custom-nodes-dir", str(base)]
+    result = _invoke(workspace, *options)
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert str(base) in error["message"]

@@ -150,10 +150,10 @@ def ls_cmd(
     params: list[tuple[str, Any]] = [("limit", min(max(limit, 1), 500))]
     if name:
         params.append(("name_contains", name))
-    for t in tags.split(",") if tags else []:
-        t = t.strip()
-        if t:
-            params.append(("include_tags", t))
+    tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else []
+    if tag_list:
+        # Cloud declares this array `explode: false`; repeated keys are a 400.
+        params.append(("include_tags", ",".join(tag_list)))
     url = target.url("assets") + "?" + urllib.parse.urlencode(params)
 
     try:

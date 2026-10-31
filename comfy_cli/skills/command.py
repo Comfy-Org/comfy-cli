@@ -4,7 +4,7 @@ The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
 three targets, zero protocol.
 
-Bundled skills (6 total) — see ``comfy skills list`` for descriptions:
+Bundled skills — see ``comfy skills list`` for descriptions:
 
   - ``comfy``           — the consolidated driver skill (command surface,
                           output contract, routing, discovery, execution,
@@ -18,6 +18,10 @@ Bundled skills (6 total) — see ``comfy skills list`` for descriptions:
   - ``comfy-deploy``    — running a Build release as a serverless deployment:
                           compute choice, worker bounds, submitting workflows,
                           and what keeps costing money
+  - ``comfy-custom-nodes`` — authoring custom nodes
+  - ``comfy-run-on-cloud`` — one local workflow onto Comfy Cloud: the standard
+                          environment first, an existing custom environment
+                          next, a workflow-scoped new one last, with every disk upload gated
 
 Reference skills (``REFERENCE_SKILLS``) are the other half: ``show`` resolves
 them and no default install writes them, so a parent skill can cite one by name

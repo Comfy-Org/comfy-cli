@@ -292,7 +292,7 @@ def test_up_will_not_move_a_deployment_that_is_stopping_or_failed_to_stop(tmp_pa
     error = _envelope(result)["error"]
     assert result.exit_code == 1
     assert error["code"] == "deploy_conflict"
-    assert "comfy deploy status --deployment dep-1" in error["hint"]
+    assert "comfy deploy show --deployment dep-1" in error["hint"]
     assert client.move_calls == [] and client.start_calls == []
 
 
@@ -667,7 +667,7 @@ def test_a_newer_update_while_one_waits_exits_1_as_replaced(tmp_path, monkeypatc
         "replacing_release_id": "release-3",
     }
     assert error["message"] == "the update of deployment dep-1 to release v5 was replaced by an update to release v3"
-    assert "comfy deploy status --deployment dep-1" in error["hint"]
+    assert "comfy deploy show --deployment dep-1" in error["hint"]
 
 
 @pytest.mark.parametrize(

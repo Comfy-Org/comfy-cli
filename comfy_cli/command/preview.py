@@ -223,7 +223,7 @@ def preview_cmd(
                 message="ffmpeg not found on PATH — `comfy preview` needs it to render.",
                 hint="install ffmpeg (`brew install ffmpeg` / `apt install ffmpeg`) or `pip install imageio-ffmpeg`",
             )
-        else:
+        elif not exc.is_absent:
             # Installed, but the match was refused. Saying "install ffmpeg" here
             # would send a user who already has it down the wrong path *and* bury
             # the interesting part: something named ffmpeg is sitting in the

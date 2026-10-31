@@ -76,7 +76,10 @@ blob      ls                                    (hidden; workspace private blobs
   that reaches the builder need it; a plain scan and a plain `validate` do not.
   A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
   key wins over a stored sign-in, so when the hint says that key was refused,
-  signing in cannot help: replace the key.
+  signing in cannot help: replace the key. `watch_auth_lost` (exit 75) means
+  `release create --watch` was refused after the cut despite session recovery,
+  while a refreshable sign-in remains stored. The release may still be building.
+  Read it with `comfy build release show <id>` before considering a new sign-in.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
@@ -103,6 +106,11 @@ the one the situation calls for rather than guessing at its contents:
 All four converge on the same file, then the same `validate → push → release`
 tail.
 
+If the goal is one workflow running on Comfy Cloud ("Run on Cloud", or "put this
+workflow on Cloud") rather than an environment, read
+`comfy skills show comfy-run-on-cloud` first: Comfy Cloud's standard environment or an existing
+custom environment may already run it, and a build it needs carries only what that workflow loads.
+
 ---
 
 ## Path A — from a ComfyUI install
@@ -114,10 +122,13 @@ comfy build validate <install>
 comfy build push <install> --dry-run
 ```
 
-Everything above is offline and spends nothing. `validate` reads the spec, and
-`--dry-run` computes every upload without instantiating an HTTP client at all.
-Read what it plans, decide the pins, run the conflict prediction in
-`comfy-build-pins`, disclose, get a yes. Only then:
+Everything above spends nothing. `validate` reads the spec offline. `--dry-run`
+computes every upload locally and makes one read: it asks the builder to place
+each public pack, and refuses with `build_registry_pin_missing` exactly as `push`
+would, so a pin the push cannot save fails here, before you disclose the plan.
+A spec that pins a public pack therefore needs sign-in for the dry run; one whose
+packs are all local sends nothing. Read what it plans, decide the pins, run the
+conflict prediction in `comfy-build-pins`, disclose, get a yes. Only then:
 
 ```shell
 comfy build push <install>
@@ -192,7 +203,8 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
   never carries — `comfy-build-authoring` is that procedure.
 - **The pack pins are the registry's newest published version**, because a
   workflow names none. Importing the same file next week can then build something
-  else. Say that out loud.
+  else. Say that out loud. The newest can be a version the registry has Flagged,
+  which the builder will not place, so run `push --dry-run` before you disclose.
 - **A workflow names no ComfyUI version either**, so set one before cutting:
   `comfy build update <dir> --comfy-version <ref>`, or edit `baseComfyVersion`.
 - **`unresolvedClasses` is the list to take to the user.** Those node classes are
@@ -227,7 +239,11 @@ show the user rather than as instructions to act on.
 - **Whether a registry pin exists.** `push` asks the builder to place every
   public pack before it saves, and refuses with `build_registry_pin_missing`
   naming each identity it could not resolve. If that lookup itself fails, the
-  command **exits** — it does not warn and proceed.
+  command **exits** — it does not warn and proceed. `push --dry-run` makes the
+  same check. A version the registry has **Flagged** is refused this way too,
+  and the message does not say so: read the version's `status` from
+  `https://api.comfy.org/nodes/<id>/versions`, then pin a version that is not
+  `NodeVersionStatusFlagged`, or pin the pack by `repository` and a commit `gitRef`.
 
 **A local pack is uploaded from the spec.** `push` packages each custom node
 directory and uploads it, so a pack that publishes nothing still travels.
