@@ -374,10 +374,14 @@ def test_install_deps_with_uv_compile():
         assert kwargs.get("uv_compile") is True
 
 
-def test_install_deps_no_args_shows_error():
+def test_install_deps_no_args_shows_error_and_exits():
+    """The message used to print and execution fell through to a TypeError
+    from os.path.expanduser(None); scripts get an exit code instead."""
     with patch("comfy_cli.command.custom_nodes.command.execute_cm_cli"):
         result = runner.invoke(app, ["install-deps"])
         assert "One of --deps or --workflow" in result.output
+        assert result.exit_code == 1
+        assert type(result.exception) is SystemExit, "clean exit, not a TypeError traceback"
 
 
 def test_restore_snapshot_with_pip_non_local_url():
