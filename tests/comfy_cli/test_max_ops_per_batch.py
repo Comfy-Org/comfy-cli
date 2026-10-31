@@ -182,6 +182,61 @@ def test_the_old_document_counts_toward_the_batch_too():
         ops.replace_ops(_nodes(600), _nodes(600))
 
 
+# --- the per-op payload bounds, on a batch nothing applies ------------------
+
+
+def test_replace_ops_refuses_an_op_whose_own_payload_is_out_of_bounds():
+    """The batch length is only the OUTER bound.
+
+    ``apply_specs``' ops each go through ``apply_op``, which canonicalizes them
+    and so enforces §20.3's per-op bounds (depth 64, 4,096 entries, 262,144
+    cost). ``replace_ops`` builds its ops and hands them straight to a caller,
+    so nothing checked those — and ``templates fetch --emit-ops`` presented the
+    result as the legal translation of the graph while the shared applier
+    refused it whole as ``malformed_op``. Same mint-then-refuse shape, one level
+    down.
+    """
+    # A `widgets_values` past the entry cap: copied verbatim into `add_node`.
+    oversized = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "KSampler",
+                "widgets_values": [0] * (ops._MAX_OP_COLLECTION_ENTRIES + 1),
+                "inputs": [],
+                "outputs": [],
+            }
+        ],
+        "links": [],
+    }
+    with pytest.raises(ops.NotExpressibleError, match=r"op #0 \(add_node\) is not a legal op payload: .*entries"):
+        ops.replace_ops({"nodes": [], "links": []}, oversized)
+
+    # And by cost, from one very long widget string.
+    costly = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "KSampler",
+                "widgets_values": ["x" * (ops._MAX_OP_COST + 1)],
+                "inputs": [],
+                "outputs": [],
+            }
+        ],
+        "links": [],
+    }
+    with pytest.raises(ops.NotExpressibleError, match=r"not a legal op payload: .*cost budget"):
+        ops.replace_ops({"nodes": [], "links": []}, costly)
+
+
+def test_the_per_op_check_leaves_an_ordinary_batch_alone():
+    """It refuses a payload the shared applier would refuse, and nothing else:
+    every op a real graph mints is orders of magnitude inside the bounds."""
+    minted = ops.replace_ops(_nodes(4), _nodes(8))
+    assert len(minted) == 12
+    assert all(len(ops._op_digest(op)) == 64 for op in minted)
+
+
 # --- where it actually bites, measured rather than assumed ------------------
 
 

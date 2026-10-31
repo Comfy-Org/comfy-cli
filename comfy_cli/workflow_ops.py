@@ -2995,6 +2995,21 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
             f"the workflow needs {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op batch limit "
             "(delete_node per existing node, add_node per node, connect per link)"
         )
+    # The batch length is only the outer bound. These ops are built here and
+    # handed straight to a caller — unlike `apply_specs`', every one of which
+    # goes through `apply_op` and is canonicalized there — so nothing had
+    # checked the PER-OP payload bounds (§20.3: depth 64, 4,096 entries, 262,144
+    # cost). A node with an outsized `widgets_values`, or a `delete_node` whose
+    # `removed_links` runs past the entry cap, produced a batch this function
+    # presented as the legal translation of the graph and the shared applier
+    # then refused as `malformed_op`: the same mint-then-refuse shape one level
+    # down. Canonicalized rather than digested, since the refusal is the whole
+    # point and the hash is not needed.
+    for i, minted in enumerate(ops):
+        try:
+            _canonical_op(minted)
+        except ValueError as e:
+            raise NotExpressibleError(f"op #{i} ({minted['op']}) is not a legal op payload: {e}") from e
     return ops
 
 

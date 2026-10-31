@@ -1433,10 +1433,12 @@ Where it is enforced, and the two different refusals:
   raises `malformed_op: batch mints <n> ops, more than the 1024-op limit`;
   `applied_count` is 0 there like every other mid-batch refusal.
 * **`replace_ops`** raises **`NotExpressibleError`**, the existing "there is no
-  legal batch for this graph" signal, rather than a bare `ValueError`. Its two
-  reasons are now *structure no frozen kind can create* and *a translation
-  longer than the bound*; both want the same caller behaviour, which both
-  production callers already implement — `templates fetch --emit-ops` reports
+  legal batch for this graph" signal, rather than a bare `ValueError`. Its
+  reasons are now *structure no frozen kind can create*, *a translation longer
+  than the bound*, and *one op whose own payload is out of §20.3's bounds* —
+  that last one because these ops are handed to a caller without ever passing
+  through `apply_op`, so nothing else canonicalizes them. All three want the
+  same caller behaviour, which both production callers already implement — `templates fetch --emit-ops` reports
   `ops_skipped` beside the file it still wrote, and `generate`'s emit path
   raises `EmitError`. The count binds on the SUM of `old` and `new`, because
   §8.8's replacement shape emits a `delete_node` per node already in `old`
