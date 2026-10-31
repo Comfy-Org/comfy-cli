@@ -1529,11 +1529,21 @@ input — so an oversized string, or an oversized object key at the `+= len(name
 charge, was fully rendered before being refused. The bound therefore did not
 bound the work.
 
-Charging and refusing at the same point fixes that and changes no outcome,
-because the budget only ever grows: every payload that exceeded at the end
-exceeds at the charge that crossed the line. The shared package already has this
-property for the same reason — `opBoundsRefusal` walks and charges the payload
-before `normalize` renders anything.
+Charging and refusing at the same point fixes that, and it does not change
+WHETHER a payload is refused, because the budget only ever grows: every payload
+that exceeded at the end exceeds at the charge that crossed the line, and every
+charge that crosses the line is followed by an end that is also over. The shared
+package already has this property for the same reason — `opBoundsRefusal` walks
+and charges the payload before `normalize` renders anything.
+
+What it can change is WHICH refusal a payload that breaks two bounds at once
+reports. An object with an oversized key AND a value nested past the depth limit
+used to charge every key without checking, reach the values, and report
+`payload_too_deep:`; it now reports the cost budget at the key. Both are
+refusals of the same payload, and the cost-first order is the one CMP's
+depth-first walk already produces, so this moves comfy-cli toward the
+counterpart rather than away from it. No single-violation payload changes its
+code.
 
 ### 22.3 Object keys that collide after coercion are `malformed_op`
 
