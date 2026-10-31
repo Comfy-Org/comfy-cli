@@ -137,6 +137,7 @@ class BuilderClient:
         # handed a token (COMFY_BUILDER_TOKEN, COMFY_CLOUD_AUTH_TOKEN) or a key keeps
         # it and lets a 401 surface.
         self._refreshes_on_401 = False
+        self._sign_in_base_url: str | None = None
         # What to replace once the builder refuses this client's credential.
         self._refused_hint = (
             credentials.refused_key_hint(api_key)
@@ -175,8 +176,14 @@ class BuilderClient:
             raise BuilderAuthError("not signed in: run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
         client = cls(base_url, session.access_token)
         client._refreshes_on_401 = True
+        client._sign_in_base_url = session.base_url
         client._refused_hint = "run `comfy cloud login` first"
         return client
+
+    @property
+    def sign_in_base_url(self) -> str | None:
+        """The environment of the stored sign-in this client's token came from; None for a key or a handed token."""
+        return self._sign_in_base_url if self._refreshes_on_401 else None
 
     def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:
         """Every builder request goes through here, so a long wait survives its token expiring.
