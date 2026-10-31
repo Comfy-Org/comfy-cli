@@ -273,10 +273,10 @@ def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, 
         # A bare name is satisfied by any installed version.
         row["status"] = "satisfied"
     else:
-        from packaging.version import InvalidVersion
+        from packaging.version import InvalidVersion, Version
 
         try:
-            contains = req.specifier.contains(installed, prereleases=True)
+            contains = req.specifier.contains(Version(installed), prereleases=True)
         except InvalidVersion:
             # A dist whose recorded version isn't PEP 440 (rare, but a broken
             # `.dist-info` will do it) can't be compared. Say so rather than

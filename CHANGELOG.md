@@ -17,6 +17,9 @@ history.
 
 ### Fixed
 
+- `comfy node deps` reports malformed installed package versions as `unknown`
+  consistently across supported `packaging` versions.
+
 - `comfy validate` no longer lets a dotted key left over from another
   dynamic-combo selection close a false dependency cycle or pull a pruned node
   back into the run. Checks stay on when the selection can't be resolved.
