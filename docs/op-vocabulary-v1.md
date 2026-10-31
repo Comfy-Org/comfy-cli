@@ -1462,3 +1462,45 @@ long batch behind a caller's back.
 precondition — a batch must be within the bound before abort-remainder has
 anything to say about it — and is otherwise unaltered. Downstream repos pinning
 this document by SHA move the SHA together with their comfy-cli pin.
+
+## 22. Amendment v1.13 — 2026-10-31 (an integer past 2^53 is spelled as the double it becomes)
+
+**§20.1's "numbers rendered as ECMAScript renders them" covers integers too, and
+comfy-cli did not implement it that way.** It rendered every `int` with Python's
+`str`, which is exact at any magnitude. The counterpart has no such type: JSON
+carries no integer, `JSON.parse` reads every numeric literal as an IEEE-754
+double, and CMP's canonicalizer refuses a `BigInt` payload outright
+(`applier.ts`: `rejectBigIntPayload`). So past 2^53 the other side holds the
+ROUNDED value and `Number::toString` spells that.
+
+The consequence was the failure §20.1's float rule exists to prevent, one type
+over. A seed at an INT widget's `0xffffffffffffffff` maximum spelled
+`18446744073709551615` here and `18446744073709552000` after a relay through JS,
+and `10**21` spelled `1e+21` there — so an **identical** op echoed back through
+the shared package digested differently and was refused as `op_id_reuse`.
+
+The rule, which changes nothing inside the exact range:
+
+* `-2^53 <= n <= 2^53` keeps its exact digits — the two spellings already agree
+  there, and this is every integer any widget, node id, link id or stamp
+  carries;
+* outside it, the value is rendered through the same double path as a float, so
+  it reads as `JSON.stringify(JSON.parse(literal))` would;
+* past the double range entirely (`10**400`), `JSON.parse` yields `Infinity` and
+  `JSON.stringify` renders `null`, matching §20.1's non-finite bullet;
+* an integer **object key** is the one place the two diverge, because a property
+  name is coerced with `String()` rather than rendered by `JSON.stringify`:
+  there the non-finite end is `"Infinity"` / `"-Infinity"`. Only a
+  programmatically built op can reach a non-`str` key at all — parsed JSON
+  always has string keys.
+
+The **cost charge is unchanged** at a flat 8 units per number, deliberately:
+`src/limits.ts` documents the model as "8 per numeric/leaf", so charging a huge
+integer by its digit count would refuse a payload CMP accepts — the same
+validation drift §20.3 withdrew a comfy-cli-only budget to avoid.
+
+**No change to §§1-8, and no change needed in `comfy-multi-player`.** CMP
+already produces these spellings, because it canonicalizes with
+`JSON.stringify`; this amendment records that comfy-cli now agrees with it. Its
+only behavioural effect is on an op carrying an integer past 2^53, which now
+digests as its JS spelling.

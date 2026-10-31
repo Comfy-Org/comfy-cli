@@ -161,6 +161,39 @@ def _es_number(value: float) -> str:
     return f"{mantissa}e{'+' if e >= 0 else '-'}{abs(e)}"
 
 
+#: ECMAScript holds an integer exactly only up to here. JSON has no integer type
+#: on the other side of the wire — `JSON.parse` reads every numeric literal as an
+#: IEEE-754 double, and comfy-multi-player's canonicalizer refuses a `BigInt`
+#: payload outright (`applier.ts`: `rejectBigIntPayload`) — so past this bound the
+#: value ARRIVES there rounded and `Number::toString` spells the rounded number.
+_ES_EXACT_INT = 2**53
+
+
+def _es_int(value: int) -> str:
+    """Render one ``int`` as ECMAScript renders the number ``JSON.parse`` makes
+    of the same literal.
+
+    Inside ``_ES_EXACT_INT`` the two spellings already agree, so the exact digits
+    are kept. Outside it they do not, and the disagreement is not cosmetic: a
+    seed at a FLOAT/INT widget's ``0xffffffffffffffff`` maximum renders
+    ``18446744073709551615`` here and ``18446744073709552000`` after a relay
+    through JS, and ``10**21`` renders as ``1e+21`` there — so an IDENTICAL op
+    echoed back through the shared package digests differently and is refused as
+    ``op_id_reuse``. That is the failure :func:`_es_number` exists to prevent,
+    one type over, which is why the rendering goes through the same double path.
+    """
+    if -_ES_EXACT_INT <= value <= _ES_EXACT_INT:
+        return str(value)
+    try:
+        as_double = float(value)
+    except OverflowError:
+        # Past the double range `JSON.parse` yields Infinity, which
+        # `JSON.stringify` renders as `null` — the same spelling the non-finite
+        # float branch below uses.
+        return "null"
+    return _es_number(as_double)
+
+
 def _canonical_string(value: str) -> str:
     """One JSON string literal, escaped the way ``JSON.stringify`` escapes it.
 
@@ -186,7 +219,17 @@ def _canonical_key(key: Any) -> str:
     if isinstance(key, bool):  # before int: bool is an int subclass
         return "true" if key else "false"
     if isinstance(key, int):
-        return str(key)
+        if -_ES_EXACT_INT <= key <= _ES_EXACT_INT:
+            return str(key)
+        # Past the exact range the property name is coerced from the DOUBLE
+        # `JSON.parse` produced, so fall through to the float path below rather
+        # than spelling out digits no JS object key would ever carry. Note the
+        # Infinity spelling there, not `_es_int`'s `null`: a KEY is coerced with
+        # `String()`, not rendered by `JSON.stringify`.
+        try:
+            key = float(key)
+        except OverflowError:
+            key = math.inf if key > 0 else -math.inf
     if isinstance(key, float):
         if math.isnan(key):
             return "NaN"
@@ -209,8 +252,11 @@ def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
         budget[0] += 8
         rendered = "true" if value else "false"
     elif isinstance(value, int):
+        # Still a flat 8, deliberately: the cost model is mirrored from the
+        # shared package ("8 per numeric/leaf", `src/limits.ts`), so charging a
+        # huge int by its digit count would refuse a payload CMP accepts.
         budget[0] += 8
-        rendered = str(value)
+        rendered = _es_int(value)
     elif isinstance(value, float):
         budget[0] += 8
         # ``JSON.stringify`` renders every non-finite number as ``null``, so

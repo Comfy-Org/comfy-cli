@@ -110,6 +110,59 @@ def test_numbers_are_rendered_the_way_ecmascript_renders_them():
     assert ops._canonical_op({"v": 5e-324}) == '{"v":5e-324}'
 
 
+def test_an_integer_past_the_exact_range_is_spelled_the_way_js_spells_it():
+    """``JSON.parse`` has no integer type: it reads every numeric literal as an
+    IEEE-754 double, and CMP's canonicalizer refuses a ``BigInt`` payload
+    outright (``applier.ts``: ``rejectBigIntPayload``). So past 2**53 the other
+    side holds the ROUNDED value and ``Number::toString`` spells that, while
+    ``str(value)`` here would spell the exact digits.
+
+    These are the spellings ``JSON.stringify(JSON.parse(literal))`` produces,
+    taken from a real engine, not from the spec text.
+    """
+    assert ops._canonical_op({"v": 2**53}) == '{"v":9007199254740992}'
+    assert ops._canonical_op({"v": 2**53 + 1}) == '{"v":9007199254740992}'
+    # A legal INT-widget maximum: a seed at 0xffffffffffffffff.
+    assert ops._canonical_op({"v": 18446744073709551615}) == '{"v":18446744073709552000}'
+    assert ops._canonical_op({"v": -18446744073709551615}) == '{"v":-18446744073709552000}'
+    # At 1e21 JS switches to exponent form for an integer too.
+    assert ops._canonical_op({"v": 10**21}) == '{"v":1e+21}'
+    assert ops._canonical_op({"v": 10**20}) == '{"v":100000000000000000000}'
+    # Past the double range `JSON.parse` yields Infinity, which stringifies as
+    # `null` — the same spelling the non-finite float branch uses.
+    assert ops._canonical_op({"v": 10**400}) == '{"v":null}'
+    # Inside the exact range nothing changed: the digits are kept.
+    assert ops._canonical_op({"v": 20}) == '{"v":20}'
+    assert ops._canonical_op({"v": -(2**53)}) == '{"v":-9007199254740992}'
+
+
+def test_a_max_seed_relayed_through_js_digests_the_same(graph):
+    """The failure the test above prevents, end to end. Without the rounding an
+    op carrying ``0xffffffffffffffff`` digests one way here and another after a
+    JS relay, so the IDENTICAL op echoed back is refused as ``op_id_reuse`` —
+    exactly what the float spelling was fixed to stop.
+    """
+    workflow = _workflow()
+    exact = _op(18446744073709551615)
+    ops.apply_op(workflow, exact, graph)
+    relayed = _op(18446744073709552000)  # what `JSON.parse(JSON.stringify(op))` yields
+    assert ops._op_digest(relayed) == ops._op_digest(exact)
+    assert ops.apply_op(workflow, relayed, graph) is workflow
+
+
+def test_an_integer_object_key_past_the_exact_range_coerces_like_a_js_key():
+    """A key is coerced with ``String()``, not rendered by ``JSON.stringify``, so
+    the two differ on the non-finite end: ``String(Infinity)`` is ``"Infinity"``
+    where ``JSON.stringify(Infinity)`` is ``null``. Only a programmatically built
+    op reaches a non-``str`` key at all — parsed JSON always has string keys.
+    """
+    assert ops._canonical_op({"v": {18446744073709551615: 1}}) == '{"v":{"18446744073709552000":1}}'
+    assert ops._canonical_op({"v": {10**21: 1}}) == '{"v":{"1e+21":1}}'
+    assert ops._canonical_op({"v": {10**400: 1}}) == '{"v":{"Infinity":1}}'
+    assert ops._canonical_op({"v": {-(10**400): 1}}) == '{"v":{"-Infinity":1}}'
+    assert ops._canonical_op({"v": {7: 1}}) == '{"v":{"7":1}}'
+
+
 def test_object_keys_sort_by_code_point_not_by_utf16_code_unit():
     """§8.1's caveat applies to the key sort too: for ASCII, JS UTF-16 ``<``
     agrees with code-point order, but above the Basic Multilingual Plane it does
