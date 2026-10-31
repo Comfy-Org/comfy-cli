@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 from typer.core import TyperGroup
-from typer.models import CommandInfo, TyperInfo
+from typer.models import CommandInfo, DefaultPlaceholder, TyperInfo
 
 if TYPE_CHECKING:
     import click
@@ -105,6 +105,60 @@ class LazyCommand:
     hidden: bool = False
 
 
+def _reject_single_callback_app(name: str, spec: LazySubcommand, sub_app: typer.Typer) -> None:
+    """Refuse a ``LazySubcommand`` mount of a Typer app that is only a callback.
+
+    A Typer app with no commands and no subgroups is one function wearing an
+    app, and ``add_typer`` turns it into a click ``Group``. A group disables
+    interspersed arguments, so the first non-option token ends option parsing
+    and everything after it is read as a nested command name. The callback's
+    own positional then swallows the query and the trailing flags become a
+    subcommand that does not exist::
+
+        $ comfy code-search KSampler --repo ComfyUI
+        Usage: comfy code-search [OPTIONS] {query} COMMAND [ARGS]...
+        Error: Missing argument 'query'.
+
+    while the same flags *before* the query parse fine — the shape a user
+    hits only in the installed CLI, since calling the module's app directly
+    never exercises the root group. ``code-search`` shipped that way and was
+    moved to :class:`LazyCommand`; this keeps the next one from repeating it.
+
+    A sub-app that supplies its own ``cls`` (e.g. a nested :class:`LazyTyperGroup`
+    with its own ``lazy_subcommands`` table) is exempt: its commands are built on
+    lookup rather than registered eagerly, so ``registered_commands`` and
+    ``registered_groups`` are empty by design, not because it is a bare callback.
+    ``cls`` can be set on the app itself (``typer.Typer(cls=...)``) or on its
+    callback (``@sub_app.callback(cls=...)``); ``typer.main.solve_typer_info_defaults``
+    reads the callback's value first, so this checks both in that order.
+    """
+    if not isinstance(sub_app, typer.Typer):
+        raise TypeError(
+            f"lazy_subcommands[{name!r}] names {spec.module}.{spec.attr}, which is "
+            f"{sub_app!r}, not a typer.Typer instance."
+        )
+    if sub_app.registered_commands or sub_app.registered_groups:
+        return
+    callback = sub_app.registered_callback
+    callback_cls = callback.cls if callback is not None else DefaultPlaceholder(None)
+    effective_cls = callback_cls if not isinstance(callback_cls, DefaultPlaceholder) else sub_app.info.cls
+    if not isinstance(effective_cls, DefaultPlaceholder):
+        return
+    if sub_app.registered_callback is None:
+        raise TypeError(
+            f"lazy_subcommands[{name!r}] mounts {spec.module}.{spec.attr} as a command group, but "
+            f"that Typer app registers no commands, no subgroups, and no callback — there is nothing "
+            f"to mount. Check the module actually registers the commands you expect."
+        )
+    raise TypeError(
+        f"lazy_subcommands[{name!r}] mounts {spec.module}.{spec.attr} as a command group, but that "
+        f"Typer app registers no commands and no subgroups — it is a single callback. Mounting it as "
+        f"a group makes click demand a nested COMMAND, so options placed after the positional "
+        f'argument are rejected. Declare it as LazyCommand({spec.module!r}, attr="<function>") '
+        f"instead, naming the callback function rather than the app."
+    )
+
+
 class LazyTyperGroup(TyperGroup):
     """Root group with subcommands declared in ``lazy_subcommands`` and built
     on first lookup. Set the table on a subclass::
@@ -174,6 +228,7 @@ class LazyTyperGroup(TyperGroup):
 
     def _build_group(self, name: str, spec: LazySubcommand) -> click.Command:
         sub_app = getattr(importlib.import_module(spec.module), spec.attr)
+        _reject_single_callback_app(name, spec, sub_app)
         # Same TyperInfo ``add_typer`` would have appended: only the keywords
         # that were given, so the sub-app's own settings fill the rest.
         kwargs: dict[str, Any] = {"name": name}
