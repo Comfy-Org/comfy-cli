@@ -3139,6 +3139,40 @@ def _selected_release_id(renderer, client, scope: _BuildScope, release: str | No
     return _newest_release_id(renderer, client, _resolve_build_id(renderer, client, scope))
 
 
+#: The exit a watch that lost its sign-in ends with, as `comfy deploy`'s watches do
+#: (``deploy_runtime.EXIT_WATCH_LOST``): only the watch ended, so it must not exit 1,
+#: which says the release failed. 75 is EX_TEMPFAIL in sysexits.h.
+_EXIT_WATCH_LOST: Final = 75
+
+
+def _watched_release(renderer, client, release_id: str) -> dict:
+    """One read of a release this command has already cut.
+
+    The builder accepted the cut with this sign-in, so a 401 session recovery did
+    not clear ends the watch while a refreshable sign-in remains stored. The
+    release may continue remotely. A key, a handed token, or a sign-in without
+    a refresh token keeps ``build_not_signed_in``.
+    """
+    from comfy_cli import credentials
+    from comfy_cli.builder_api import BuilderCredentialRefused
+
+    try:
+        return client.get_release(release_id)
+    except BuilderCredentialRefused as error:
+        if not credentials.sign_in_still_stored(getattr(client, "sign_in_base_url", None)):
+            raise
+        renderer.error(
+            code="watch_auth_lost",
+            message=f"the builder refused the sign-in (401) after attempting session recovery; "
+            f"release {release_id} may still be building on the server",
+            hint=f"read it with `comfy build release show {release_id}` until its status is complete; "
+            "the stored sign-in was preserved",
+            details={"releaseId": release_id},
+            exit_code=_EXIT_WATCH_LOST,
+        )
+        raise typer.Exit(code=_EXIT_WATCH_LOST) from error
+
+
 def _poll_call(renderer, fn, usable=None):
     """``_builder_call`` for one poll of a watch, which a single timed-out or
     dropped request must not end: the release keeps building either way. A
@@ -3196,7 +3230,7 @@ def _poll_status(renderer, client, release_id: str) -> dict:
     word and ends the watch at the caller."""
     return _poll_call(
         renderer,
-        lambda: client.get_release(release_id),
+        lambda: _watched_release(renderer, client, release_id),
         usable=lambda release: isinstance(release, dict) and isinstance(release.get("status"), str),
     )
 

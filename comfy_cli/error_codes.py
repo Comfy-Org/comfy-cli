@@ -1719,6 +1719,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pendingUpdate and its releaseId is the release asked for",
     ),
     ErrorCode(
+        "watch_auth_lost",
+        "A watch over work the server had already accepted (`comfy build release create --watch`, `comfy deploy "
+        "up`, `promote` and `rollback`, `comfy deploy status --watch`) was refused with HTTP 401 despite "
+        "serialized session recovery and at most one retry, while a refreshable sign-in remains stored. "
+        "Only the watch ended: the release may still be building and the deployment may still be coming up. "
+        "The exit code is 75, not 1. `details.releaseId` (build) or "
+        "`details.deployment_id` (deploy) names what is still running. A 401 before anything was accepted, on a "
+        "workspace API key, or with no refreshable sign-in remaining stays `build_not_signed_in` or "
+        "`deploy_not_signed_in`.",
+        "the stored sign-in was preserved: re-read the work with `comfy build "
+        "release show <releaseId>` or `comfy deploy status --deployment <deployment_id> --watch`",
+    ),
+    ErrorCode(
         "deploy_update_failed",
         "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and the watch saw "
         "the move fail: the new release's copy failed to come up, or the update ended before it landed, which "
