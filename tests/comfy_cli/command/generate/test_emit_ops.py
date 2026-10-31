@@ -532,6 +532,67 @@ def test_cli_emit_ops_says_so_in_pretty_mode_when_no_batch_was_minted(tmp_path, 
     assert len(on_disk["nodes"]) <= workflow_ops._MAX_OPS_PER_BATCH
 
 
+@pytest.mark.parametrize("flag", ["--json", "--json-stream"])
+def test_cli_emit_ops_reports_the_skip_in_the_machine_envelope(tmp_path, monkeypatch, flag):
+    """The machine-readable half of the same condition.
+
+    The pretty warning exists because `ops_skipped` reaches only the envelope,
+    so that key is the whole premise and is worth pinning directly: on a skip the
+    envelope carries `ops_skipped` with the refusal reason and carries no `ops`
+    key at all, which is what lets a consumer fall back to the whole-document
+    path instead of inferring it from an empty batch. Both machine modes, since
+    `--json-stream` resolves to NDJSON and emits the same final envelope.
+    """
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+    out.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {"id": i + 1, "type": "LoadImage", "widgets_values": ["example.png"], "inputs": [], "outputs": []}
+                    for i in range(workflow_ops._MAX_OPS_PER_BATCH + 1)
+                ],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            flag,
+            "generate",
+            "nano-banana",
+            "--prompt",
+            "add sunglasses",
+            "--image",
+            "cat.png",
+            "--emit-workflow",
+            str(out),
+            "--emit-ops",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    assert "1024-op batch limit" in data["ops_skipped"]
+    # Absent, not null or empty: `templates fetch --emit-ops` uses the same
+    # envelope shape, and a consumer branches on the key being there.
+    assert "ops" not in data, sorted(data)
+    assert data["format"] == "frontend"
+    # The file is still written, which is the deliverable either way.
+    assert json.loads(out.read_text())["nodes"]
+
+
 def test_cli_emit_ops_is_quiet_in_pretty_mode_when_the_batch_was_minted(tmp_path, monkeypatch):
     """The complement: the warning is conditional, not printed on every run."""
     from typer.testing import CliRunner
