@@ -279,6 +279,31 @@ def test_the_shared_bounds_bind_only_past_any_observed_workflow():
         ops._op_digest({"value": "x" * 131_065, "old": "y" * 131_065})
 
 
+def test_an_oversized_string_is_refused_before_it_is_rendered(monkeypatch):
+    """The cost bound exists to cap the WORK a hostile payload costs, so it has
+    to refuse at the charge rather than after the render.
+
+    ``_canonical_string`` runs ``json.dumps`` plus a surrogate scan over the
+    whole string and allocates up to ~6x its size for control-heavy input, so
+    checking the budget only at the end of the call meant the oversized value
+    was fully rendered first. The shared package charges before it renders for
+    the same reason (``opBoundsRefusal`` walks the payload ahead of
+    ``normalize``). The refusal itself is unchanged — the budget only grows.
+    """
+    rendered: list[str] = []
+    real = ops._canonical_string
+    monkeypatch.setattr(ops, "_canonical_string", lambda value: (rendered.append(value), real(value))[1])
+    oversized = "x" * (ops._MAX_OP_COST + 1)
+
+    with pytest.raises(ValueError, match=f"^malformed_op: payload exceeds the {ops._MAX_OP_COST}-unit cost budget"):
+        ops._canonical_op({"v": oversized})
+
+    assert oversized not in rendered
+    # Charged per key too, so a dict of oversized keys cannot slip past either.
+    with pytest.raises(ValueError, match="cost budget"):
+        ops._canonical_op({"k" * (ops._MAX_OP_COST + 1): 1})
+
+
 def test_canonicalization_still_refuses_a_runaway_payload():
     nested: Any = "leaf"
     for _ in range(ops._MAX_OP_PAYLOAD_DEPTH + 2):

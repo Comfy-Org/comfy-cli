@@ -1463,7 +1463,14 @@ precondition — a batch must be within the bound before abort-remainder has
 anything to say about it — and is otherwise unaltered. Downstream repos pinning
 this document by SHA move the SHA together with their comfy-cli pin.
 
-## 22. Amendment v1.13 — 2026-10-31 (an integer past 2^53 is spelled as the double it becomes)
+## 22. Amendment v1.13 — 2026-10-31 (v1.11 corrections: canonical form and ledger edges)
+
+Five corrections to Amendment v1.11, all found by review of the implementation
+rather than by a failure in the field. None of them re-scopes an op kind and none
+needs a change in `comfy-multi-player`; each is comfy-cli coming into line with
+what v1.11 and CMP A8 already say.
+
+### 22.1 An integer past 2^53 is spelled as the double it becomes
 
 **§20.1's "numbers rendered as ECMAScript renders them" covers integers too, and
 comfy-cli did not implement it that way.** It rendered every `int` with Python's
@@ -1499,8 +1506,23 @@ The **cost charge is unchanged** at a flat 8 units per number, deliberately:
 integer by its digit count would refuse a payload CMP accepts — the same
 validation drift §20.3 withdrew a comfy-cli-only budget to avoid.
 
-**No change to §§1-8, and no change needed in `comfy-multi-player`.** CMP
-already produces these spellings, because it canonicalizes with
-`JSON.stringify`; this amendment records that comfy-cli now agrees with it. Its
-only behavioural effect is on an op carrying an integer past 2^53, which now
-digests as its JS spelling.
+CMP already produces these spellings, because it canonicalizes with
+`JSON.stringify`; this records that comfy-cli now agrees with it. The only
+behavioural effect is on an op carrying an integer past 2^53, which now digests
+as its JS spelling.
+
+### 22.2 The cost bound refuses at the charge, not after the render
+
+§20.3's budget exists to cap the WORK a hostile payload costs, and it was
+checked only at the END of each `_canonical_value` call. A string is charged by
+length and then handed to the renderer, which runs `json.dumps` plus a surrogate
+scan over the whole thing and allocates up to ~6x its size for control-heavy
+input — so an oversized string, or an oversized object key at the `+= len(name)`
+charge, was fully rendered before being refused. The bound therefore did not
+bound the work.
+
+Charging and refusing at the same point fixes that and changes no outcome,
+because the budget only ever grows: every payload that exceeded at the end
+exceeds at the charge that crossed the line. The shared package already has this
+property for the same reason — `opBoundsRefusal` walks and charges the payload
+before `normalize` renders anything.

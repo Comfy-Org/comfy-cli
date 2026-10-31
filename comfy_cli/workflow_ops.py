@@ -241,24 +241,41 @@ def _canonical_key(key: Any) -> str:
     raise ValueError(f"malformed_op: object key of type {type(key).__name__} is not canonical JSON")
 
 
+def _charge(budget: list[int], units: int) -> None:
+    """Charge ``units`` against the cost budget and refuse AT the charge.
+
+    Checking only at the end of :func:`_canonical_value` left the bound not
+    actually bounding the work: a string is charged by length and then handed to
+    ``_canonical_string``, which runs ``json.dumps`` plus a surrogate scan over
+    the whole thing and allocates up to ~6x its size for control-heavy input, so
+    an oversized payload was fully rendered before being refused. The shared
+    package has the same property for the same reason — ``opBoundsRefusal`` walks
+    and charges the payload BEFORE ``normalize`` renders anything — and the
+    refusal is unchanged either way, because the budget only ever grows.
+    """
+    budget[0] += units
+    if budget[0] > _MAX_OP_COST:
+        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
+
+
 def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
     if depth > _MAX_OP_PAYLOAD_DEPTH:
         raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
-    budget[0] += 1
+    _charge(budget, 1)
     if value is None:
-        budget[0] += 8
+        _charge(budget, 8)
         rendered = "null"
     elif isinstance(value, bool):  # before int: bool is an int subclass
-        budget[0] += 8
+        _charge(budget, 8)
         rendered = "true" if value else "false"
     elif isinstance(value, int):
         # Still a flat 8, deliberately: the cost model is mirrored from the
         # shared package ("8 per numeric/leaf", `src/limits.ts`), so charging a
         # huge int by its digit count would refuse a payload CMP accepts.
-        budget[0] += 8
+        _charge(budget, 8)
         rendered = _es_int(value)
     elif isinstance(value, float):
-        budget[0] += 8
+        _charge(budget, 8)
         # ``JSON.stringify`` renders every non-finite number as ``null``, so
         # doing the same is what makes the two canonical forms agree. It also
         # un-breaks overwriting a widget whose CURRENT value is NaN/Infinity
@@ -266,16 +283,16 @@ def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
         # ``old``), which the previous ``allow_nan=False`` rejected outright.
         rendered = _es_number(value) if math.isfinite(value) else "null"
     elif isinstance(value, str):
-        budget[0] += len(value)
+        _charge(budget, len(value))
         rendered = _canonical_string(value)
     elif isinstance(value, dict):
         if len(value) > _MAX_OP_COLLECTION_ENTRIES:
             raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
-        budget[0] += 4
+        _charge(budget, 4)
         members = []
         for key in value:
             name = _canonical_key(key)
-            budget[0] += len(name)
+            _charge(budget, len(name))
             members.append((name, value[key]))
         # Unicode code point order at every depth: Python sorts `str` that way.
         members.sort(key=lambda member: member[0])
@@ -285,12 +302,10 @@ def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
     elif isinstance(value, list | tuple):
         if len(value) > _MAX_OP_COLLECTION_ENTRIES:
             raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
-        budget[0] += 4
+        _charge(budget, 4)
         rendered = "[" + ",".join(_canonical_value(child, depth + 1, budget) for child in value) + "]"
     else:
         raise ValueError(f"malformed_op: op payload is not canonical JSON: {type(value).__name__} is not serializable")
-    if budget[0] > _MAX_OP_COST:
-        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
     return rendered
 
 
