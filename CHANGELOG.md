@@ -15,6 +15,18 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- A `connect` into a widget input of an agent-built node is now type-checked.
+  `comfy workflow add-node` gives every widget input a socket entry (see Fixed
+  below), so a link into one is an ordinary connect to an existing slot rather
+  than a `grow` that minted a new slot and took the source's type unchecked. A
+  mismatched scalar — `INT` into a `FLOAT` widget such as `force_rate`, or
+  `IMAGE` into a `COMBO` — now fails the existing type check instead of being
+  accepted silently. A `COMBO` widget socket still accepts `COMBO`, `STRING`,
+  `INT` and `FLOAT`, because that is how a computed file name or a numeric
+  option reaches a combo; every other source type is refused.
+
 ### Fixed
 
 - `comfy update` no longer dies with a `FileNotFoundError` traceback when the
@@ -30,6 +42,18 @@ history.
   selects a different directory in the current shell. An exact uv version pin
   is preserved and reported with manual reinstall guidance. Installer diagnostics
   stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
+
+- A typed `comfy model download` with no `--relative-path` now saves into the
+  folder the running local ComfyUI scans for that model type, and says where.
+  On Comfy Desktop that is the shared library, not the install's `models/`.
+  "The running ComfyUI" is whichever local server the CLI is already pointed at
+  (`COMFY_LOCAL_URL`, a `comfy launch --background` server, else
+  `127.0.0.1:8188`), and the folder is used only when it already exists on this
+  machine — so a server in Docker, WSL, or behind `ssh -L` reporting paths from
+  its own filesystem changes nothing. An explicit `--workspace` always wins. In
+  every other case the workspace path is kept, as before. `comfy model list` and
+  `comfy model remove` still read `<workspace>/models`, so a model saved into a
+  shared library is not listed by them.
 
 - `comfy validate` no longer lets a dotted key left over from another
   dynamic-combo selection close a false dependency cycle or pull a pruned node
@@ -48,6 +72,25 @@ history.
   longer exercising the behaviour it named. `_filter_control_values` takes the
   same two values adjacently and is now keyword-only for the same reason, before
   anything is inserted into it.
+
+- `comfy workflow add-node` writes a socket entry for every widget input of the
+  new node — `INT`, `FLOAT`, `STRING`, `BOOLEAN` and `COMBO` — in the same
+  `{"name", "type", "widget": {"name"}, "link": null}` shape the frontend
+  serializes, placed after the link inputs so existing link indices do not move.
+  Before this, an agent-built node carried no `inputs[]` entry for its widgets,
+  so a link a human drew into a widget socket on the canvas named a slot the
+  shared document did not have and was dropped. Sockets are written all or none
+  per node: a node with a widget that cannot have an entry of its own — a
+  dynamic combo, a union type such as `FLOAT,INT`, a socketless widget — keeps
+  the previous convert-on-connect behaviour unchanged. Nodes already present in
+  existing documents are not migrated.
+
+- The save-to-API converter no longer drops a `COMBO` value that happens to read
+  like a control marker. When a node's widget sockets account for every saved
+  widget value there is no room for a trailing `control_after_generate` marker,
+  so the positional marker filter is skipped and a value of `"fixed"` stays a
+  value. Saves with a real marker have one more value than sockets and still go
+  through the filter.
 
 ## [1.24.0] - 2026-10-29
 
