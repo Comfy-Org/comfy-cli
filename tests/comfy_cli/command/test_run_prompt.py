@@ -9,6 +9,8 @@ websocket/HTTP code).
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,11 +34,15 @@ class TestExecuteSubmitsPreloadedGraph:
     """`preloaded` short-circuits file loading; the in-memory graph is what
     reaches the submit path (WorkflowExecution)."""
 
+    @pytest.fixture(autouse=True)
+    def preloaded_catalog(self):
+        """Validate the injected graph against a frozen catalog, without a server."""
+        catalog = json.loads((Path(__file__).resolve().parents[1] / "fixtures/sd15_object_info.json").read_text())
+        with patch("comfy_cli.command.run._fetch_object_info", return_value=catalog):
+            yield
+
     def test_preloaded_graph_is_submitted(self):
-        injected = {
-            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "a red fox in snow"}},
-            "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0]}},
-        }
+        injected = build_default_workflow(prompt="a red fox in snow")
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.ExecutionProgress"),
@@ -63,7 +69,7 @@ class TestExecuteSubmitsPreloadedGraph:
 
     def test_preloaded_skips_file_loading(self):
         """A non-existent path never triggers workflow_not_found when preloaded."""
-        injected = {"9": {"class_type": "SaveImage", "inputs": {}}}
+        injected = build_default_workflow(prompt="fox")
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
             patch("comfy_cli.command.run.ExecutionProgress"),

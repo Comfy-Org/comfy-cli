@@ -72,6 +72,10 @@ def _isolate_config_path(tmp_path, monkeypatch):
     # whichever ``get_os()`` resolves to lands in our tmp dir.
     for k in list(constants.DEFAULT_CONFIG.keys()):
         monkeypatch.setitem(constants.DEFAULT_CONFIG, k, str(fake_root))
+    # Constants patched in this process do not reach CLI subprocesses. Give
+    # each test its own supported store override, also replacing any ambient
+    # override so credential writes cannot leak between tests or reach a user.
+    monkeypatch.setenv("COMFY_SECRETS_PATH", str(fake_root / "secrets.json"))
     # ConfigManager is a @singleton that reads the config dir once, at
     # construction — so repointing the dir alone leaves the FIRST test's
     # in-memory config serving every later one. Any test that runs the CLI
