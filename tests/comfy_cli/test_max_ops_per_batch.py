@@ -253,8 +253,14 @@ def test_the_batch_bound_binds_only_far_past_any_real_workflow():
     the absolute upper bound on nodes+links is 212, still a fifth of the bound.
     The largest expressible workflow in this repo's own fixtures mints 3 ops.
 
-    This test pins the fixture end of that measurement, which is the half that
-    can regress in CI.
+    What that measurement does NOT cover is the ``old`` side. ``replace_ops``
+    emits a ``delete_node`` per node already in the document being replaced, and
+    that document is user data bounded by nothing here — see
+    ``test_the_old_document_counts_toward_the_batch_too``. Both production
+    callers degrade rather than fail on it.
+
+    This test pins the fixture end of the ``new``-side measurement, which is the
+    half that can regress in CI.
     """
     fixture = json.loads((_FIXTURES / "seedream_5_0_pro_t2i_ui.json").read_text(encoding="utf-8"))
     minted = ops.replace_ops({"nodes": [], "links": []}, fixture)

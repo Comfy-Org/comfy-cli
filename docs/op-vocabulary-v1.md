@@ -1444,9 +1444,15 @@ Where it is enforced, and the two different refusals:
   §8.8's replacement shape emits a `delete_node` per node already in `old`
   before the adds.
 
-Measured headroom. Across all 735 workflows in `Comfy-Org/workflow_templates` —
-the gallery `templates fetch --emit-ops` reads — the longest batch `replace_ops`
-actually mints is **50 ops**, 4.9% of the bound. 447 of those templates carry a
+Measured headroom, and what the measurement does NOT cover. Across all 735
+workflows in `Comfy-Org/workflow_templates` — the gallery
+`templates fetch --emit-ops` reads — the longest batch `replace_ops` actually
+mints is **50 ops**, 4.9% of the bound. That measured the `new` side only. The
+`old` side is whatever document the caller is replacing, which is user data and
+is bounded by nothing here: a fetch or an emit into a path already holding a
+workflow of ~1,000 nodes can exceed the bound on the `delete_node` half alone
+while the incoming template is tiny. Both callers degrade rather than fail on
+that case (`ops_skipped` beside a file they still write). 447 of those templates carry a
 subgraph definition, a canvas group or a reroute point and are refused as
 inexpressible before size is considered; across all 735, nodes+links peaks at
 212, so even if every one of them became expressible the worst case stays a fifth

@@ -191,12 +191,30 @@ history.
 ### Changed
 
 - A structured-edit batch is bounded at 1,024 ops, the limit the shared
-  `comfy-multi-player` applier already enforces. `comfy workflow apply` refuses
-  a longer batch before any spec is processed and writes nothing, and
-  `templates fetch --emit-ops` reports `ops_skipped` beside the workflow file it
-  still writes rather than emitting a batch that would be rejected whole on
-  arrival. Measured over the whole template gallery, the longest batch this path
-  actually produces is 50 ops, so no real workflow is affected.
+  `comfy-multi-player` applier already enforces, and each op in it is bounded by
+  the per-op payload limits that applier applies. `comfy workflow apply` refuses
+  a longer batch and writes nothing — counting the ops the specs actually mint,
+  since one `set_dynamic_group_rows` spec expands into a write per row field.
+  `templates fetch --emit-ops` and `generate --emit-workflow --emit-ops` report
+  `ops_skipped` beside the workflow file they still write, rather than emitting
+  a batch that would be rejected whole on arrival.
+
+  Where the bound can be reached: the measurement behind it covered the
+  workflows being written — over the whole template gallery the longest batch
+  that path produces is 50 ops — and a replacement also emits a `delete_node`
+  per node already in the file being replaced, which is not bounded by anything
+  this measurement saw. So a fetch or an emit into a path that already holds a
+  workflow of about a thousand nodes can exceed the bound while the incoming
+  template is small. That case now skips the batch and keeps the file, where an
+  emit previously failed and wrote nothing.
+
+- An integer past 2^53 in an op payload is digested as the double it becomes,
+  the way ECMAScript spells it, rather than as its exact Python digits. JSON
+  carries no integer type, so a relay through the shared applier rounds such a
+  value — a seed at `0xffffffffffffffff` comes back as `18446744073709552000` —
+  and digesting the exact digits made an identical op echoed back look like a
+  changed payload reusing its `op_id`. Integers inside that range, which is
+  every id, stamp and ordinary widget value, are unaffected.
 
 - Once every model byte is in, the progress line of `comfy deploy up`,
   `comfy deploy status` (with or without `--watch`) and a watching
