@@ -1271,9 +1271,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(
         "installed_versions_unavailable",
-        "`comfy node deps` could not read the workspace venv's installed packages (`pip list --format=json` "
-        "timed out, returned unparseable output, or exited non-zero and its `importlib.metadata` fallback "
-        "failed too), so every parseable requirement is reported with "
+        "`comfy node deps` could not read the workspace venv's raw installed-package metadata "
+        "(the guarded `importlib.metadata` probe timed out, returned unparseable output, or failed), "
+        "so every parseable requirement is reported with "
         '`status: "unknown"`. Surfaced in `data.warnings[]` (not as an error envelope) so the declared '
         "requirements are still reported.",
         "check the workspace interpreter runs (`comfy env`), then re-run",

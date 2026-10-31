@@ -8,14 +8,13 @@ computed status per requirement.
 
 ``--registry <node-id>`` extends the same diff to a pack that is **not yet
 installed**: the registry's published dependency list for that pack's latest
-version, diffed against the very same ``pip list`` map, so conflict risk can be
+version, diffed against the same installed-version map, so conflict risk can be
 assessed *before* installing anything.
 
 Read-only by construction: it never installs anything and never shells out to
-``cm-cli``. The only subprocess it runs is a single ``<workspace python> -m pip
-list --format=json`` for the whole report (not once per pack), plus one
-``importlib.metadata`` listing in the same interpreter when that interpreter has
-no pip (a ``uv venv`` ships without it). The only network
+``cm-cli``. The only subprocess it runs is one guarded ``importlib.metadata``
+listing in the workspace interpreter for the whole report (not once per pack).
+It reads raw metadata versions whether or not pip is installed. The only network
 call is the registry's side-effect-free ``GET /nodes/{id}``, made solely for
 ``--registry`` ids — never ``install_node``, whose endpoint records an
 installation and fires an analytics event server-side on every call.
@@ -31,8 +30,7 @@ Statuses:
   bare VCS/URL line, or anything else :class:`packaging.requirements.Requirement`
   rejects. Kept in the report rather than dropped silently;
 - ``unknown``     — the comparison could not be made: either the installed-
-  packages probe failed (``pip list`` and its ``importlib.metadata`` fallback;
-  accompanied by an ``installed_versions_unavailable`` warning on the report)
+  packages metadata probe failed (accompanied by an ``installed_versions_unavailable`` warning on the report)
   or the installed dist records a version that isn't PEP 440 and the requirement
   includes an operator other than literal ``===`` equality.
 
@@ -103,9 +101,9 @@ MAX_REGISTRY_ERROR_CHARS = 300
 # ---------------------------------------------------------------------------
 
 
-# Fallback probe for an interpreter without pip (a ``uv venv`` has none): the
-# same ``[{"name", "version"}]`` shape as ``pip list --format=json``, read with
-# the stdlib inside that interpreter.
+# Read raw Name/Version metadata with the workspace interpreter's stdlib.
+# `pip list` normalizes valid versions, losing spellings needed by `===`.
+# The JSON shape stays [{"name", "version"}], with no pip dependency.
 #
 # - Before anything that could be shadowed is imported, every ``sys.path`` entry
 #   naming the caller's directory is dropped (the ``-c`` ``''`` entry and e.g.
@@ -176,23 +174,16 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
 
 
 def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
-    """Return ``(canonical_name -> version, error)`` for the workspace venv.
+    """Return ``(canonical_name -> raw metadata version, error)`` for the venv.
 
-    Runs ``<python> -m pip list --format=json`` once for the whole report. If
-    that exits non-zero — typically ``No module named pip`` in a uv-created
-    venv — the same interpreter is asked once more via ``importlib.metadata``.
-    A timeout or an interpreter that can't be started is not retried: the
-    fallback would hit the same wall and only double the wait. On failure the
-    map is ``None`` with a human-readable reason — a report that can't see the
-    venv is still a useful report.
+    The legacy helper name is retained, but pip is never invoked: its display
+    output normalizes valid versions. One guarded ``importlib.metadata`` probe
+    preserves raw values and works in pip-less venvs too. A failed or timed-out
+    probe is not retried; the map is ``None`` with a human-readable reason so
+    the report can retain requirements with unknown installed versions.
     """
-    versions, pip_error, exited_nonzero = _list_installed([python, "-m", "pip", "list", "--format=json"], "`pip list`")
-    if versions is not None or not exited_nonzero:
-        return versions, pip_error
-    versions, metadata_error, _ = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
-    if versions is not None:
-        return versions, None
-    return None, f"{pip_error}; {metadata_error}"
+    versions, error, _ = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
+    return versions, error
 
 
 # ---------------------------------------------------------------------------
@@ -277,12 +268,15 @@ def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, 
         from packaging.version import InvalidVersion, Version
 
         try:
-            if all(spec.operator == "===" for spec in req.specifier):
-                # Arbitrary equality compares raw strings, including legacy versions.
-                contains = all(installed.lower() == spec.version.lower() for spec in req.specifier)
-            else:
+            # Validate before any clause can short-circuit a mixed constraint.
+            if any(spec.operator != "===" for spec in req.specifier):
                 Version(installed)
-                contains = req.specifier.contains(installed, prereleases=True)
+            contains = all(
+                installed.lower() == spec.version.lower()
+                if spec.operator == "==="
+                else spec.contains(installed, prereleases=True)
+                for spec in req.specifier
+            )
         except InvalidVersion:
             # A dist whose recorded version isn't PEP 440 (rare, but a broken
             # `.dist-info` will do it) can't be compared. Say so rather than
@@ -506,7 +500,7 @@ def _registry_report(
         row["warning"] = message
         warnings.append({"code": "registry_partial_dependency_metadata", "message": message})
 
-    # Same per-requirement diff, against the same single ``pip list`` map.
+    # Same per-requirement diff, against the same single installed-version map.
     rows: dict[str, dict[str, Any]] = {}
     for line in declared:
         if line not in rows:
@@ -563,14 +557,14 @@ def build_report(
     workspace = Path(comfy_path)
     python = python or resolve_workspace_python(comfy_path)
 
-    installed_versions, pip_error = pip_list(python)
+    installed_versions, probe_error = pip_list(python)
     if installed_versions is None:
         warnings.append(
             {
                 "code": "installed_versions_unavailable",
                 "message": (
                     f"could not read installed packages from {python}"
-                    + (f" ({pip_error})" if pip_error else "")
+                    + (f" ({probe_error})" if probe_error else "")
                     + " — every parseable requirement is reported with status 'unknown'"
                 ),
             }

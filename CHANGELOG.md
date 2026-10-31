@@ -30,9 +30,10 @@ history.
 ### Fixed
 
 - `comfy node deps` reports malformed installed package versions as `unknown`
-  consistently across supported `packaging` versions. Pure `===` constraints
-  compare raw version strings case-insensitively, including legacy versions,
-  without version normalization.
+  consistently across supported `packaging` versions. One metadata probe
+  preserves raw installed versions with or without pip. Every `===` clause
+  compares raw strings case-insensitively, including in mixed constraints;
+  ordinary clauses still require valid versions and use semantic comparison.
 
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
