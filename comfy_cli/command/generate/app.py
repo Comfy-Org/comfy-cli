@@ -351,7 +351,7 @@ def _spinner() -> Progress:
     )
 
 
-def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool) -> None:
+def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool, track_error) -> None:
     renderer = get_renderer()
     # One failure path for every output mode, checked FIRST: a terminally
     # failed job is never a result. In JSON/NDJSON modes it is an ok=false
@@ -376,13 +376,23 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
             output.print_json(result.raw)
         raise typer.Exit(code=1)
     if renderer.is_json() or as_json:
-        # Honor --download in machine modes too. Previously this returned
-        # before saving, so `--json --download` printed the URL but wrote no
-        # file, forcing callers to curl the URL by hand. Save first, then
-        # surface the local path alongside the response.
+        # Honor --download in machine modes too. Save first, then surface the
+        # local paths alongside the response.
         saved: list[str] = []
-        if download and result.image_urls:
-            saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
+        try:
+            if download and result.image_urls:
+                saved.extend(str(p) for p in output.save_urls(result.image_urls, download, request_id))
+            if download and result.blobs:
+                saved.extend(str(p) for p in output.save_inline_blobs(result.blobs, download, request_id))
+        except OSError as save_error:
+            _bail(
+                track_error,
+                save_error,
+                code="internal_error",
+                kind="emit",
+                message=f"Failed to save the downloaded output: {save_error}",
+                hint="check the --download destination is writable",
+            )
         if renderer.is_json():
             # JSON/NDJSON modes (the global ``--output json``, a redirected
             # stdout, or the tail ``--json``) get the envelope/1 contract every
@@ -400,14 +410,32 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         else:
             output.print_json(result.raw)
         return
-    if download and result.image_urls:
-        saved = output.save_urls(result.image_urls, download, request_id)
-        output.print_urls(result.image_urls, request_id=request_id)
+
+    saved: list[Path] = []
+    has_media = bool(result.image_urls or result.blobs)
+    try:
+        if download and result.image_urls:
+            saved.extend(output.save_urls(result.image_urls, download, request_id))
+        if download and result.blobs:
+            saved.extend(output.save_inline_blobs(result.blobs, download, request_id))
+    except OSError as save_error:
+        _bail(
+            track_error,
+            save_error,
+            code="internal_error",
+            kind="emit",
+            message=f"Failed to save the downloaded output: {save_error}",
+            hint="check the --download destination is writable",
+        )
+
+    if has_media:
+        # URL answers list their URLs; inline answers were already saved, so
+        # print what landed on disk instead of a misleading "no URLs" line.
+        if result.image_urls:
+            output.print_urls(result.image_urls, request_id=request_id)
         output.print_saved(saved)
-    else:
-        output.print_urls(result.image_urls, request_id=request_id)
-        if download and not result.image_urls:
-            rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
+    elif download:
+        rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
 
 
 class SpendNotConfirmed(RuntimeError):
@@ -835,7 +863,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     kind=_track_kind(poll_error),
                 )
             try:
-                _emit_result(result, request_id=job_id, download=download, as_json=as_json)
+                _emit_result(result, request_id=job_id, download=download, as_json=as_json, track_error=_track_error)
                 tracking.track_event("generate:success", gen_props)
             except typer.Exit as e:
                 if (e.exit_code or 0) == 0:
@@ -867,7 +895,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
 
         try:
             result = poll.sync_result_from_response(resp)
-            _emit_result(result, request_id=request_id, download=download, as_json=as_json)
+            _emit_result(result, request_id=request_id, download=download, as_json=as_json, track_error=_track_error)
             tracking.track_event("generate:success", gen_props)
         except typer.Exit as e:
             if (e.exit_code or 0) == 0:
@@ -1260,7 +1288,8 @@ def _resume(extra_args: list[str]) -> None:
         # inside the `with` would interleave the envelope with the live spinner.
         _fail(code=_transport_code(poll_error), message=f"Job {job_id} failed while polling: {poll_error}")
         raise typer.Exit(code=1) from poll_error
-    _emit_result(result, request_id=job_id, download=download, as_json=as_json)
+    _emit_result(result, request_id=job_id, download=download, as_json=as_json,
+                    track_error=lambda kind, exc: None)
 
 
 def _print_top_help() -> None:
