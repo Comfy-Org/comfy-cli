@@ -22,6 +22,7 @@ import copy
 import logging
 import random
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from comfy_cli.cql.engine import (
@@ -1730,7 +1731,11 @@ def _build_api_node(
             link_inputs[input_name] = [actual_id_str, actual_slot]
 
     widget_inputs = _collect_widget_inputs(node, node_type, object_info, link_inputs)
-    default_inputs = _collect_default_inputs(schema, widget_inputs, primitive_inputs, link_inputs)
+    # ``widget_inputs`` is the save's own positional fill, so it is what tells a
+    # complete widget inventory from a legacy converted-only marker list — see
+    # ``_saved_widget_names``.
+    saved_widget_names = _saved_widget_names(node, schema, widget_inputs)
+    default_inputs = _collect_default_inputs(schema, widget_inputs, primitive_inputs, link_inputs, saved_widget_names)
 
     ordered = _get_ordered_input_names(node_type, node, object_info)
     if ordered:
@@ -2552,16 +2557,178 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
             out.setdefault("➕ Add Lora", value)
 
 
+def _saved_widget_names(
+    node: dict,
+    schema: dict | None = None,
+    filled_widget_names: Iterable[str] = (),
+) -> frozenset[str] | None:
+    """The widget names the SAVED node records, when they are a COMPLETE inventory.
+
+    ``None`` means "no usable evidence", and the caller then changes nothing.
+
+    Two frontend generations write ``inputs[]`` markers differently, and only
+    one of them is an inventory:
+
+    * the older one wrote an entry only for a widget CONVERTED to a socket, so
+      an ordinary unconverted widget is simply absent from the list. Reading
+      that as an inventory would drop a widget the node really has;
+    * the current one writes an entry for every widget-backed input, converted
+      or not (the linked-inputs model).
+
+    Two independent tests separate them, and the list is an inventory only if
+    it passes BOTH.
+
+    **1. At least one unlinked widget marker.** Converting a widget is what
+    adds its socket, so a list of only *linked* markers could have come from
+    either generation. This is the bulk of the discrimination: measured over
+    the 500 oracle fixtures, 6676 of 7945 marker-bearing nodes carry an
+    unlinked marker and 1269 are the ambiguous converted-only shape.
+
+    It is weaker than it looks, and an earlier version of this docstring
+    overstated it as "a converted widget always carries a ``link``". Legacy
+    ``convertToInput`` added the socket *without* connecting it, so a widget
+    converted and left unconnected — or connected and later disconnected —
+    serializes as an unlinked marker on a legacy save too
+    (``src/extensions/core/widgetInputs.ts`` at ComfyUI_frontend
+    ``d2e9943e79``, before #2925 / #2930 removed it). The marker is
+    byte-indistinguishable from a current one: ``GET_CONFIG`` is a ``Symbol()``
+    so the config never reaches JSON, and both generations write
+    ``{"name": ...}``.
+
+    **2. Every widget the save positionally filled is named.** A legacy
+    converted-only list omits exactly the *unconverted* widgets — which are the
+    ones carrying ``widgets_values`` entries. So a declared widget input the
+    save filled but the markers do not name proves the list is not an
+    inventory, whatever its link states, and that is what closes the hole left
+    by (1). ``schema``/``filled_widget_names`` are optional only so the helper
+    stays callable with a node alone; omit them and only (1) applies.
+
+    Compare against *flattened* names (``_marker_coverage``): a dict widget is
+    declared as ``regions`` but marked per leaf (``regions.face_oval``,
+    ``regions.lips``), so a marker covers its own name and the declared name it
+    is a leaf of.
+    """
+    raw = node.get("inputs")
+    if not isinstance(raw, list):
+        return None
+    names: set[str] = set()
+    saw_unlinked = False
+    for inp in raw:
+        if not isinstance(inp, dict) or not inp.get("widget"):
+            continue
+        name = inp.get("name")
+        if not isinstance(name, str):
+            continue
+        names.add(name)
+        if not _is_link_id(inp.get("link")):
+            saw_unlinked = True
+    if not names or not saw_unlinked:
+        return None
+    if _markers_omit_a_filled_widget(names, schema, filled_widget_names):
+        return None
+    return frozenset(names)
+
+
+def _marker_coverage(marker_names: Iterable[str]) -> frozenset[str]:
+    """The declared input names a marker list accounts for.
+
+    A dict widget is DECLARED as ``regions`` but MARKED per leaf
+    (``regions.face_oval``, ``regions.0.lips``), so a marker accounts for its
+    own string and for the declared input it is a leaf of.
+
+    Both readers of a marker list compare against this set: the inventory test
+    below, and the suppression predicate in ``_widget_absent_from_the_save``.
+    They have to agree. A reader doing a flat membership test instead reads the
+    very marker that proves an input EXISTS as proof that it does not, and then
+    drops that input's declared default.
+    """
+    covered: set[str] = set()
+    for name in marker_names:
+        covered.add(name)
+        head = name.split(".", 1)[0]
+        if head:
+            covered.add(head)
+    return frozenset(covered)
+
+
+def _markers_omit_a_filled_widget(
+    marker_names: set[str], schema: dict | None, filled_widget_names: Iterable[str]
+) -> bool:
+    """Whether the save filled a declared widget input the markers do not name.
+
+    See ``_saved_widget_names`` test (2): this is the shape a legacy
+    converted-only marker list has and a complete inventory cannot.
+
+    Socketless widgets are excluded. They render no input socket, so whether
+    the linked-inputs model marks them at all is not something this corpus
+    settles — and they are never dropped anyway, so a refusal here would only
+    cost fixes elsewhere on the node.
+    """
+    input_def = _schema_input_def(schema)
+    if not input_def:
+        return False
+    covered = _marker_coverage(marker_names)
+    for name in filled_widget_names:
+        if name in covered:
+            continue
+        spec = _declared_input_spec(input_def, name)
+        if spec is None or not _is_widget_input(spec)[0] or _is_socketless_widget(spec):
+            continue
+        return True
+    return False
+
+
+def _widget_absent_from_the_save(
+    input_name: str, input_spec: Any, section: str, saved_widget_coverage: frozenset[str] | None
+) -> bool:
+    """Whether the saved node proves it never carried this widget.
+
+    ``graphToPrompt()`` serializes the widgets a node actually has, so an input
+    the node did not carry is absent from its prompt. Synthesizing a schema
+    default for one put inputs in the prompt the frontend's golden does not
+    contain: ``CreateVideo`` in the ``03_video_wan2_2_14B_i2v_subgraphed``
+    oracle fixture saves ``widgets_values: [16]`` and the golden holds exactly
+    ``{"fps": 16, "images": [...]}``, while today's object_info also declares
+    optional ``bit_depth`` / ``color_space`` / ``codec``.
+
+    The evidence is the node's own marker list, NOT the length of
+    ``widgets_values``. That same fixture's node records
+    ``inputs[]: [images, audio, fps{widget}]`` — one widget-flagged entry,
+    naming ``fps`` only — so the file itself says the three optional inputs did
+    not exist on it, independently of the golden. Keying on "absent from
+    ``widgets_values``" instead would also have dropped an optional widget the
+    node really had and whose value simply ran past a truncated save, where the
+    frontend does send the default.
+
+    Required inputs are never dropped: the server rejects a prompt without
+    them, and that repair is load-bearing for a truncated save. A socketless
+    widget is never dropped either — the branch below exists precisely because
+    the frontend submits those from live widget state even when they were never
+    serialized.
+
+    The argument is marker COVERAGE (``_marker_coverage``), not the raw marker
+    strings: a dict widget declared ``regions`` is marked per leaf, so
+    ``regions.face_oval`` is what proves the node carried ``regions``.
+    """
+    if section != "optional" or saved_widget_coverage is None:
+        return False
+    if not _is_widget_input(input_spec)[0] or _is_socketless_widget(input_spec):
+        return False
+    return input_name not in saved_widget_coverage
+
+
 def _collect_default_inputs(
     schema: dict | None,
     widget_inputs: dict[str, Any],
     primitive_inputs: dict[str, Any],
     link_inputs: dict[str, list],
+    saved_widget_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     if not schema:
         return {}
     input_def = _schema_input_def(schema)
     defaults: dict[str, Any] = {}
+    saved_widget_coverage = None if saved_widget_names is None else _marker_coverage(saved_widget_names)
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
@@ -2570,7 +2737,9 @@ def _collect_default_inputs(
             if input_name in widget_inputs or input_name in primitive_inputs or input_name in link_inputs:
                 continue
             default = _extract_default(input_spec)
-            if default is not _MISSING:
+            if default is not _MISSING and not _widget_absent_from_the_save(
+                input_name, input_spec, section, saved_widget_coverage
+            ):
                 defaults[input_name] = _wrap_widget_value(default)
             elif section == "required" and _is_socketless_widget(input_spec):
                 # A socketless widget the saved workflow never persisted
