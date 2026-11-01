@@ -242,11 +242,18 @@ def slots_cmd(
         "slots": slots,
     }
 
+    warnings: list[dict] = []
     if _stale:
         payload["stale"] = True
-        payload["warnings"] = [
+        warnings.append(
             {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
-        ]
+        )
+    # A node whose saved widget layout the current catalog cannot reconcile
+    # advertises no slots rather than guessed ones. Say which node and why, or
+    # its absence from the list reads as "this node has nothing to edit".
+    warnings.extend(schema.get("warnings") or [])
+    if warnings:
+        payload["warnings"] = warnings
 
     if select is not None:
         from comfy_cli.selector import emit_selected
@@ -1127,7 +1134,31 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
 # ---------------------------------------------------------------------------
 
 
-def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, order: str) -> None:
+def _page_fields(
+    *, offset: int, emitted: int, total: int | None, has_more: bool | None, offset_honored: bool = True
+) -> dict[str, Any]:
+    """The paging half of a ``workflow list`` envelope.
+
+    ``count`` is the rows on THIS page, which a reader asked "how many workflows
+    do I have?" will otherwise report as the answer — a user with 30 saved
+    workflows was told "You have 20" (the default page). ``total`` is every
+    match, ``has_more`` says the page stopped short of it, and ``next_offset``
+    is what ``--offset`` takes for the next page. A field the source did not
+    supply is omitted rather than emitted as ``null``. ``next_offset`` is
+    withheld when it would not advance (an empty page) or when the source did
+    not page by the offset asked for, so a reader paging on it cannot loop.
+    """
+    fields: dict[str, Any] = {}
+    if total is not None:
+        fields["total"] = total
+    if has_more is not None:
+        fields["has_more"] = has_more
+        if has_more and emitted and offset_honored:
+            fields["next_offset"] = offset + emitted
+    return fields
+
+
+def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, order: str, offset: int = 0) -> None:
     import urllib.error
     import urllib.parse
 
@@ -1151,11 +1182,13 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
 
     sort_key = _LOCAL_SORT_KEYS.get(sort, "created")
     reverse = order != "asc"
+    # `path` breaks ties so `--offset` pages slice the same order every call.
     if sort_key == "path":
-        rows.sort(key=lambda r: r["path"].lower(), reverse=reverse)
+        rows.sort(key=lambda r: (r["path"].lower(), r["path"]), reverse=reverse)
     else:
-        rows.sort(key=lambda r: r.get(sort_key) or 0, reverse=reverse)
-    rows = rows[: min(max(limit, 1), 100)]
+        rows.sort(key=lambda r: (r.get(sort_key) or 0, r["path"]), reverse=reverse)
+    total = len(rows)
+    rows = rows[offset : offset + min(max(limit, 1), 100)]
 
     workflows = [
         {
@@ -1167,7 +1200,11 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
         }
         for r in rows
     ]
-    payload = {"count": len(workflows), "workflows": workflows}
+    payload = {
+        "count": len(workflows),
+        "workflows": workflows,
+        **_page_fields(offset=offset, emitted=len(workflows), total=total, has_more=offset + len(workflows) < total),
+    }
     if renderer.is_pretty():
         from rich.table import Table
 
@@ -1182,7 +1219,7 @@ def _local_list(renderer, target, *, name: str | None, limit: int, sort: str, or
                 sanitize_markup(r["size"]) if r["size"] is not None else "",
             )
         renderer.console().print(tbl)
-        rprint(f"[dim]{len(workflows)} workflow(s) (local)[/dim]")
+        rprint(f"[dim]{len(workflows)} of {total} workflow(s) (local)[/dim]")
     renderer.emit(payload, command="workflow list", where="local")
 
 
@@ -1357,6 +1394,10 @@ def list_cmd(
         typer.Option("--name", show_default=False, help="Case-insensitive substring match on workflow name."),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", help="Cap rows returned (max 100).")] = 20,
+    offset: Annotated[
+        int,
+        typer.Option("--offset", min=0, help="Rows to skip, for the next page (`next_offset` from the previous page)."),
+    ] = 0,
     sort: Annotated[
         str,
         typer.Option("--sort", help="Sort field: create_time | update_time | name."),
@@ -1392,9 +1433,11 @@ def list_cmd(
 
     target = _resolve_where_target(where)
     if not target.is_cloud:
-        return _local_list(renderer, target, name=name, limit=limit, sort=sort, order=order_norm)
+        return _local_list(renderer, target, name=name, limit=limit, offset=offset, sort=sort, order=order_norm)
 
     params: dict[str, Any] = {"limit": min(max(limit, 1), 100), "sort": sort, "order": order_norm}
+    if offset:
+        params["offset"] = offset
     if name:
         params["name"] = name
     url = target.url("workflows") + "?" + urllib.parse.urlencode(params)
@@ -1453,6 +1496,38 @@ def list_cmd(
             if isinstance(r, dict)
         ],
     }
+    # Forward the server's own paging instead of leaving `count` (this page) as
+    # the only number. Each field is type-checked on its own because `bool` is
+    # an `int` in Python, and `total` is dropped when it cannot be true — the
+    # cursor-paged form of PaginationInfo may report 0 — so a wrong total is
+    # never emitted where an absent one is honest. An empty page past the end
+    # (`--offset` beyond the last row) keeps a positive total, which is the
+    # number a reader that overshot needs.
+    pagination = (body or {}).get("pagination")
+    pagination = pagination if isinstance(pagination, dict) else {}
+    total = pagination.get("total")
+    if not (
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and (total >= offset + len(rows) or (not rows and total > 0))
+    ):
+        total = None
+    has_more = pagination.get("has_more")
+    if not isinstance(has_more, bool):
+        has_more = offset + len(rows) < total if total is not None else None
+    # `next_offset` only when the server echoed the offset we sent and gave a
+    # usable total: the cursor form may ignore `?offset=`, and following a
+    # `next_offset` there would return the same page forever.
+    echoed = pagination.get("offset")
+    payload.update(
+        _page_fields(
+            offset=offset,
+            emitted=len(rows),
+            total=total,
+            has_more=has_more,
+            offset_honored=total is not None and echoed == offset and not isinstance(echoed, bool),
+        )
+    )
     if renderer.is_pretty():
         from rich.table import Table
 
@@ -1474,7 +1549,8 @@ def list_cmd(
                 sanitize_markup(str(r["updated_at"] or "")[:10]),
             )
         renderer.console().print(tbl)
-        rprint(f"[dim]{len(rows)} workflow(s)[/dim]")
+        shown = f"{len(rows)} of {total}" if total is not None else str(len(rows))
+        rprint(f"[dim]{shown} workflow(s)[/dim]")
     renderer.emit(payload, command="workflow list", where="cloud")
 
 
@@ -1673,6 +1749,66 @@ def delete_cmd(
 # The canonical home for API-format workflow validation. The top-level
 # `comfy validate` is kept as a hidden deprecated alias that delegates to the
 # shared implementation below (see cmdline.py).
+
+
+# Above this many pruned nodes, `validate` reports them as ONE warning. A canvas
+# that keeps finished branches around (an 8-scene film workflow, 76 nodes) got up
+# to 66 warnings per call, one per pruned node, and an agent re-reads all of them
+# on every later round of its turn. A handful still get one entry each.
+_UNREACHABLE_PER_NODE_MAX = 3
+_UNREACHABLE_IDS_IN_MESSAGE = 10
+_UNREACHABLE_CODE = "node_not_reachable_from_output"
+
+
+def _collapse_unreachable_warnings(warnings: list[dict], api_workflow: dict) -> list[dict]:
+    """Fold more than _UNREACHABLE_PER_NODE_MAX pruned-node warnings into one.
+
+    Runs after node ids were rewritten to editable addresses, so ``node_ids``
+    speaks the same address space as every other finding; the raw API ids ride
+    alongside in ``api_node_ids`` when any id was rewritten.
+    """
+    unreachable = [w for w in warnings if w.get("code") == _UNREACHABLE_CODE]
+    if len(unreachable) <= _UNREACHABLE_PER_NODE_MAX:
+        return warnings
+    node_ids = [str(w.get("node_id")) for w in unreachable]
+    api_ids = [str(w.get("api_node_id", w.get("node_id"))) for w in unreachable]
+    by_class: dict[str, int] = {}
+    for api_id in api_ids:
+        node = api_workflow.get(api_id)
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        key = str(class_type) if class_type else "unknown"
+        by_class[key] = by_class.get(key, 0) + 1
+    classes = ", ".join(f"{name} x{n}" for name, n in sorted(by_class.items(), key=lambda kv: (-kv[1], kv[0])))
+    shown = ", ".join(node_ids[:_UNREACHABLE_IDS_IN_MESSAGE])
+    if len(node_ids) > _UNREACHABLE_IDS_IN_MESSAGE:
+        shown += f" and {len(node_ids) - _UNREACHABLE_IDS_IN_MESSAGE} more"
+    merged: dict = {
+        "node_id": node_ids[0],
+        "node_ids": node_ids,
+        "count": len(node_ids),
+        "field": None,
+        "code": _UNREACHABLE_CODE,
+        "message": (
+            f"{len(node_ids)} nodes feed no output node — the server prunes them, so they will not run "
+            f"and have no effect on the result: {shown} ({classes})"
+        ),
+        "hint": (
+            "wire each one's output into the chain that reaches a save/preview node, or delete the ones "
+            "you no longer need; a node that reaches no output is skipped entirely"
+        ),
+    }
+    if api_ids != node_ids:
+        merged["api_node_ids"] = api_ids
+    template_ids = {str(w.get("node_id")): w["template_node_id"] for w in unreachable if "template_node_id" in w}
+    if template_ids:
+        merged["template_node_ids"] = template_ids
+    out: list[dict] = []
+    for w in warnings:
+        if w.get("code") != _UNREACHABLE_CODE:
+            out.append(w)
+        elif w is unreachable[0]:
+            out.append(merged)
+    return out
 
 
 def validate_api_workflow(
@@ -1916,6 +2052,8 @@ def validate_api_workflow(
             tid = template_node_id(ui_workflow, issue.get("node_id"))
             if tid is not None:
                 issue["template_node_id"] = tid
+
+    result["warnings"] = _collapse_unreachable_warnings(result["warnings"], wf_data)
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative

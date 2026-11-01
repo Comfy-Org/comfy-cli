@@ -386,7 +386,7 @@ def test_unwired_declared_subgraph_output_prints_as_none():
                     "id": uuid,
                     "name": "Partially wired",
                     "inputs": [],
-                    "outputs": [{"name": "IMAGE"}, {"name": "MASK"}],
+                    "outputs": [{"name": "IMAGE", "linkIds": [1]}, {"name": "MASK"}],
                     "nodes": [
                         {
                             "id": 3,
@@ -530,7 +530,7 @@ def test_cli_print_autogrow_addresses_match_connect(tmp_path, autogrow_graph):
     # that printed slot name is exactly what connect grows
     wf2, _ = workflow_ops.connect(wf, autogrow_graph, a, "IMAGE", b, "model.images.image_1")
     node = next(n for n in wf2["nodes"] if n["id"] == b)
-    assert [i["name"] for i in node["inputs"]] == ["model.images.image_1"]
+    assert [i["name"] for i in node["inputs"] if "widget" not in i] == ["model.images.image_1"]
 
 
 def test_no_catalog_still_prints_the_instance_values(promoted_graph):

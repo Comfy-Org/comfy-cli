@@ -2002,6 +2002,33 @@ def run(
             ),
         ),
     ] = False,
+    output_node_ids: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--output-node-ids",
+            show_default=False,
+            help=(
+                "Comma-separated ids of output nodes to run (e.g. 9,12; repeatable); only they and "
+                "the nodes they depend on execute, the rest of the graph is skipped. Ids are the "
+                "API-format graph's node ids and must be output nodes. Sent to /prompt as "
+                "partial_execution_targets. Omit to run the whole graph."
+            ),
+        ),
+    ] = None,
+    client_id: Annotated[
+        str | None,
+        typer.Option(
+            "--client-id",
+            show_default=False,
+            help=(
+                "Local-only: submit as this already-connected WebSocket clientId instead of a fresh "
+                "one. ComfyUI sends a prompt's execution events only to the socket that submitted it, "
+                "so passing a browser tab's clientId is what makes that tab show node highlights, "
+                "progress and outputs for a run it did not start. This invocation then cannot watch "
+                "the run itself, so it cannot be combined with --wait."
+            ),
+        ),
+    ] = None,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
@@ -2047,10 +2074,50 @@ def run(
         # `where` kwarg is None then). Rides on the execution_success/_error events.
         _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
 
+        if client_id is not None and not client_id.strip():
+            renderer.error(
+                code="client_id_rejected",
+                message="--client-id must not be empty",
+                hint="pass the connected browser client's id, or omit --client-id",
+                details={"reason": "empty"},
+            )
+            raise typer.Exit(code=1)
+        client_id = client_id.strip() if client_id is not None else None
+        if client_id:
+            rejection = None
+            if decision.target is where_module.WhereTarget.CLOUD:
+                rejection = ("cloud", "--client-id addresses a local ComfyUI socket and has no meaning on cloud")
+            elif wait:
+                rejection = (
+                    "wait",
+                    "--client-id hands this run's events to another client, so --wait would watch a silent socket",
+                )
+            if rejection is not None:
+                reason, message = rejection
+                renderer.error(
+                    code="client_id_rejected",
+                    message=message,
+                    hint="drop --client-id, or drop the conflicting flag",
+                    details={"reason": reason},
+                )
+                raise typer.Exit(code=1)
+
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
         # ask for). The user can override either way with --notify/--no-notify.
         effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
+
+        target_ids: list[str] | None = None
+        if output_node_ids:
+            target_ids = run_inner.parse_output_node_ids(output_node_ids)
+            if not target_ids:
+                renderer.error(
+                    code="invalid_output_node_ids",
+                    message="--output-node-ids was given but names no node ids",
+                    hint="pass comma-separated output node ids, e.g. --output-node-ids 9,12; omit it to run the whole graph",
+                    details={"unknown_node_ids": [], "non_output_node_ids": []},
+                )
+                raise typer.Exit(code=1)
 
         # --prompt/--set build an in-memory API-format graph from the bundled
         # default text2img workflow (no --workflow file). The aliases resolve
@@ -2106,6 +2173,7 @@ def run(
                 workflow_id=workflow_id,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                output_node_ids=target_ids,
             )
         else:
             # Both targets must fall off the END of this try suite: Python skips
@@ -2144,6 +2212,8 @@ def run(
                 print_prompt=print_prompt,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                output_node_ids=target_ids,
+                client_id=client_id,
             )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:

@@ -52,26 +52,330 @@ while the display order does not.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import random
 import re
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from comfy_cli import layout
 from comfy_cli.cql.engine import (
+    SOCKETED_WIDGET_TYPES,
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _dynamic_group_widgets,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
     frontend_injected_widget_error,
     is_wildcard_type,
+    saved_widget_order,
 )
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
+
+# Mirrored EXACTLY from comfy-multi-player's `src/limits.ts` at
+# 221b2b2e470c79afaface24b1edcb53cdafc8922 (`MAX_PAYLOAD_DEPTH` 64,
+# `MAX_COLLECTION_ENTRIES` 4096, `MAX_OP_COST` 262_144) — cited by SHA, not by
+# branch, because the whole point is that the two implementations agree.
+#
+# These are not a local policy choice. CMP's A8 canonicalizer applies the same
+# budget to the whole envelope on EVERY apply, before its dedupe gate
+# (`applier.ts`: `applyOps` -> `opDigest` -> `canonicalJson` -> `opBoundsRefusal`),
+# so "the digest is computed on every apply" is equally true there and a looser
+# bound HERE rescues nothing — it only moves where an oversized op fails, from a
+# local `malformed_op` to a `malformed_op` from the shared package after
+# comfy-cli already accepted the payload. Re-deriving a second, looser budget is
+# exactly the validation drift the one shared op package exists to prevent. If a
+# real edit ever needs more room, widen it in comfy-multi-player and move this
+# pin; never widen it here alone.
+_MAX_OP_PAYLOAD_DEPTH = 64
+_MAX_OP_COLLECTION_ENTRIES = 4096
+_MAX_OP_COST = 262_144
+
+# The fourth bound in that same `src/limits.ts` block (`MAX_OPS_PER_BATCH`, also
+# 1024 at 221b2b2e470c79afaface24b1edcb53cdafc8922), and the only one that is
+# about the BATCH rather than about one op's payload. CMP checks it in `applyOps`
+# before any op is processed (`applier.ts`, `batch of N ops exceeds the 1024-op
+# limit; rejected before any op was processed`) and again in `inspectOps`, so a
+# longer batch is refused WHOLE — not truncated, and not partially applied.
+#
+# Without a counterpart here, comfy-cli happily builds and hands out a batch of
+# any length, and the refusal lands on the shared package after comfy-cli has
+# already written the document (`apply_specs`) or already told a caller the batch
+# is the legal translation of its graph (`replace_ops`). That is the same
+# mint-then-refuse shape the three payload bounds above exist to close, one level
+# up. Mirror it, never widen it here alone.
+_MAX_OPS_PER_BATCH = 1024
+
+#: Any surrogate code point in a Python ``str`` is a LONE surrogate — astral
+#: characters are single code points there — so matching the whole block is
+#: enough to find the ones that cannot be UTF-8 encoded.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _es_number(value: float) -> str:
+    """Render a float exactly as ECMAScript ``Number::toString`` does.
+
+    The canonical form has to be byte-identical on both sides of the wire, and
+    the counterpart implementation (comfy-multi-player schema Amendment A8)
+    builds it with ``JSON.stringify``. Python's own float repr disagrees with
+    that on three shapes a FLOAT widget produces constantly — an integral float
+    (``20.0`` vs ``20``), negative zero (``-0.0`` vs ``0``) and an exponent
+    (``1e-07`` vs ``1e-7``) — so digesting Python's spelling would reject an
+    identical op that had merely been relayed through JS as ``op_id_reuse``, and
+    no float payload would ever digest the same on the two sides.
+
+    ``repr`` is still the input: it is the shortest round-tripping decimal, the
+    same digit string ECMAScript's algorithm starts from. Only the rendering of
+    that digit string differs, and this reimplements it: the ECMAScript
+    ``Number::toString`` algorithm, including its ``k``/``n``/``s`` case
+    analysis for when to use fixed versus exponential notation.
+    """
+    if value == 0:  # also folds -0.0, which ECMAScript renders as "0"
+        return "0"
+    if value < 0:
+        return "-" + _es_number(-value)
+    _, raw_digits, exponent = Decimal(repr(value)).as_tuple()
+    digits = list(raw_digits)
+    # ECMAScript picks the `s` that is NOT divisible by 10, so trailing zeros
+    # move into the exponent instead of into the digit string.
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    s = "".join(str(d) for d in digits)
+    k = len(s)
+    n = exponent + k
+    if k <= n <= 21:
+        return s + "0" * (n - k)
+    if 0 < n <= 21:
+        return f"{s[:n]}.{s[n:]}"
+    if -6 < n <= 0:
+        return "0." + "0" * -n + s
+    e = n - 1
+    mantissa = s if k == 1 else f"{s[0]}.{s[1:]}"
+    return f"{mantissa}e{'+' if e >= 0 else '-'}{abs(e)}"
+
+
+#: ECMAScript holds an integer exactly only up to here. JSON has no integer type
+#: on the other side of the wire — `JSON.parse` reads every numeric literal as an
+#: IEEE-754 double, and comfy-multi-player's canonicalizer refuses a `BigInt`
+#: payload outright (`applier.ts`: `rejectBigIntPayload`) — so past this bound the
+#: value ARRIVES there rounded and `Number::toString` spells the rounded number.
+_ES_EXACT_INT = 2**53
+
+
+def _es_int(value: int) -> str:
+    """Render one ``int`` as ECMAScript renders the number ``JSON.parse`` makes
+    of the same literal.
+
+    Inside ``_ES_EXACT_INT`` the two spellings already agree, so the exact digits
+    are kept. Outside it they do not, and the disagreement is not cosmetic: a
+    seed at a FLOAT/INT widget's ``0xffffffffffffffff`` maximum renders
+    ``18446744073709551615`` here and ``18446744073709552000`` after a relay
+    through JS, and ``10**21`` renders as ``1e+21`` there — so an IDENTICAL op
+    echoed back through the shared package digests differently and is refused as
+    ``op_id_reuse``. That is the failure :func:`_es_number` exists to prevent,
+    one type over, which is why the rendering goes through the same double path.
+    """
+    if -_ES_EXACT_INT <= value <= _ES_EXACT_INT:
+        return str(value)
+    try:
+        as_double = float(value)
+    except OverflowError:
+        # Past the double range `JSON.parse` yields Infinity, which
+        # `JSON.stringify` renders as `null` — the same spelling the non-finite
+        # float branch below uses.
+        return "null"
+    return _es_number(as_double)
+
+
+def _canonical_string(value: str) -> str:
+    """One JSON string literal, escaped the way ``JSON.stringify`` escapes it.
+
+    ``json.dumps`` already escapes exactly the code points ``JSON.stringify``
+    does, so the two agree on every well-formed string. They disagree on a lone
+    surrogate — which ``json.loads('"\\ud800"')`` happily produces: ES2019
+    well-formed stringify emits it as a ``\\udXXX`` escape, Python emits it raw.
+    A raw surrogate cannot be UTF-8 encoded at all, so leaving it would make the
+    digest die with a bare ``UnicodeEncodeError`` outside the ``malformed_op:``
+    contract callers classify errors by. Escaping it both matches ECMAScript and
+    keeps the encode in :func:`_op_digest` total.
+    """
+    literal = json.dumps(value, ensure_ascii=False)
+    if _LONE_SURROGATE.search(literal):
+        literal = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m.group()):04x}", literal)
+    return literal
+
+
+def _canonical_key(key: Any) -> str:
+    """An object key as its string form, matching ECMAScript property coercion."""
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bool):  # before int: bool is an int subclass
+        return "true" if key else "false"
+    if isinstance(key, int):
+        if -_ES_EXACT_INT <= key <= _ES_EXACT_INT:
+            return str(key)
+        # Past the exact range the property name is coerced from the DOUBLE
+        # `JSON.parse` produced, so fall through to the float path below rather
+        # than spelling out digits no JS object key would ever carry. Note the
+        # Infinity spelling there, not `_es_int`'s `null`: a KEY is coerced with
+        # `String()`, not rendered by `JSON.stringify`.
+        try:
+            key = float(key)
+        except OverflowError:
+            key = math.inf if key > 0 else -math.inf
+    if isinstance(key, float):
+        if math.isnan(key):
+            return "NaN"
+        if math.isinf(key):
+            return "Infinity" if key > 0 else "-Infinity"
+        return _es_number(key)
+    if key is None:
+        return "null"
+    raise ValueError(f"malformed_op: object key of type {type(key).__name__} is not canonical JSON")
+
+
+def _charge(budget: list[int], units: int) -> None:
+    """Charge ``units`` against the cost budget and refuse AT the charge.
+
+    Checking only at the end of :func:`_canonical_value` left the bound not
+    actually bounding the work: a string is charged by length and then handed to
+    ``_canonical_string``, which runs ``json.dumps`` plus a surrogate scan over
+    the whole thing and allocates up to ~6x its size for control-heavy input, so
+    an oversized payload was fully rendered before being refused. The shared
+    package has the same property for the same reason — ``opBoundsRefusal`` walks
+    and charges the payload BEFORE ``normalize`` renders anything — and the
+    refusal is unchanged either way, because the budget only ever grows.
+    """
+    budget[0] += units
+    if budget[0] > _MAX_OP_COST:
+        raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
+
+
+def _canonical_value(value: Any, depth: int, budget: list[int]) -> str:
+    if depth > _MAX_OP_PAYLOAD_DEPTH:
+        raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
+    _charge(budget, 1)
+    if value is None:
+        _charge(budget, 8)
+        rendered = "null"
+    elif isinstance(value, bool):  # before int: bool is an int subclass
+        _charge(budget, 8)
+        rendered = "true" if value else "false"
+    elif isinstance(value, int):
+        # Still a flat 8, deliberately: the cost model is mirrored from the
+        # shared package ("8 per numeric/leaf", `src/limits.ts`), so charging a
+        # huge int by its digit count would refuse a payload CMP accepts.
+        _charge(budget, 8)
+        rendered = _es_int(value)
+    elif isinstance(value, float):
+        _charge(budget, 8)
+        # ``JSON.stringify`` renders every non-finite number as ``null``, so
+        # doing the same is what makes the two canonical forms agree. It also
+        # un-breaks overwriting a widget whose CURRENT value is NaN/Infinity
+        # (Python's ``json.load`` accepts both, and the op captures it in
+        # ``old``), which the previous ``allow_nan=False`` rejected outright.
+        rendered = _es_number(value) if math.isfinite(value) else "null"
+    elif isinstance(value, str):
+        _charge(budget, len(value))
+        rendered = _canonical_string(value)
+    elif isinstance(value, dict):
+        if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+            raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+        _charge(budget, 4)
+        members = []
+        # Coercion is not injective: `1` and `"1"`, `True` and `"true"`, `None`
+        # and `"null"` are distinct Python keys that name the same JS property.
+        # Emitting both produces an object literal no JS object can hold, and
+        # because `members.sort` is stable the digest of such a dict then depends
+        # on INSERTION order — so the canonical form would not be canonical.
+        # Only a programmatically built op can reach it (parsed JSON always has
+        # `str` keys), which is why it is refused rather than silently merged:
+        # there is no payload here whose intent a merge would preserve.
+        coerced: dict[str, Any] = {}
+        for key in value:
+            name = _canonical_key(key)
+            _charge(budget, len(name))
+            if name in coerced:
+                raise ValueError(
+                    f"malformed_op: object keys {coerced[name]!r} and {key!r} both canonicalize to {name!r}"
+                )
+            coerced[name] = key
+            members.append((name, value[key]))
+        # Unicode code point order at every depth: Python sorts `str` that way.
+        members.sort(key=lambda member: member[0])
+        rendered = (
+            "{" + ",".join(f"{_canonical_string(n)}:{_canonical_value(v, depth + 1, budget)}" for n, v in members) + "}"
+        )
+    elif isinstance(value, list | tuple):
+        if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+            raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+        _charge(budget, 4)
+        rendered = "[" + ",".join(_canonical_value(child, depth + 1, budget) for child in value) + "]"
+    else:
+        raise ValueError(f"malformed_op: op payload is not canonical JSON: {type(value).__name__} is not serializable")
+    return rendered
+
+
+def _canonical_op(op: dict) -> str:
+    """Compact JSON over the whole envelope: keys sorted by Unicode code point
+    at every depth, array order preserved, numbers rendered as ECMAScript
+    renders them so the digest matches the CMP A8 counterpart's."""
+    return _canonical_value(op, 0, [0])
+
+
+def _op_digest(op: dict) -> str:
+    return hashlib.sha256(_canonical_op(op).encode("utf-8")).hexdigest()
+
+
+def _applied_digest(op: dict) -> str | None:
+    """The digest :func:`apply_op` would have recorded for ``op``, or ``None``
+    when the payload is not canonical, so nothing recorded one."""
+    try:
+        return _op_digest(op)
+    except ValueError:
+        return None
+
+
+def _rebind_op_digest(workflow: dict, op: dict, applied: str | None) -> None:
+    """Re-bind ``op_id`` to the digest of the *enriched* envelope.
+
+    ``_set_widget_impl`` finishes a promoted / legacy-primitive op AFTER
+    :func:`apply_op` returns — the host's materialized ``host_widgets_values``
+    can only be read back out of the document the write produced — so the ledger
+    otherwise holds the pre-enrichment digest while the caller broadcasts the
+    enriched payload, and a redelivery of what was actually sent is rejected as
+    ``op_id_reuse``.
+
+    Nothing happens in the two cases where correcting it would be wrong:
+
+    * the op was DEFERRED, or was a duplicate, so the ledger entry either does
+      not exist or belongs to a different payload. Detected by comparing against
+      the digest ``apply_op`` actually wrote for *this* call rather than by
+      trusting the key's presence.
+    * the enriched envelope is not canonical. ``host_widgets_values`` comes out
+      of the document, so it can carry a NaN/Infinity, a lone surrogate or a
+      volume the op payload never did. The document is ALREADY written here, so
+      raising would report failure for an op that was applied: the caller never
+      gets it back to broadcast and ``set_widget``'s ``ValueError`` fallback can
+      attempt a second write. The pre-enrichment digest stays instead, and a
+      redelivery of the uncanonical envelope is refused in :func:`apply_op`'s
+      duplicate branch — before it can mutate anything.
+    """
+    if applied is None:
+        return
+    digests = workflow.get("_applied_op_digests")
+    if not isinstance(digests, dict) or digests.get(op["op_id"]) != applied:
+        return
+    enriched = _applied_digest(op)
+    if enriched is not None:
+        digests[op["op_id"]] = enriched
 
 
 def mint_id() -> int:
@@ -231,11 +535,11 @@ class NoteTextNotWritable(ValueError):
         #: delete_node accepts (not the spelling the caller typed).
         self.node_id = node_id
         if interior:
-            # delete_node only removes top-level nodes, and insert_workflow only
-            # adds at the root, so there is no command route to replace it.
+            # insert_workflow only adds at the root, so even where delete_node
+            # can remove an interior note there is no command route to replace it.
             self.hint = (
-                f"{node_id} is a note inside a subgraph definition: delete-node only removes top-level nodes, "
-                "so its text can only be changed in the ComfyUI editor"
+                f"{node_id} is a note inside a subgraph definition: no command can insert a replacement inside "
+                "a subgraph, so its text can only be changed in the ComfyUI editor"
             )
         else:
             self.hint = (
@@ -261,9 +565,8 @@ if not AUTHORABLE_VIRTUAL_NODE_TYPES <= UI_ONLY_NODE_TYPES:
     )
 
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
-# `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
-# mistake it for a class name. There is no instantiate-a-subgraph command, so
-# such an add can never succeed; say why instead of "unknown node type".
+# `ls-nodes` prints that verbatim. ``add_node`` can reuse that id only when the
+# current workflow contains both the definition and an instance to copy.
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -296,8 +599,8 @@ class UnknownNodeType(ValueError):
             )
         elif subgraph_id:
             msg = (
-                f"{class_type!r} is a subgraph INSTANCE id, not a node class. `ls-nodes` prints a subgraph "
-                "instance's definition uuid as its type; there is no command to instantiate a subgraph"
+                f"{class_type!r} looks like a subgraph definition id, not a node class, but this workflow "
+                "does not contain a matching definition and reusable instance"
             )
         else:
             msg = f"unknown node type {class_type!r}"
@@ -373,6 +676,21 @@ def _slot_types(t: Any) -> set[str]:
     ``MESH,FILE_3D_GLB,FILE_3D_GLTF,...`` on a 3D importer's ``mesh`` input.
     """
     return {p.strip() for p in str(t or "").split(",") if p.strip()}
+
+
+_COMBO_SOCKET_SOURCE_TYPES = frozenset({"STRING", "INT", "FLOAT"})
+
+
+def _input_accepts(link_type: Any, input_entry: dict) -> bool:
+    """Whether an output of ``link_type`` may drive ``input_entry``.
+
+    A COMBO widget socket also takes a scalar: that is how a computed file name
+    or option reaches a combo, and a combo's options can be numbers.
+    """
+    dst_type = input_entry.get("type")
+    if dst_type == "COMBO" and input_entry.get("widget") and link_type in _COMBO_SOCKET_SOURCE_TYPES:
+        return True
+    return _types_compatible(link_type, dst_type)
 
 
 def _types_compatible(link_type: Any, dst_type: Any) -> bool:
@@ -467,7 +785,17 @@ def _rehint_discarded_batch(e: Exception, pre_batch_hint: str) -> ValueError:
             "Any node id minted by this batch is gone; re-read ids with "
             "`comfy workflow slots` / `ls-nodes` before addressing nodes."
         )
-    return ValueError(msg + suffix)
+    rendered = msg + suffix
+    if isinstance(e, FatalFindingError):
+        # Preserve the catalog finding across the atomic-batch re-hint. The
+        # command layer can then emit its stable code and operand evidence
+        # instead of flattening an actionable refusal into
+        # ``workflow_edit_invalid``. Keep the re-hinted message because any
+        # ids created earlier in this failed batch no longer exist.
+        finding = dict(e.finding)
+        finding["message"] = rendered
+        return FatalFindingError(finding)
+    return ValueError(rendered)
 
 
 def _find_by_str(workflow: dict, node_id: Any) -> dict | None:
@@ -661,6 +989,128 @@ def _coerce_pos(pos: Any) -> Any:
     return out
 
 
+def _subgraph_definition_and_template(workflow: dict, definition_id: str) -> tuple[dict | None, dict | None]:
+    """Resolve an exact definition id and its first top-level host instance.
+
+    Older workflows may serialize a host's ``type`` as the definition name.
+    The engine's definition index already owns that compatibility rule, so use
+    object identity from the same resolver instead of duplicating an id-only
+    comparison here.  The CLI input remains the exact definition id.
+    """
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    definition = next(
+        (
+            candidate
+            for candidate in subgraphs or []
+            if isinstance(candidate, dict) and candidate.get("id") == definition_id
+        ),
+        None,
+    )
+    if definition is None:
+        return None, None
+    from comfy_cli.cql import engine as _engine
+
+    definitions_by_key = _engine._subgraph_defs_by_id(workflow)
+    for node in workflow.get("nodes") or []:
+        if isinstance(node, dict) and definitions_by_key.get(str(node.get("type", ""))) is definition:
+            return definition, node
+    return definition, None
+
+
+def _reusable_subgraph_instance(workflow: dict, definition_id: str) -> dict | None:
+    definition, template = _subgraph_definition_and_template(workflow, definition_id)
+    if definition is None:
+        return None
+    if template is None:
+        raise UnknownNodeType(definition_id, subgraph_id=True)
+    return template
+
+
+def _subgraph_instance_paths(workflow: dict, target: dict) -> list[list[str]]:
+    """Every live path whose host resolves to ``target``, in document order.
+
+    The paths ride in a reused-subgraph ``add_node`` op so conflict detection
+    can identify a concurrent interior mutation without consulting mutable
+    workflow state. Cyclic definitions are malformed but possible; record the
+    cycle edge itself, then stop descending it.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    definitions_by_key = _engine._subgraph_defs_by_id(workflow)
+    paths: list[list[str]] = []
+
+    def walk(nodes: Any, prefix: list[str], ancestors: frozenset[int]) -> None:
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            definition = definitions_by_key.get(str(node.get("type", "")))
+            if definition is None:
+                continue
+            path = [*prefix, str(node.get("id"))]
+            if definition is target:
+                paths.append(path)
+            identity = id(definition)
+            if identity not in ancestors:
+                walk(definition.get("nodes"), path, ancestors | {identity})
+
+    walk(workflow.get("nodes"), [], frozenset())
+    return paths
+
+
+def _copy_host_field(template: dict, name: str, expected: type | tuple[type, ...], default: Any) -> Any:
+    value = template.get(name)
+    if value is None:
+        return copy.deepcopy(default)
+    if not isinstance(value, expected):
+        expected_names = (
+            "/".join(item.__name__ for item in expected) if isinstance(expected, tuple) else expected.__name__
+        )
+        raise ValueError(f"reusable subgraph host field {name!r} must be {expected_names}, got {type(value).__name__}")
+    return copy.deepcopy(value)
+
+
+def _build_subgraph_instance(
+    node_id: int,
+    definition_id: str,
+    template: dict,
+    pos: list,
+    size: list,
+    *,
+    title: str | None,
+) -> dict:
+    inputs = _copy_host_field(template, "inputs", list, [])
+    outputs = _copy_host_field(template, "outputs", list, [])
+    if any(not isinstance(item, dict) for item in inputs):
+        raise ValueError("reusable subgraph host field 'inputs' must contain only objects")
+    if any(not isinstance(item, dict) for item in outputs):
+        raise ValueError("reusable subgraph host field 'outputs' must contain only objects")
+    node = {
+        "id": node_id,
+        "type": definition_id,
+        "pos": list(pos),
+        "size": list(size),
+        "flags": {},
+        "order": 0,
+        "mode": 0,
+        "inputs": inputs,
+        "outputs": outputs,
+        "properties": _copy_host_field(template, "properties", dict, {}),
+        "widgets_values": _copy_host_field(template, "widgets_values", (list, dict), []),
+    }
+    for item in node["inputs"]:
+        if isinstance(item, dict):
+            item["link"] = None
+    for item in node["outputs"]:
+        if isinstance(item, dict):
+            item["links"] = []
+    if "widgets_values_form" in template:
+        node["widgets_values_form"] = _copy_host_field(template, "widgets_values_form", dict, {})
+    if title is not None:
+        node["title"] = title
+    return node
+
+
 def add_node(
     workflow: dict,
     graph,
@@ -691,6 +1141,7 @@ def add_node(
     # executable node.
     is_note = class_type in AUTHORABLE_VIRTUAL_NODE_TYPES
     m = None if is_note else graph.node(class_type)
+    subgraph_template = None
     if is_note:
         if text is None:
             text = ""
@@ -700,12 +1151,20 @@ def add_node(
     elif m is None:
         if class_type in UI_ONLY_NODE_TYPES:
             raise UnknownNodeType(class_type, ui_only=True)
-        if _UUID_RE.match(class_type.strip()):
+        subgraph_template = _reusable_subgraph_instance(workflow, class_type)
+        if subgraph_template is not None:
+            if text is not None:
+                raise ValueError("`text` is not valid for a subgraph instance; edit its promoted widgets by name")
+            size = layout.normalized_size(subgraph_template.get("size"))
+        elif _UUID_RE.match(class_type.strip()):
             raise UnknownNodeType(class_type, subgraph_id=True)
-        import difflib
+        else:
+            import difflib
 
-        names = [n.id for n in graph.all_nodes()]
-        raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
+            names = [n.id for n in graph.all_nodes()]
+            raise UnknownNodeType(
+                class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6)
+            )
     else:
         if text is not None:
             raise ValueError(
@@ -746,7 +1205,9 @@ def add_node(
         raise ValueError(f"node position must be two finite numbers, got {pos!r}")
     if title is not None and not isinstance(title, str):
         raise ValueError(f"node title must be a string, got {title!r}")
-    if m is None:
+    if subgraph_template is not None:
+        node = _build_subgraph_instance(mint_id(), class_type, subgraph_template, pos, size, title=title)
+    elif m is None:
         node = _build_note_node(mint_id(), class_type, pos, size, text or "", title=title)
     else:
         node = _build_node(mint_id(), class_type, m, graph, pos, size, title=title)
@@ -760,6 +1221,15 @@ def add_node(
                 f"invalid node mode {mode!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
             )
         node["mode"] = mode
+    subgraph_reuse = None
+    if subgraph_template is not None:
+        definition, _template = _subgraph_definition_and_template(workflow, class_type)
+        if definition is None:  # guarded by the successful template lookup above
+            raise UnknownNodeType(class_type, subgraph_id=True)
+        subgraph_reuse = {
+            "definition_id": class_type,
+            "existing_instance_paths": _subgraph_instance_paths(workflow, definition),
+        }
     op = _new_op(
         "add_node",
         actor,
@@ -768,6 +1238,7 @@ def add_node(
         class_type=class_type,
         pos=node["pos"],
         node=node,
+        **({"subgraph_reuse": subgraph_reuse} if subgraph_reuse is not None else {}),
         **({"mode": mode} if mode else {}),
         **({"title": title} if title is not None else {}),
     )
@@ -813,6 +1284,149 @@ def set_widget(
             except ValueError as e2:
                 raise _enrich_resolution_error(e2, workflow, graph, widget=widget) from e2
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def set_dynamic_group_rows(
+    workflow: dict,
+    graph,
+    node_id: Any,
+    group: str,
+    rows: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, list[dict]]:
+    """Replace a DynamicGroup's rows with ``rows``, expressed as ordinary
+    ``set_widget`` ops: the row count first, then every widget of each written
+    row, including a field's ``<field>.0`` control mode. Omitted widgets take
+    the template default.
+
+    A row with a connected or promoted field keeps its index and values and
+    is left out of ``rows``, which fill the other positions in order. Links
+    are never moved, so ``rows`` must cover every free position before the
+    last pinned row.
+
+    The writes run on a copy, so ``workflow`` is unchanged when any is refused.
+    The ops share one stamp, so an earlier write to the group at the same
+    stamp is refused rather than left to the ``op_id`` tiebreak (revisit once
+    #1007 makes the later write in a batch win). ``apply_op`` must replay them
+    in order, because this workflow model materializes rows from the count.
+    """
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    workflow = copy.deepcopy(workflow)
+    node_id = _template_id(workflow, node_id, graph)
+    target = _resolve_widget_write(workflow, graph, node_id, group)
+    if target.kind == "top" and target.redirected_from is None:
+        node = target.node
+        segments = [str(node.get("id"))]
+    elif target.kind == "interior" and target.redirected_from is None:
+        node = _promoted._navigate(workflow, target.segments, _promoted.defs_by_id(workflow))
+        segments = target.segments
+    else:
+        raise ValueError(
+            f"{group}: replace rows on the node that owns the DynamicGroup, not a promoted or linked address"
+        )
+    m = graph.node(node.get("type", ""))
+    port = next((p for p in m.inputs if p.name == group and p.is_dynamic_group), None) if m else None
+    if port is None:
+        raise ValueError(f"{group!r} is not a DynamicGroup on node {node_id}")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError(f"{group}: rows must be a list of objects keyed by row field")
+    widgets = _engine._dynamic_group_widgets(port)
+    names = [widget.name for widget in widgets]
+    for i, row in enumerate(rows):
+        unknown = [key for key in row if key not in names]
+        if unknown:
+            raise ValueError(f"{group}: rows[{i}] has unknown field(s) {unknown}; row fields: {', '.join(names)}")
+        for widget in widgets:
+            if widget.name not in row and _engine._widget_default(widget) is None:
+                raise ValueError(f"{group}: field {widget.name!r} has no default; supply it in rows[{i}]")
+
+    entries = _engine._validate_dynamic_group_layout(node, m) or []
+    current = sum(1 for e in entries if e.owner == group) // len(widgets)
+    linked = set()
+    for inp in node.get("inputs") or []:
+        if isinstance(inp, dict) and inp.get("link") is not None:
+            widget = inp.get("widget")
+            linked.update(
+                name
+                for name in (inp.get("name"), widget.get("name") if isinstance(widget, dict) else None)
+                if isinstance(name, str)
+            )
+    fields = [field.name for field in _engine._dynamic_group_fields(port)]
+
+    def pin_reason(row: int) -> str | None:
+        # A link, or a promotion whose write lands on the host (a subgraph
+        # input or a legacy proxyWidgets entry), owns the row's value.
+        for name in fields:
+            address = f"{group}.{row}.{name}"
+            try:
+                target = _promoted.resolve_write(workflow, graph, segments, address)
+            except ValueError:  # fed by another interior node: a plain link
+                target = None
+            if target is not None and (target.redirected_from or target.kind not in ("top", "interior")):
+                return "is promoted to the parent subgraph; unpromote it first"
+            if address in linked:
+                return "is connected; disconnect it first"
+        return None
+
+    pinned = {r: reason for r in range(current) if (reason := pin_reason(r))}
+    last = max(pinned, default=None)
+    free_before_last = last + 1 - len(pinned) if pinned else 0
+    if len(rows) < free_before_last:
+        raise ValueError(
+            f"{group}.{last} keeps its position and is left out of rows; supply at least "
+            f"{free_before_last} row(s), or {group}.{last} {pinned[last]}"
+        )
+    maximum = port.options.max if port.options.max is not None else 20
+    if len(rows) + len(pinned) > maximum:
+        raise ValueError(
+            f"{group}: {len(rows)} row(s) plus {len(pinned)} connected or promoted row(s) exceed the maximum of {maximum}"
+        )
+    supplied = iter(rows)
+    plan = [None if index in pinned else next(supplied) for index in range(len(rows) + len(pinned))]
+    for index in range(current, len(plan)):
+        # A shrink can leave a link on an input it did not match by name.
+        if any(f"{group}.{index}.{name}" in linked for name in fields):
+            raise ValueError(f"{group}.{index} still has a link from an earlier row; disconnect it first")
+    address = "/".join(segments) if len(segments) > 1 else node_id
+    where = segments if len(segments) > 1 else str(node_id)
+    stamps = workflow.get("_widget_stamps") or {}
+    claimed = [group] + [
+        f"{group}.{i}.{w.name}"
+        for i in range(max(len(plan), current))
+        if i >= len(plan) or plan[i] is not None
+        for w in widgets
+    ]
+    for written in claimed:
+        prior = stamps.get(json.dumps(["widget", where, written]))
+        if prior is not None and list(prior[:2]) >= [base_version, actor]:
+            raise ValueError(
+                f"{group}: {written} is already written at stamp [{prior[0]}, {prior[1]}]; write the group once "
+                f"per batch (a stamp left by an earlier apply needs a higher base_version)"
+            )
+
+    # The address is resolved, so skip set_widget's retry on another node.
+    workflow, op = _set_widget_impl(workflow, graph, address, group, len(plan), actor=actor, base_version=base_version)
+    ops = [op]
+    for index, row in enumerate(plan):
+        if row is None:
+            continue
+        for widget in widgets:
+            value = row[widget.name] if widget.name in row else _engine._widget_default(widget)
+            workflow, op = _set_widget_impl(
+                workflow,
+                graph,
+                address,
+                f"{group}.{index}.{widget.name}",
+                value,
+                actor=actor,
+                base_version=base_version,
+            )
+            ops.append(op)
+    return workflow, ops
 
 
 def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
@@ -940,7 +1554,13 @@ def _widget_schema_port(graph, class_type: str, widget: str):
 
 
 def _normalize_combo(
-    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+    graph,
+    class_type: str,
+    widget: str,
+    value: Any,
+    widgets_values: list[Any] | None = None,
+    *,
+    node: dict | None = None,
 ) -> tuple[Any, dict | None]:
     """Rewrite a mangled model/COMBO value to the real option it means so the
     model actually loads (e.g. ``checkpoints/wai-illustrious-sdxl.safetensors`` →
@@ -956,8 +1576,17 @@ def _normalize_combo(
         m = graph.node(class_type)
         if m is None:
             return value, None
+        saved_names = _engine.saved_widget_order(node, graph, class_type)
         port = next(
-            (entry.port for entry in _engine._expand_widget_entries(m, widgets_values) if entry.name == widget),
+            (
+                entry.port
+                for entry in _engine._expand_widget_entries(
+                    m,
+                    widgets_values,
+                    saved_widget_names=saved_names,
+                )
+                if entry.name == widget
+            ),
             None,
         )
     if port is None:
@@ -1044,7 +1673,7 @@ def _set_widget_impl(
     from comfy_cli.cql import promoted as _promoted
 
     # Subgraph-aware. A promoted widget's value lives on the HOST instance
-    # (ADR 0009: the host value wins over the interior default at run time),
+    # (ADR-SUBGRAPH-PROMOTION-0009: the host value wins over the interior default at run time),
     # and when an outside node feeds the promoted input, on THAT node — never
     # on the interior node the legacy ``proxyWidgets`` route pointed at. So a
     # flat ``57.width``, the interior ``57/13.width`` it backs, and a primitive
@@ -1104,6 +1733,9 @@ def _set_widget_impl(
         if warnings:
             op["warnings"] = warnings
         workflow = apply_op(workflow, op, graph)
+        # Captured before the enrichment below mutates ``op``: it is how
+        # ``_rebind_op_digest`` recognizes the ledger entry as this call's own.
+        applied_digest = _applied_digest(op)
         if target.repair is not None:
             # The slot only exists after the repair (and the instance may sit
             # on a freshly forked definition): read it back from the document.
@@ -1118,6 +1750,7 @@ def _set_widget_impl(
         # resolution is the pre-fork sibling, not the written one.
         written = _engine._resolve_node_path(workflow, list(target.segments), _engine._subgraph_defs_by_id(workflow))
         op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
+        _rebind_op_digest(workflow, op, applied_digest)
         return workflow, op
     if target.kind == "legacy_primitive":
         # A frontend-only PrimitiveNode has no catalog entry, so every
@@ -1139,7 +1772,9 @@ def _set_widget_impl(
             **extra,
         )
         workflow = apply_op(workflow, op, graph)
+        applied_digest = _applied_digest(op)
         op["promoted"]["host_widgets_values"] = list(src.get("widgets_values") or [])
+        _rebind_op_digest(workflow, op, applied_digest)
         return workflow, op
     if target.kind == "top" and target.redirected_from is not None:
         node_id = target.node.get("id")
@@ -1149,15 +1784,29 @@ def _set_widget_impl(
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
-        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value, cur)
+        value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value, cur, node=target)
         old = None
         if graph.node(inner_type) is not None:
             # Same resolution as a top-level node, so a sub-widget the current
             # dynamic-combo option hides is refused here too instead of
             # recording an op that writes nothing.
-            i = _widget_index(graph, inner_type, inner_widget, cur, node_id="/".join(str(s) for s in segments))
+            i = _widget_index(
+                graph,
+                inner_type,
+                inner_widget,
+                cur,
+                node_id="/".join(str(s) for s in segments),
+                node=target,
+            )
             old = cur[i] if i < len(cur) else None
-        warnings = _validate_widget(graph, inner_type, inner_widget, value, cur)  # raises on shape/catalog mismatch
+        warnings = _validate_widget(
+            graph,
+            inner_type,
+            inner_widget,
+            value,
+            cur,
+            node=target,
+        )  # raises on shape/catalog mismatch
         if norm_note:
             warnings = [norm_note, *warnings]
         op = _new_op(
@@ -1188,10 +1837,17 @@ def _set_widget_impl(
             f"delete it and add a new one"
         )
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
-    idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"))  # raises on unknown name
-    value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets)
+    idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"), node=node)  # raises on unknown name
+    value, norm_note = _normalize_combo(graph, class_type, widget, value, widgets, node=node)
     old = widgets[idx] if idx < len(widgets) else None
-    warnings = _validate_widget(graph, class_type, widget, value, widgets)  # raises on shape/catalog mismatch
+    warnings = _validate_widget(
+        graph,
+        class_type,
+        widget,
+        value,
+        widgets,
+        node=node,
+    )  # raises on shape/catalog mismatch
     morphism = graph.node(class_type)
     port = next((p for p in morphism.inputs if p.name == widget), None) if morphism is not None else None
     if port is not None and port.dynamic_options:
@@ -1341,6 +1997,27 @@ def _navigate_subgraph_path(workflow: dict, segments: list[str]) -> dict:
         if node is None:
             raise ValueError(f"interior node {seg} not found in subgraph {sg.get('id')}")
     return node
+
+
+def _interior_path_deleted(workflow: dict, segments: list[str]) -> bool:
+    """True when ``segments`` stops at an interior node that is absent from an
+    existing definition — the shape an interior ``delete_node`` leaves behind,
+    as opposed to a path that was never valid."""
+    from comfy_cli.cql import engine as _engine
+
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    node = _find_by_str(workflow, segments[0])
+    for seg in segments[1:]:
+        sg = defs_by_id.get(str((node or {}).get("type", ""))) if isinstance(node, dict) else None
+        if sg is None:
+            return False
+        node = next(
+            (n for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("id", "")) == str(seg)),
+            None,
+        )
+        if node is None:
+            return True
+    return False
 
 
 def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
@@ -1639,7 +2316,7 @@ def _connect_impl(
     # link.
     if in_idx is not None:
         dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-        if not _types_compatible(link_type, dst_type):
+        if not _input_accepts(link_type, (dst.get("inputs") or [])[in_idx]):
             raise ValueError(
                 f"type mismatch: {link_type} output of node {from_node} cannot connect to "
                 f"{dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node {to_node}"
@@ -1771,6 +2448,76 @@ def _interior_disconnect_scope(workflow: dict, to_node: Any) -> dict | None:
     return {"path": [str(seg) for seg in path], "definition": definition, "dst": dst}
 
 
+def _interior_delete_scope(workflow: dict, node_id: Any) -> dict | None:
+    """Resolve an interior node delete to its owning single-instance definition."""
+    from comfy_cli.cql import engine as _engine
+
+    text = str(node_id)
+    if _find_by_str(workflow, text) is not None:
+        return None
+    if _engine._SUBGRAPH_PATH_SEP in text:
+        segments = _engine.split_node_path(workflow, text)
+    elif ":" in text:
+        segments = text.split(":")
+    else:
+        return None
+    if len(segments) < 2:
+        return None
+    path = segments[:-1]
+    try:
+        host = _navigate_subgraph_path(workflow, path)
+    except ValueError:
+        return None
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None:
+        return None
+    target = next(
+        (
+            node
+            for node in definition.get("nodes") or []
+            if isinstance(node, dict) and str(node.get("id")) == str(segments[-1])
+        ),
+        None,
+    )
+    if target is None:
+        return None
+    instances = _definition_instance_count(workflow, str(host.get("type", "")))
+    if instances > 1:
+        raise ValueError(
+            f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
+            f"{instances} instances, so deleting a node inside it would mutate all {instances} at once — "
+            "delete-node refuses that; edit a single-instance copy (unpack or duplicate the subgraph in the editor)"
+        )
+    # A promoted widget's value lives positionally in the host's
+    # widgets_values (or, for a legacy promotion, in proxyWidgets order).
+    # Deleting its source would shift every later value onto the wrong input,
+    # and neither this CLI nor the shared applier realigns the host, so refuse.
+    from comfy_cli.cql import promoted as _promoted
+
+    target_id = str(target.get("id"))
+    backed = [
+        p.name
+        for p in _promoted.promoted_inputs(definition, _engine._subgraph_defs_by_id(workflow))
+        if p.is_widget and str(p.source_node) == target_id
+    ]
+    backed += [
+        str(entry[1])
+        for entry in (host.get("properties") or {}).get("proxyWidgets") or []
+        if isinstance(entry, list) and len(entry) >= 2 and str(entry[0]) == target_id
+    ]
+    if backed:
+        raise ValueError(
+            f"node {'/'.join([*path, target_id])} backs the promoted widget(s) {sorted(set(backed))} of subgraph "
+            f"{'/'.join(path)}; deleting it would shift the subgraph's remaining widget values onto the wrong "
+            "inputs — delete-node refuses that; remove the promotion in the editor first"
+        )
+    return {
+        "path": [str(seg) for seg in path],
+        "definition": definition,
+        "target": target,
+    }
+
+
 def _definition_instance_count(workflow: dict, def_id: str) -> int:
     """How many live instances of definition ``def_id`` the workflow holds.
 
@@ -1839,7 +2586,7 @@ def _connect_interior(
             "the node lists; inside a subgraph connect can only wire an existing input"
         )
     dst_type = (dst.get("inputs") or [])[in_idx].get("type")
-    if not _types_compatible(link_type, dst_type):
+    if not _input_accepts(link_type, (dst.get("inputs") or [])[in_idx]):
         raise ValueError(
             f"type mismatch: {link_type} output of node {'/'.join(scope['path'])}/{src.get('id')} cannot connect "
             f"to {dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node "
@@ -2051,13 +2798,20 @@ def reset_doc(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> t
 
 
 class NotExpressibleError(ValueError):
-    """A graph uses structure the frozen v1 vocabulary cannot express.
+    """A graph the frozen v1 vocabulary cannot express as one op batch.
 
     Raised by :func:`replace_ops` INSTEAD of returning a partial batch. A
     partial batch is the dangerous answer: it applies cleanly and leaves a
     document that is not the graph the caller asked for. The caller is expected
     to fall back to whatever whole-document path it had before (the cloud
     agent re-mints), and to say why.
+
+    Two reasons reach it. The graph may use STRUCTURE no frozen op kind can
+    create (a subgraph definition, a canvas group, a reroute point). Or the
+    translation may simply be too LONG — more than ``_MAX_OPS_PER_BATCH`` ops,
+    which the shared applier refuses whole. Both are "there is no legal batch
+    for this graph", and both want the same caller behaviour, so they share the
+    type rather than making every caller learn a second one.
     """
 
 
@@ -2103,13 +2857,17 @@ def _slot_ref(node: dict, slots_key: str, index: Any, alias: str) -> str:
 
     Names are the canonical reference form and survive slot reordering; the
     index is the fallback for a node whose slot list the template omits.
-    ``_split_ref_slot`` partitions on the FIRST dot, so a name containing one
-    would resolve wrong — those fall back to the index too.
+    A dotted autogrow name (``images.image0``) is emitted verbatim: an alias
+    never contains a dot, and ``_split_ref_slot`` partitions on the FIRST one,
+    so the whole remainder — dots and all — is handed back as the slot. Falling
+    back to the index for those instead broke the §8.8 one-artifact/two-consumers
+    contract, because ``apply_specs`` re-mints each node from the catalog and a
+    fresh node has no grown slot at that index (Comfy-Org/comfy-cli#1034).
     """
     slots = node.get(slots_key)
     if isinstance(slots, list) and isinstance(index, int) and 0 <= index < len(slots):
         name = (slots[index] or {}).get("name") if isinstance(slots[index], dict) else None
-        if isinstance(name, str) and name and "." not in name:
+        if isinstance(name, str) and name:
             return f"${alias}.{name}"
     return f"${alias}.{index}"
 
@@ -2152,7 +2910,8 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
     it reproduces the STRUCTURE (classes + wiring) while the op path reproduces
     the graph exactly, widget values included.
 
-    :raises NotExpressibleError: ``new`` uses structure no frozen op can create.
+    :raises NotExpressibleError: ``new`` uses structure no frozen op can create,
+        or its translation needs more than ``_MAX_OPS_PER_BATCH`` ops.
     """
     reason = _inexpressible_reason(new)
     if reason:
@@ -2240,6 +2999,32 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
                 },
             )
         )
+    # The batch is counted at the end rather than predicted up front because the
+    # exact length is only known here (a link to a node `new` does not contain is
+    # dropped above, so it costs no op), and nothing has left the function yet —
+    # the ops exist only in this local list. Returning a longer batch would hand
+    # the caller an artifact the shared applier rejects whole as `malformed_op`,
+    # which is the same "it applies cleanly nowhere" answer a partial batch is.
+    if len(ops) > _MAX_OPS_PER_BATCH:
+        raise NotExpressibleError(
+            f"the workflow needs {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op batch limit "
+            "(delete_node per existing node, add_node per node, connect per link)"
+        )
+    # The batch length is only the outer bound. These ops are built here and
+    # handed straight to a caller — unlike `apply_specs`', every one of which
+    # goes through `apply_op` and is canonicalized there — so nothing had
+    # checked the PER-OP payload bounds (§20.3: depth 64, 4,096 entries, 262,144
+    # cost). A node with an outsized `widgets_values`, or a `delete_node` whose
+    # `removed_links` runs past the entry cap, produced a batch this function
+    # presented as the legal translation of the graph and the shared applier
+    # then refused as `malformed_op`: the same mint-then-refuse shape one level
+    # down. Canonicalized rather than digested, since the refusal is the whole
+    # point and the hash is not needed.
+    for i, minted in enumerate(ops):
+        try:
+            _canonical_op(minted)
+        except ValueError as e:
+            raise NotExpressibleError(f"op #{i} ({minted['op']}) is not a legal op payload: {e}") from e
     return ops
 
 
@@ -2300,6 +3085,24 @@ def _delete_node_impl(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    interior = _interior_delete_scope(workflow, node_id)
+    if interior is not None:
+        target_id = interior["target"]["id"]
+        removed = [
+            _interior_link_id(link)
+            for link in interior["definition"].get("links") or []
+            if str(_interior_link_endpoints(link)[0]) == str(target_id)
+            or str(_interior_link_endpoints(link)[1]) == str(target_id)
+        ]
+        op = _new_op(
+            "delete_node",
+            actor,
+            base_version,
+            path=interior["path"],
+            node_id=target_id,
+            removed_links=removed,
+        )
+        return apply_op(workflow, op, graph), op
     _require(workflow, node_id)
     removed = [ln[0] for ln in workflow.get("links") or [] if ln[1] == node_id or ln[3] == node_id]
     op = _new_op("delete_node", actor, base_version, node_id=node_id, removed_links=removed)
@@ -2403,6 +3206,13 @@ def _param(name: str, params: dict[str, Any]) -> Any:
     return params[name]
 
 
+def _capture_saved_widget_order(node: dict, graph, node_type: str) -> list[str] | None:
+    try:
+        return saved_widget_order(node, graph, node_type)
+    except SavedWidgetLayoutError as exc:
+        raise RecipeError(f"node {node.get('id')}: {exc}") from exc
+
+
 def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | None = None) -> tuple[dict, list[dict]]:
     """Project a UI-format graph into a recipe — the op-batch that rebuilds it
     (add_node + non-default set_widget + connect). The inverse of `apply`:
@@ -2474,7 +3284,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         # but no value, and apply would refuse it anyway — say so up front.
         node_type = node.get("type", "")
         values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-        if widget not in graph.editable_widget_names(node_type, values):
+        saved_names = _capture_saved_widget_order(node, graph, node_type)
+        if widget not in graph.editable_widget_names(node_type, values, saved_names):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
         saved_values = node.get("widgets_values")
         if isinstance(saved_values, dict) and widget not in saved_values:
@@ -2619,7 +3430,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
         saved_values = n.get("widgets_values")
         widgets = _engine._widgets_as_positional(saved_values, graph, class_type)
-        order = graph.widget_order_for_node(class_type, widgets)
+        saved_names = _capture_saved_widget_order(n, graph, class_type)
+        order = graph.widget_order_for_node(class_type, widgets, saved_names)
         group_widgets = {e.name for e in group_entries.get(n["id"], [])}
         defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
@@ -2737,7 +3549,29 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
 def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
-    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases).
+
+    :raises ValueError: the batch mints more than ``_MAX_OPS_PER_BATCH`` ops.
+    """
+    # The bound is on the OPS, and one spec is not one op — `set_dynamic_group_rows`
+    # expands into a row-count write plus one `set_widget` per row field. So this
+    # entry check is the cheap half: a spec list already longer than the bound
+    # cannot mint a batch within it (every spec mints at least one op), and
+    # catching it here refuses before the `at` coercion and before
+    # `layout.assign_positions`, both of which are per-spec work. The half that
+    # actually binds is the `len(ops)` check after the loop below; a batch of
+    # 1,000 specs that expands past 1,024 ops passes this one and is caught there.
+    #
+    # Either way the refusal is whole-batch, because `applyOps` refuses an
+    # over-long batch WHOLE: accepting it here applies the edit locally and has
+    # every op in it rejected downstream. §4's abort-remainder contract has
+    # nothing to say about that case — it describes which ops in a batch apply,
+    # and here none do.
+    if len(specs) > _MAX_OPS_PER_BATCH:
+        raise ValueError(
+            f"malformed_op: batch of {len(specs)} specs exceeds the {_MAX_OPS_PER_BATCH}-op limit; "
+            "rejected before any op was processed"
+        )
     # Parse a string `at` up front: layout treats a pinned `at` as an obstacle
     # and reads it as coordinates.
     specs = [
@@ -2746,12 +3580,20 @@ def apply_specs(
         else spec
         for spec in specs
     ]
-    specs = layout.assign_positions(workflow, graph, specs)
+
+    def unknown_size(class_type: Any) -> list[float] | None:
+        if not isinstance(class_type, str):
+            return None
+        _definition, template = _subgraph_definition_and_template(workflow, class_type)
+        return layout.normalized_size(template.get("size")) if template is not None else None
+
+    specs = layout.assign_positions(workflow, graph, specs, unknown_size_resolver=unknown_size)
     # Snapshot the inventory BEFORE any op mutates the graph — on failure the
     # caller discards everything below, so this is what actually survives.
     pre_batch_hint = _available_nodes_hint(workflow)
     aliases: dict[str, Any] = {}
     ops: list[dict] = []
+    replaced: dict[tuple, bool] = {}
     input_targets: set[str] = set()
     try:
         for i, spec in enumerate(specs):
@@ -2815,6 +3657,19 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                elif kind == "set_dynamic_group_rows":
+                    workflow, row_ops = set_dynamic_group_rows(
+                        workflow,
+                        graph,
+                        resolve_ref(spec["node"], aliases),
+                        spec["group"],
+                        spec["rows"],
+                        actor=actor,
+                        base_version=base_version,
+                    )
+                    ops.extend(row_ops)
+                    replaced.update({_write_target(row_op): row_op is row_ops[0] for row_op in row_ops})
+                    continue
                 elif kind == "set_node_field":
                     workflow, op = set_node_field(
                         workflow,
@@ -2837,6 +3692,19 @@ def apply_specs(
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            # A later write at the batch's stamp would tie with the replacement
+            # and be settled by the random op_id. Revisit once #1007 makes the
+            # later write in a batch win.
+            target = _write_target(op) if op.get("op") == "set_widget" else None
+            if target in replaced:
+                raise ValueError(
+                    f"spec #{i}: {target[2]} was replaced earlier in this batch by set_dynamic_group_rows; "
+                    + (
+                        "change the number of rows in that spec instead"
+                        if replaced[target]
+                        else "put the value in its rows instead"
+                    )
+                )
             if kind in {"connect", "disconnect"}:
                 grow = op.get("grow")
                 if grow is not None and not grow.get("promoted"):
@@ -2854,6 +3722,17 @@ def apply_specs(
                     )
                 input_targets.add(encoded_target)
             ops.append(op)
+        # The entry check above counted specs. This one counts what they
+        # actually minted, which is what `applyOps` bounds: a batch of 1,000
+        # specs carrying a few `set_dynamic_group_rows` clears the entry check
+        # and still returns more than 1,024 ops, and the shared applier then
+        # refuses every one of them as `malformed_op` after comfy-cli has
+        # already written the document. Inside the `try` so the discard rehint
+        # below records `spec_index`/`applied_count` like every other refusal
+        # in this batch, and `applied_count` is 0 — the caller discards the
+        # whole batch, so nothing this loop wrote survives.
+        if len(ops) > _MAX_OPS_PER_BATCH:
+            raise ValueError(f"malformed_op: batch mints {len(ops)} ops, more than the {_MAX_OPS_PER_BATCH}-op limit")
     except (NotBatchableError, DeprecatedNodeType):
         # Already carries a registered code and a hint that says what to do
         # instead — don't wrap it into a generic hint.
@@ -2883,14 +3762,88 @@ def apply_specs(
 
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
-    op whose ``op_id`` was already applied is a no-op."""
-    had_applied_ops = "_applied_ops" in workflow
-    applied = workflow.setdefault("_applied_ops", [])
-    if op["op_id"] in applied:
+    op whose ``op_id`` was already applied is a no-op only for one payload."""
+    # Validate the replay bookkeeping BEFORE anything mutates. All three values
+    # arrive from untrusted JSON — ``_applied_op_digests`` and ``_applied_ops``
+    # are stripped on write but never checked on load, and ``op_id`` is whatever
+    # the envelope carried — and all three are indexed by the tail below. Left
+    # unchecked, a null/list/string ledger or a list-valued ``op_id`` raises
+    # ``TypeError``/``AttributeError`` AFTER the handler has written the
+    # document and appended to ``_applied_ops``, outside the rollback: a
+    # half-committed op whose deferred cleanup never ran.
+    op_id = op["op_id"]
+    if not isinstance(op_id, str):
+        raise ValueError(f"malformed_op: op_id must be a string, got {type(op_id).__name__}")
+    # Membership, not truthiness: an explicit ``null`` is PRESENT, and the
+    # ``setdefault`` in the tail below would hand back that ``None`` rather than
+    # a fresh dict.
+    if "_applied_op_digests" in workflow and not isinstance(workflow["_applied_op_digests"], dict):
+        raise ValueError("malformed_op: _applied_op_digests must be an object keyed by op_id")
+    if "_applied_ops" in workflow and not isinstance(workflow["_applied_ops"], list):
+        raise ValueError("malformed_op: _applied_ops must be an array of op_ids")
+    recorded_digests = workflow.get("_applied_op_digests")
+    recorded_ops = workflow.get("_applied_ops")
+    if op_id in (recorded_ops or ()):
+        ledger = recorded_digests if isinstance(recorded_digests, dict) else {}
+        # MEMBERSHIP, not ``.get(...) is None``: a document carrying
+        # ``{<op_id>: null}`` has a digest entry, it just has a malformed one.
+        # Reading its absence as "legacy list-only ledger" made a
+        # changed-payload redelivery a silent no-op on exactly the shape the
+        # up-front check does not cover — every other non-string value failed
+        # closed on the ``!=`` below, so null was the one that failed open.
+        if op_id not in ledger:
+            # A legacy list-only ledger keeps its historical duplicate
+            # behaviour, and deliberately WITHOUT digesting the payload first:
+            # a replay whose envelope is not canonical must still be the
+            # documented no-op rather than a ``malformed_op``.
+            return workflow
+        recorded = ledger[op_id]
+        # The up-front check validates the ledger's TYPE, not its values, and
+        # both arrive from the same untrusted JSON. Refused on read rather than
+        # by walking every entry on every apply.
+        if not isinstance(recorded, str):
+            raise ValueError(
+                f"malformed_op: _applied_op_digests[{op_id!r}] must be a string digest, got {type(recorded).__name__}"
+            )
+        if recorded != _op_digest(op):
+            raise ValueError(f"op_id_reuse: op_id {op_id!r} was already applied with a different payload")
         return workflow
+    # Digest BEFORE the ``setdefault`` below, so a first-seen op that
+    # canonicalization rejects leaves a document that had no ledger exactly as
+    # it found it — which is what the amendment's "rejects before mutation"
+    # wording promises.
+    digest = _op_digest(op)
+    # A deferred ``set_widget`` never reached ``_applied_ops`` — it waits in
+    # ``_deferred_widget_ops`` until a selector reveals its target — so gating
+    # on the applied list alone lets a SECOND op carrying the same ``op_id`` and
+    # a different payload straight through: it overwrites the pending entry (or
+    # applies at once), and the tail's ``deferred.pop`` then drops the original.
+    # No ``op_id_reuse`` is raised, so two replicas that received the pair in
+    # different orders diverge silently.
+    queued = workflow.get("_deferred_widget_ops")
+    waiting = queued.get(op_id) if isinstance(queued, dict) else None
+    # ``_applied_digest``, not ``_op_digest``: ``_deferred_widget_ops`` comes off
+    # the DOCUMENT and is never validated on load, so an oversized or deeply
+    # nested queued entry raised its own ``malformed_op:``/``payload_too_deep:``
+    # here — against the incoming op, blocking it (even as an identical
+    # redelivery) with an error naming a payload that is not the one being
+    # applied. ``None`` is a mismatch, and correctly so: the op above was just
+    # digested, so it IS canonical, and an uncanonical queued entry therefore
+    # cannot be the same payload. ``_retry_deferred_widget_ops`` already treats
+    # an uncanonical queued entry as unusable for the same reason.
+    if isinstance(waiting, dict) and _applied_digest(waiting) != digest:
+        raise ValueError(f"op_id_reuse: op_id {op_id!r} is already deferred with a different payload")
+    # BEFORE the ``setdefault`` below, because both of these raise OUTSIDE the
+    # rollback: a first-seen op with no ``op`` key, or a non-insert op carrying
+    # ``definitions``, is rejected and used to leave an empty ``_applied_ops``
+    # on a document that arrived without one — contradicting §20.2's "a document
+    # that arrived without a ledger is never left carrying an empty one by a
+    # rejected op".
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
+    had_applied_ops = "_applied_ops" in workflow
+    workflow.setdefault("_applied_ops", [])
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed
@@ -2945,10 +3898,11 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # binding above is stale for that kind and the reset's own op_id would be
     # written into a discarded list. Re-read, so a re-delivered reset_doc is a
     # no-op rather than a second wipe.
-    workflow.setdefault("_applied_ops", []).append(op["op_id"])
+    workflow.setdefault("_applied_ops", []).append(op_id)
+    workflow.setdefault("_applied_op_digests", {})[op_id] = digest
     deferred = workflow.get("_deferred_widget_ops")
     if isinstance(deferred, dict):
-        deferred.pop(op["op_id"], None)
+        deferred.pop(op_id, None)
         if not deferred:
             workflow.pop("_deferred_widget_ops", None)
     if kind == "set_widget":
@@ -2970,9 +3924,23 @@ def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
                 pending.pop(op_id, None)
                 progressed = True
                 continue
+            # Bind the id to its canonical payload here too: a deferred write
+            # reaches ``_applied_ops`` through this loop and never through
+            # ``apply_op``'s tail, so without this the reuse gate would read it
+            # as a legacy list-only entry and silently no-op a changed retry.
+            # Digested BEFORE the write, so an uncanonical queued payload — only
+            # reachable from a hand-edited document, since ``apply_op``
+            # canonicalizes on the way in — is dropped like the non-dict entry
+            # above instead of raising half-way through its own apply.
+            digest = _applied_digest(op)
+            if digest is None:
+                pending.pop(op_id, None)
+                progressed = True
+                continue
             if _apply_set_widget(workflow, op, graph) is False:
                 continue
             workflow.setdefault("_applied_ops", []).append(op_id)
+            workflow.setdefault("_applied_op_digests", {})[op_id] = digest
             pending.pop(op_id, None)
             progressed = True
         if not progressed:
@@ -3056,7 +4024,12 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         # Validate against the current definition before the mutating resolver
         # forks shared ancestors. Imported/replayed malformed ops must be
         # atomic: a rejected widget cannot leave an unreachable fork behind.
-        preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        try:
+            preflight = _navigate_subgraph_path(workflow, [str(s) for s in path])
+        except ValueError:
+            if _interior_path_deleted(workflow, [str(s) for s in path]):
+                return  # interior node concurrently deleted => no-op (delete wins)
+            raise
         preflight_warnings = _engine._write_widget(
             copy.deepcopy(preflight), op["inner_widget"], op["value"], graph, extend=False
         )
@@ -3161,7 +4134,7 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
     # integer key into it — leaving ``inputcount`` stale next to a garbage key.
     widgets = _engine._widgets_as_positional(dst.get("widgets_values"), graph, dst.get("type", ""))
     dst["widgets_values"] = widgets
-    idx = _widget_index(graph, dst.get("type", ""), widget, widgets)
+    idx = _widget_index(graph, dst.get("type", ""), widget, widgets, node=dst)
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = value
@@ -3557,6 +4530,9 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
 
 
 def _apply_delete_node(workflow: dict, op: dict) -> None:
+    if op.get("path"):
+        _apply_interior_delete_node(workflow, op)
+        return
     node_id = str(op["node_id"])  # node identity is compared as a string (amendment v1.2)
     workflow["nodes"] = [n for n in workflow.get("nodes") or [] if str(n.get("id")) != node_id]
     removed = set(op.get("removed_links") or [])
@@ -3581,6 +4557,54 @@ def _apply_delete_node(workflow: dict, op: dict) -> None:
                 pending.pop(key, None)
         if not pending:
             workflow.pop("_pending_dynamic_connects", None)
+
+
+def _apply_interior_delete_node(workflow: dict, op: dict) -> None:
+    """Apply a path-scoped delete inside one single-instance definition."""
+    from comfy_cli.cql import engine as _engine
+
+    try:
+        host = _navigate_subgraph_path(workflow, [str(seg) for seg in op["path"]])
+    except ValueError:
+        return
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None or _definition_instance_count(workflow, str(host.get("type", ""))) > 1:
+        return
+    node_id = str(op["node_id"])
+    definition["nodes"] = [
+        node
+        for node in definition.get("nodes") or []
+        if not (isinstance(node, dict) and str(node.get("id")) == node_id)
+    ]
+    removed = {str(link_id) for link_id in op.get("removed_links") or []}
+    kept = []
+    for link in definition.get("links") or []:
+        origin_id, target_id, _ = _interior_link_endpoints(link)
+        if str(_interior_link_id(link)) in removed or str(origin_id) == node_id or str(target_id) == node_id:
+            removed.add(str(_interior_link_id(link)))
+            continue
+        kept.append(link)
+    definition["links"] = kept
+    kept_ids = {str(_interior_link_id(link)) for link in kept}
+    # Links from the input proxy / into the output proxy are also listed on the
+    # definition's boundary slots; a stale id there leaves the slot "connected"
+    # to a link that no longer exists.
+    for boundary in [*(definition.get("inputs") or []), *(definition.get("outputs") or [])]:
+        if isinstance(boundary, dict) and isinstance(boundary.get("linkIds"), list):
+            boundary["linkIds"] = [link_id for link_id in boundary["linkIds"] if str(link_id) not in removed]
+    for node in definition.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        for inp in node.get("inputs") or []:
+            if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) not in kept_ids:
+                inp["link"] = None
+        for out in node.get("outputs") or []:
+            if isinstance(out, dict) and isinstance(out.get("links"), list):
+                out["links"] = [link_id for link_id in out["links"] if str(link_id) in kept_ids]
+    if isinstance(definition.get("node_order"), list):
+        definition["node_order"] = [value for value in definition["node_order"] if str(value) != node_id]
+    if isinstance(definition.get("link_order"), list):
+        definition["link_order"] = [value for value in definition["link_order"] if str(value) in kept_ids]
 
 
 def _apply_clear(workflow: dict, op: dict) -> None:
@@ -3615,6 +4639,7 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     workflow["last_node_id"] = 0
     workflow["last_link_id"] = 0
     workflow["_applied_ops"] = []
+    workflow["_applied_op_digests"] = {}
     workflow["_widget_stamps"] = {}
 
 
@@ -3649,6 +4674,8 @@ def _write_target(op: dict) -> tuple:
         # neither collides with a same-named widget's register.
         return ("node_field", str(op["node_id"]), op["field"])
     if kind in ("add_node", "delete_node"):
+        if op.get("path"):
+            return ("node", tuple(str(s) for s in op["path"]), str(op["node_id"]))
         return ("node", str(op["node_id"]))
     if kind in ("connect", "disconnect"):
         grow = op.get("grow")
@@ -3691,6 +4718,36 @@ def detect_conflict(a: dict, b: dict) -> bool:
     the same base conflict here (their batch order is undecidable leaderlessly)
     even though :func:`apply_op` keeps both connections and ``canonical`` treats
     their order as immaterial."""
+
+    def mutated_definition_path(op: dict) -> list[str] | None:
+        path = op.get("path")
+        if isinstance(path, list) and path:
+            # set_widget's path includes the interior target node; the other
+            # path-scoped ops carry the owning host path directly.
+            return [str(item) for item in (path[:-1] if op.get("op") == "set_widget" else path)]
+        promoted = op.get("promoted")
+        if op.get("op") == "set_widget" and isinstance(promoted, dict) and promoted.get("repair"):
+            instance_path = promoted.get("instance_path")
+            if isinstance(instance_path, list) and instance_path:
+                return [str(item) for item in instance_path]
+        return None
+
+    def reuse_conflicts_with_mutation(reuse_op: dict, mutation_op: dict) -> bool:
+        metadata = reuse_op.get("subgraph_reuse")
+        mutation_path = mutated_definition_path(mutation_op)
+        if not isinstance(metadata, dict) or mutation_path is None:
+            return False
+        for raw_path in metadata.get("existing_instance_paths") or []:
+            if not isinstance(raw_path, list) or not raw_path:
+                continue
+            instance_path = [str(item) for item in raw_path]
+            if mutation_path[: len(instance_path)] == instance_path:
+                return True
+        return False
+
+    if reuse_conflicts_with_mutation(a, b) or reuse_conflicts_with_mutation(b, a):
+        return True
+
     target_a = _write_target(a)
     target_b = _write_target(b)
     if a["op"] == "set_widget" and b["op"] == "set_widget" and target_a[:-1] == target_b[:-1]:
@@ -3728,6 +4785,7 @@ def canonical(workflow: dict) -> dict:
     """
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
+    w.pop("_applied_op_digests", None)
     w.pop("_widget_stamps", None)
     w.pop("_pending_dynamic_connects", None)
     w.pop("_deferred_widget_ops", None)
@@ -3835,6 +4893,7 @@ def strip_internal(workflow: dict) -> dict:
     file writes, ``--stdout`` and batch output alike.
     """
     workflow.pop("_applied_ops", None)
+    workflow.pop("_applied_op_digests", None)
     workflow.pop("_widget_stamps", None)
     workflow.pop("_pending_dynamic_connects", None)
     workflow.pop("_deferred_widget_ops", None)
@@ -3846,7 +4905,34 @@ def strip_internal(workflow: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Widget input types a fresh node gets a socket entry for. The frontend gives
+# every non-socketless widget input a socket and serializes it as
+# ``{"name", "type", "widget": {"name"}}``; without the entry the shared document
+# has no slot for a link a human draws into that socket, so the link never
+# reaches the document.
+_SOCKETED_WIDGET_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"})
+
+
+def _widget_input_entries(m, order: list[str]) -> list[dict]:
+    """Socket entries for every widget in ``order``, or none.
+
+    Without object_info the converter names saved values from these entries by
+    position, so sockets for only some widgets would misname the rest. A node
+    with a widget that has no entry of its own (a dynamic combo, a union type, a
+    socketless widget) keeps the convert-on-connect path instead.
+    """
+    entries = [
+        {"name": p.name, "type": p.type, "widget": {"name": p.name}, "link": None}
+        for p in m.inputs
+        if not p.is_link and not p.is_socketless and p.type in _SOCKETED_WIDGET_TYPES
+    ]
+    if [e["name"] for e in entries] != [name for name in order if name != "control_after_generate"]:
+        return []
+    return entries
+
+
 def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, title: str | None = None) -> dict:
+    # Link inputs first, so their indices are unchanged; widget sockets after.
     inputs = [{"name": p.name, "type": p.type, "link": None} for p in m.inputs if p.is_link]
     outputs = [{"name": p.name, "type": p.type, "links": []} for p in m.outputs]
     # Widget values in positional order, including dynamic-combo selectors and
@@ -3858,6 +4944,7 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, 
     # it, so neither does a fresh node — no phantom trailing ``null``.
     while order and order[-1] not in defaults:
         order = order[:-1]
+    inputs += _widget_input_entries(m, order)
     widgets = [defaults.get(name) for name in order]
     node = {
         "id": node_id,
@@ -3954,11 +5041,28 @@ def _other_option_widget_error(
     )
 
 
-def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, node_id: Any = None) -> int:
-    # Node-aware: expand a dynamic combo's sub-widgets by this node's actual
-    # selected key (from ``widgets_values``), not the schema's first key, so the
-    # index stays aligned to ``widgets_values`` for the node's real selection.
-    order = graph.widget_order_for_node(class_type, widgets_values)
+def _widget_index(
+    graph,
+    class_type: str,
+    widget: str,
+    widgets_values=None,
+    *,
+    node_id: Any = None,
+    node: dict | None = None,
+) -> int:
+    # Node-aware twice over. The dynamic combo's sub-widgets expand by this
+    # node's actual selected key (from ``widgets_values``) rather than the
+    # schema's first key, AND in the order the node was SAVED with when it
+    # records one (``inputs[].widget`` markers). The second part matters because
+    # ``widgets_values`` is positional against the save's layout: an option that
+    # has since gained a sub-input shifts every later slot, and the write then
+    # lands on a neighbour. On a pre-``auto_upscale`` Seedance save that meant
+    # ``set-widget seed`` overwrote the seed's ``control_after_generate`` marker
+    # and left the seed itself alone.
+    from comfy_cli.cql import engine as _eng  # lazy: engine imports this module at load time
+
+    saved_names = _eng.saved_widget_order(node, graph, class_type)
+    order = graph.widget_order_for_node(class_type, widgets_values, saved_names)
     # A frontend-injected slot (``upload``/``audioUI``/``PREVIEW_3D`` ``image``)
     # sits in ``order`` — it owns a position — but has no schema port to
     # validate against and ``slots`` never advertises it; refuse it by name so
@@ -3966,13 +5070,18 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, n
     # unadvertised but stays writable (it carries a real user value).
     if widget in graph.frontend_injected_widget_names(class_type):
         raise frontend_injected_widget_error(
-            class_type, widget, graph.editable_widget_names(class_type, widgets_values)
+            class_type, widget, graph.editable_widget_names(class_type, widgets_values, saved_names)
         )
     if widget not in order:
+        if saved_names is not None and widget in graph.widget_order_for_node(class_type, widgets_values):
+            raise ValueError(
+                f"widget {widget!r} exists in the current catalog but not in this saved workflow's layout; "
+                "the save predates that widget, so no positional slot was guessed or written"
+            )
         other = _other_option_widget_error(graph, class_type, widget, order, widgets_values, node_id)
         if other is not None:
             raise other
-        avail = graph.editable_widget_names(class_type, widgets_values)
+        avail = graph.editable_widget_names(class_type, widgets_values, saved_names)
         socket = _link_input_note(graph, class_type, widget)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
@@ -4023,7 +5132,13 @@ class FatalFindingError(ValueError):
 
 
 def _validate_widget(
-    graph, class_type: str, widget: str, value: Any, widgets_values: list[Any] | None = None
+    graph,
+    class_type: str,
+    widget: str,
+    value: Any,
+    widgets_values: list[Any] | None = None,
+    *,
+    node: dict | None = None,
 ) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
@@ -4039,7 +5154,8 @@ def _validate_widget(
         m = graph.node(class_type)
         if m is None:
             return []
-        entries = _engine._expand_widget_entries(m, widgets_values)
+        saved_names = _engine.saved_widget_order(node, graph, class_type)
+        entries = _engine._expand_widget_entries(m, widgets_values, saved_widget_names=saved_names)
         port = next((entry.port for entry in entries if entry.name == widget), None)
     if port is None:
         return []
@@ -4280,6 +5396,14 @@ def _resolve_input_target(
     # bare-element guess (``image0``) a group's vocabulary might also match.
     node_type = node.get("type", "")
     if graph is not None and isinstance(slot, str) and slot in _linkable_widget_names(node, graph):
+        declared = _socketed_widget_type(graph, node_type, slot)
+        if declared is not None:
+            if not _types_compatible(elem_type, declared):
+                raise ValueError(
+                    f"type mismatch: {elem_type} output cannot connect to {declared} input {slot!r} "
+                    f"of node {node.get('id')}"
+                )
+            return None, {"name": slot, "type": declared, "widget": slot}
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
@@ -4366,7 +5490,8 @@ def _resolve_dynamic_link_input(
     if port is None or not port.dynamic_options or not _engine._is_dynamic_combo_type(port.type):
         return None
     values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    order = graph.widget_order_for_node(node_type, values)
+    saved_names = _engine.saved_widget_order(node, graph, node_type)
+    order = graph.widget_order_for_node(node_type, values, saved_names)
     current = values[order.index(selector)] if selector in order and order.index(selector) < len(values) else None
 
     def link_sub(key: Any):
@@ -4398,6 +5523,17 @@ def _resolve_dynamic_link_input(
     # register from a concurrent first connect's grow, and the occupant would
     # depend on apply order. Both appliers reuse the existing entry by name.
     return None, {"name": slot, "type": hit.type, "promoted": True}
+
+
+def _socketed_widget_type(graph, node_type: str, name: str) -> str | None:
+    """The declared socket type of widget ``name`` when it is one of the
+    :data:`SOCKETED_WIDGET_TYPES` (``CreateBoundingBoxes.editor_state``), else
+    ``None``."""
+    m = graph.node(node_type) if node_type else None
+    for p in getattr(m, "inputs", None) or []:
+        if p.name == name and p.type in SOCKETED_WIDGET_TYPES:
+            return p.type
+    return None
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:

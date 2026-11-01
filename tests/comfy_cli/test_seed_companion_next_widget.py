@@ -11,7 +11,7 @@ shifting every later widget.
 
 from __future__ import annotations
 
-from comfy_cli.workflow_to_api import _schema_widget_pairs
+from comfy_cli.workflow_to_api import _filter_control_values, _schema_widget_pairs
 
 # An unflagged seed-like INT, then a CONNECTION input, then a COMBO whose legal
 # values include a control keyword. widgets_values only carries widget slots:
@@ -102,3 +102,35 @@ def test_current_stream_noise_seed_companion_consumed():
     assert pairs == [("noise_seed", 7), ("mode", "loop"), ("cfg", 5.5)]
     legacy = _schema_widget_pairs(schema, [7, "fixed", 5.5])
     assert legacy == [("noise_seed", 7), ("mode", "fixed"), ("cfg", 5.5)]
+
+
+def test_node_and_node_type_cannot_be_passed_positionally():
+    """``node`` and ``node_type`` are keyword-only so a mis-bind cannot pass silently.
+
+    ``node_type`` was once inserted as the third positional parameter, ahead of
+    ``node``. A caller passing ``(schema, values, node)`` then bound its node to
+    ``node_type`` and left ``node`` as ``None`` — so no ``inputs[].widget``
+    markers were read, the saved-layout refusals never fired, and the walk fell
+    back to catalog order. The call still returned pairs, so two tests kept
+    passing while no longer reaching the behaviour they named. Keyword-only makes
+    that a ``TypeError`` at the call site instead.
+    """
+    import pytest
+
+    schema = {"input": {"required": {"seed": ["INT", {}]}}}
+    with pytest.raises(TypeError):
+        _schema_widget_pairs(schema, [7], "SomeNodeType")  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        _schema_widget_pairs(schema, [7], {"type": "SomeNodeType"})  # type: ignore[misc]
+    # The keyword forms remain available.
+    assert _schema_widget_pairs(schema, [7], node_type="SomeNodeType") == [("seed", 7)]
+    assert _schema_widget_pairs(schema, [7], node=None) == [("seed", 7)]
+
+    # _filter_control_values takes the same two values adjacently and had the
+    # same exposure, so it is pinned here too rather than left as the next one
+    # to be inserted into. Its sole caller binds by keyword.
+    assert _filter_control_values([7], node_type="SomeNodeType") == [7]
+    with pytest.raises(TypeError):
+        _filter_control_values([7], "SomeNodeType")  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        _filter_control_values([7], {"type": "SomeNodeType"})  # type: ignore[misc]
