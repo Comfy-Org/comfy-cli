@@ -1884,8 +1884,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "knowledge_unknown_model",
-        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
-        "try one of `details.close_matches`",
+        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names. "
+        "When catalog ids or aliases share the query's family word and numeric components, in order, "
+        "`details.candidate_ids` lists up to five sorted canonical ids; these are suggestions only.",
+        "try one of `details.close_matches`, or ask which of `details.candidate_ids` is intended and retry "
+        "`comfy knowledge resolve <exact-id>`",
     ),
 )
 
