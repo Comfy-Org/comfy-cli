@@ -645,16 +645,23 @@ class TestAddNode:
         assert env["ok"] is True
         assert captured["where"] == "cloud"
 
-    def test_ids_are_large_ints_and_collision_free(self, patched_graph, tmp_path, capsys):
-        """CRDT identity: leaderless, collision-free, int-typed (converter-safe)."""
+    def test_ids_follow_agent_partition(self, patched_graph, tmp_path, capsys, monkeypatch):
+        """Agent IDs set bit 40 and stay below the documented ``2**52`` bound."""
+        draws = iter([0, (1 << 52) - 1])
+
+        def draw(bits: int) -> int:
+            assert bits == 52
+            return next(draws)
+
+        monkeypatch.setattr(workflow_ops.random, "getrandbits", draw)
         path = _write(tmp_path, _base_workflow())
         env1 = _run(["add-node", str(path), "VAEDecode"], capsys)
         env2 = _run(["add-node", str(path), "VAEDecode"], capsys)
         id1, id2 = env1["data"]["op"]["node_id"], env2["data"]["op"]["node_id"]
-        assert isinstance(id1, int) and isinstance(id2, int)
-        assert id1 != id2
-        # Not a small sequential counter value — minted from a large space.
-        assert id1 > 10_000 and id2 > 10_000
+        assert id1 == 1 << 40
+        assert id2 == (1 << 52) - 1
+        assert all(isinstance(node_id, int) for node_id in (id1, id2))
+        assert all(node_id & (1 << 40) for node_id in (id1, id2))
 
     def test_add_node_without_at_does_not_stack(self):
         """No explicit `pos` → the layout-aware cascade default, not the old
