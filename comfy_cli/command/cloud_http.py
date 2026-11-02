@@ -79,8 +79,8 @@ def http_request(
     ``http.client.IncompleteRead``, never a decode failure: the answer was cut
     off in transit, not malformed, and a retry may get all of it.
 
-    A body that declares more than ``_MAX_BODY_BYTES`` is never parsed; it gets
-    the decode-failure outcome, since the bytes read are not the whole answer.
+    A body longer than ``_MAX_BODY_BYTES``, chunked or not, is never parsed; it
+    gets the decode-failure outcome, since the bytes read are not the whole answer.
     """
     import http.client
     import urllib.request
@@ -90,13 +90,15 @@ def http_request(
     req = _authed_request(url, target, method=method, data=data, content_type=ct)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         status = resp.status
-        raw = resp.read(_MAX_BODY_BYTES)
+        # One byte past the cap tells a body longer than the cap apart from one
+        # exactly the cap, with or without a Content-Length.
+        raw = resp.read(_MAX_BODY_BYTES + 1)
         # A chunked body cut short raises IncompleteRead inside `read`, but a
         # bounded read of a Content-Length body returns whatever arrived;
         # http.client still counts the declared bytes that did not (`length`).
         unread = getattr(resp, "length", None)
-    over_cap = isinstance(unread, int) and unread > 0
-    if over_cap and len(raw) < _MAX_BODY_BYTES:
+    over_cap = len(raw) > _MAX_BODY_BYTES
+    if isinstance(unread, int) and unread > 0 and not over_cap:
         raise http.client.IncompleteRead(raw, unread)
     # `.strip()` so a whitespace-only body counts as empty rather than as a
     # decode failure: identical to the old behaviour on the default path (it
@@ -106,8 +108,8 @@ def http_request(
         return status, None
     try:
         if over_cap:
-            # The read stopped at the cap with declared bytes still unread: the
-            # prefix may happen to be valid JSON, but it is not the answer.
+            # The body runs past the cap: the prefix may happen to be valid
+            # JSON, but it is not the answer.
             raise ValueError(f"response body larger than {_MAX_BODY_BYTES} bytes")
         return status, json.loads(raw)
     except (ValueError, RecursionError) as e:
