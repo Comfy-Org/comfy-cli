@@ -28,6 +28,10 @@ _EMPTY_DEFINITION: JsonObject = {"models": [], "customNodes": []}
 # `?os=&gpu=`) still matches.
 _ROUTES: dict[tuple[str, str], tuple[int, JsonObject]] = {
     ("POST", "/v1/snapshots/resolve"): (200, {"definition": _EMPTY_DEFINITION, "report": {}}),
+    ("POST", "/v1/workflows/validate"): (
+        200,
+        {"format": "api", "complete": True, "covered": 0, "missing": [], "unverified": []},
+    ),
     ("POST", "/v1/builds"): (201, {"id": BUILD_ID, "updatedAt": REVISION}),
     ("GET", "/v1/builds"): (200, {"builds": [{"id": BUILD_ID, "name": "Matrix"}]}),
     ("GET", f"/v1/builds/{BUILD_ID}"): (
@@ -111,6 +115,12 @@ def _resolved_filenames(body: JsonObject | None) -> list[JsonValue]:
     filenames = body["filenames"]
     assert isinstance(filenames, list)
     return [{"filename": filename, "candidates": []} for filename in filenames]
+
+
+def write_workflow(root: Path) -> Path:
+    path = root / "workflow.json"
+    path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}), encoding="utf-8")
+    return path
 
 
 def write_snapshot(root: Path) -> Path:

@@ -306,7 +306,10 @@ is the only check available on this path, because the conflict prediction in
 the policy fields back unchecked, so a pass showing your `mode` is not
 confirmation the `mode` is valid — the builder is the first thing to refuse a bad
 one, at `push`. `--remote` additionally looks up public model-source candidates
-and needs the sign-in.
+and needs the sign-in. `--workflow <workflow>.json` additionally asks the builder whether
+this local definition (not the saved Build) installs every node class the
+workflow uses, and exits 1 naming each missing pack and its classes, or each class
+it could not verify; it needs the sign-in and the builder.
 
 ## Correcting a scanned pack id
 

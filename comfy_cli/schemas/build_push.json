@@ -58,6 +58,18 @@
         }
       }
     },
+    "workflow_coverage": {
+      "description": "Present only with `--workflow`, and only when the check passed: the builder compared the workflow at `path` with the LOCAL spec's definition (a local node counted as the upload a push makes of it) and found every custom node class installed. Any missing or unverified class, or a builder that could not check, is an error envelope instead (`build_workflow_nodes_missing`, `build_workflow_unverified`, `build_workflow_check_unavailable`).",
+      "type": "object",
+      "required": ["path", "format", "complete", "covered"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "format": {"description": "The export dialect the builder read the file as, `api` or `ui`.", "type": "string"},
+        "complete": {"const": true},
+        "covered": {"description": "Distinct custom node classes the definition installs.", "type": "integer", "minimum": 0}
+      }
+    },
     "targets": {
       "type": "array",
       "minItems": 1,
