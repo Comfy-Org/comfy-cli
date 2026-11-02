@@ -1491,6 +1491,19 @@ class TestBodiesCutShort:
         with pytest.raises(cloud_http.ResponseUnparseable):
             cloud_http.http_request(cloud_target.url("assets"), cloud_target, strict_json=True)
 
+    @pytest.mark.parametrize("strict", [True, False])
+    def test_a_body_past_the_size_cap_is_never_parsed(self, cloud_target, monkeypatch, strict):
+        from comfy_cli.command import cloud_http
+
+        # The first 8 bytes are a valid JSON object plus whitespace; the rest is not.
+        monkeypatch.setattr(cloud_http, "_MAX_BODY_BYTES", 8)
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _wire(b'{}      , "assets": [1]}'))
+        if strict:
+            with pytest.raises(cloud_http.ResponseUnparseable):
+                cloud_http.http_request(cloud_target.url("assets"), cloud_target, strict_json=True)
+        else:
+            assert cloud_http.http_request(cloud_target.url("assets"), cloud_target) == (200, None)
+
     @pytest.mark.parametrize(
         "cut", [pytest.param({"declared": 40}, id="content-length"), pytest.param({"chunked": 40}, id="chunked")]
     )

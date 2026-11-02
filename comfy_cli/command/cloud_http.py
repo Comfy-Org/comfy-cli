@@ -78,6 +78,9 @@ def http_request(
     A connection that closes before the body it declared has arrived raises
     ``http.client.IncompleteRead``, never a decode failure: the answer was cut
     off in transit, not malformed, and a retry may get all of it.
+
+    A body that declares more than ``_MAX_BODY_BYTES`` is never parsed; it gets
+    the decode-failure outcome, since the bytes read are not the whole answer.
     """
     import http.client
     import urllib.request
@@ -92,15 +95,20 @@ def http_request(
         # bounded read of a Content-Length body returns whatever arrived;
         # http.client still counts the declared bytes that did not (`length`).
         unread = getattr(resp, "length", None)
-    if isinstance(unread, int) and unread > 0 and len(raw) < _MAX_BODY_BYTES:
+    over_cap = isinstance(unread, int) and unread > 0
+    if over_cap and len(raw) < _MAX_BODY_BYTES:
         raise http.client.IncompleteRead(raw, unread)
     # `.strip()` so a whitespace-only body counts as empty rather than as a
     # decode failure: identical to the old behaviour on the default path (it
     # collapsed to `None` either way), but it keeps `strict_json` from calling a
     # server that answers `b"\n"` malformed.
-    if not raw.strip():
+    if not over_cap and not raw.strip():
         return status, None
     try:
+        if over_cap:
+            # The read stopped at the cap with declared bytes still unread: the
+            # prefix may happen to be valid JSON, but it is not the answer.
+            raise ValueError(f"response body larger than {_MAX_BODY_BYTES} bytes")
         return status, json.loads(raw)
     except (ValueError, RecursionError) as e:
         # Catch the ``ValueError`` BASE, not ``JSONDecodeError``: handed raw bytes,
