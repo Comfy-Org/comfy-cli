@@ -137,18 +137,39 @@ class DataPlaneToken:
     when it is within a minute of expiring; ``after_rejection`` forces the shared
     refresh after a 401. A workspace API key, or a token handed to the client
     directly, does not expire here and is sent unchanged (``refreshes=False``).
+
+    ``same_account=True`` is for a command whose work the server ties to one
+    user and workspace (an upload completed and read back as its uploader): a
+    token is taken from the store only while the store holds that same sign-in.
     """
 
-    def __init__(self, value: str, *, refreshes: bool, base_url: str | None = None, allow_clear: bool = True) -> None:
+    def __init__(
+        self,
+        value: str,
+        *,
+        refreshes: bool,
+        base_url: str | None = None,
+        allow_clear: bool = True,
+        same_account: bool = False,
+    ) -> None:
         self._value = value
         self._refreshes = refreshes
         # A sign-in to another environment, made while this command runs, is
         # never picked up in its place.
         self._base_url = base_url
         self._allow_clear = allow_clear
+        # With ``same_account``, a sign-in to another account (or workspace) on
+        # the same environment, made while this command runs, is not picked up
+        # either: the token already held is kept, and ``account_replaced``
+        # records why a 401 could not be retried.
+        self._same_account = same_account
+        self._account = _token_account(value) if same_account else None
+        self.account_replaced = False
 
     @classmethod
-    def for_target_token(cls, value: str, *, base_url: str, allow_clear: bool) -> DataPlaneToken:
+    def for_target_token(
+        cls, value: str, *, base_url: str, allow_clear: bool, same_account: bool = False
+    ) -> DataPlaneToken:
         """Refresh ``value`` only if it is the stored sign-in's token.
 
         A Target does not say where its token came from, and a token injected
@@ -161,13 +182,19 @@ class DataPlaneToken:
             return cls(value, refreshes=False, base_url=base_url, allow_clear=allow_clear)
         stored = get_session(refresh=False)
         is_sign_in = stored is not None and stored.access_token == value and stored.base_url == base_url
-        return cls(value, refreshes=is_sign_in, base_url=base_url, allow_clear=allow_clear)
+        return cls(value, refreshes=is_sign_in, base_url=base_url, allow_clear=allow_clear, same_account=same_account)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return f"DataPlaneToken(value=***, refreshes={self._refreshes!r})"
 
     def _same_environment(self, session: CloudSession | None) -> bool:
         return session is not None and (self._base_url is None or session.base_url == self._base_url)
+
+    def _same_login(self, session: CloudSession | None) -> bool:
+        """``session`` is one this command may take its token from."""
+        if not self._same_environment(session):
+            return False
+        return not self._same_account or _token_account(session.access_token) == self._account
 
     def current(self) -> str:
         """The token to send now; the one already held when the store cannot be read or written."""
@@ -176,9 +203,9 @@ class DataPlaneToken:
         try:
             # The environment is checked before refreshing, so a sign-in another
             # shell stored elsewhere is never spent (or cleared) on this command's behalf.
-            if self._same_environment(get_session(refresh=False)):
+            if self._same_login(get_session(refresh=False)):
                 session = get_session(refresh=True, allow_clear=self._allow_clear)
-                if session is not None and session.access_token and self._same_environment(session):
+                if session is not None and session.access_token and self._same_login(session):
                     self._value = session.access_token
         except OSError as error:
             # A job already running must not be abandoned over the sign-in store:
@@ -191,7 +218,13 @@ class DataPlaneToken:
         if not self._refreshes:
             return False
         try:
-            if not self._same_environment(get_session(refresh=False)):
+            stored = get_session(refresh=False)
+            if not self._same_environment(stored):
+                return False
+            if not self._same_login(stored):
+                # Another account signed in here meanwhile: its refresh token is
+                # not this command's to spend, and its token would act as it.
+                self.account_replaced = True
                 return False
             token = refreshed_access_token(self._value, allow_clear=self._allow_clear)
         except OSError as error:
@@ -199,8 +232,37 @@ class DataPlaneToken:
             return False
         if token is None:
             return False
+        if self._same_account and _token_account(token) != self._account:
+            # The other sign-in landed while the refresh waited for the store's lock.
+            self.account_replaced = True
+            return False
         self._value = token
         return True
+
+
+def _token_account(token: str | None) -> tuple[str | None, str | None] | None:
+    """The user and workspace a Comfy Cloud access token acts as, or ``None`` when it does not say.
+
+    Read from the JWT's ``sub`` and ``workspace_id`` claims WITHOUT verifying the
+    signature: it only tells two locally stored tokens apart, and the server
+    still decides what either may do. A refresh keeps both claims, so two tokens
+    of one sign-in compare equal; a sign-in to another account or workspace does not.
+    """
+    import base64
+    import json
+
+    parts = token.split(".") if isinstance(token, str) else []
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, RecursionError):  # binascii.Error and UnicodeDecodeError are ValueErrors
+        return None
+    if not isinstance(claims, dict):
+        return None
+    user, workspace = claims.get("sub"), claims.get("workspace_id")
+    account = (user if isinstance(user, str) else None, workspace if isinstance(workspace, str) else None)
+    return account if any(account) else None
 
 
 def _env_value(env_var: str) -> str | None:

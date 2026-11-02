@@ -13,6 +13,9 @@ import json
 
 import typer
 
+# The most of a response body ``http_request`` reads.
+_MAX_BODY_BYTES = 64 * 1024 * 1024
+
 
 def cloud_target_or_local_error(where: str | None, renderer):
     """Resolve a cloud Target, or emit ``cloud_only_command`` for a non-cloud target."""
@@ -71,7 +74,12 @@ def http_request(
     raises ``ResponseUnparseable``. The two are different answers ("nothing to
     say" vs. "a malformed answer"), and a listing caller that conflates them
     reports a proxy or captive-portal error page as a successful empty listing.
+
+    A connection that closes before the body it declared has arrived raises
+    ``http.client.IncompleteRead``, never a decode failure: the answer was cut
+    off in transit, not malformed, and a retry may get all of it.
     """
+    import http.client
     import urllib.request
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -79,7 +87,13 @@ def http_request(
     req = _authed_request(url, target, method=method, data=data, content_type=ct)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         status = resp.status
-        raw = resp.read(64 * 1024 * 1024)  # 64 MiB cap
+        raw = resp.read(_MAX_BODY_BYTES)
+        # A chunked body cut short raises IncompleteRead inside `read`, but a
+        # bounded read of a Content-Length body returns whatever arrived;
+        # http.client still counts the declared bytes that did not (`length`).
+        unread = getattr(resp, "length", None)
+    if isinstance(unread, int) and unread > 0 and len(raw) < _MAX_BODY_BYTES:
+        raise http.client.IncompleteRead(raw, unread)
     # `.strip()` so a whitespace-only body counts as empty rather than as a
     # decode failure: identical to the old behaviour on the default path (it
     # collapsed to `None` either way), but it keeps `strict_json` from calling a

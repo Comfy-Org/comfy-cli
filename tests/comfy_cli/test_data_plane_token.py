@@ -212,3 +212,27 @@ def test_an_unusable_sign_in_store_keeps_the_watch_on_the_token_it_holds(monkeyp
     assert result.job["status"] == "succeeded"
     assert sent == ["Bearer t0", "t0"]
     assert request.token is not None and request.token.after_rejection() is False
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["opaque-token", "", "a.b", "a.!!!.c", "a.bm90IGpzb24.c", "a.WzFd.c", "a.e30.c", "a.eyJzdWIiOiAxfQ.c"],
+    ids=["opaque", "empty", "two-parts", "bad-base64", "not-json", "a-list", "no-claims", "non-string-sub"],
+)
+def test_a_token_that_names_no_account_reads_as_none(token) -> None:
+    from comfy_cli.credentials import _token_account
+
+    assert _token_account(token) is None
+
+
+def test_a_held_token_is_kept_when_the_store_holds_another_account(monkeypatch) -> None:
+    # Given: tokens for user u1 then u2 (payloads {"sub": "u1"} / {"sub": "u2"})
+    held, other = "h.eyJzdWIiOiAidTEifQ.s", "h.eyJzdWIiOiAidTIifQ.s"
+    sign_in = _SignIn(proactive=other, forced="h.eyJzdWIiOiAidTIiLCAibiI6IDJ9.s")
+    monkeypatch.setattr("comfy_cli.credentials.get_session", sign_in)
+    token = DataPlaneToken(held, refreshes=True, same_account=True)
+
+    # When / Then: neither read nor a 401 picks up the other account, or spends its refresh
+    assert token.current() == held
+    assert token.after_rejection() is False
+    assert token.account_replaced is True and sign_in.forced_calls == 0

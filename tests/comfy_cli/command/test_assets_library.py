@@ -21,6 +21,7 @@ The caller had to guess its way past a message about the wrong resource.
 
 from __future__ import annotations
 
+import base64
 import http.client
 import io
 import json
@@ -764,7 +765,7 @@ def _started(n: int = 1) -> dict:
 
 
 class _Cloud:
-    """Answers each ``(method, path)`` from a queue: a dict body, raw bytes, or an exception."""
+    """Answers each ``(method, path)`` from a queue: a dict body, raw bytes, an exception, or a response factory."""
 
     def __init__(self, routes: dict):
         self.routes = {k: list(v) if isinstance(v, list) else [v] for k, v in routes.items()}
@@ -779,6 +780,8 @@ class _Cloud:
         outcome = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(outcome, Exception):
             raise outcome
+        if callable(outcome):
+            return outcome()
         raw = outcome if isinstance(outcome, bytes) else json.dumps(outcome).encode()
 
         class _Resp:
@@ -1220,6 +1223,171 @@ class TestUploadOutlastsTheToken:
         assert cloud.paths().count(_COMPLETE_1) == 1
 
 
+def _jwt(account: str, n: int = 1) -> str:
+    """A Comfy Cloud access token for ``account``'s user and workspace; ``n`` tells its refreshes apart."""
+
+    def part(claims: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+
+    claims = {"sub": f"user-{account}", "workspace_id": f"ws-{account}", "jti": f"{account}-{n}"}
+    return f"{part({'alg': 'ES256', 'typ': 'JWT'})}.{part(claims)}.signature"
+
+
+def _account_of(header: str | None) -> str:
+    if header == "test-key":
+        return "a"
+    payload = (header or "").removeprefix("Bearer ").split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["sub"].removeprefix("user-")
+
+
+@pytest.fixture
+def stored_login(monkeypatch: pytest.MonkeyPatch):
+    """A stored sign-in as account A for https://cloud.example.com.
+
+    ``login`` is the ``(account, n)`` the store holds: another shell signing in
+    replaces it. A forced refresh (after a 401) rotates whichever sign-in is
+    stored then, keeping its account; ``forced`` counts those refreshes.
+    """
+    from comfy_cli.target import Target
+
+    for var in ("COMFY_CLOUD_AUTH_TOKEN", "COMFY_CLOUD_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    state = SimpleNamespace(login=("a", 1), forced=0)
+
+    def get_session(*, refresh=True, force=False, allow_clear=True):
+        if force:
+            state.forced += 1
+            state.login = (state.login[0], state.login[1] + 1)
+        return SimpleNamespace(access_token=_jwt(*state.login), base_url="https://cloud.example.com")
+
+    monkeypatch.setattr("comfy_cli.credentials.get_session", get_session)
+    target = Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        auth_token=_jwt("a"),
+    )
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: target)
+    return state
+
+
+class _AccountCloud(_Cloud):
+    """``_Cloud`` that files the upload under account A, as Comfy Cloud does.
+
+    During call number ``lands_during`` another shell's sign-in lands: the store
+    then holds ``lands``. A's first token is refused with a 401 from call number
+    ``a_expires_from`` on. A request as any other account gets a 404, which is
+    what Cloud answers B for A's staged upload or A's task.
+    """
+
+    def __init__(self, routes: dict, login, *, lands=("b", 1), lands_during=None, a_expires_from=None):
+        super().__init__(routes)
+        self.login, self.lands, self.lands_during, self.a_expires_from = login, lands, lands_during, a_expires_from
+        self.auth: list[str | None] = []
+
+    def __call__(self, req, timeout=None):
+        import urllib.parse
+
+        index = len(self.calls)
+        header = req.get_header("Authorization") or req.get_header("X-api-key")
+        self.auth.append(header)
+        if index == self.lands_during:
+            self.login.login = self.lands
+        refusal = None
+        if self.a_expires_from is not None and index >= self.a_expires_from and header == f"Bearer {_jwt('a')}":
+            refusal = _http_error(401)
+        elif _account_of(header) != "a":
+            refusal = _cloud_error(404, "NOT_FOUND", "nothing by that id for this account")
+        if refusal is not None:
+            self.calls.append((req.get_method(), urllib.parse.urlsplit(req.full_url).path, None))
+            raise refusal
+        return super().__call__(req, timeout)
+
+
+class TestUploadKeepsItsAccount:
+    """Another shell signing in to another account mid-upload does not take the upload over.
+
+    Comfy Cloud files the staged bytes and the task under the user and workspace
+    that started them, so completing or reading them as anyone else gets a 404.
+    """
+
+    @pytest.mark.parametrize(
+        "lands_during", [pytest.param(1, id="before-complete"), pytest.param(3, id="during-polling")]
+    )
+    def test_another_login_does_not_change_the_upload_owner(
+        self, stored_login, monkeypatch, capsys, model_file, no_wait, lands_during
+    ):
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands_during=lands_during)
+        env, rc, _, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
+        )
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.auth == [f"Bearer {_jwt('a')}"] * 5
+        assert stored_login.login == ("b", 1) and stored_login.forced == 0
+        assert len(storage.puts) == 1
+
+    @pytest.mark.parametrize(
+        ("lands_during", "a_expires_from", "operation"),
+        [pytest.param(1, 2, "complete", id="at-complete"), pytest.param(3, 4, "task", id="during-polling")],
+    )
+    def test_an_expired_token_with_another_login_stored_ends_with_a_clear_error(
+        self, stored_login, monkeypatch, capsys, model_file, no_wait, lands_during, a_expires_from, operation
+    ):
+        cloud = _AccountCloud(
+            dict(_UPLOAD_ROUTES), stored_login, lands_during=lands_during, a_expires_from=a_expires_from
+        )
+        env, rc, _, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
+        )
+
+        assert rc == 1 and env["error"]["code"] == "cloud_unauthorized"
+        assert env["error"]["details"] == {"status": 401, "operation": operation, "reason": "account_replaced"}
+        assert "another account" in env["error"]["message"]
+        # B's token was never sent, and B's sign-in was never refreshed on A's behalf.
+        assert set(cloud.auth) == {f"Bearer {_jwt('a')}"}
+        assert stored_login.login == ("b", 1) and stored_login.forced == 0
+        assert len(storage.puts) == 1
+
+    def test_the_same_login_refreshed_in_another_shell_is_picked_up(
+        self, stored_login, monkeypatch, capsys, model_file, no_wait
+    ):
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands=("a", 2), lands_during=1, a_expires_from=2)
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.auth[2:] == [f"Bearer {_jwt('a', 2)}"] * 3
+        assert stored_login.forced == 0
+
+    def test_the_same_login_is_refreshed_after_a_401(self, stored_login, monkeypatch, capsys, model_file, no_wait):
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, a_expires_from=2)
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.auth[2:] == [f"Bearer {_jwt('a')}"] + [f"Bearer {_jwt('a', 2)}"] * 3
+        assert stored_login.forced == 1
+
+    @pytest.mark.parametrize("explicit", ["env-token", "api-key"])
+    def test_an_explicit_credential_is_sent_unchanged_when_another_login_lands(
+        self, cloud_target, stored_login, monkeypatch, capsys, model_file, no_wait, explicit
+    ):
+        # `cloud_target` first, so the sign-in's target is the one resolved unless the key case swaps it back.
+        if explicit == "env-token":
+            monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", _jwt("a"))
+            sent = f"Bearer {_jwt('a')}"
+        else:
+            monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: cloud_target)
+            sent = "test-key"
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands_during=1)
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.auth == [sent] * 5
+        assert stored_login.forced == 0
+
+
 class TestTruncatedResponses:
     def test_a_truncated_task_poll_is_retried(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
         routes = dict(_UPLOAD_ROUTES)
@@ -1238,3 +1406,98 @@ class TestTruncatedResponses:
 
         assert rc == 1 and env["error"]["code"] == "cloud_http_error"
         assert env["error"]["details"] == {"operation": "complete"}
+
+    def test_a_task_poll_cut_short_of_its_content_length_is_retried(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [lambda: _wire(b'{"id": "task-1", "sta', declared=100), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.paths().count("/api/tasks/task-1") == 2
+
+    def test_a_chunked_task_poll_cut_short_is_retried(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [lambda: _wire(b'{"id": "task-1", "sta', chunked=100), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.paths().count("/api/tasks/task-1") == 2
+
+    def test_a_whole_malformed_task_answer_still_ends_the_wait_at_once(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [lambda: _wire(b'{"id": "task-1", "sta'), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+        assert "not valid JSON" in env["error"]["message"]
+        assert cloud.paths().count("/api/tasks/task-1") == 1
+
+
+class _WireSocket:
+    def __init__(self, wire: bytes):
+        self._wire = wire
+
+    def makefile(self, *args, **kwargs):
+        return io.BytesIO(self._wire)
+
+
+def _wire(body: bytes, *, declared: int | None = None, chunked: int | None = None) -> http.client.HTTPResponse:
+    """A real ``http.client`` response to ``body`` as sent on the wire, the connection closing after it.
+
+    ``declared`` sets the Content-Length (default: the body's length). ``chunked``
+    sends the body as one chunk announced as that many bytes.
+    """
+    if chunked is not None:
+        head, payload = "Transfer-Encoding: chunked", f"{chunked:x}\r\n".encode() + body
+    else:
+        head, payload = f"Content-Length: {len(body) if declared is None else declared}", body
+    resp = http.client.HTTPResponse(_WireSocket(f"HTTP/1.1 200 OK\r\n{head}\r\n\r\n".encode() + payload))
+    resp.begin()
+    return resp
+
+
+class TestBodiesCutShort:
+    """A body the connection cut short is a transport failure, never a malformed answer.
+
+    A chunked body raises ``IncompleteRead`` from ``read``; a Content-Length body
+    read with a size returns the bytes that arrived, so ``http_request`` checks
+    them against the declared length.
+    """
+
+    def test_a_body_cut_short_of_its_content_length_raises_incomplete_read(self, cloud_target, monkeypatch):
+        from comfy_cli.command import cloud_http
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _wire(b'{"assets": [', declared=40))
+        with pytest.raises(http.client.IncompleteRead) as caught:
+            cloud_http.http_request(cloud_target.url("assets"), cloud_target, strict_json=True)
+        assert caught.value.partial == b'{"assets": [' and caught.value.expected == 28
+
+    def test_a_body_the_size_cap_stops_is_not_called_cut_short(self, cloud_target, monkeypatch):
+        from comfy_cli.command import cloud_http
+
+        monkeypatch.setattr(cloud_http, "_MAX_BODY_BYTES", 8)
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _wire(b'{"assets": []}'))
+        with pytest.raises(cloud_http.ResponseUnparseable):
+            cloud_http.http_request(cloud_target.url("assets"), cloud_target, strict_json=True)
+
+    @pytest.mark.parametrize(
+        "cut", [pytest.param({"declared": 40}, id="content-length"), pytest.param({"chunked": 40}, id="chunked")]
+    )
+    def test_a_listing_cut_short_is_cloud_http_error_not_a_crash(self, cloud_target, monkeypatch, capsys, cut):
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _wire(b'{"assets": [', **cut))
+        env, rc = _run_with_rc(["ls", "--where", "cloud"], capsys)
+
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+
+    @pytest.mark.parametrize(
+        "cut", [pytest.param({"declared": 40}, id="content-length"), pytest.param({"chunked": 40}, id="chunked")]
+    )
+    def test_an_ensure_answer_cut_short_is_cloud_http_error_not_a_crash(self, cloud_target, monkeypatch, capsys, cut):
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _wire(b'{"id": "asse', **cut))
+        env, rc = _run_with_rc(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"

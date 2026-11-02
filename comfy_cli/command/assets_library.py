@@ -144,6 +144,7 @@ def ls_cmd(
     limit: Annotated[int, typer.Option("--limit", help="Cap rows returned (max 500).")] = 20,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
+    import http.client
     import urllib.error
     import urllib.parse
 
@@ -166,7 +167,8 @@ def ls_cmd(
         # a broken response as a successful EMPTY library, the same masquerade
         # the shape guards below refuse to make.
         _, body = http_request(url, target, strict_json=True)
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    # HTTPException: a connection closed partway through the body (IncompleteRead).
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise handle_cloud_http_error(renderer, e, operation="list") from e
     except ResponseUnparseable as e:
         renderer.error(
@@ -265,6 +267,7 @@ def ensure_cmd(
     ] = "input",
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
+    import http.client
     import urllib.error
 
     renderer = get_renderer()
@@ -275,7 +278,8 @@ def ensure_cmd(
     normalized_hash = _normalize_content_hash(hash)
     try:
         status, body = http_request(url, target, method="POST", body={"hash": normalized_hash, "tags": tag_list})
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+    # HTTPException: a connection closed partway through the body (IncompleteRead).
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, http.client.HTTPException) as e:
         # The parameterized helper, not `cloud_http`'s: that one hardcodes the
         # saved-workflow vocabulary, so a 404 here read "workflow not found
         # (ensure)" with a hint to list workflows — for a request that never
@@ -418,7 +422,7 @@ def _local_refusal(path: Path) -> tuple[str, str] | None:
     return None
 
 
-def _http_failure(renderer, e: Exception, operation: str) -> typer.Exit:
+def _http_failure(renderer, e: Exception, operation: str, sign_in=None) -> typer.Exit:
     """Emit the envelope for a failed cloud API call; return the Exit to raise.
 
     A 400/403/404 carrying Comfy Cloud's ``{"code", "message"}`` body is a
@@ -459,6 +463,19 @@ def _http_failure(renderer, e: Exception, operation: str) -> typer.Exit:
             hint=_REFUSAL_HINTS.get(server_code, "`details.server_code` names the refusal; a retry gets the same"),
             details={"status": e.code, "server_code": server_code, "operation": operation},
         )
+    elif e.code == 401 and sign_in is not None and sign_in.account_replaced:
+        renderer.error(
+            code="cloud_unauthorized",
+            message=(
+                f"HTTP 401 during {operation}: the upload's sign-in expired, and this machine is now "
+                "signed in to another account or workspace, which cannot finish it"
+            ),
+            hint=(
+                "sign in again as the account that started the upload (`comfy cloud login`), then check "
+                "`comfy assets library ls --tags models` or upload the file again"
+            ),
+            details={"status": 401, "operation": operation, "reason": "account_replaced"},
+        )
     elif e.code == 401:
         renderer.error(
             code="cloud_unauthorized",
@@ -495,8 +512,10 @@ def _send(target, sign_in, url: str, **kwargs) -> tuple[int, dict | None]:
     The token lasts fifteen minutes and a 2 GB PUT can outlast it. It is re-read
     before each call; after a 401 the shared refresh is forced and the call sent
     once more (the server refuses before acting, so a resent complete queues no
-    second task). ``sign_in`` is ``None`` for an API key or a token handed in by
-    env: those are sent unchanged and their 401 surfaces.
+    second task). A sign-in to another account made meanwhile is never used: the
+    server files the upload and its task under the account that started it.
+    ``sign_in`` is ``None`` for an API key or a token handed in by env: those are
+    sent unchanged and their 401 surfaces.
     """
     import urllib.error
 
@@ -521,7 +540,7 @@ def _call(renderer, target, operation: str, parts: tuple[str, ...], body: dict |
         _, parsed = _send(target, sign_in, target.url(*parts), method=method, body=body, strict_json=True)
     # HTTPException: a connection closed partway through the body (IncompleteRead).
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
-        raise _http_failure(renderer, e, operation) from e
+        raise _http_failure(renderer, e, operation, sign_in) from e
     except ResponseUnparseable as e:
         raise _unexpected(renderer, route, "body was not valid JSON", operation=operation) from e
     if not isinstance(parsed, dict):
@@ -573,7 +592,7 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
             unanswered_since = now if unanswered_since is None else unanswered_since
             refused = isinstance(e, urllib.error.HTTPError) and e.code < 500
             if refused or now - unanswered_since >= _UNANSWERED_WINDOW_SECONDS:
-                raise _http_failure(renderer, e, "task") from e
+                raise _http_failure(renderer, e, "task", sign_in) from e
         except ResponseUnparseable as e:
             raise _unexpected(renderer, "/api/tasks", "body was not valid JSON", task_id=task_id) from e
         else:
@@ -617,9 +636,13 @@ def upload_cmd(
         raise typer.Exit(code=1)
     target = cloud_target_or_local_error(where, renderer)
     # A stored sign-in's token can expire during the PUT, so completion and
-    # polling keep it fresh. An API key, or a token handed in by env, is sent as is.
+    # polling keep it fresh, but only from the same sign-in: Comfy Cloud files the
+    # staged bytes and the task under the user and workspace that started them.
+    # An API key, or a token handed in by env, is sent as is.
     sign_in = (
-        DataPlaneToken.for_target_token(target.auth_token, base_url=target.base_url, allow_clear=True)
+        DataPlaneToken.for_target_token(
+            target.auth_token, base_url=target.base_url, allow_clear=True, same_account=True
+        )
         if target.auth_token
         else None
     )
