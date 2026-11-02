@@ -91,7 +91,14 @@ not owned as shared converter code.
   reads as a converter defect and is not one, which is the same confusion between
   drift and defect that the capture-epoch pin exists to remove. The id changes
   whenever any member changes, so a partial upgrade is a loud mismatch rather
-  than a silent reinterpretation.
+  than a silent reinterpretation. The id check runs at the bundle-loading
+  boundary — whatever assembles the five artifacts for a run, before any of
+  them reaches a converter — never inside the converter itself: "No shared
+  converter implementation" below means there is no single place inside the
+  per-language converter code to put a shared check, so each converter is
+  handed an already-verified bundle and never re-derives or re-checks the id
+  on its own. Validation 20 enforces this at the loader, once per run, rather
+  than per converter call.
 - **A shared comparison kernel as a specification with self-test vectors**,
   re-implemented per language (~150 LOC each) rather than shared as code or a
   subprocess. The signature grammar, the normalization rules, the verdict
