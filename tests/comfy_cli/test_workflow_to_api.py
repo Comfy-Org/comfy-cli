@@ -9,6 +9,7 @@ import pytest
 
 from comfy_cli.workflow_to_api import (
     WorkflowConversionError,
+    _markers_omit_a_filled_widget,
     convert_ui_to_api,
     is_api_format,
     is_subgraph_uuid,
@@ -2854,6 +2855,201 @@ class TestSubgraphExpansion:
         assert result["100:50"]["inputs"]["images"] == ["7", 0]
 
 
+class TestAbsentOptionalWidgetsAreNotSynthesized:
+    """An optional widget the SAVED NODE never carried is omitted, not defaulted.
+
+    ``graphToPrompt()`` serializes the widgets a node actually has, so a widget
+    the node did not carry is absent from its prompt. The evidence that it did
+    not carry one is the node's own ``inputs[]`` marker list, not the length of
+    ``widgets_values``: a truncated save whose later widgets ran past the end
+    still HAS those widgets, and the frontend sends their defaults.
+
+    Ground truth is the ``03_video_wan2_2_14B_i2v_subgraphed`` oracle fixture in
+    ``comfy-cloud-mcp-server``. Its ``CreateVideo`` saves
+    ``widgets_values: [16]`` AND ``inputs: [images, audio, fps{widget}]`` — one
+    widget-flagged entry naming ``fps`` — and the golden holds exactly
+    ``{"fps": 16, "images": [...]}`` while today's object_info also declares
+    optional ``bit_depth`` / ``color_space`` / ``codec``.
+    """
+
+    @staticmethod
+    def _convert(widget_values, required, optional, marker_names=None, all_markers_linked=False):
+        object_info = {
+            "N": {
+                "input": {"required": required, "optional": optional},
+                "input_order": {"required": list(required), "optional": list(optional)},
+            }
+        }
+        node = {"id": 1, "type": "N", "widgets_values": widget_values}
+        if marker_names is not None:
+            # An UNLINKED marker is what proves the save lists every widget and
+            # not just the converted ones; `all_markers_linked` builds the
+            # ambiguous converted-only shape instead.
+            node["inputs"] = [
+                {"name": n, "widget": {"name": n}, "link": 7 if all_markers_linked else None} for n in marker_names
+            ]
+        return convert_ui_to_api({"nodes": [node], "links": []}, object_info)["1"]["inputs"]
+
+    def test_a_converted_only_marker_list_is_not_an_inventory(self):
+        # Every marker is linked, so this could be an older frontend that wrote
+        # an entry only for a widget converted to a socket. An ordinary
+        # unmarked widget may therefore exist, and its default must stand.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+            all_markers_linked=True,
+        )
+        assert inputs["codec"] == "auto"
+
+    def test_an_optional_widget_the_markers_do_not_name_is_omitted(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16}
+
+    def test_a_truncated_save_still_defaults_a_widget_the_node_had(self):
+        # The markers name `codec`, so the node HAS that widget and its value
+        # merely ran past the end of a truncated widgets_values. The frontend
+        # sends the default here, so dropping it would diverge.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps", "codec"],
+        )
+        assert inputs == {"fps": 16, "codec": "auto"}
+
+    def test_a_node_recording_no_markers_keeps_the_default(self):
+        # No evidence either way: an older frontend wrote an `inputs[]` entry
+        # only for a widget converted to a socket, so an empty marker set
+        # proves nothing. Behaviour is unchanged from before.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+        )
+        assert inputs == {"fps": 16, "codec": "auto"}
+
+    def test_an_absent_required_widget_still_takes_its_default(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}], "quality": ["INT", {"default": 85}]},
+            {},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "quality": 85}
+
+    def test_an_optional_socketless_widget_is_never_dropped(self):
+        # The frontend submits a socketless widget from LIVE widget state even
+        # when it was never serialized, so its absence from the markers is not
+        # evidence that the node lacks it.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"swatch": ["COLOR", {"default": "#000000", "socketless": True}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "swatch": "#000000"}
+
+    def test_a_serialized_optional_widget_keeps_its_saved_value(self):
+        inputs = self._convert(
+            [16, "h264"],
+            {"fps": ["INT", {"default": 30}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps", "codec"],
+        )
+        assert inputs == {"fps": 16, "codec": "h264"}
+
+    def test_an_optional_non_widget_socket_keeps_its_default(self):
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"vae": ["VAE", {"default": None}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "vae": None}
+
+    def test_a_legacy_converted_but_unconnected_marker_is_not_an_inventory(self):
+        # Legacy ``convertToInput`` added the socket WITHOUT connecting it, so an
+        # unlinked marker is not by itself proof of the linked-inputs model: this
+        # node's only marker is a converted-and-unconnected ``cfg``, and ``steps``
+        # is an ordinary unmarked widget that the save positionally filled.
+        # Markers that omit a widget the save FILLED cannot be an inventory, so
+        # the optional ``denoise`` default must stand.
+        inputs = self._convert(
+            [None, 20],  # legacy hideWidget leaves the converted slot present but empty
+            {"cfg": ["FLOAT", {"default": 8.0}], "steps": ["INT", {"default": 20}]},
+            {"denoise": ["FLOAT", {"default": 1.0}]},
+            marker_names=["cfg"],
+        )
+        assert inputs == {"cfg": None, "steps": 20, "denoise": 1.0}
+
+    def test_an_inventory_naming_every_filled_widget_is_still_trusted(self):
+        # The same shape with complete markers: both filled widgets are named, so
+        # nothing contradicts the inventory and the unnamed optional is dropped.
+        inputs = self._convert(
+            [8.0, 20],
+            {"cfg": ["FLOAT", {"default": 8.0}], "steps": ["INT", {"default": 20}]},
+            {"denoise": ["FLOAT", {"default": 1.0}]},
+            marker_names=["cfg", "steps"],
+        )
+        assert inputs == {"cfg": 8.0, "steps": 20}
+
+    def test_an_unmarked_filled_input_that_is_not_a_widget_does_not_refuse(self):
+        # ``forceInput`` demotes a widget-type input to a connection-only slot, so
+        # it is not a declared widget and its absence from the markers says
+        # nothing about the inventory. The optional is still dropped.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}], "mask": ["INT", {"default": 1, "forceInput": True}]},
+            {"codec": [["auto", "h264"], {"default": "auto"}]},
+            marker_names=["fps"],
+        )
+        assert inputs == {"fps": 16, "mask": 1}
+
+    def test_a_dict_widget_marked_per_leaf_counts_as_naming_its_declared_input(self):
+        # A dict widget is DECLARED as ``regions`` but MARKED per leaf
+        # (``regions.face_oval``, ``regions.lips``, ...), so the inventory check
+        # compares against flattened names. Without that, every save carrying one
+        # would be refused and lose the fix on the rest of the node. Measured over
+        # the 500 oracle fixtures this is the only shape where the two differ.
+        schema = {
+            "input": {
+                "required": {"regions": ["COMFY_DYNAMICGROUP_V3", {}]},
+                "optional": {"codec": [["auto", "h264"], {"default": "auto"}]},
+            }
+        }
+        assert (
+            _markers_omit_a_filled_widget(
+                {"regions.face_oval", "regions.lips"}, schema, ["regions", "regions.face_oval"]
+            )
+            is False
+        )
+        # ...while a genuinely unnamed declared widget still refuses.
+        assert _markers_omit_a_filled_widget({"regions.face_oval"}, schema, ["codec"]) is True
+
+    def test_a_dict_widget_marked_per_leaf_keeps_its_declared_default(self):
+        # The same flattening on the other reader of the marker list. The save
+        # marks ``regions`` only per leaf (``regions.face_oval``) and its value
+        # ran past the end of a truncated ``widgets_values``, so the node HAS
+        # that widget and the frontend sends its default. Comparing the
+        # declared name against the raw marker strings reads the very marker
+        # that proves the input exists as proof that it does not, and drops the
+        # default.
+        inputs = self._convert(
+            [16],
+            {"fps": ["INT", {"default": 30}]},
+            {"regions": ["STRING", {"default": "all"}]},
+            marker_names=["fps", "regions.face_oval"],
+        )
+        assert inputs == {"fps": 16, "regions": "all"}
+
+
 class TestSeedreamDynamicCombo:
     """Regression: a pristine ``COMFY_DYNAMICCOMBO_V3`` template must convert to
     valid API JSON.
@@ -2886,7 +3082,10 @@ class TestSeedreamDynamicCombo:
         assert inputs["seed"] == 0
         assert isinstance(inputs["seed"], int) and not isinstance(inputs["seed"], bool)
         assert inputs["watermark"] is False
-        # Optional input not in widgets_values is filled from its schema default.
+        # ``thinking`` is optional and this template records no ``inputs[]``
+        # widget markers, so nothing proves the node lacked the widget and the
+        # schema default still stands. See
+        # TestAbsentOptionalWidgetsAreNotSynthesized for the marker rule.
         assert inputs["thinking"] is True
 
         # The connection-only ``images`` sub-input must never become a widget,

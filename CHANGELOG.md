@@ -29,6 +29,30 @@ history.
 
 ### Fixed
 
+- UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
+  the order the workflow was SAVED with, when the saved graph records one,
+  instead of the option's current order. An option that has since gained a
+  sub-input shifted every later slot by one, and once the alignment was off the
+  `control_after_generate` marker was consumed as a real value too — a
+  Seedance 2.0 graph converted with `model.auto_upscale` holding the seed and
+  `seed` holding `"randomize"`. `validate` catches the seed type but not the
+  boolean, so fixing only the seed still submitted the wrong graph. A sub-input
+  the save never carried now takes no slot, and a save that names one the
+  option no longer declares falls back to the current expansion untouched.
+- UI→API conversion no longer synthesizes an input for an optional widget the
+  saved node never carried. `graphToPrompt()` serializes the widgets a node
+  actually has, so padding one from its schema default attached inputs the
+  frontend does not send: `CreateVideo` saved with a single `fps` widget came
+  out carrying `bit_depth`, `color_space` and `codec`, and
+  `ModelSamplingAuraFlow`, `CFGNorm` and `SimpleMath+` behaved the same way.
+  The evidence is the node's own `inputs[]` widget-marker list rather than the
+  length of `widgets_values`, so a truncated save whose later widgets ran past
+  the end still gets their defaults. Required inputs, socketless widgets, and
+  optional non-widget sockets are never dropped, and neither is anything on a
+  node whose markers omit a widget the save itself filled — the shape a legacy
+  frontend wrote when it marked only the widgets converted to a socket. A dict
+  widget declared as one input but marked per leaf (`regions.face_oval`) counts
+  as marked, so its default survives too.
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
