@@ -2368,7 +2368,11 @@ class TestExecuteUiWorkflow:
         """Validate against the complete conversion fixture without a live server."""
         from copy import deepcopy
 
-        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", lambda *a, **k: deepcopy(self.OBJECT_INFO))
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return deepcopy(self.OBJECT_INFO)
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
 
         def unexpected_catalog_request(*args, **kwargs):
             pytest.fail("unexpected real catalog request; mock the specific object_info transport")

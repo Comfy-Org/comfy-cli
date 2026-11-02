@@ -1440,9 +1440,10 @@ class TestErrorPathCoverage:
         try:
             with (
                 patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-                patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")),
+                patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")) as mock_open,
             ):
                 lines, exit_code = _run_execute_capture(path, capsys)
+            mock_open.assert_called_once_with("http://127.0.0.1:8188/object_info", timeout=30)
             assert _envelope(lines)["error"]["code"] == "connection_error"
         finally:
             os.unlink(path)
