@@ -1745,6 +1745,7 @@ class TestUploadFileErrors:
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert "SECRETSIG" not in result.output
 
+
 def _throttled(retry_after: str | None = None):
     headers = {"Retry-After": retry_after} if retry_after is not None else {}
     return urllib.error.HTTPError("https://cloud.example.com/api/tasks/task-1", 429, "slow down", headers, io.BytesIO())
