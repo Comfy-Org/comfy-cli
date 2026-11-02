@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -489,15 +489,38 @@ def _unexpected(renderer, route: str, problem: str, **details: Any) -> typer.Exi
     return typer.Exit(code=1)
 
 
-def _call(renderer, target, operation: str, parts: tuple[str, ...], body: dict | None = None) -> dict:
+def _send(target, sign_in, url: str, **kwargs) -> tuple[int, dict | None]:
+    """``http_request``, keeping a stored sign-in's token fresh through a long upload.
+
+    The token lasts fifteen minutes and a 2 GB PUT can outlast it. It is re-read
+    before each call; after a 401 the shared refresh is forced and the call sent
+    once more (the server refuses before acting, so a resent complete queues no
+    second task). ``sign_in`` is ``None`` for an API key or a token handed in by
+    env: those are sent unchanged and their 401 surfaces.
+    """
+    import urllib.error
+
+    if sign_in is None:
+        return http_request(url, target, **kwargs)
+    try:
+        return http_request(url, replace(target, auth_token=sign_in.current()), **kwargs)
+    except urllib.error.HTTPError as e:
+        if e.code != 401 or not sign_in.after_rejection():
+            raise
+    return http_request(url, replace(target, auth_token=sign_in.current()), **kwargs)
+
+
+def _call(renderer, target, operation: str, parts: tuple[str, ...], body: dict | None = None, *, sign_in=None) -> dict:
     """One JSON call to the cloud API; anything but a JSON object is a mapped error."""
+    import http.client
     import urllib.error
 
     route = "/api/" + "/".join(parts)
     method = "GET" if body is None else "POST"
     try:
-        _, parsed = http_request(target.url(*parts), target, method=method, body=body, strict_json=True)
-    except (urllib.error.URLError, OSError) as e:
+        _, parsed = _send(target, sign_in, target.url(*parts), method=method, body=body, strict_json=True)
+    # HTTPException: a connection closed partway through the body (IncompleteRead).
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise _http_failure(renderer, e, operation) from e
     except ResponseUnparseable as e:
         raise _unexpected(renderer, route, "body was not valid JSON", operation=operation) from e
@@ -531,8 +554,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
         raise _PutFailed(resp.status_code)
 
 
-def _wait_for_task(renderer, target, task_id: str) -> dict:
+def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
     """Read the task until it ends, riding out a brief 5xx or dropped connection."""
+    import http.client
     import urllib.error
     import urllib.parse
 
@@ -542,8 +566,9 @@ def _wait_for_task(renderer, target, task_id: str) -> dict:
     status = None
     while True:
         try:
-            _, task = http_request(url, target, strict_json=True)
-        except (urllib.error.URLError, OSError) as e:
+            _, task = _send(target, sign_in, url, strict_json=True)
+        # HTTPException: a connection closed partway through the body (IncompleteRead).
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
             now = _clock()
             unanswered_since = now if unanswered_since is None else unanswered_since
             refused = isinstance(e, urllib.error.HTTPError) and e.code < 500
@@ -581,6 +606,7 @@ def upload_cmd(
     import urllib.parse
 
     from comfy_cli.command.build_upload_progress import UploadProgressReporter
+    from comfy_cli.credentials import DataPlaneToken
 
     renderer = get_renderer()
     refusal = _local_refusal(file)
@@ -590,11 +616,18 @@ def upload_cmd(
         )
         raise typer.Exit(code=1)
     target = cloud_target_or_local_error(where, renderer)
+    # A stored sign-in's token can expire during the PUT, so completion and
+    # polling keep it fresh. An API key, or a token handed in by env, is sent as is.
+    sign_in = (
+        DataPlaneToken.for_target_token(target.auth_token, base_url=target.base_url, allow_clear=True)
+        if target.auth_token
+        else None
+    )
 
     # Absent while uploads are off for the workspace, or when the server could
     # not evaluate its flags. Either way the start call decides, and it refuses
     # before any byte is sent.
-    folders = _call(renderer, target, "features", ("features",)).get("model_upload_folders")
+    folders = _call(renderer, target, "features", ("features",), sign_in=sign_in).get("model_upload_folders")
     if folders is not None:
         if not isinstance(folders, list) or not all(isinstance(f, str) for f in folders):
             raise _unexpected(renderer, "/api/features", "model_upload_folders is not a list of strings")
@@ -617,6 +650,7 @@ def upload_cmd(
             "start",
             ("assets", "uploads"),
             {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags},
+            sign_in=sign_in,
         )
         upload_id, upload_url, headers = start.get("upload_id"), start.get("upload_url"), start.get("headers")
         if not (
@@ -649,12 +683,14 @@ def upload_cmd(
             raise typer.Exit(code=1) from None
 
     complete = ("assets", "uploads", urllib.parse.quote(upload_id, safe=""), "complete")
-    task_id = _call(renderer, target, "complete", complete, {"filename": item.filename, "tags": tags}).get("task_id")
+    task_id = _call(
+        renderer, target, "complete", complete, {"filename": item.filename, "tags": tags}, sign_in=sign_in
+    ).get("task_id")
     if not isinstance(task_id, str) or not task_id:
         raise _unexpected(renderer, "/api/assets/uploads/complete", "no task_id", upload_id=upload_id)
     if renderer.is_pretty():
         renderer.info("Uploaded; Comfy Cloud is checking and storing the file.")
-    task = _wait_for_task(renderer, target, task_id)
+    task = _wait_for_task(renderer, target, task_id, sign_in)
 
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     if task["status"] != "completed" or result.get("success") is False:

@@ -21,11 +21,13 @@ The caller had to guess its way past a message about the wrong resource.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import sys
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -839,8 +841,10 @@ def no_wait(monkeypatch):
     return now
 
 
-def _upload(monkeypatch, capsys, args: list[str], routes: dict, puts: list) -> tuple[dict, int, _Cloud, _Storage, str]:
-    cloud, storage = _Cloud(routes), _Storage(puts)
+def _upload(
+    monkeypatch, capsys, args: list[str], routes: dict, puts: list, cloud: _Cloud | None = None
+) -> tuple[dict, int, _Cloud, _Storage, str]:
+    cloud, storage = cloud or _Cloud(routes), _Storage(puts)
     monkeypatch.setattr("urllib.request.urlopen", cloud)
     monkeypatch.setattr("requests.put", storage)
     r = Renderer.resolve(
@@ -1098,3 +1102,139 @@ class TestUpload:
     def test_new_codes_are_registered(self):
         for code in ("asset_upload_invalid", "asset_upload_refused", "asset_upload_failed", "asset_upload_timeout"):
             assert error_codes.is_registered(code), code
+
+
+class _ExpiringCloud(_Cloud):
+    """``_Cloud`` that answers 401 to ``Bearer old-token`` from its ``expires_at``-th call on."""
+
+    def __init__(self, routes: dict, expires_at: int):
+        super().__init__(routes)
+        self.expires_at = expires_at
+        self.auth: list[str | None] = []
+
+    def __call__(self, req, timeout=None):
+        import urllib.parse
+
+        header = req.get_header("Authorization") or req.get_header("X-api-key")
+        self.auth.append(header)
+        if header in ("Bearer old-token", "test-key") and len(self.calls) >= self.expires_at:
+            self.calls.append((req.get_method(), urllib.parse.urlsplit(req.full_url).path, None))
+            raise _http_error(401)
+        return super().__call__(req, timeout)
+
+
+@pytest.fixture
+def signed_in(monkeypatch: pytest.MonkeyPatch):
+    """A stored sign-in for https://cloud.example.com whose token the server stops taking mid-upload.
+
+    Its clock says the token is still good, so only a forced refresh (after a
+    401) swaps in ``new-token``; ``forced`` counts those refreshes.
+    """
+    from comfy_cli.target import Target
+
+    for var in ("COMFY_CLOUD_AUTH_TOKEN", "COMFY_CLOUD_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    state = SimpleNamespace(
+        session=SimpleNamespace(access_token="old-token", base_url="https://cloud.example.com"), forced=0
+    )
+
+    def get_session(*, refresh=True, force=False, allow_clear=True):
+        if force:
+            state.forced += 1
+            state.session = SimpleNamespace(access_token="new-token", base_url="https://cloud.example.com")
+        return state.session
+
+    monkeypatch.setattr("comfy_cli.credentials.get_session", get_session)
+    target = Target(
+        kind="cloud",
+        base_url="https://cloud.example.com",
+        path_prefix="/api",
+        history_path="history_v2",
+        jobs_path="jobs",
+        auth_token="old-token",
+    )
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: target)
+    return state
+
+
+_COMPLETE_1 = "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete"
+
+
+class TestUploadOutlastsTheToken:
+    """A stored sign-in's token can expire during a long PUT.
+
+    Completion and polling refresh it and carry on, never resending the file.
+    """
+
+    def test_a_401_on_complete_refreshes_the_sign_in_and_completes(
+        self, signed_in, monkeypatch, capsys, model_file, no_wait
+    ):
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=2)  # features, start, then expired
+        env, rc, _, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
+        )
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert signed_in.forced == 1
+        assert len(storage.puts) == 1
+        assert cloud.paths().count(_COMPLETE_1) == 2
+        assert cloud.auth[2:] == ["Bearer old-token"] + ["Bearer new-token"] * 3
+
+    def test_a_401_on_a_task_poll_refreshes_the_sign_in_and_keeps_waiting(
+        self, signed_in, monkeypatch, capsys, model_file, no_wait
+    ):
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=3)  # expires after complete
+        env, rc, _, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
+        )
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert signed_in.forced == 1
+        assert len(storage.puts) == 1 and cloud.paths().count(_COMPLETE_1) == 1
+        assert cloud.paths().count("/api/tasks/task-1") == 3
+
+    def test_an_api_key_is_not_refreshed_and_its_401_surfaces(
+        self, cloud_target, signed_in, monkeypatch, capsys, model_file, no_wait
+    ):
+        monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: cloud_target)
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=2)
+        env, rc, _, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
+        )
+
+        assert rc == 1 and env["error"]["code"] == "cloud_unauthorized"
+        assert signed_in.forced == 0
+        assert len(storage.puts) == 1 and cloud.paths().count(_COMPLETE_1) == 1
+
+    def test_a_token_handed_in_by_env_is_not_refreshed_even_beside_a_matching_sign_in(
+        self, signed_in, monkeypatch, capsys, model_file, no_wait
+    ):
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "old-token")
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=2)
+        env, rc, _, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
+        )
+
+        assert rc == 1 and env["error"]["code"] == "cloud_unauthorized"
+        assert signed_in.forced == 0
+        assert cloud.paths().count(_COMPLETE_1) == 1
+
+
+class TestTruncatedResponses:
+    def test_a_truncated_task_poll_is_retried(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [http.client.IncompleteRead(b'{"id": "ta', 40), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.paths().count("/api/tasks/task-1") == 2
+
+    def test_a_truncated_complete_answer_is_an_error_envelope_not_a_crash(
+        self, cloud_target, monkeypatch, capsys, model_file
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", _COMPLETE_1)] = http.client.IncompleteRead(b'{"task_', 30)
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+        assert env["error"]["details"] == {"operation": "complete"}
