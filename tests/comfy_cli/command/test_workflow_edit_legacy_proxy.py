@@ -69,6 +69,7 @@ def _interior(wf: dict, instance_id: Any, inner_id: Any) -> dict:
 def _stripped(wf: dict) -> str:
     w = copy.deepcopy(wf)
     w.pop("_applied_ops", None)
+    w.pop("_applied_op_digests", None)
     w.pop("_widget_stamps", None)
     return json.dumps(w, sort_keys=True)
 
