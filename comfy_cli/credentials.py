@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from comfy_cli.auth.store import CloudSession
 
 # Provider name under which a Comfy Cloud API key is persisted in the auth
@@ -84,7 +86,13 @@ class Credential:
         return f"Credential(kind={self.kind!r}, value=***, source={self.source!r})"
 
 
-def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool = True) -> CloudSession | None:
+def get_session(
+    *,
+    refresh: bool = True,
+    force: bool = False,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+) -> CloudSession | None:
     """Read the stored Comfy Cloud OAuth session.
 
     ``refresh=True`` goes through ``ensure_fresh_session`` (spends the
@@ -101,25 +109,40 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     refresh failure does NOT clear the stored session. Background watchers pass
     this — they are read-mostly and must never log the user off the shared
     session; only foreground, user-driven commands own that lifecycle.
+
+    ``expect`` (refresh path only) forwards to ``ensure_fresh_session``: the
+    stored session is checked with it under the refresh lock, and
+    ``oauth.SessionReplaced`` is raised, with the store untouched, when it fails.
     """
     if refresh or force:
         from comfy_cli.cloud import oauth
 
+        if expect is not None:
+            return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear, expect=expect)
         return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear)
     from comfy_cli.auth import store as auth_store
 
     return auth_store.get_cloud_session()
 
 
-def refreshed_access_token(rejected: str | None, *, allow_clear: bool = True) -> str | None:
+def refreshed_access_token(
+    rejected: str | None,
+    *,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+) -> str | None:
     """Force the shared refresh after a server 401, and return the new access token.
 
     Returns ``None`` when the refresh produced no token or the same one the
     server just refused, so the caller surfaces the 401 rather than retrying a
     token already known to fail. A fatal refresh clears the stored session, and
-    the 401 then carries the usual sign-in guidance.
+    the 401 then carries the usual sign-in guidance. ``expect`` is passed to
+    :func:`get_session`.
     """
-    session = get_session(refresh=True, force=True, allow_clear=allow_clear)
+    if expect is not None:
+        session = get_session(refresh=True, force=True, allow_clear=allow_clear, expect=expect)
+    else:
+        session = get_session(refresh=True, force=True, allow_clear=allow_clear)
     if session is None or not session.access_token or session.access_token == rejected:
         return None
     return session.access_token
@@ -137,18 +160,41 @@ class DataPlaneToken:
     when it is within a minute of expiring; ``after_rejection`` forces the shared
     refresh after a 401. A workspace API key, or a token handed to the client
     directly, does not expire here and is sent unchanged (``refreshes=False``).
+
+    ``same_account=True`` is for a command whose work the server ties to one
+    user and workspace (an upload completed and read back as its uploader): a
+    token is taken from the store only while the store holds that same sign-in,
+    and the refresh checks that under its lock, so a sign-in another shell
+    stores meanwhile is never refreshed or cleared on this command's behalf.
     """
 
-    def __init__(self, value: str, *, refreshes: bool, base_url: str | None = None, allow_clear: bool = True) -> None:
+    def __init__(
+        self,
+        value: str,
+        *,
+        refreshes: bool,
+        base_url: str | None = None,
+        allow_clear: bool = True,
+        same_account: bool = False,
+    ) -> None:
         self._value = value
         self._refreshes = refreshes
         # A sign-in to another environment, made while this command runs, is
         # never picked up in its place.
         self._base_url = base_url
         self._allow_clear = allow_clear
+        # With ``same_account``, a sign-in to another account (or workspace) on
+        # the same environment, made while this command runs, is not picked up
+        # either: the token already held is kept, and ``account_replaced``
+        # records why a 401 could not be retried.
+        self._same_account = same_account
+        self._account = _token_account(value) if same_account else None
+        self.account_replaced = False
 
     @classmethod
-    def for_target_token(cls, value: str, *, base_url: str, allow_clear: bool) -> DataPlaneToken:
+    def for_target_token(
+        cls, value: str, *, base_url: str, allow_clear: bool, same_account: bool = False
+    ) -> DataPlaneToken:
         """Refresh ``value`` only if it is the stored sign-in's token.
 
         A Target does not say where its token came from, and a token injected
@@ -161,7 +207,7 @@ class DataPlaneToken:
             return cls(value, refreshes=False, base_url=base_url, allow_clear=allow_clear)
         stored = get_session(refresh=False)
         is_sign_in = stored is not None and stored.access_token == value and stored.base_url == base_url
-        return cls(value, refreshes=is_sign_in, base_url=base_url, allow_clear=allow_clear)
+        return cls(value, refreshes=is_sign_in, base_url=base_url, allow_clear=allow_clear, same_account=same_account)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return f"DataPlaneToken(value=***, refreshes={self._refreshes!r})"
@@ -169,17 +215,38 @@ class DataPlaneToken:
     def _same_environment(self, session: CloudSession | None) -> bool:
         return session is not None and (self._base_url is None or session.base_url == self._base_url)
 
+    def _same_login(self, session: CloudSession | None) -> bool:
+        """``session`` is one this command may take its token from."""
+        if not self._same_environment(session):
+            return False
+        return not self._same_account or _token_account(session.access_token) == self._account
+
+    def _refresh_guard(self) -> dict:
+        """The ``expect`` an account-bound holder hands the refresh; nothing for any other holder.
+
+        The check before refreshing reads the store once and the refresh reads it
+        again, so a login stored between the two would otherwise be refreshed (or,
+        on a fatal answer, cleared) by this command. ``expect`` repeats the check
+        on the refresh's own reads, the last one under its lock.
+        """
+        return {"expect": self._same_login} if self._same_account else {}
+
     def current(self) -> str:
         """The token to send now; the one already held when the store cannot be read or written."""
         if not self._refreshes:
             return self._value
+        from comfy_cli.cloud.oauth import SessionReplaced
+
         try:
             # The environment is checked before refreshing, so a sign-in another
             # shell stored elsewhere is never spent (or cleared) on this command's behalf.
-            if self._same_environment(get_session(refresh=False)):
-                session = get_session(refresh=True, allow_clear=self._allow_clear)
-                if session is not None and session.access_token and self._same_environment(session):
+            if self._same_login(get_session(refresh=False)):
+                session = get_session(refresh=True, allow_clear=self._allow_clear, **self._refresh_guard())
+                if session is not None and session.access_token and self._same_login(session):
                     self._value = session.access_token
+        except SessionReplaced:
+            # Another sign-in landed before the refresh took the lock: keep the token held.
+            pass
         except OSError as error:
             # A job already running must not be abandoned over the sign-in store:
             # the token held may still be accepted, and a 401 reports itself.
@@ -190,17 +257,59 @@ class DataPlaneToken:
         """Swap in a refreshed token after a 401; ``False`` when there is none to retry with."""
         if not self._refreshes:
             return False
+        from comfy_cli.cloud.oauth import SessionReplaced
+
         try:
-            if not self._same_environment(get_session(refresh=False)):
+            stored = get_session(refresh=False)
+            if not self._same_environment(stored):
                 return False
-            token = refreshed_access_token(self._value, allow_clear=self._allow_clear)
+            if not self._same_login(stored):
+                # Another account signed in here meanwhile: its refresh token is
+                # not this command's to spend, and its token would act as it.
+                self.account_replaced = True
+                return False
+            token = refreshed_access_token(self._value, allow_clear=self._allow_clear, **self._refresh_guard())
+        except SessionReplaced as replaced:
+            # Another sign-in landed before the refresh took the lock; it was left as stored.
+            self.account_replaced = self._same_environment(replaced.session)
+            return False
         except OSError as error:
             _log.warning("could not refresh the stored sign-in after a 401: %s", error)
             return False
         if token is None:
             return False
+        if self._same_account and _token_account(token) != self._account:
+            # The refresh checked the account under its lock, so only a token
+            # endpoint answering for another account reaches here.
+            self.account_replaced = True
+            return False
         self._value = token
         return True
+
+
+def _token_account(token: str | None) -> tuple[str | None, str | None] | None:
+    """The user and workspace a Comfy Cloud access token acts as, or ``None`` when it does not say.
+
+    Read from the JWT's ``sub`` and ``workspace_id`` claims WITHOUT verifying the
+    signature: it only tells two locally stored tokens apart, and the server
+    still decides what either may do. A refresh keeps both claims, so two tokens
+    of one sign-in compare equal; a sign-in to another account or workspace does not.
+    """
+    import base64
+    import json
+
+    parts = token.split(".") if isinstance(token, str) else []
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, RecursionError):  # binascii.Error and UnicodeDecodeError are ValueErrors
+        return None
+    if not isinstance(claims, dict):
+        return None
+    user, workspace = claims.get("sub"), claims.get("workspace_id")
+    account = (user if isinstance(user, str) else None, workspace if isinstance(workspace, str) else None)
+    return account if any(account) else None
 
 
 def _env_value(env_var: str) -> str | None:
