@@ -389,6 +389,17 @@ class _PutFailed(Exception):
     """The PUT did not land; ``args[0]`` is the status, or ``None`` when no answer came."""
 
 
+class _FileUnreadable(Exception):
+    """The file could not be opened or read while it was being sent; ``args[0]`` is the ``OSError``."""
+
+
+def _file_problem(path: Path, e: OSError) -> tuple[str, str]:
+    """``(reason, message)`` for an ``OSError`` met while checking the file."""
+    if isinstance(e, FileNotFoundError):
+        return "file_not_found", f"{path} does not exist or is not a file"
+    return "file_unreadable", f"{path} cannot be read ({e.strerror or e})"
+
+
 def _local_refusal(path: Path) -> tuple[str, str] | None:
     """``(reason, message)`` when Comfy Cloud would refuse this file, else ``None``."""
     name = path.name
@@ -412,9 +423,16 @@ def _local_refusal(path: Path) -> tuple[str, str] | None:
             f"{name!r} is not a file name Comfy Cloud accepts: at most {_MAX_FILENAME_BYTES} bytes of UTF-8, "
             "no leading dot, no '..', backslash or control characters"
         )
-    if not path.is_file():
-        return "file_not_found", f"{path} does not exist or is not a file"
-    size = path.stat().st_size
+    try:
+        if not path.is_file():
+            return "file_not_found", f"{path} does not exist or is not a file"
+        # Opened here so a file this user cannot read is refused before the
+        # start call creates an upload on the server.
+        with path.open("rb"):
+            pass
+        size = path.stat().st_size
+    except OSError as e:
+        return _file_problem(path, e)
     if size < 1:
         return "empty_file", f"{path} is empty"
     if size > _MAX_UPLOAD_BYTES:
@@ -552,47 +570,79 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
     """Stream the file to its signed URL, or raise ``_PutFailed``.
 
     A transport exception is dropped, never shown: its text quotes the signed
-    URL, whose query string is a live credential.
+    URL, whose query string is a live credential. A file that cannot be opened
+    or read raises ``_FileUnreadable`` instead: a fresh upload would fail the
+    same way, so it is not a transport failure to retry.
     """
     import requests
 
     from comfy_cli.builder_api import _CountingReader
 
+    class _Reader(_CountingReader):
+        # urllib3 reports a body that fails to read as a dropped connection,
+        # so the read error is kept here to tell the two apart.
+        failed: OSError | None = None
+
+        def read(self, size: int = -1) -> bytes:
+            try:
+                return super().read(size)
+            except OSError as e:
+                self.failed = e
+                raise
+
     try:
-        with path.open("rb") as f:
+        f = path.open("rb")
+    except OSError as e:
+        raise _FileUnreadable(e) from None
+    with f:
+        reader = _Reader(f, progress)
+        try:
             resp = requests.put(
                 upload_url,
-                data=_CountingReader(f, progress),
+                data=reader,
                 headers=headers,
                 timeout=_PUT_TIMEOUT,
                 allow_redirects=False,  # the URL names one object; never divert the file
             )
-    except requests.RequestException:
-        raise _PutFailed(None) from None
+        except OSError as e:  # `requests.RequestException` is an OSError too
+            if reader.failed is not None:
+                raise _FileUnreadable(reader.failed) from None
+            if isinstance(e, requests.RequestException):
+                raise _PutFailed(None) from None
+            raise
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 
 
 def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
-    """Read the task until it ends, riding out a brief 5xx or dropped connection."""
+    """Read the task until it ends, riding out a brief 5xx, 429 or dropped connection."""
     import http.client
     import urllib.error
     import urllib.parse
+
+    from comfy_cli.command._cloud_errors import retry_after_from_headers
 
     url = target.url("tasks", urllib.parse.quote(task_id, safe=""))
     deadline = _clock() + _TASK_WAIT_SECONDS
     unanswered_since: float | None = None
     status = None
     while True:
+        pause = _TASK_POLL_SECONDS
         try:
             _, task = _send(target, sign_in, url, strict_json=True)
         # HTTPException: a connection closed partway through the body (IncompleteRead).
         except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
             now = _clock()
             unanswered_since = now if unanswered_since is None else unanswered_since
-            refused = isinstance(e, urllib.error.HTTPError) and e.code < 500
+            code = e.code if isinstance(e, urllib.error.HTTPError) else None
+            refused = code is not None and code < 500 and code != 429
             if refused or now - unanswered_since >= _UNANSWERED_WINDOW_SECONDS:
                 raise _http_failure(renderer, e, "task", sign_in) from e
+            retry_after = retry_after_from_headers(getattr(e, "headers", None)) if code == 429 else None
+            if retry_after is not None:
+                # Never past the end of the window or of the whole wait.
+                left = min(unanswered_since + _UNANSWERED_WINDOW_SECONDS, deadline) - now
+                pause = max(_TASK_POLL_SECONDS, min(retry_after, left))
         except ResponseUnparseable as e:
             raise _unexpected(renderer, "/api/tasks", "body was not valid JSON", task_id=task_id) from e
         else:
@@ -610,7 +660,7 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
                 details={"task_id": task_id, "status": status},
             )
             raise typer.Exit(code=1)
-        _sleep(_TASK_POLL_SECONDS)
+        _sleep(pause)
 
 
 @app.command("upload", help="Upload a .safetensors model file (up to 2 GB) into your Comfy Cloud model library.")
@@ -627,13 +677,14 @@ def upload_cmd(
     from comfy_cli.command.build_upload_progress import UploadProgressReporter
     from comfy_cli.credentials import DataPlaneToken
 
+    def refuse(reason: str, message: str) -> typer.Exit:
+        renderer.error(code="asset_upload_invalid", message=message, details={"reason": reason, "file": str(file)})
+        return typer.Exit(code=1)
+
     renderer = get_renderer()
     refusal = _local_refusal(file)
     if refusal is not None:
-        renderer.error(
-            code="asset_upload_invalid", message=refusal[1], details={"reason": refusal[0], "file": str(file)}
-        )
-        raise typer.Exit(code=1)
+        raise refuse(*refusal)
     target = cloud_target_or_local_error(where, renderer)
     # A stored sign-in's token can expire during the PUT, so completion and
     # polling keep it fresh, but only from the same sign-in: Comfy Cloud files the
@@ -662,7 +713,11 @@ def upload_cmd(
             )
             raise typer.Exit(code=1)
 
-    item = _UploadItem(filename=file.name, size_bytes=file.stat().st_size)
+    try:
+        size = file.stat().st_size
+    except OSError as e:  # removed or locked since it was checked; nothing is sent yet
+        raise refuse(*_file_problem(file, e)) from None
+    item = _UploadItem(filename=file.name, size_bytes=size)
     tags = ["models", folder]
     reporter = UploadProgressReporter(renderer)
     reporter.plan([item], already_held=0)
@@ -691,6 +746,15 @@ def upload_cmd(
             with reporter.uploading(item, 1, 1) as progress:
                 _put(upload_url, headers, file, progress)
             break
+        except _FileUnreadable as e:
+            renderer.error(
+                code="asset_upload_failed",
+                message=f"could not read {file} while sending it to storage ({e.args[0].strerror or e.args[0]})",
+                hint="check that the file is still there and readable, then upload it again; "
+                "nothing was added to the library",
+                details={"reason": "file_unreadable", "upload_id": upload_id, "attempts": attempt},
+            )
+            raise typer.Exit(code=1) from None
         except _PutFailed as e:
             status = e.args[0]
             if (status is None or status >= 500) and attempt < _UPLOAD_STARTS:

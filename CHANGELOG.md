@@ -20,8 +20,10 @@ history.
 - `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
   model file of up to 2 GB into your Comfy Cloud workspace's model library,
   e.g. `comfy assets library upload my_style.safetensors --type loras`. The
-  file name, size and `--type` are checked before anything is sent (`--type`
-  against the folders the workspace takes), the bytes stream straight to
+  file name, size, that the file can be read, and `--type` are checked before
+  anything is sent (`--type` against the folders the workspace takes); a file
+  that cannot be read mid-transfer ends as `asset_upload_failed` with
+  `details.reason` `file_unreadable`, not retried. The bytes stream straight to
   storage with the same progress line and events as `comfy build push`, and
   the command waits for Comfy Cloud to store the file, then prints the asset
   id, name, folder and hash (`--json`: the `assets_library` schema). A
@@ -56,6 +58,9 @@ history.
 
 ### Fixed
 
+- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
+  when the server drops the connection partway through its error body, instead
+  of crashing with `IncompleteRead`.
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.

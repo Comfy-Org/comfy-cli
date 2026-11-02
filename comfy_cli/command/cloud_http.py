@@ -121,10 +121,16 @@ def http_request(
 
 def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
+    import http.client
     import urllib.error
 
     if isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+        # Best effort: a server that drops the connection partway through its
+        # error body must not keep the status from being classified.
+        try:
+            body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+        except (http.client.HTTPException, OSError):
+            body = ""
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",

@@ -25,6 +25,7 @@ import base64
 import http.client
 import io
 import json
+import os
 import sys
 import urllib.error
 from pathlib import Path
@@ -845,9 +846,15 @@ def no_wait(monkeypatch):
 
 
 def _upload(
-    monkeypatch, capsys, args: list[str], routes: dict, puts: list, cloud: _Cloud | None = None
+    monkeypatch,
+    capsys,
+    args: list[str],
+    routes: dict,
+    puts: list,
+    cloud: _Cloud | None = None,
+    storage: _Storage | None = None,
 ) -> tuple[dict, int, _Cloud, _Storage, str]:
-    cloud, storage = cloud or _Cloud(routes), _Storage(puts)
+    cloud, storage = cloud or _Cloud(routes), storage or _Storage(puts)
     monkeypatch.setattr("urllib.request.urlopen", cloud)
     monkeypatch.setattr("requests.put", storage)
     r = Renderer.resolve(
@@ -1501,3 +1508,214 @@ class TestBodiesCutShort:
         env, rc = _run_with_rc(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
 
         assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+
+
+_NOT_ROOT = pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="needs a file the user cannot read (Windows and root ignore the mode)",
+)
+
+
+def _then(action, answer):
+    """A route outcome that runs ``action`` before ``_Cloud`` answers with ``answer``."""
+
+    def outcome():
+        action()
+        return _Cloud({("GET", "/x"): answer})(SimpleNamespace(get_method=lambda: "GET", full_url="/x", data=None))
+
+    return outcome
+
+
+class TestUploadFileErrors:
+    """A file that cannot be read is an upload error envelope, never a traceback."""
+
+    @_NOT_ROOT
+    def test_an_unreadable_file_is_refused_locally(self, model_file):
+        # From the command line, click's `Path` check refuses a file the user
+        # cannot read before the command runs; this is the command's own check.
+        model_file.chmod(0)
+        try:
+            refusal = assets_library._local_refusal(model_file)
+        finally:
+            model_file.chmod(0o600)
+
+        assert refusal is not None and refusal[0] == "file_unreadable"
+        assert "Permission denied" in refusal[1]
+
+    def test_a_file_whose_stat_fails_is_refused_before_any_request(self, cloud_target, monkeypatch, capsys, model_file):
+        def stat(self, *a, **kw):
+            raise OSError(5, "Input/output error", str(self))
+
+        monkeypatch.setattr(Path, "is_file", lambda self: True)
+        monkeypatch.setattr(Path, "stat", stat)
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["reason"] == "file_unreadable"
+        assert "Input/output error" in env["error"]["message"]
+        assert cloud.calls == [] and storage.puts == []
+
+    def test_a_file_removed_before_its_size_is_read_is_refused_before_the_upload(
+        self, cloud_target, monkeypatch, capsys, model_file
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/features")] = _then(model_file.unlink, _FOLDERS)
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["reason"] == "file_not_found"
+        assert cloud.paths() == ["/api/features"] and storage.puts == []
+
+    def test_a_file_removed_before_the_put_fails_without_a_retry(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [_then(model_file.unlink, _started(1)), _started(2)]
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200, 200]
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["reason"] == "file_unreadable"
+        assert env["error"]["details"]["attempts"] == 1
+        assert storage.puts == [] and cloud.paths("POST").count("/api/assets/uploads") == 1
+        assert "SECRETSIG" not in everything
+
+    @_NOT_ROOT
+    def test_a_file_made_unreadable_before_the_put_fails_without_a_retry(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [_then(lambda: model_file.chmod(0), _started(1)), _started(2)]
+        try:
+            env, rc, cloud, storage, _ = _upload(
+                monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200, 200]
+            )
+        finally:
+            model_file.chmod(0o600)
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["reason"] == "file_unreadable"
+        assert storage.puts == [] and cloud.paths("POST").count("/api/assets/uploads") == 1
+
+    @pytest.mark.parametrize("wrapped", [True, False], ids=["transport-wraps-it", "raised-as-is"])
+    def test_a_read_error_mid_put_is_not_retried_as_a_transport_failure(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, wrapped
+    ):
+        import requests
+
+        from comfy_cli import builder_api
+
+        def failing_read(self, size=-1):
+            raise OSError(5, "Input/output error")
+
+        class _Wrapping(_Storage):
+            def __call__(self, url, data=None, **kw):
+                try:
+                    return super().__call__(url, data=data, **kw)
+                except OSError as e:  # urllib3 reports a body that fails to read as a dropped connection
+                    raise requests.ConnectionError(("Connection aborted.", e)) from e
+
+        monkeypatch.setattr(builder_api._CountingReader, "read", failing_read)
+        storage = _Wrapping([200, 200]) if wrapped else None
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200, 200], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["reason"] == "file_unreadable"
+        assert "Input/output error" in env["error"]["message"]
+        assert cloud.paths("POST").count("/api/assets/uploads") == 1
+        assert "SECRETSIG" not in everything
+
+
+def _throttled(retry_after: str | None = None):
+    headers = {"Retry-After": retry_after} if retry_after is not None else {}
+    return urllib.error.HTTPError("https://cloud.example.com/api/tasks/task-1", 429, "slow down", headers, io.BytesIO())
+
+
+@pytest.fixture
+def sleeps(monkeypatch, no_wait):
+    taken: list[float] = []
+
+    def sleep(s):
+        taken.append(s)
+        no_wait[0] += s
+
+    monkeypatch.setattr(assets_library, "_sleep", sleep)
+    return taken
+
+
+class TestTaskPollThrottled:
+    def test_a_429_is_retried(self, cloud_target, monkeypatch, capsys, model_file, sleeps):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [_throttled(), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.paths().count("/api/tasks/task-1") == 2
+        assert sleeps == [assets_library._TASK_POLL_SECONDS]
+
+    def test_a_429_waits_its_retry_after(self, cloud_target, monkeypatch, capsys, model_file, sleeps):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [_throttled("7"), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert sleeps == [7.0]
+
+    def test_a_retry_after_past_the_window_is_cut_to_the_window(
+        self, cloud_target, monkeypatch, capsys, model_file, sleeps
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [_throttled("3600"), _DONE]
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert sleeps == [assets_library._UNANSWERED_WINDOW_SECONDS]
+
+    @pytest.mark.parametrize("retry_after", [None, "3600"])
+    def test_429s_past_the_window_end_the_wait(
+        self, cloud_target, monkeypatch, capsys, model_file, sleeps, no_wait, retry_after
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = _throttled(retry_after)
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "cloud_rate_limited"
+        assert env["error"]["details"]["status"] == 429
+        assert no_wait[0] >= assets_library._UNANSWERED_WINDOW_SECONDS
+        assert no_wait[0] < assets_library._UNANSWERED_WINDOW_SECONDS + 2 * assets_library._TASK_POLL_SECONDS
+
+
+class _BodyCutOff(io.RawIOBase):
+    """An error response whose body the server stopped sending partway."""
+
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def readable(self):
+        return True
+
+    def read(self, n=-1):
+        raise self.exc
+
+
+class TestErrorBodyCutOff:
+    @pytest.mark.parametrize(
+        ("status", "exc", "code"),
+        [
+            (401, http.client.IncompleteRead(b'{"err', 40), "cloud_unauthorized"),
+            (403, ConnectionResetError(54, "Connection reset by peer"), "cloud_unauthorized"),
+            (500, http.client.IncompleteRead(b"<ht", 40), "cloud_http_error"),
+        ],
+    )
+    def test_the_status_is_classified_when_the_error_body_is_cut_off(
+        self, cloud_target, monkeypatch, capsys, status, exc, code
+    ):
+        err = urllib.error.HTTPError("https://cloud.example.com/api/assets", status, "err", {}, _BodyCutOff(exc))
+        _patch_urlopen(monkeypatch, err)
+        env, rc = _run_with_rc(["ls"], capsys)
+
+        assert rc == 1 and env["error"]["code"] == code
+        assert env["error"]["details"]["status"] == status

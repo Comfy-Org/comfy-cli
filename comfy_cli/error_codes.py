@@ -471,8 +471,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "asset_upload_invalid",
         "`assets library upload` refused the file or `--type` before uploading anything: "
         "`details.reason` is unsupported_file_type (not .safetensors), bad_filename, file_not_found, "
-        "empty_file, file_too_large (over 2 GB) or unsupported_model_type (`details.valid_types` lists "
-        "the folders the workspace takes).",
+        "file_unreadable (it could not be opened or its size read), empty_file, file_too_large (over 2 GB) "
+        "or unsupported_model_type (`details.valid_types` lists the folders the workspace takes).",
         "fix the file or `--type` named in the message; nothing was sent",
     ),
     ErrorCode(
@@ -486,9 +486,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "asset_upload_failed",
         "A model upload did not end in a stored asset: sending the bytes to storage failed after a fresh "
-        "retry (`details.status`, null when no answer came), or Comfy Cloud's storing task failed or was "
-        "cancelled (the message carries the task's error, e.g. not a valid .safetensors file).",
-        "retry for a storage failure; for a task failure fix the file the message names",
+        "retry (`details.status`, null when no answer came), the local file could not be read while it "
+        "was being sent (`details.reason` file_unreadable; not retried), or Comfy Cloud's storing task "
+        "failed or was cancelled (the message carries the task's error, e.g. not a valid .safetensors file).",
+        "retry for a storage failure; for an unreadable file or a task failure fix the file the message names",
     ),
     ErrorCode(
         "asset_upload_timeout",
