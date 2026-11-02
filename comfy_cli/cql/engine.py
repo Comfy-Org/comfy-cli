@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -1422,14 +1422,90 @@ def parse_disable_config(data: bytes) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _apply_annotation(
+    m: Morphism,
+    node_pack: dict[str, str],
+    node_labels: dict[str, list[str]],
+    disable_labels: set[str],
+) -> None:
+    if m.id in node_pack:
+        m.pack = node_pack[m.id]
+    if m.id in node_labels:
+        m.labels = node_labels[m.id]
+    m.cloud_disabled = any(label in disable_labels for label in m.labels)
+
+
+class _LazyNodes(Mapping[str, Morphism]):
+    """Class name -> ``Morphism`` over a raw ``/object_info`` payload, parsing
+    each class on first access.
+
+    A catalog holds thousands of classes and a command that reads a workflow
+    touches a handful, so parsing them all up front dominated those commands.
+    Iteration order, membership and length match the eager dict this replaces:
+    insertion order of ``object_info``, entries whose value is not a JSON
+    object skipped. Annotations are recorded and replayed in order on every
+    class parsed later, so a lazily parsed class ends up exactly as it would
+    have had it been parsed before ``annotate`` ran.
+    """
+
+    __slots__ = ("_raw", "_parsed", "_annotations")
+
+    def __init__(self, object_info: dict[str, Any]) -> None:
+        self._raw: dict[str, dict] = {k: v for k, v in object_info.items() if isinstance(v, dict)}
+        self._parsed: dict[str, Morphism] = {}
+        self._annotations: list[tuple[dict[str, str], dict[str, list[str]], set[str]]] = []
+
+    def _parse(self, name: str, raw: dict) -> Morphism:
+        m = _parse_morphism(name, raw)
+        _unconstrain_frontend_combos(m)
+        for node_pack, node_labels, disable_labels in self._annotations:
+            _apply_annotation(m, node_pack, node_labels, disable_labels)
+        self._parsed[name] = m
+        return m
+
+    def __getitem__(self, name: str) -> Morphism:
+        m = self._parsed.get(name)
+        if m is not None:
+            return m
+        return self._parse(name, self._raw[name])
+
+    def get(self, name: str, default: Any = None) -> Any:
+        m = self._parsed.get(name)
+        if m is not None:
+            return m
+        raw = self._raw.get(name)
+        if raw is None:
+            return default
+        return self._parse(name, raw)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._raw
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._raw)
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def add_annotation(
+        self,
+        node_pack: dict[str, str],
+        node_labels: dict[str, list[str]],
+        disable_labels: set[str],
+    ) -> None:
+        self._annotations.append((node_pack, node_labels, disable_labels))
+        for m in self._parsed.values():
+            _apply_annotation(m, node_pack, node_labels, disable_labels)
+
+
 class Graph:
     """Indexed compatibility graph over ComfyUI node classes."""
 
     def __init__(self) -> None:
-        self._nodes: dict[str, Morphism] = {}
-        self._producers: dict[str, list[Morphism]] = defaultdict(list)
-        self._consumers: dict[str, list[Morphism]] = defaultdict(list)
-        self._types: set[str] = set()
+        # Classes are parsed on first lookup (see ``_LazyNodes``); the type
+        # indexes below are built on first access, which parses every class.
+        self._nodes: _LazyNodes = _LazyNodes({})
+        self._type_index: tuple[dict[str, list[Morphism]], dict[str, list[Morphism]], set[str]] | None = None
         self._annotated = False
         # Lazily-computed closure of types obtainable without wiring anything in
         # (see ``free_types``). Invalidated implicitly: graphs are built once.
@@ -1459,30 +1535,46 @@ class Graph:
             )
         g = cls()
         g._raw = object_info
-        for node_id, raw in object_info.items():
-            if not isinstance(raw, dict):
-                continue
-            m = _parse_morphism(node_id, raw)
-            _unconstrain_frontend_combos(m)
-            g._nodes[m.id] = m
-            # A deprecated class stays addressable by name (show, validate,
-            # edits on a graph that already holds it) but is never a
-            # discovery answer: upstream/downstream/path/free-producer all
-            # read these indexes.
-            for t in m.output_types():
-                if not m.deprecated:
-                    g._producers[t].append(m)
-                g._types.add(t)
-            for t in m.input_link_types():
-                if not m.deprecated:
-                    g._consumers[t].append(m)
-                g._types.add(t)
-        # Sort indexes for deterministic output
-        for t in g._producers:
-            g._producers[t].sort(key=lambda m: m.id)
-        for t in g._consumers:
-            g._consumers[t].sort(key=lambda m: m.id)
+        g._nodes = _LazyNodes(object_info)
         return g
+
+    def _build_type_index(self) -> tuple[dict[str, list[Morphism]], dict[str, list[Morphism]], set[str]]:
+        if self._type_index is None:
+            producers: dict[str, list[Morphism]] = defaultdict(list)
+            consumers: dict[str, list[Morphism]] = defaultdict(list)
+            types: set[str] = set()
+            for m in self._nodes.values():
+                # A deprecated class stays addressable by name (show, validate,
+                # edits on a graph that already holds it) but is never a
+                # discovery answer: upstream/downstream/path/free-producer all
+                # read these indexes.
+                for t in m.output_types():
+                    if not m.deprecated:
+                        producers[t].append(m)
+                    types.add(t)
+                for t in m.input_link_types():
+                    if not m.deprecated:
+                        consumers[t].append(m)
+                    types.add(t)
+            # Sort indexes for deterministic output
+            for t in producers:
+                producers[t].sort(key=lambda m: m.id)
+            for t in consumers:
+                consumers[t].sort(key=lambda m: m.id)
+            self._type_index = (producers, consumers, types)
+        return self._type_index
+
+    @property
+    def _producers(self) -> dict[str, list[Morphism]]:
+        return self._build_type_index()[0]
+
+    @property
+    def _consumers(self) -> dict[str, list[Morphism]]:
+        return self._build_type_index()[1]
+
+    @property
+    def _types(self) -> set[str]:
+        return self._build_type_index()[2]
 
     # -- Annotation --
 
@@ -1497,12 +1589,7 @@ class Graph:
             supported_nodes_yaml, cloud_disable_yaml
         )
 
-        for nid, m in self._nodes.items():
-            if nid in node_pack:
-                m.pack = node_pack[nid]
-            if nid in node_labels:
-                m.labels = node_labels[nid]
-            m.cloud_disabled = any(label in disable_labels for label in m.labels)
+        self._nodes.add_annotation(node_pack, node_labels, disable_labels)
         self._annotated = True
 
     # -- Lookup --
