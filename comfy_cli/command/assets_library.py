@@ -9,6 +9,7 @@ emitting a JSON envelope via the renderer. Cloud-only — there is no local
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, replace
@@ -390,7 +391,7 @@ class _PutFailed(Exception):
 
 
 class _FileUnreadable(Exception):
-    """The file could not be opened or read while it was being sent; ``args[0]`` is the ``OSError``."""
+    """The file could not be opened, sized or read while it was being sent; ``args[0]`` is the ``OSError``."""
 
 
 def _file_problem(path: Path, e: OSError) -> tuple[str, str]:
@@ -572,7 +573,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
     A transport exception is dropped, never shown: its text quotes the signed
     URL, whose query string is a live credential. A file that cannot be opened,
     sized or read raises ``_FileUnreadable`` instead: a fresh upload would fail
-    the same way, so it is not a transport failure to retry.
+    the same way, so it is not a transport failure to retry. Any other
+    ``OSError`` (a TLS setup error, such as a CA bundle path that no longer
+    exists) is raised as it is, with its own message.
     """
     import requests
 
@@ -582,6 +585,16 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
         # urllib3 reports a body that fails to read as a dropped connection,
         # so the read error is kept here to tell the two apart.
         failed: OSError | None = None
+
+        def __init__(self, raw, progress, size: int) -> None:
+            super().__init__(raw, progress)
+            self._size = size
+
+        def __len__(self) -> int:
+            # Requests takes the length from here rather than its own
+            # `os.fstat`, so the file is sized only below, where an error is
+            # known to be the file's. Same Content-Length either way.
+            return self._size
 
         def read(self, size: int = -1) -> bytes:
             try:
@@ -595,7 +608,11 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
     except OSError as e:
         raise _FileUnreadable(e) from None
     with f:
-        reader = _Reader(f, progress)
+        try:
+            size = os.fstat(f.fileno()).st_size
+        except OSError as e:  # e.g. a stale handle on a network filesystem
+            raise _FileUnreadable(e) from None
+        reader = _Reader(f, progress, size)
         try:
             resp = requests.put(
                 upload_url,
@@ -609,9 +626,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
                 raise _FileUnreadable(reader.failed) from None
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None
-            # Not from the transport (Requests wraps those): the file failed
-            # before its first read, e.g. a stale handle on the size lookup.
-            raise _FileUnreadable(e) from None
+            # Neither the file nor the transport (Requests wraps those): the
+            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file.
+            raise
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 

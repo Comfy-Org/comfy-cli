@@ -1651,16 +1651,12 @@ class TestUploadFileErrors:
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert "SECRETSIG" not in everything
 
-    def test_a_file_error_while_requests_sizes_the_body_fails_without_a_retry(
+    def test_a_file_error_while_sizing_the_body_fails_without_a_retry(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait
     ):
-        # Requests sizes the body with `os.fstat(body.fileno())` before its first
-        # read; on a network filesystem that can raise a stale handle, which is
-        # not a RequestException and comes before `_Reader.read` sees anything.
+        # The body is sized from the open handle before Requests sees it; on a
+        # network filesystem that can raise a stale handle before any read.
         import errno
-
-        import requests
-        import requests.utils
 
         class _Os:
             def __getattr__(self, name):
@@ -1669,27 +1665,84 @@ class TestUploadFileErrors:
             def fstat(self, fd):
                 raise OSError(errno.ESTALE, "Stale NFS file handle")
 
-        class _Preparing(_Storage):
-            attempts = 0
-
-            def __call__(self, url, data=None, headers=None, **kw):
-                self.attempts += 1
-                requests.Request("PUT", url, data=data, headers=headers).prepare()
-                return super().__call__(url, data=data, headers=headers, **kw)
-
-        monkeypatch.setattr(requests.utils, "os", _Os())
-        storage = _Preparing([200, 200])
+        monkeypatch.setattr(assets_library, "os", _Os())
         env, rc, cloud, storage, everything = _upload(
-            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200, 200], storage=storage
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200, 200]
         )
 
         assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
         assert env["error"]["details"]["reason"] == "file_unreadable"
         assert env["error"]["details"]["attempts"] == 1
         assert "Stale NFS file handle" in env["error"]["message"]
-        assert storage.attempts == 1 and storage.puts == []
+        assert storage.puts == []
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert "SECRETSIG" not in everything
+
+    def test_requests_sends_the_body_with_its_content_length_not_chunked(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        # A presigned storage PUT refuses a chunked body, so the length Requests
+        # takes from the reader must be the file's.
+        import requests
+
+        class _Preparing(_Storage):
+            prepared: dict | None = None
+
+            def __call__(self, url, data=None, headers=None, **kw):
+                self.prepared = dict(requests.Request("PUT", url, data=data, headers=headers).prepare().headers)
+                return super().__call__(url, data=data, headers=headers, **kw)
+
+        storage = _Preparing([200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200], storage=storage
+        )
+
+        assert rc == 0 and env["ok"] is True
+        assert storage.prepared["Content-Length"] == str(model_file.stat().st_size)
+        assert "Transfer-Encoding" not in storage.prepared
+        assert storage.puts[0]["body"] == model_file.read_bytes()
+
+    def test_a_missing_ca_bundle_is_not_blamed_on_the_model_file(
+        self, cloud_target, monkeypatch, capsys, model_file, tmp_path, no_wait
+    ):
+        # The real Requests adapter: with REQUESTS_CA_BUNDLE naming a removed
+        # file, it raises a plain OSError while setting up TLS, before any
+        # connection or read of the body. That is the machine's TLS setup, not
+        # the model, so it must keep its own message, not `file_unreadable`.
+        import requests
+
+        real_put = requests.put
+
+        class _RealPut(_Storage):
+            attempts = 0
+
+            def __call__(self, url, **kw):
+                self.attempts += 1
+                return real_put(url, **kw)
+
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "removed-ca-bundle.pem"))
+        cloud, storage = _Cloud(dict(_UPLOAD_ROUTES)), _RealPut([])
+        monkeypatch.setattr("urllib.request.urlopen", cloud)
+        monkeypatch.setattr("requests.put", storage)
+        r = Renderer.resolve(
+            is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
+        )
+        r.mode = OutputMode.JSON
+        set_renderer(r)
+        result = CliRunner().invoke(
+            assets_library.app,
+            ["upload", str(model_file), "--type", "loras", "--where", "cloud"],
+            standalone_mode=False,
+        )
+        captured = capsys.readouterr()
+        everything = captured.out + captured.err + result.output
+
+        assert "file_unreadable" not in everything
+        assert isinstance(result.exception, OSError), result.exception
+        assert "CA certificate bundle" in str(result.exception)
+        assert storage.attempts == 1
+        assert cloud.paths("POST").count("/api/assets/uploads") == 1
+        assert "SECRETSIG" not in everything + str(result.exception)
 
 
 def _throttled(retry_after: str | None = None):
