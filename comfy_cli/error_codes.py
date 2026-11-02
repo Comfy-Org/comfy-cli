@@ -487,9 +487,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "asset_upload_failed",
         "A model upload did not end in a stored asset: sending the bytes to storage failed after a fresh "
         "retry (`details.status`, null when no answer came), the local file could not be read while it "
-        "was being sent (`details.reason` file_unreadable; not retried), or Comfy Cloud's storing task "
-        "failed or was cancelled (the message carries the task's error, e.g. not a valid .safetensors file).",
-        "retry for a storage failure; for an unreadable file or a task failure fix the file the message names",
+        "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
+        "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
+        "file; not retried), or Comfy Cloud's storing task failed or was cancelled (the message carries the "
+        "task's error, e.g. not a valid .safetensors file).",
+        "retry for a storage failure; for an unreadable file or a task failure fix the file the message names; "
+        "for tls_setup fix the certificate setting the message names",
     ),
     ErrorCode(
         "asset_upload_timeout",

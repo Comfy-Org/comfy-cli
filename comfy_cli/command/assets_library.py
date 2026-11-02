@@ -394,6 +394,10 @@ class _FileUnreadable(Exception):
     """The file could not be opened, sized or read while it was being sent; ``args[0]`` is the ``OSError``."""
 
 
+class _TlsSetupFailed(Exception):
+    """This machine's TLS settings stopped the PUT before it connected; ``args[0]`` is the message to show."""
+
+
 def _file_problem(path: Path, e: OSError) -> tuple[str, str]:
     """``(reason, message)`` for an ``OSError`` met while checking the file."""
     if isinstance(e, FileNotFoundError):
@@ -574,9 +578,12 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
     URL, whose query string is a live credential. A file that cannot be opened,
     sized or read raises ``_FileUnreadable`` instead: a fresh upload would fail
     the same way, so it is not a transport failure to retry. Any other
-    ``OSError`` (a TLS setup error, such as a CA bundle path that no longer
-    exists) is raised as it is, with its own message.
+    ``OSError`` comes from setting up TLS (a CA bundle path that no longer
+    exists) and raises ``_TlsSetupFailed`` with its message; a retry would
+    fail the same way too.
     """
+    import urllib.parse
+
     import requests
 
     from comfy_cli.builder_api import _CountingReader
@@ -627,8 +634,13 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None
             # Neither the file nor the transport (Requests wraps those): the
-            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file.
-            raise
+            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file. Its
+            # text names a certificate path, but is never shown if it quotes
+            # the signed URL.
+            text, query = str(e) or type(e).__name__, urllib.parse.urlsplit(upload_url).query
+            if upload_url in text or (query and query in text):
+                text = type(e).__name__
+            raise _TlsSetupFailed(text) from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 
@@ -772,6 +784,15 @@ def upload_cmd(
                 hint="check that the file is still there and readable, then upload it again; "
                 "nothing was added to the library",
                 details={"reason": "file_unreadable", "upload_id": upload_id, "attempts": attempt},
+            )
+            raise typer.Exit(code=1) from None
+        except _TlsSetupFailed as e:
+            renderer.error(
+                code="asset_upload_failed",
+                message=f"could not set up a secure connection to storage ({e.args[0]})",
+                hint="point REQUESTS_CA_BUNDLE (or CURL_CA_BUNDLE) at a certificate bundle that exists, or unset it, "
+                "then upload again; nothing was added to the library",
+                details={"reason": "tls_setup", "upload_id": upload_id, "attempts": attempt},
             )
             raise typer.Exit(code=1) from None
         except _PutFailed as e:

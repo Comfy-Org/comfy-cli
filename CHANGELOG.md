@@ -23,7 +23,9 @@ history.
   file name, size, that the file can be read, and `--type` are checked before
   anything is sent (`--type` against the folders the workspace takes); a file
   that cannot be read mid-transfer ends as `asset_upload_failed` with
-  `details.reason` `file_unreadable`, not retried. The bytes stream straight to
+  `details.reason` `file_unreadable`, and a TLS setting that stops the transfer
+  (e.g. `REQUESTS_CA_BUNDLE` naming a missing file) with `details.reason`
+  `tls_setup` and its message; neither is retried. The bytes stream straight to
   storage with the same progress line and events as `comfy build push`, and
   the command waits for Comfy Cloud to store the file, then prints the asset
   id, name, folder and hash (`--json`: the `assets_library` schema). A

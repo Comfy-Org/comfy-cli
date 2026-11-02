@@ -1702,14 +1702,17 @@ class TestUploadFileErrors:
         assert "Transfer-Encoding" not in storage.prepared
         assert storage.puts[0]["body"] == model_file.read_bytes()
 
-    def test_a_missing_ca_bundle_is_not_blamed_on_the_model_file(
-        self, cloud_target, monkeypatch, capsys, model_file, tmp_path, no_wait
+    def test_a_missing_ca_bundle_ends_the_upload_with_a_tls_setup_error(
+        self, cloud_target, monkeypatch, model_file, tmp_path, no_wait
     ):
         # The real Requests adapter: with REQUESTS_CA_BUNDLE naming a removed
         # file, it raises a plain OSError while setting up TLS, before any
-        # connection or read of the body. That is the machine's TLS setup, not
-        # the model, so it must keep its own message, not `file_unreadable`.
+        # connection or read of the body. Run from the root CLI, that is a
+        # handled upload failure carrying the certificate message: neither a
+        # crash (`internal_error`) nor a fault in the model (`file_unreadable`).
         import requests
+
+        from comfy_cli.cmdline import app as root_app
 
         real_put = requests.put
 
@@ -1724,26 +1727,23 @@ class TestUploadFileErrors:
         cloud, storage = _Cloud(dict(_UPLOAD_ROUTES)), _RealPut([])
         monkeypatch.setattr("urllib.request.urlopen", cloud)
         monkeypatch.setattr("requests.put", storage)
-        r = Renderer.resolve(
-            is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
-        )
-        r.mode = OutputMode.JSON
-        set_renderer(r)
         result = CliRunner().invoke(
-            assets_library.app,
-            ["upload", str(model_file), "--type", "loras", "--where", "cloud"],
-            standalone_mode=False,
+            root_app,
+            ["--json", "assets", "library", "upload", str(model_file), "--type", "loras", "--where", "cloud"],
+            env={"NO_COLOR": "1", "COLUMNS": "400"},
         )
-        captured = capsys.readouterr()
-        everything = captured.out + captured.err + result.output
+        lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        assert lines, f"no envelope on stdout (rc={result.exit_code}, exc={result.exception!r})"
+        env = json.loads(lines[-1])
 
-        assert "file_unreadable" not in everything
-        assert isinstance(result.exception, OSError), result.exception
-        assert "CA certificate bundle" in str(result.exception)
+        assert result.exit_code == 1 and env["ok"] is False
+        assert env["error"]["code"] == "asset_upload_failed", env["error"]
+        assert env["error"]["details"]["reason"] == "tls_setup"
+        assert env["error"]["details"]["attempts"] == 1
+        assert "CA certificate bundle" in env["error"]["message"]
         assert storage.attempts == 1
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
-        assert "SECRETSIG" not in everything + str(result.exception)
-
+        assert "SECRETSIG" not in result.output
 
 def _throttled(retry_after: str | None = None):
     headers = {"Retry-After": retry_after} if retry_after is not None else {}
