@@ -714,7 +714,13 @@ def notes_cmd(
 @tracking.track_command("workflow")
 def print_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    fmt: Annotated[str, typer.Option("--format", help="Output form. Only `py` today.")] = "py",
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output form: `py` (source and bindings) or `json` (the same plus `nodes`, one structured record per node).",
+        ),
+    ] = "py",
     input_path: Annotated[
         str | None,
         typer.Option("--input", show_default=False, help="Offline object_info.json dump for widget names."),
@@ -734,10 +740,10 @@ def print_cmd(
     from comfy_cli.workflow_print import PrintUnsupported, render_py
 
     renderer = get_renderer()
-    if fmt != "py":
+    if fmt not in ("py", "json"):
         renderer.error(
             code="workflow_print_unsupported",
-            message=f"unknown --format {fmt!r}; only `py` is supported",
+            message=f"unknown --format {fmt!r}; use `py` or `json`",
             details={"reasons": [f"format {fmt!r}"]},
         )
         raise typer.Exit(code=1)
@@ -768,13 +774,15 @@ def print_cmd(
         warnings.append(f"object_info_stale: {_stale['source']}: {_stale['reason']}")
     payload = {
         "workflow": str(p),
-        "format": "py",
+        "format": fmt,
         "source": res.source,
         "bindings": res.bindings,
         "node_count": res.node_count,
         "skipped": res.skipped,
         "warnings": warnings,
     }
+    if fmt == "json":
+        payload["nodes"] = res.nodes
     if select is not None:
         from comfy_cli.selector import emit_selected
 
