@@ -15,6 +15,38 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
+  model file of up to 2 GB into your Comfy Cloud workspace's model library,
+  e.g. `comfy assets library upload my_style.safetensors --type loras`. The
+  file name, size, that the file can be read, and `--type` are checked before
+  anything is sent (`--type` against the folders the workspace takes); a file
+  that cannot be read mid-transfer ends as `asset_upload_failed` with
+  `details.reason` `file_unreadable`, and a TLS setting that stops the transfer
+  (e.g. `REQUESTS_CA_BUNDLE` naming a missing file) with `details.reason`
+  `tls_setup` and its message; neither is retried. The bytes stream straight to
+  storage with the same progress line and events as `comfy build push`, and
+  the command waits for Comfy Cloud to store the file, then prints the asset
+  id, name, folder and hash (`--json`: the `assets_library` schema). A
+  refusal from Comfy Cloud, such as uploads being off for the workspace or the
+  model storage cap being reached, is shown with the server's message as
+  `asset_upload_refused`; new codes `asset_upload_invalid`,
+  `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
+  can end.
+
+- `comfy knowledge resolve` suggests canonical model ids for an incomplete
+  family/version name such as `Qwen 2.1`. The command still fails with
+  `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
+  up to five sorted, distinct ids whose id or alias has the same family word
+  and the same numeric components in order, and the hint names them and asks
+  which model is intended before retrying `comfy knowledge resolve <exact-id>`.
+  A single candidate is still only a suggestion: nothing is auto-resolved,
+  downloaded or run. Substituted family words, different versions and names
+  with non-ASCII letters or digits get no candidates. Exact id and alias
+  resolution, `close_matches` and the hint for a name with no candidates are
+  unchanged.
+
 ### Changed
 
 - A `connect` into a widget input of an agent-built node is now type-checked.
@@ -89,6 +121,10 @@ history.
   so the positional marker filter is skipped and a value of `"fixed"` stays a
   value. Saves with a real marker have one more value than sockets and still go
   through the filter.
+
+- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
+  when the server drops the connection partway through its error body, instead
+  of crashing with `IncompleteRead`.
 
 ## [1.24.0] - 2026-10-29
 
