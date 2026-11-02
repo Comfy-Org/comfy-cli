@@ -17,6 +17,18 @@ history.
 
 ### Added
 
+- `comfy knowledge resolve` suggests canonical model ids for an incomplete
+  family/version name such as `Qwen 2.1`. The command still fails with
+  `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
+  up to five sorted, distinct ids whose id or alias has the same family word
+  and the same numeric components in order, and the hint names them and asks
+  which model is intended before retrying `comfy knowledge resolve <exact-id>`.
+  A single candidate is still only a suggestion: nothing is auto-resolved,
+  downloaded or run. Substituted family words, different versions and names
+  with non-ASCII letters or digits get no candidates. Exact id and alias
+  resolution, `close_matches` and the hint for a name with no candidates are
+  unchanged.
+
 - `comfy model upload` previews an import into the standard environment and
   uploads only the approved file digest to the approved workspace. It verifies
   model-folder capabilities, collisions and returned content identity, and sends
