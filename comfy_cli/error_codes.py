@@ -175,9 +175,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_filename_ambiguous",
-        "Cloud `workflow delete` found a sidebar file but could not safely associate it with the requested "
-        "record (duplicate names or an unresolved lookup). Nothing was deleted.",
-        "inspect same-name records; remove the intended file in the Cloud sidebar before deleting its record",
+        "Cloud `workflow delete` could not safely associate a sidebar filename or file with the requested record "
+        "because its name, content, or ownership could not be verified. Nothing was deleted.",
+        "inspect the record and sidebar file; verify the name, content, and ownership before any manual cleanup",
     ),
     ErrorCode(
         "workflow_delete_incomplete",

@@ -1627,7 +1627,7 @@ def _cloud_delete(renderer, target, workflow_id: str) -> None:
                 renderer.error(
                     code="workflow_filename_ambiguous",
                     message="the record name would be normalized to a different sidebar filename",
-                    hint="inspect and remove the intended file in the Cloud sidebar before deleting its record",
+                    hint="inspect the record and sidebar file; verify the name, content, and ownership before any manual cleanup",
                     details={"workflow_id": workflow_id, "filename": key},
                 )
                 raise typer.Exit(code=1)
@@ -1659,7 +1659,7 @@ def _cloud_delete(renderer, target, workflow_id: str) -> None:
                         code="workflow_filename_ambiguous",
                         message=f"cannot safely associate sidebar file {key!r} with record {workflow_id!r}",
                         hint="inspect same-name records with `comfy --json workflow list --name <name>`; "
-                        "remove the intended file in the Cloud sidebar before deleting its record",
+                        "verify the file name, content, and ownership before any manual cleanup",
                         details={"workflow_id": workflow_id, "filename": key},
                     )
                     raise typer.Exit(code=1)
