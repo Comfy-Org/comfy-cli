@@ -2,7 +2,7 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "$id": "https://comfy.org/schemas/assets_library.json",
  "title": "comfy assets library --json data payload",
- "description": "Union schema for `assets library ls` and `assets library ensure`.",
+ "description": "Union schema for `assets library ls`, `assets library ensure` and `assets library upload`. `upload` returns the stored asset: `id`, `name`, `folder` (its model folder), `hash`, `size` (bytes) and `task_id` (the server task that stored it).",
  "type": "object",
  "additionalProperties": true,
  "properties": {
@@ -29,6 +29,10 @@
   "total": { "type": "integer", "minimum": 0 },
   "id": { "type": ["string", "null"] },
   "hash": { "type": ["string", "null"] },
-  "created_new": { "type": ["boolean", "null"] }
+  "created_new": { "type": ["boolean", "null"] },
+  "name": { "type": "string" },
+  "folder": { "type": "string" },
+  "size": { "type": "integer", "minimum": 1 },
+  "task_id": { "type": "string" }
  }
 }
