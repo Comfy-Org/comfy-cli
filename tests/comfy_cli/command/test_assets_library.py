@@ -25,6 +25,7 @@ import io
 import json
 import sys
 import urllib.error
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -731,3 +732,369 @@ class TestUppercaseHex:
         calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
         _run(["ensure", "--hash", _HEX.upper(), "--where", "cloud"], capsys)
         assert json.loads(calls[0]["body"])["hash"] == _HEX.upper()
+
+
+# --- assets library upload ---------------------------------------------------
+
+_SIGNED = "https://storage.example.com/assets/temp/model-uploads/x.safetensors?X-Goog-Signature=SECRETSIG"
+_PUT_HEADERS = {
+    "Content-Type": "application/octet-stream",
+    "x-goog-content-length-range": "0,16",
+    "x-goog-if-generation-match": "0",
+}
+_FOLDERS = {"model_upload_folders": ["checkpoints", "embeddings", "loras", "vae"]}
+_DONE = {
+    "id": "task-1",
+    "status": "completed",
+    "result": {"success": True, "asset_id": "asset-9", "hash": "blake3:" + "cd" * 32, "filename": "style.safetensors"},
+}
+
+
+def _started(n: int = 1) -> dict:
+    return {
+        "upload_id": f"00000000-0000-0000-0000-00000000000{n}",
+        "upload_url": f"{_SIGNED}{n}",
+        "method": "PUT",
+        "headers": dict(_PUT_HEADERS),
+        "expires_at": "2026-11-02T00:15:00Z",
+        "max_size_bytes": 2147483648,
+    }
+
+
+class _Cloud:
+    """Answers each ``(method, path)`` from a queue: a dict body, raw bytes, or an exception."""
+
+    def __init__(self, routes: dict):
+        self.routes = {k: list(v) if isinstance(v, list) else [v] for k, v in routes.items()}
+        self.calls: list[tuple[str, str, Any]] = []
+
+    def __call__(self, req, timeout=None):
+        import urllib.parse
+
+        method, path = req.get_method(), urllib.parse.urlsplit(req.full_url).path
+        self.calls.append((method, path, json.loads(req.data) if req.data else None))
+        queue = self.routes[(method, path)]
+        outcome = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        raw = outcome if isinstance(outcome, bytes) else json.dumps(outcome).encode()
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=None):
+                return raw
+
+        return _Resp()
+
+    def paths(self, method: str | None = None) -> list[str]:
+        return [p for m, p, _ in self.calls if method in (None, m)]
+
+
+class _Storage:
+    """Stands in for ``requests.put``: answers each PUT from a queue of statuses or exceptions."""
+
+    def __init__(self, outcomes: list):
+        self.outcomes = list(outcomes)
+        self.puts: list[dict] = []
+
+    def __call__(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
+        sent = b""
+        while block := data.read(4):
+            sent += block
+        self.puts.append({"url": url, "headers": headers, "body": sent, "allow_redirects": allow_redirects})
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+        class _Resp:
+            status_code = outcome
+
+        return _Resp()
+
+
+def _cloud_error(code: int, server_code: str, message: str):
+    body = json.dumps({"code": server_code, "message": message}).encode()
+    return urllib.error.HTTPError("https://cloud.example.com/api/x", code, "err", {}, io.BytesIO(body))
+
+
+@pytest.fixture
+def model_file(tmp_path):
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(b"0123456789abcdef")
+    return path
+
+
+@pytest.fixture
+def no_wait(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(assets_library, "_clock", lambda: now[0])
+    monkeypatch.setattr(assets_library, "_sleep", lambda s: now.__setitem__(0, now[0] + s))
+    return now
+
+
+def _upload(monkeypatch, capsys, args: list[str], routes: dict, puts: list) -> tuple[dict, int, _Cloud, _Storage, str]:
+    cloud, storage = _Cloud(routes), _Storage(puts)
+    monkeypatch.setattr("urllib.request.urlopen", cloud)
+    monkeypatch.setattr("requests.put", storage)
+    r = Renderer.resolve(
+        is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
+    )
+    r.mode = OutputMode.JSON
+    set_renderer(r)
+    result = CliRunner().invoke(assets_library.app, ["upload", *args, "--where", "cloud"], standalone_mode=False)
+    captured = capsys.readouterr()
+    everything = captured.out + captured.err + result.output
+    rc = result.exit_code or (result.return_value if isinstance(result.return_value, int) else 0)
+    lines = (captured.out or result.stdout).strip().splitlines()
+    assert lines, f"no envelope on stdout (rc={rc}, exc={result.exception})"
+    return json.loads(lines[-1]), rc, cloud, storage, everything
+
+
+_UPLOAD_ROUTES = {
+    ("GET", "/api/features"): _FOLDERS,
+    ("POST", "/api/assets/uploads"): [_started(1), _started(2)],
+    ("POST", "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete"): {
+        "task_id": "task-1",
+        "status": "created",
+    },
+    ("POST", "/api/assets/uploads/00000000-0000-0000-0000-000000000002/complete"): {
+        "task_id": "task-1",
+        "status": "created",
+    },
+    ("GET", "/api/tasks/task-1"): [{"id": "task-1", "status": "running"}, _DONE],
+}
+
+
+class TestUpload:
+    def test_uploads_completes_and_reports_the_stored_asset(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        import jsonschema
+
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200]
+        )
+
+        assert rc == 0 and env["ok"] is True
+        assert env["data"] == {
+            "id": "asset-9",
+            "name": "style.safetensors",
+            "folder": "loras",
+            "hash": "blake3:" + "cd" * 32,
+            "size": 16,
+            "task_id": "task-1",
+        }
+        schema = json.loads(
+            (Path(assets_library.__file__).resolve().parents[1] / "schemas" / "assets_library.json").read_text()
+        )
+        jsonschema.Draft202012Validator(schema).validate(env["data"])
+        assert cloud.paths() == [
+            "/api/features",
+            "/api/assets/uploads",
+            "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete",
+            "/api/tasks/task-1",
+            "/api/tasks/task-1",
+        ]
+        assert cloud.calls[1][2] == {"filename": "style.safetensors", "size_bytes": 16, "tags": ["models", "loras"]}
+        assert cloud.calls[2][2] == {"filename": "style.safetensors", "tags": ["models", "loras"]}
+        (put,) = storage.puts
+        assert put["url"] == f"{_SIGNED}1" and put["headers"] == _PUT_HEADERS and put["allow_redirects"] is False
+        assert put["body"] == model_file.read_bytes()
+        assert "SECRETSIG" not in everything
+
+    @pytest.mark.parametrize(
+        ("name", "size", "reason"),
+        [
+            ("style.ckpt", 16, "unsupported_file_type"),
+            ("style.pt", 16, "unsupported_file_type"),
+            (".hidden.safetensors", 16, "bad_filename"),
+            ("a..b.safetensors", 16, "bad_filename"),
+            ("x" * 250 + ".safetensors", None, "bad_filename"),
+            ("style.safetensors", None, "file_not_found"),
+            ("style.safetensors", 0, "empty_file"),
+            ("style.safetensors", 2 * 1024**3 + 1, "file_too_large"),
+        ],
+    )
+    def test_a_file_comfy_cloud_would_refuse_is_refused_before_any_request(
+        self, cloud_target, monkeypatch, capsys, tmp_path, name, size, reason
+    ):
+        path = tmp_path / name
+        if size is not None:
+            with path.open("wb") as f:
+                f.truncate(size)  # sparse: no 2 GB written to disk
+
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(path), "--type", "loras"], {}, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["reason"] == reason
+        assert cloud.calls == [] and storage.puts == []
+
+    def test_exactly_2_gib_is_accepted_locally(self, tmp_path):
+        path = tmp_path / "big.SAFETENSORS"
+        with path.open("wb") as f:
+            f.truncate(2 * 1024**3)
+        assert assets_library._local_refusal(path) is None
+
+    def test_unknown_type_is_refused_listing_the_valid_ones_before_the_upload(
+        self, cloud_target, monkeypatch, capsys, model_file
+    ):
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "lora"], dict(_UPLOAD_ROUTES), []
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["valid_types"] == _FOLDERS["model_upload_folders"]
+        assert "checkpoints, embeddings, loras, vae" in env["error"]["message"]
+        assert cloud.paths() == ["/api/features"] and storage.puts == []
+
+    def test_without_upload_folders_the_start_call_decides(self, cloud_target, monkeypatch, capsys, model_file):
+        routes = {
+            ("GET", "/api/features"): {"max_upload_size": 1},
+            ("POST", "/api/assets/uploads"): _cloud_error(
+                403, "FEATURE_DISABLED", "Uploading a model file is not enabled for this workspace"
+            ),
+        }
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_refused"
+        assert env["error"]["message"] == "Uploading a model file is not enabled for this workspace"
+        assert env["error"]["details"]["server_code"] == "FEATURE_DISABLED"
+        assert storage.puts == []
+
+    def test_storage_cap_refusal_prints_the_server_message(self, cloud_target, monkeypatch, capsys, model_file):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = _cloud_error(
+            403, "MODEL_STORAGE_LIMIT_REACHED", "Your workspace has used its 1 TB of model storage."
+        )
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, []
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_refused"
+        assert env["error"]["message"] == "Your workspace has used its 1 TB of model storage."
+        assert env["error"]["details"] == {
+            "status": 403,
+            "server_code": "MODEL_STORAGE_LIMIT_REACHED",
+            "operation": "start",
+        }
+        assert storage.puts == [] and "/complete" not in "".join(cloud.paths())
+
+    def test_412_means_the_bytes_already_landed(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [412]
+        )
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert len(storage.puts) == 1 and cloud.paths("POST").count("/api/assets/uploads") == 1
+
+    def test_a_put_with_no_answer_starts_one_fresh_upload(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        import requests
+
+        lost = requests.ConnectionError(f"Max retries exceeded with url: {_SIGNED}1")
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [lost, 200]
+        )
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert [p["url"] for p in storage.puts] == [f"{_SIGNED}1", f"{_SIGNED}2"]
+        assert "/api/assets/uploads/00000000-0000-0000-0000-000000000002/complete" in cloud.paths()
+        assert "SECRETSIG" not in everything
+
+    def test_the_fresh_upload_is_bounded(self, cloud_target, monkeypatch, capsys, model_file):
+        import requests
+
+        lost = requests.ConnectionError(f"Max retries exceeded with url: {_SIGNED}1")
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [lost, 503]
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["status"] == 503 and env["error"]["details"]["attempts"] == 2
+        assert len(storage.puts) == 2 and not any(p.endswith("/complete") for p in cloud.paths())
+        assert "SECRETSIG" not in everything
+
+    def test_a_refused_put_is_not_retried(self, cloud_target, monkeypatch, capsys, model_file):
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [403]
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert len(storage.puts) == 1 and "SECRETSIG" not in everything
+
+    def test_a_failed_task_exits_non_zero_with_its_message(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = {
+            "id": "task-1",
+            "status": "failed",
+            "error_message": "This file is not a valid .safetensors file.",
+            "result": {"success": False, "error": "This file is not a valid .safetensors file."},
+        }
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert "This file is not a valid .safetensors file." in env["error"]["message"]
+        assert env["error"]["details"] == {"task_id": "task-1", "status": "failed"}
+
+    def test_task_reads_ride_out_a_brief_5xx(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = [_http_error(503), urllib.error.URLError("reset"), _DONE]
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert cloud.paths().count("/api/tasks/task-1") == 3
+
+    def test_task_reads_give_up_after_the_window(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = _http_error(503)
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+        assert env["error"]["details"]["status"] == 503
+        assert no_wait[0] >= assets_library._UNANSWERED_WINDOW_SECONDS
+        assert no_wait[0] < assets_library._UNANSWERED_WINDOW_SECONDS + 2 * assets_library._TASK_POLL_SECONDS
+
+    def test_a_task_4xx_ends_the_wait_at_once(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = _http_error(404)
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and cloud.paths().count("/api/tasks/task-1") == 1
+
+    def test_a_task_that_never_ends_times_out(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/tasks/task-1")] = {"id": "task-1", "status": "running"}
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_timeout"
+        assert env["error"]["details"] == {"task_id": "task-1", "status": "running"}
+
+    @pytest.mark.parametrize(
+        ("route", "answer"),
+        [
+            (("POST", "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete"), b"<html>proxy</html>"),
+            (("POST", "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete"), {"status": "created"}),
+            (("GET", "/api/tasks/task-1"), {"id": "task-1", "status": "completed", "result": {"success": True}}),
+            (("POST", "/api/assets/uploads"), {"upload_id": "u", "method": "PUT", "headers": {}}),
+        ],
+    )
+    def test_an_unusable_answer_is_an_error_not_a_success(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, route, answer
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[route] = answer
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["ok"] is False and env["error"]["code"] == "cloud_http_error"
+
+    def test_new_codes_are_registered(self):
+        for code in ("asset_upload_invalid", "asset_upload_refused", "asset_upload_failed", "asset_upload_timeout"):
+            assert error_codes.is_registered(code), code

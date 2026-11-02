@@ -1,5 +1,5 @@
-"""``comfy assets library`` — browse and borrow assets from Comfy Cloud's
-asset library.
+"""``comfy assets library`` — browse, borrow and upload assets in Comfy
+Cloud's asset library.
 
 Mirrors the cloud-saved-workflow subcommands in ``workflow.py`` (``list``,
 ``get``, ...): thin Typer commands over ``cloud_http``'s shared helpers,
@@ -10,6 +10,9 @@ emitting a JSON envelope via the renderer. Cloud-only — there is no local
 from __future__ import annotations
 
 import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -23,7 +26,7 @@ from comfy_cli.command.cloud_http import (
 )
 from comfy_cli.output.renderer import get_renderer
 
-app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow).")
+app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow, upload).")
 
 # A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in
 # the canonical ``blake3:<hex>`` wire form. Comfy Cloud's from-hash lookup
@@ -336,3 +339,345 @@ def ensure_cmd(
         "created_new": status == 201,
     }
     renderer.emit(payload, command="assets library ensure", where="cloud")
+
+
+# What Comfy Cloud takes from `upload` (POST /api/assets/uploads): one
+# `.safetensors` file of 1 byte to 2 GiB under a bare name of at most 255 bytes.
+# A pickle format (.ckpt, .pt, .bin) is refused: it can run code when loaded.
+_MAX_UPLOAD_BYTES = 2 * 1024**3
+_MAX_FILENAME_BYTES = 255
+# The first upload plus one fresh one after a PUT that got no answer or a 5xx.
+# Fresh, not a second PUT to the same URL: a signed URL lasts 15 minutes, which
+# a slow 2 GB transfer can use up.
+_UPLOAD_STARTS = 2
+# Storage answers 412 to a PUT for an object that already exists. Each upload
+# id names a fresh object, so it can only be this upload's: the bytes landed.
+_ALREADY_WRITTEN = 412
+_PUT_TIMEOUT = (10, 600)
+# Storing the file (hashing up to 2 GiB) normally takes a minute or two.
+_TASK_POLL_SECONDS = 2.0
+_TASK_WAIT_SECONDS = 15 * 60.0
+# A task read that gets a 5xx or no answer is retried for this long from the
+# first failure in a row; a 4xx ends the wait at once.
+_UNANSWERED_WINDOW_SECONDS = 60.0
+_TASK_DONE = frozenset({"completed", "failed", "cancelled"})
+_REFUSAL_HINTS = {
+    "FEATURE_DISABLED": "this workspace cannot take model uploads yet",
+    "MODEL_STORAGE_LIMIT_REACHED": "delete models you no longer need, or move to a plan with more model storage",
+    "UNSUPPORTED_FILE_TYPE": "convert the model to .safetensors",
+    "UNSUPPORTED_MODEL_TYPE": "pass a --type from `model_upload_folders` in GET /api/features",
+    "FILE_TOO_LARGE": "files can be up to 2 GB",
+}
+_sleep = time.sleep
+_clock = time.monotonic
+
+
+@dataclass(frozen=True)
+class _UploadItem:
+    """What ``UploadProgressReporter`` reads about the file."""
+
+    filename: str
+    size_bytes: int
+    kind: str = "model"
+
+
+class _PutFailed(Exception):
+    """The PUT did not land; ``args[0]`` is the status, or ``None`` when no answer came."""
+
+
+def _local_refusal(path: Path) -> tuple[str, str] | None:
+    """``(reason, message)`` when Comfy Cloud would refuse this file, else ``None``."""
+    name = path.name
+    if not name.lower().endswith(".safetensors"):
+        return "unsupported_file_type", (
+            f"{name} is not a .safetensors file; only .safetensors model files can be uploaded "
+            "(a pickle format such as .ckpt, .pt or .bin can run code when it is loaded)"
+        )
+    try:
+        bad = len(name.encode("utf-8")) > _MAX_FILENAME_BYTES
+    except UnicodeEncodeError:  # not valid UTF-8
+        bad = True
+    if (
+        bad
+        or name.startswith(".")
+        or ".." in name
+        or "\\" in name
+        or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name)
+    ):
+        return "bad_filename", (
+            f"{name!r} is not a file name Comfy Cloud accepts: at most {_MAX_FILENAME_BYTES} bytes of UTF-8, "
+            "no leading dot, no '..', backslash or control characters"
+        )
+    if not path.is_file():
+        return "file_not_found", f"{path} does not exist or is not a file"
+    size = path.stat().st_size
+    if size < 1:
+        return "empty_file", f"{path} is empty"
+    if size > _MAX_UPLOAD_BYTES:
+        return "file_too_large", f"{name} is {size} bytes; files can be up to 2 GB ({_MAX_UPLOAD_BYTES} bytes)"
+    return None
+
+
+def _http_failure(renderer, e: Exception, operation: str) -> typer.Exit:
+    """Emit the envelope for a failed cloud API call; return the Exit to raise.
+
+    A 400/403/404 carrying Comfy Cloud's ``{"code", "message"}`` body is a
+    refusal: its message is shown as it is, under ``asset_upload_refused``.
+    """
+    import json
+    import urllib.error
+
+    from comfy_cli.command._cloud_errors import emit_status_error, retry_after_from_headers
+
+    if not isinstance(e, urllib.error.HTTPError):
+        renderer.error(
+            code="cloud_http_error",
+            message=f"{operation} failed: {e}",
+            hint="check network / `comfy cloud whoami`",
+            details={"operation": operation},
+        )
+        return typer.Exit(code=1)
+    try:
+        body = (e.read(1000) or b"").decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 — a failed read must not pre-empt the envelope
+        body = ""
+    try:
+        parsed = json.loads(body)
+    except (ValueError, RecursionError):
+        parsed = None
+    server_code = parsed.get("code") if isinstance(parsed, dict) else None
+    server_message = parsed.get("message") if isinstance(parsed, dict) else None
+    if (
+        e.code in (400, 403, 404)
+        and isinstance(server_code, str)
+        and isinstance(server_message, str)
+        and server_message
+    ):
+        renderer.error(
+            code="asset_upload_refused",
+            message=server_message,
+            hint=_REFUSAL_HINTS.get(server_code, "`details.server_code` names the refusal; a retry gets the same"),
+            details={"status": e.code, "server_code": server_code, "operation": operation},
+        )
+    elif e.code == 401:
+        renderer.error(
+            code="cloud_unauthorized",
+            message=f"HTTP 401 during {operation}",
+            hint="re-run `comfy cloud login`",
+            details={"status": 401, "operation": operation},
+        )
+    else:
+        emit_status_error(
+            renderer,
+            status=e.code,
+            retry_after=retry_after_from_headers(getattr(e, "headers", None)),
+            operation=operation,
+            message=f"HTTP {e.code} during {operation}",
+            hint="check `details.body` for the server's message",
+            details={"status": e.code, "body": body, "operation": operation},
+        )
+    return typer.Exit(code=1)
+
+
+def _unexpected(renderer, route: str, problem: str, **details: Any) -> typer.Exit:
+    renderer.error(
+        code="cloud_http_error",
+        message=f"unexpected response from {route} ({problem})",
+        hint="check whether a proxy or captive portal is intercepting the request",
+        details=details,
+    )
+    return typer.Exit(code=1)
+
+
+def _call(renderer, target, operation: str, parts: tuple[str, ...], body: dict | None = None) -> dict:
+    """One JSON call to the cloud API; anything but a JSON object is a mapped error."""
+    import urllib.error
+
+    route = "/api/" + "/".join(parts)
+    method = "GET" if body is None else "POST"
+    try:
+        _, parsed = http_request(target.url(*parts), target, method=method, body=body, strict_json=True)
+    except (urllib.error.URLError, OSError) as e:
+        raise _http_failure(renderer, e, operation) from e
+    except ResponseUnparseable as e:
+        raise _unexpected(renderer, route, "body was not valid JSON", operation=operation) from e
+    if not isinstance(parsed, dict):
+        raise _unexpected(renderer, route, "expected a JSON object", operation=operation)
+    return parsed
+
+
+def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
+    """Stream the file to its signed URL, or raise ``_PutFailed``.
+
+    A transport exception is dropped, never shown: its text quotes the signed
+    URL, whose query string is a live credential.
+    """
+    import requests
+
+    from comfy_cli.builder_api import _CountingReader
+
+    try:
+        with path.open("rb") as f:
+            resp = requests.put(
+                upload_url,
+                data=_CountingReader(f, progress),
+                headers=headers,
+                timeout=_PUT_TIMEOUT,
+                allow_redirects=False,  # the URL names one object; never divert the file
+            )
+    except requests.RequestException:
+        raise _PutFailed(None) from None
+    if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
+        raise _PutFailed(resp.status_code)
+
+
+def _wait_for_task(renderer, target, task_id: str) -> dict:
+    """Read the task until it ends, riding out a brief 5xx or dropped connection."""
+    import urllib.error
+    import urllib.parse
+
+    url = target.url("tasks", urllib.parse.quote(task_id, safe=""))
+    deadline = _clock() + _TASK_WAIT_SECONDS
+    unanswered_since: float | None = None
+    status = None
+    while True:
+        try:
+            _, task = http_request(url, target, strict_json=True)
+        except (urllib.error.URLError, OSError) as e:
+            now = _clock()
+            unanswered_since = now if unanswered_since is None else unanswered_since
+            refused = isinstance(e, urllib.error.HTTPError) and e.code < 500
+            if refused or now - unanswered_since >= _UNANSWERED_WINDOW_SECONDS:
+                raise _http_failure(renderer, e, "task") from e
+        except ResponseUnparseable as e:
+            raise _unexpected(renderer, "/api/tasks", "body was not valid JSON", task_id=task_id) from e
+        else:
+            unanswered_since = None
+            if not isinstance(task, dict) or not isinstance(task.get("status"), str):
+                raise _unexpected(renderer, "/api/tasks", "no task status", task_id=task_id)
+            status = task["status"]
+            if status in _TASK_DONE:
+                return task
+        if _clock() >= deadline:
+            renderer.error(
+                code="asset_upload_timeout",
+                message=f"Comfy Cloud was still storing the file after {int(_TASK_WAIT_SECONDS)}s",
+                hint="storing goes on without this command; check `comfy assets library ls --tags models` later",
+                details={"task_id": task_id, "status": status},
+            )
+            raise typer.Exit(code=1)
+        _sleep(_TASK_POLL_SECONDS)
+
+
+@app.command("upload", help="Upload a .safetensors model file (up to 2 GB) into your Comfy Cloud model library.")
+@tracking.track_command("assets")
+def upload_cmd(
+    file: Annotated[Path, typer.Argument(help="The .safetensors file to upload.", show_default=False)],
+    folder: Annotated[
+        str, typer.Option("--type", help="Model folder to file it under (e.g. loras, checkpoints, vae).")
+    ],
+    where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
+):
+    import urllib.parse
+
+    from comfy_cli.command.build_upload_progress import UploadProgressReporter
+
+    renderer = get_renderer()
+    refusal = _local_refusal(file)
+    if refusal is not None:
+        renderer.error(
+            code="asset_upload_invalid", message=refusal[1], details={"reason": refusal[0], "file": str(file)}
+        )
+        raise typer.Exit(code=1)
+    target = cloud_target_or_local_error(where, renderer)
+
+    # Absent while uploads are off for the workspace, or when the server could
+    # not evaluate its flags. Either way the start call decides, and it refuses
+    # before any byte is sent.
+    folders = _call(renderer, target, "features", ("features",)).get("model_upload_folders")
+    if folders is not None:
+        if not isinstance(folders, list) or not all(isinstance(f, str) for f in folders):
+            raise _unexpected(renderer, "/api/features", "model_upload_folders is not a list of strings")
+        if folder not in folders:
+            renderer.error(
+                code="asset_upload_invalid",
+                message=f"{folder!r} is not a model type Comfy Cloud takes uploads for; pick one of: {', '.join(folders)}",
+                details={"reason": "unsupported_model_type", "type": folder, "valid_types": folders},
+            )
+            raise typer.Exit(code=1)
+
+    item = _UploadItem(filename=file.name, size_bytes=file.stat().st_size)
+    tags = ["models", folder]
+    reporter = UploadProgressReporter(renderer)
+    reporter.plan([item], already_held=0)
+    for attempt in range(1, _UPLOAD_STARTS + 1):
+        start = _call(
+            renderer,
+            target,
+            "start",
+            ("assets", "uploads"),
+            {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags},
+        )
+        upload_id, upload_url, headers = start.get("upload_id"), start.get("upload_url"), start.get("headers")
+        if not (
+            isinstance(upload_id, str)
+            and upload_id
+            and isinstance(upload_url, str)
+            and upload_url
+            and start.get("method") == "PUT"
+            and isinstance(headers, dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items())
+        ):
+            # Never the URL itself in the error: it is a credential.
+            raise _unexpected(renderer, "/api/assets/uploads", "expected upload_id, upload_url, method PUT and headers")
+        try:
+            with reporter.uploading(item, 1, 1) as progress:
+                _put(upload_url, headers, file, progress)
+            break
+        except _PutFailed as e:
+            status = e.args[0]
+            if (status is None or status >= 500) and attempt < _UPLOAD_STARTS:
+                renderer.warn("The upload to storage did not go through; starting a fresh upload.")
+                continue
+            answer = "no response" if status is None else f"HTTP {status}"
+            renderer.error(
+                code="asset_upload_failed",
+                message=f"sending {item.filename} to storage failed ({answer})",
+                hint="retry; nothing was added to the library",
+                details={"status": status, "upload_id": upload_id, "attempts": attempt},
+            )
+            raise typer.Exit(code=1) from None
+
+    complete = ("assets", "uploads", urllib.parse.quote(upload_id, safe=""), "complete")
+    task_id = _call(renderer, target, "complete", complete, {"filename": item.filename, "tags": tags}).get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise _unexpected(renderer, "/api/assets/uploads/complete", "no task_id", upload_id=upload_id)
+    if renderer.is_pretty():
+        renderer.info("Uploaded; Comfy Cloud is checking and storing the file.")
+    task = _wait_for_task(renderer, target, task_id)
+
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    if task["status"] != "completed" or result.get("success") is False:
+        reason = task.get("error_message") or result.get("error") or f"the task ended {task['status']}"
+        renderer.error(
+            code="asset_upload_failed",
+            message=f"Comfy Cloud did not store {item.filename}: {reason}",
+            hint="the message says why; fix the file and upload it again",
+            details={"task_id": task_id, "status": task["status"]},
+        )
+        raise typer.Exit(code=1)
+    asset_id = result.get("asset_id")
+    if not isinstance(asset_id, str) or not asset_id:
+        raise _unexpected(renderer, "/api/tasks", "a completed task with no asset_id", task_id=task_id)
+    payload = {
+        "id": asset_id,
+        "name": result["filename"] if isinstance(result.get("filename"), str) else item.filename,
+        "folder": folder,
+        "hash": result["hash"] if isinstance(result.get("hash"), str) else None,
+        "size": item.size_bytes,
+        "task_id": task_id,
+    }
+    if renderer.is_pretty():
+        renderer.success(f"Added {payload['name']} to {folder}")
+        renderer.info(f"asset id: {asset_id}\nhash: {payload['hash'] or '-'}")
+    renderer.emit(payload, command="assets library upload", where="cloud", changed=True)

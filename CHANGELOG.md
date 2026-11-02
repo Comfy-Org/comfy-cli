@@ -17,6 +17,19 @@ history.
 
 ### Added
 
+- `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
+  model file of up to 2 GB into your Comfy Cloud workspace's model library,
+  e.g. `comfy assets library upload my_style.safetensors --type loras`. The
+  file name, size and `--type` are checked before anything is sent (`--type`
+  against the folders the workspace takes), the bytes stream straight to
+  storage with the same progress line and events as `comfy build push`, and
+  the command waits for Comfy Cloud to store the file, then prints the asset
+  id, name, folder and hash (`--json`: the `assets_library` schema). A
+  refusal from Comfy Cloud, such as uploads being off for the workspace or the
+  model storage cap being reached, is shown with the server's message as
+  `asset_upload_refused`; new codes `asset_upload_invalid`,
+  `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
+  can end.
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
