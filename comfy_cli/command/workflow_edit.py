@@ -7,8 +7,9 @@ consumer (the cloud agent) applies; the file write is the single-writer local
 path. Both come from the same ``comfy_cli.workflow_ops`` core, so a local edit
 and a server-side merge stay in lock-step.
 
-Node/link identity is leaderless (random 53-bit ints) so concurrent edits never
-collide; widgets are addressed by name, not array index. See ``workflow_ops``.
+Node/link identity is leaderless (random ints with bit 40 set, below ``2**52``),
+with collisions possible between random draws; widgets are addressed by name,
+not array index. See ``workflow_ops``.
 """
 
 from __future__ import annotations
