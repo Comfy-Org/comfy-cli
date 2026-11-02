@@ -1628,6 +1628,46 @@ class TestUploadFileErrors:
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert "SECRETSIG" not in everything
 
+    def test_a_file_error_while_requests_sizes_the_body_fails_without_a_retry(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        # Requests sizes the body with `os.fstat(body.fileno())` before its first
+        # read; on a network filesystem that can raise a stale handle, which is
+        # not a RequestException and comes before `_Reader.read` sees anything.
+        import errno
+
+        import requests
+        import requests.utils
+
+        class _Os:
+            def __getattr__(self, name):
+                return getattr(os, name)
+
+            def fstat(self, fd):
+                raise OSError(errno.ESTALE, "Stale NFS file handle")
+
+        class _Preparing(_Storage):
+            attempts = 0
+
+            def __call__(self, url, data=None, headers=None, **kw):
+                self.attempts += 1
+                requests.Request("PUT", url, data=data, headers=headers).prepare()
+                return super().__call__(url, data=data, headers=headers, **kw)
+
+        monkeypatch.setattr(requests.utils, "os", _Os())
+        storage = _Preparing([200, 200])
+        env, rc, cloud, storage, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200, 200], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["reason"] == "file_unreadable"
+        assert env["error"]["details"]["attempts"] == 1
+        assert "Stale NFS file handle" in env["error"]["message"]
+        assert storage.attempts == 1 and storage.puts == []
+        assert cloud.paths("POST").count("/api/assets/uploads") == 1
+        assert "SECRETSIG" not in everything
+
 
 def _throttled(retry_after: str | None = None):
     headers = {"Retry-After": retry_after} if retry_after is not None else {}

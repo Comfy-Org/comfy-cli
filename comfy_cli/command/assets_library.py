@@ -570,9 +570,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
     """Stream the file to its signed URL, or raise ``_PutFailed``.
 
     A transport exception is dropped, never shown: its text quotes the signed
-    URL, whose query string is a live credential. A file that cannot be opened
-    or read raises ``_FileUnreadable`` instead: a fresh upload would fail the
-    same way, so it is not a transport failure to retry.
+    URL, whose query string is a live credential. A file that cannot be opened,
+    sized or read raises ``_FileUnreadable`` instead: a fresh upload would fail
+    the same way, so it is not a transport failure to retry.
     """
     import requests
 
@@ -609,7 +609,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
                 raise _FileUnreadable(reader.failed) from None
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None
-            raise
+            # Not from the transport (Requests wraps those): the file failed
+            # before its first read, e.g. a stale handle on the size lookup.
+            raise _FileUnreadable(e) from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 
