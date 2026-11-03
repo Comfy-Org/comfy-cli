@@ -1,0 +1,1355 @@
+{
+  "provenance": {
+    "package": "uuid",
+    "version": "11.1.1",
+    "consumer": "savedWorkflowService.ts and savedWorkflowLink.ts: uuid.validate(id) && id === id.toLowerCase()",
+    "regex_sha256": "774bc4bc767a58458dfdd252430d96b71b3d380ac241b50df6cb757aaa1b4783"
+  },
+  "cases": [
+    {
+      "id": "version-0-variant-0",
+      "input": "11111111-1111-0111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-1",
+      "input": "11111111-1111-0111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-2",
+      "input": "11111111-1111-0111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-3",
+      "input": "11111111-1111-0111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-4",
+      "input": "11111111-1111-0111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-5",
+      "input": "11111111-1111-0111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-6",
+      "input": "11111111-1111-0111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-7",
+      "input": "11111111-1111-0111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-8",
+      "input": "11111111-1111-0111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-9",
+      "input": "11111111-1111-0111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-a",
+      "input": "11111111-1111-0111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-b",
+      "input": "11111111-1111-0111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-c",
+      "input": "11111111-1111-0111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-d",
+      "input": "11111111-1111-0111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-e",
+      "input": "11111111-1111-0111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-0-variant-f",
+      "input": "11111111-1111-0111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-0",
+      "input": "11111111-1111-1111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-1",
+      "input": "11111111-1111-1111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-2",
+      "input": "11111111-1111-1111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-3",
+      "input": "11111111-1111-1111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-4",
+      "input": "11111111-1111-1111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-5",
+      "input": "11111111-1111-1111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-6",
+      "input": "11111111-1111-1111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-7",
+      "input": "11111111-1111-1111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-8",
+      "input": "11111111-1111-1111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-1-variant-9",
+      "input": "11111111-1111-1111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-1-variant-a",
+      "input": "11111111-1111-1111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-1-variant-b",
+      "input": "11111111-1111-1111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-1-variant-c",
+      "input": "11111111-1111-1111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-d",
+      "input": "11111111-1111-1111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-e",
+      "input": "11111111-1111-1111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-1-variant-f",
+      "input": "11111111-1111-1111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-0",
+      "input": "11111111-1111-2111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-1",
+      "input": "11111111-1111-2111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-2",
+      "input": "11111111-1111-2111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-3",
+      "input": "11111111-1111-2111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-4",
+      "input": "11111111-1111-2111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-5",
+      "input": "11111111-1111-2111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-6",
+      "input": "11111111-1111-2111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-7",
+      "input": "11111111-1111-2111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-8",
+      "input": "11111111-1111-2111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-2-variant-9",
+      "input": "11111111-1111-2111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-2-variant-a",
+      "input": "11111111-1111-2111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-2-variant-b",
+      "input": "11111111-1111-2111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-2-variant-c",
+      "input": "11111111-1111-2111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-d",
+      "input": "11111111-1111-2111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-e",
+      "input": "11111111-1111-2111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-2-variant-f",
+      "input": "11111111-1111-2111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-0",
+      "input": "11111111-1111-3111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-1",
+      "input": "11111111-1111-3111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-2",
+      "input": "11111111-1111-3111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-3",
+      "input": "11111111-1111-3111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-4",
+      "input": "11111111-1111-3111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-5",
+      "input": "11111111-1111-3111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-6",
+      "input": "11111111-1111-3111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-7",
+      "input": "11111111-1111-3111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-8",
+      "input": "11111111-1111-3111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-3-variant-9",
+      "input": "11111111-1111-3111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-3-variant-a",
+      "input": "11111111-1111-3111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-3-variant-b",
+      "input": "11111111-1111-3111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-3-variant-c",
+      "input": "11111111-1111-3111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-d",
+      "input": "11111111-1111-3111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-e",
+      "input": "11111111-1111-3111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-3-variant-f",
+      "input": "11111111-1111-3111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-0",
+      "input": "11111111-1111-4111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-1",
+      "input": "11111111-1111-4111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-2",
+      "input": "11111111-1111-4111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-3",
+      "input": "11111111-1111-4111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-4",
+      "input": "11111111-1111-4111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-5",
+      "input": "11111111-1111-4111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-6",
+      "input": "11111111-1111-4111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-7",
+      "input": "11111111-1111-4111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-8",
+      "input": "11111111-1111-4111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-4-variant-9",
+      "input": "11111111-1111-4111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-4-variant-a",
+      "input": "11111111-1111-4111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-4-variant-b",
+      "input": "11111111-1111-4111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-4-variant-c",
+      "input": "11111111-1111-4111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-d",
+      "input": "11111111-1111-4111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-e",
+      "input": "11111111-1111-4111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-4-variant-f",
+      "input": "11111111-1111-4111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-0",
+      "input": "11111111-1111-5111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-1",
+      "input": "11111111-1111-5111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-2",
+      "input": "11111111-1111-5111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-3",
+      "input": "11111111-1111-5111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-4",
+      "input": "11111111-1111-5111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-5",
+      "input": "11111111-1111-5111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-6",
+      "input": "11111111-1111-5111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-7",
+      "input": "11111111-1111-5111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-8",
+      "input": "11111111-1111-5111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-5-variant-9",
+      "input": "11111111-1111-5111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-5-variant-a",
+      "input": "11111111-1111-5111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-5-variant-b",
+      "input": "11111111-1111-5111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-5-variant-c",
+      "input": "11111111-1111-5111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-d",
+      "input": "11111111-1111-5111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-e",
+      "input": "11111111-1111-5111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-5-variant-f",
+      "input": "11111111-1111-5111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-0",
+      "input": "11111111-1111-6111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-1",
+      "input": "11111111-1111-6111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-2",
+      "input": "11111111-1111-6111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-3",
+      "input": "11111111-1111-6111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-4",
+      "input": "11111111-1111-6111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-5",
+      "input": "11111111-1111-6111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-6",
+      "input": "11111111-1111-6111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-7",
+      "input": "11111111-1111-6111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-8",
+      "input": "11111111-1111-6111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-6-variant-9",
+      "input": "11111111-1111-6111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-6-variant-a",
+      "input": "11111111-1111-6111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-6-variant-b",
+      "input": "11111111-1111-6111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-6-variant-c",
+      "input": "11111111-1111-6111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-d",
+      "input": "11111111-1111-6111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-e",
+      "input": "11111111-1111-6111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-6-variant-f",
+      "input": "11111111-1111-6111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-0",
+      "input": "11111111-1111-7111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-1",
+      "input": "11111111-1111-7111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-2",
+      "input": "11111111-1111-7111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-3",
+      "input": "11111111-1111-7111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-4",
+      "input": "11111111-1111-7111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-5",
+      "input": "11111111-1111-7111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-6",
+      "input": "11111111-1111-7111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-7",
+      "input": "11111111-1111-7111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-8",
+      "input": "11111111-1111-7111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-7-variant-9",
+      "input": "11111111-1111-7111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-7-variant-a",
+      "input": "11111111-1111-7111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-7-variant-b",
+      "input": "11111111-1111-7111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-7-variant-c",
+      "input": "11111111-1111-7111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-d",
+      "input": "11111111-1111-7111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-e",
+      "input": "11111111-1111-7111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-7-variant-f",
+      "input": "11111111-1111-7111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-0",
+      "input": "11111111-1111-8111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-1",
+      "input": "11111111-1111-8111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-2",
+      "input": "11111111-1111-8111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-3",
+      "input": "11111111-1111-8111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-4",
+      "input": "11111111-1111-8111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-5",
+      "input": "11111111-1111-8111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-6",
+      "input": "11111111-1111-8111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-7",
+      "input": "11111111-1111-8111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-8",
+      "input": "11111111-1111-8111-8111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-8-variant-9",
+      "input": "11111111-1111-8111-9111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-8-variant-a",
+      "input": "11111111-1111-8111-a111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-8-variant-b",
+      "input": "11111111-1111-8111-b111-111111111111",
+      "accepted": true
+    },
+    {
+      "id": "version-8-variant-c",
+      "input": "11111111-1111-8111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-d",
+      "input": "11111111-1111-8111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-e",
+      "input": "11111111-1111-8111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-8-variant-f",
+      "input": "11111111-1111-8111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-0",
+      "input": "11111111-1111-9111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-1",
+      "input": "11111111-1111-9111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-2",
+      "input": "11111111-1111-9111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-3",
+      "input": "11111111-1111-9111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-4",
+      "input": "11111111-1111-9111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-5",
+      "input": "11111111-1111-9111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-6",
+      "input": "11111111-1111-9111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-7",
+      "input": "11111111-1111-9111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-8",
+      "input": "11111111-1111-9111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-9",
+      "input": "11111111-1111-9111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-a",
+      "input": "11111111-1111-9111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-b",
+      "input": "11111111-1111-9111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-c",
+      "input": "11111111-1111-9111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-d",
+      "input": "11111111-1111-9111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-e",
+      "input": "11111111-1111-9111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-9-variant-f",
+      "input": "11111111-1111-9111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-0",
+      "input": "11111111-1111-a111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-1",
+      "input": "11111111-1111-a111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-2",
+      "input": "11111111-1111-a111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-3",
+      "input": "11111111-1111-a111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-4",
+      "input": "11111111-1111-a111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-5",
+      "input": "11111111-1111-a111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-6",
+      "input": "11111111-1111-a111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-7",
+      "input": "11111111-1111-a111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-8",
+      "input": "11111111-1111-a111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-9",
+      "input": "11111111-1111-a111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-a",
+      "input": "11111111-1111-a111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-b",
+      "input": "11111111-1111-a111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-c",
+      "input": "11111111-1111-a111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-d",
+      "input": "11111111-1111-a111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-e",
+      "input": "11111111-1111-a111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-a-variant-f",
+      "input": "11111111-1111-a111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-0",
+      "input": "11111111-1111-b111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-1",
+      "input": "11111111-1111-b111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-2",
+      "input": "11111111-1111-b111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-3",
+      "input": "11111111-1111-b111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-4",
+      "input": "11111111-1111-b111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-5",
+      "input": "11111111-1111-b111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-6",
+      "input": "11111111-1111-b111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-7",
+      "input": "11111111-1111-b111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-8",
+      "input": "11111111-1111-b111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-9",
+      "input": "11111111-1111-b111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-a",
+      "input": "11111111-1111-b111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-b",
+      "input": "11111111-1111-b111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-c",
+      "input": "11111111-1111-b111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-d",
+      "input": "11111111-1111-b111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-e",
+      "input": "11111111-1111-b111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-b-variant-f",
+      "input": "11111111-1111-b111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-0",
+      "input": "11111111-1111-c111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-1",
+      "input": "11111111-1111-c111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-2",
+      "input": "11111111-1111-c111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-3",
+      "input": "11111111-1111-c111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-4",
+      "input": "11111111-1111-c111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-5",
+      "input": "11111111-1111-c111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-6",
+      "input": "11111111-1111-c111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-7",
+      "input": "11111111-1111-c111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-8",
+      "input": "11111111-1111-c111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-9",
+      "input": "11111111-1111-c111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-a",
+      "input": "11111111-1111-c111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-b",
+      "input": "11111111-1111-c111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-c",
+      "input": "11111111-1111-c111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-d",
+      "input": "11111111-1111-c111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-e",
+      "input": "11111111-1111-c111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-c-variant-f",
+      "input": "11111111-1111-c111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-0",
+      "input": "11111111-1111-d111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-1",
+      "input": "11111111-1111-d111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-2",
+      "input": "11111111-1111-d111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-3",
+      "input": "11111111-1111-d111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-4",
+      "input": "11111111-1111-d111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-5",
+      "input": "11111111-1111-d111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-6",
+      "input": "11111111-1111-d111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-7",
+      "input": "11111111-1111-d111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-8",
+      "input": "11111111-1111-d111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-9",
+      "input": "11111111-1111-d111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-a",
+      "input": "11111111-1111-d111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-b",
+      "input": "11111111-1111-d111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-c",
+      "input": "11111111-1111-d111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-d",
+      "input": "11111111-1111-d111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-e",
+      "input": "11111111-1111-d111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-d-variant-f",
+      "input": "11111111-1111-d111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-0",
+      "input": "11111111-1111-e111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-1",
+      "input": "11111111-1111-e111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-2",
+      "input": "11111111-1111-e111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-3",
+      "input": "11111111-1111-e111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-4",
+      "input": "11111111-1111-e111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-5",
+      "input": "11111111-1111-e111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-6",
+      "input": "11111111-1111-e111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-7",
+      "input": "11111111-1111-e111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-8",
+      "input": "11111111-1111-e111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-9",
+      "input": "11111111-1111-e111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-a",
+      "input": "11111111-1111-e111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-b",
+      "input": "11111111-1111-e111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-c",
+      "input": "11111111-1111-e111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-d",
+      "input": "11111111-1111-e111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-e",
+      "input": "11111111-1111-e111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-e-variant-f",
+      "input": "11111111-1111-e111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-0",
+      "input": "11111111-1111-f111-0111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-1",
+      "input": "11111111-1111-f111-1111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-2",
+      "input": "11111111-1111-f111-2111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-3",
+      "input": "11111111-1111-f111-3111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-4",
+      "input": "11111111-1111-f111-4111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-5",
+      "input": "11111111-1111-f111-5111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-6",
+      "input": "11111111-1111-f111-6111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-7",
+      "input": "11111111-1111-f111-7111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-8",
+      "input": "11111111-1111-f111-8111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-9",
+      "input": "11111111-1111-f111-9111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-a",
+      "input": "11111111-1111-f111-a111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-b",
+      "input": "11111111-1111-f111-b111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-c",
+      "input": "11111111-1111-f111-c111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-d",
+      "input": "11111111-1111-f111-d111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-e",
+      "input": "11111111-1111-f111-e111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "version-f-variant-f",
+      "input": "11111111-1111-f111-f111-111111111111",
+      "accepted": false
+    },
+    {
+      "id": "boundary-256",
+      "input": "00000000-0000-0000-0000-000000000000",
+      "accepted": true
+    },
+    {
+      "id": "boundary-257",
+      "input": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+      "accepted": true
+    },
+    {
+      "id": "boundary-258",
+      "input": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+      "accepted": false
+    },
+    {
+      "id": "boundary-259",
+      "input": "978E5F58-49DC-4A81-8235-A0B91C204A1C",
+      "accepted": false
+    },
+    {
+      "id": "boundary-260",
+      "input": "978e5f58-49dc-4a81-8235-a0b91c204a1c",
+      "accepted": true
+    },
+    {
+      "id": "boundary-261",
+      "input": "978e5f5849dc4a818235a0b91c204a1c",
+      "accepted": false
+    },
+    {
+      "id": "boundary-262",
+      "input": " 978e5f58-49dc-4a81-8235-a0b91c204a1c",
+      "accepted": false
+    },
+    {
+      "id": "boundary-263",
+      "input": "978e5f58-49dc-4a81-8235-a0b91c204a1c\n",
+      "accepted": false
+    },
+    {
+      "id": "boundary-264",
+      "input": "",
+      "accepted": false
+    },
+    {
+      "id": "boundary-265",
+      "input": null,
+      "accepted": false
+    },
+    {
+      "id": "boundary-266",
+      "input": true,
+      "accepted": false
+    },
+    {
+      "id": "boundary-267",
+      "input": 123,
+      "accepted": false
+    },
+    {
+      "id": "boundary-268",
+      "input": {},
+      "accepted": false
+    }
+  ]
+}

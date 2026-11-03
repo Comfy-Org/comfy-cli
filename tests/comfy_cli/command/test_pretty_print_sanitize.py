@@ -764,6 +764,34 @@ def test_local_workflow_list_table_is_inert(pretty):
     assert "boom" in assert_inert(pretty)
 
 
+def test_cloud_workflow_save_receipt_names_the_sidebar_and_is_inert(pretty, tmp_path):
+    """`comfy workflow save --where cloud` prints the sidebar entry it wrote and
+    the record id Cloud returned, which is server-supplied; a warning is printed
+    too, since pretty mode drops `data.warnings`."""
+    from comfy_cli.command import workflow
+
+    src = tmp_path / "wf.json"
+    src.write_text(json.dumps({"nodes": [], "links": []}))
+    record = {"id": EVIL, "name": "flux", "latest_version": 1}
+    target = MagicMock()
+    target.url.side_effect = lambda *parts: "https://cloud.example/api/" + "/".join(parts)
+
+    def _fake_http(url, _target, *, method="GET", body=None):
+        if method == "POST":
+            return (200, {"size": 2})
+        if url.endswith("/content"):
+            return (200, {"workflow_json": {"nodes": [], "links": []}})
+        return (200, {"data": [record]})
+
+    with patch.object(workflow, "_http_request", side_effect=_fake_http):
+        workflow._cloud_save(get_renderer(), target, str(src), "flux", "a note")
+    out = assert_inert(pretty)
+    assert "Cloud Workflows sidebar" in out
+    assert "workflows/flux.json" in out
+    assert "boom" in out
+    assert "--description is ignored" in out
+
+
 def test_cloud_workflow_list_table_is_inert(pretty):
     """The cloud saved-workflow catalog reaches the same sink."""
     from comfy_cli.command import workflow

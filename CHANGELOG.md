@@ -34,6 +34,7 @@ history.
   `asset_upload_refused`; new codes `asset_upload_invalid`,
   `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
   can end.
+
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
@@ -60,9 +61,27 @@ history.
 
 ### Fixed
 
-- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
-  when the server drops the connection partway through its error body, instead
-  of crashing with `IncompleteRead`.
+- `comfy workflow save --where cloud` saves the workflow where the Cloud
+  Workflows sidebar lists it, as `workflows/<name>.json`, so it shows there and
+  opens from it. It used to create only an `/api/workflows` record, which the
+  sidebar never shows. Cloud keeps a record for the file, and `workflow_id` and
+  `latest_version` are read back from it by name; when exactly one record by
+  that name with matching content can't be read back they are null, with a
+  `workflow_record_unresolved` warning, and the save still succeeds. `--json`
+  also carries `filename`, `size` and `modified`. `saved_file_id` identifies
+  the actual userdata file, separately from `workflow_id`; it is null with
+  `saved_file_identity_unavailable` when the server write receipt cannot
+  certify it. A same-name save replaces the
+  workflow, as the Cloud editor's Save does, where it used to add a second
+  record with the same name; the new `--no-overwrite` refuses it with
+  `workflow_exists` instead, on both routes. On Cloud `--description` is now
+  ignored with a `description_ignored` warning, since the file has no
+  description field. A save named `.index.json`, the folder's favorites file,
+  is refused, as are Cloud dotfiles or hidden folders that the sidebar never
+  lists. Cloud deletion now removes the sidebar file as well as its record;
+  ambiguous same-name records are refused before deletion, and partial cleanup
+  reports `workflow_delete_incomplete` with the file's deletion state.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
@@ -111,6 +130,10 @@ history.
   so the positional marker filter is skipped and a value of `"fixed"` stays a
   value. Saves with a real marker have one more value than sockets and still go
   through the filter.
+
+- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
+  when the server drops the connection partway through its error body, instead
+  of crashing with `IncompleteRead`.
 
 ## [1.24.0] - 2026-10-29
 
