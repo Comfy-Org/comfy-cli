@@ -234,7 +234,7 @@ def live_line(progress: JsonObject, *, now: datetime) -> str:
 
 
 def reattach_hint(deployment_id: str) -> str:
-    return f"comfy deploy status --deployment {deployment_id} --watch"
+    return f"comfy deploy show --deployment {deployment_id}"
 
 
 class DeployWatchReporter:
@@ -303,7 +303,8 @@ class DeployWatchReporter:
         self.close()
         self._say(
             f"Stopped watching. Deployment {self._deployment_id} keeps coming up on our side.",
-            hint=f"run `{reattach_hint(self._deployment_id)}` to watch it again",
+            hint=f"run `{reattach_hint(self._deployment_id)}` to inspect it; watching requires "
+            f"`comfy deploy status <spec-PATH> --deployment {self._deployment_id} --watch` with this Build's spec",
         )
 
     # ----- internals -----

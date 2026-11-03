@@ -113,7 +113,7 @@ def _cli_invocation() -> str:
     path that answered "Access is denied".
     """
     argv0 = Path(sys.argv[0] or "")
-    if argv0.name == "__main__.py":
+    if argv0.name == "__main__.py" and argv0.parent.name == "comfy_cli":
         return f"{Path(sys.executable).name} -m comfy_cli"
     name = argv0.name[:-4] if argv0.name.lower().endswith(".exe") else argv0.name
     return name if name in _CLI_NAMES else "comfy"

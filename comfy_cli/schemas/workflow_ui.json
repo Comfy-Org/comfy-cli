@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/workflow_ui.json",
+  "title": "comfy workflow ui --json data payload",
+  "description": "Read-only normal private saved-workflow identity and environment link, emitted only with the matching release capability, authenticated workspace and exact UUID-bound userdata snapshot. Opening still requires the browser's signed-in session; it changes browser selection without mutating compute.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["savedFileId", "workspaceId", "environment", "filename", "verified", "url"],
+  "properties": {
+    "savedFileId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "environment": {"enum": ["standard", "custom"]},
+    "filename": {"type": "string", "pattern": "^workflows/.+\\.json$"},
+    "verified": {"const": true},
+    "url": {"type": "string", "format": "uri"},
+    "deploymentId": {"type": "string", "minLength": 1},
+    "releaseId": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {"if": {"properties": {"environment": {"const": "custom"}}}, "then": {"required": ["deploymentId", "releaseId"]}},
+    {"if": {"properties": {"environment": {"const": "standard"}}}, "then": {"not": {"anyOf": [{"required": ["deploymentId"]}, {"required": ["releaseId"]}]}}}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_ui.json",
+  "title": "comfy deploy ui --json data payload",
+  "description": "A Cloud editor URL confirmed against the authenticated workspace's editor deployment listing and the ready control-plane record. Contains no credentials; opening it still requires the browser's signed-in session.",
+  "type": "object",
+  "required": ["workspaceId", "deploymentId", "releaseId", "url"],
+  "additionalProperties": false,
+  "properties": {
+    "workspaceId": {"type": "string", "minLength": 1},
+    "deploymentId": {"type": "string", "minLength": 1},
+    "releaseId": {"type": "string", "minLength": 1},
+    "url": {"type": "string", "format": "uri"}
+  }
+}

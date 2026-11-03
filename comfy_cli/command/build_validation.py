@@ -204,7 +204,9 @@ def _validate_local_path(entry: JsonObject, context: LocalPathContext) -> None:
         case unreachable:
             assert_never(unreachable)
     if not correct_kind:
-        raise BuildSpecInvalidError(f"{context.location}.localPath must resolve to a {expected}: {local_path!r}")
+        raise BuildSpecInvalidError(
+            f"{context.location}.localPath must resolve to a {expected} under {context.root}: {local_path!r}"
+        )
 
 
 def _validate_authoring_definition(definition: JsonObject, paths: BuildPaths) -> None:

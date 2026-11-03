@@ -18,6 +18,7 @@ from comfy_cli.command import deploy_refs as _deploy_refs
 from comfy_cli.command import deploy_rename as _deploy_rename
 from comfy_cli.command import deploy_rollback as _deploy_rollback
 from comfy_cli.command import deploy_run as _deploy_run
+from comfy_cli.command import deploy_ui as _deploy_ui
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
@@ -206,6 +207,12 @@ def ls_cmd(
     _deploy_ls.run_ls(_deploy_ls.ListRequest(path, include_deleted, workspace, status, limit))
 
 
+@app.command("ui", help="Print a verified authenticated Cloud editor URL for a ready deployment. Read-only.")
+@tracking.track_command("deploy")
+def ui_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_ui.run_ui(_deploy_read.ReadRequest(path, deployment_id))
+
+
 @app.command("show", help="Show one deployment's raw control-plane record.")
 @tracking.track_command("deploy")
 def show_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
@@ -298,7 +305,7 @@ def _render_move_replaced(renderer, builder, error: MoveReplacedError) -> NoRetu
     renderer.error(
         code="deploy_update_replaced",
         message=replaced_message(error.deployment_id, error.release, replacing),
-        hint=f"run `comfy deploy status --deployment {error.deployment_id}` to see the update that replaced it",
+        hint=f"run `comfy deploy show --deployment {error.deployment_id}` to see the update that replaced it",
         details={
             "deployment_id": error.deployment_id,
             "release_id": error.release["id"],

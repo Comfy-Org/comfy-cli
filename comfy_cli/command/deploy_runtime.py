@@ -12,6 +12,7 @@ from typing import Final, NoReturn, TypeVar
 import typer
 from typing_extensions import assert_never
 
+from comfy_cli import credentials
 from comfy_cli.builder_api import BuilderClient, BuilderCredentialRefused
 from comfy_cli.command.build import DEFAULT_BUILDER_URL
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
@@ -121,11 +122,30 @@ def terminal_status_error(deployment_id: str, status: str) -> JsonObject:
 class DeployWatchLostError(Exception):
     """The deploy API left a watch's reads unanswered for the whole retry window."""
 
+    code = "deploy_watch_lost"
+
     def __init__(self, deployment_id: str, cause: Exception | None = None, *, message: str | None = None) -> None:
         super().__init__(
             message or f"the deploy API stopped answering while following deployment {deployment_id} ({cause})"
         )
         self.deployment_id = deployment_id
+
+
+class DeployWatchAuthLostError(DeployWatchLostError):
+    """The deploy API refused a watch's read while a refreshable sign-in remains stored.
+
+    The client has already attempted shared session recovery and at most one
+    retry. The deployment may continue remotely, so it is the watch that ended.
+    """
+
+    code = "watch_auth_lost"
+
+    def __init__(self, deployment_id: str) -> None:
+        super().__init__(
+            deployment_id,
+            message=f"the deploy API refused the sign-in (401) while following deployment {deployment_id}, "
+            "after attempting session recovery",
+        )
 
 
 def _unanswered(error: Exception) -> bool:
@@ -139,12 +159,29 @@ def _unanswered(error: Exception) -> bool:
     return error.code == "deploy_server_error" and (error.status is None or error.status >= 500)
 
 
+def _sign_in_refused(client: DeployUpClient, error: Exception) -> bool:
+    """A 401 on a watch's read, from a client whose refreshable sign-in remains.
+
+    A key, a handed token, or a sign-in without a refresh token keeps the
+    sign-in code, because changing that credential is the fix.
+    """
+    if not isinstance(error, DeployAPIError) or error.status != 401:
+        return False
+    return credentials.sign_in_still_stored(getattr(client, "sign_in_base_url", None))
+
+
 def exit_watch_lost(renderer: Renderer, error: DeployWatchLostError, hint: str | None = None) -> NoReturn:
     """Say it is the watch that gave out, not the deployment, and how to pick it up again."""
+    hint = hint or (
+        f"run `{reattach_hint(error.deployment_id)}` to inspect it; watching requires "
+        f"`comfy deploy status <spec-PATH> --deployment {error.deployment_id} --watch` with this Build's spec"
+    )
+    if isinstance(error, DeployWatchAuthLostError):
+        hint = f"{hint}; the stored sign-in was preserved"
     renderer.error(
-        code="deploy_watch_lost",
+        code=error.code,
         message=f"{error}; the deployment may still be coming up",
-        hint=hint or f"run `{reattach_hint(error.deployment_id)}` to watch it again",
+        hint=hint,
         details={"deployment_id": error.deployment_id},
         exit_code=EXIT_WATCH_LOST,
     )
@@ -172,7 +209,9 @@ def poll_deployment(
     The progress a watcher shows rides the same read the loop already makes, so
     watching costs the service nothing it was not already answering. A read the
     service does not answer is retried, and the first of each run of them goes to
-    ``on_unanswered``; past the window this raises ``DeployWatchLostError``.
+    ``on_unanswered``; past the window this raises ``DeployWatchLostError``. A
+    401 session recovery did not clear, with a refreshable sign-in still stored,
+    raises ``DeployWatchAuthLostError`` at once.
     """
     failures, since, started = 0, 0.0, clock()
     while True:
@@ -186,6 +225,8 @@ def poll_deployment(
         # The client maps a timeout, but a connection dropped before the status
         # line or partway through a 200's body escapes it unmapped.
         except (DeployAPIError, ConnectionError, http.client.HTTPException) as error:
+            if _sign_in_refused(client, error):
+                raise DeployWatchAuthLostError(deployment_id) from error
             if not _unanswered(error):
                 raise
             if failures == 0:

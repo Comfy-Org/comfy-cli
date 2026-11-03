@@ -721,17 +721,19 @@ class TestWorkspaceFreeCommands:
         result = self._invoke(["--json", *command])
         assert not isinstance(result.exception, AssertionError), result.exception
 
-    def test_which_still_resolves_the_workspace(self):
+    def test_which_still_resolves_the_workspace(self, tmp_path):
         from typer.testing import CliRunner
 
         import comfy_cli.workspace_manager as workspace_manager_module
         from comfy_cli.cmdline import app
 
-        with patch.object(workspace_manager_module, "check_comfy_repo", return_value=(True, "/sentinel/ComfyUI")):
+        workspace = tmp_path / "ComfyUI"
+        workspace.mkdir()
+        with patch.object(workspace_manager_module, "check_comfy_repo", return_value=(True, str(workspace))):
             result = CliRunner().invoke(app, ["--json", "which"])
 
         assert result.exit_code == 0, result.output
-        assert "/sentinel/ComfyUI" in result.output
+        assert str(workspace) in result.output
 
     def test_gitpython_is_not_imported(self):
         import subprocess

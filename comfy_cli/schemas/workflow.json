@@ -5,6 +5,11 @@
   "type": "object",
   "properties": {
     "workflow": { "type": "string" },
+    "saved_file_id": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Cloud save: actual userdata UUID from the write receipt, distinct from the mirrored workflow_id record. Null when the server cannot certify file identity; do not repeat the save."
+    },
     "count": { "type": "integer" },
     "total": {
       "type": "integer",

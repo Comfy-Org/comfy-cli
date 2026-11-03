@@ -233,7 +233,7 @@ class _Refused(FakeDeploy):
         (
             "PENDING_UPDATE_EXISTS",
             "is waiting on an update, so the rollback was refused",
-            "wait until `comfy deploy status --deployment dep-prod` shows no update",
+            "wait until `comfy deploy show --deployment dep-prod` shows no update",
         ),
         (
             "RELEASE_DELETED",

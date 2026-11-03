@@ -48,8 +48,22 @@ def reset_singleton():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(scope="module")
+def root_cli_ready():
+    """Load the actual CLI before a test's target fake can bind into lazy modules."""
+    from click import Context
+    from typer.main import get_command
+
+    from comfy_cli.cmdline import app as root_app
+
+    root = get_command(root_app)
+    with Context(root) as context:
+        for name in root.list_commands(context):
+            root.get_command(context, name)
+
+
 @pytest.fixture
-def cloud_target(monkeypatch: pytest.MonkeyPatch):
+def cloud_target(monkeypatch: pytest.MonkeyPatch, root_cli_ready):
     from comfy_cli.target import Target
 
     fake = Target(
@@ -738,6 +752,16 @@ class TestUppercaseHex:
         assert json.loads(calls[0]["body"])["hash"] == _HEX.upper()
 
 
+def test_ls_encodes_multiple_tags_as_the_cloud_nonexploded_parameter(cloud_target, monkeypatch, capsys):
+    from urllib.parse import parse_qs, urlsplit
+
+    calls = _patch_urlopen(monkeypatch, {"assets": [], "has_more": False, "total": 0})
+    result = _run(["ls", "--tags", " models, loras ", "--where", "cloud"], capsys)
+    assert result["ok"] is True
+    query = parse_qs(urlsplit(calls[0]["url"]).query)
+    assert query["include_tags"] == ["models,loras"]
+
+
 # --- assets library upload ---------------------------------------------------
 
 _SIGNED = "https://storage.example.com/assets/temp/model-uploads/x.safetensors?X-Goog-Signature=SECRETSIG"
@@ -1148,7 +1172,7 @@ def signed_in(monkeypatch: pytest.MonkeyPatch):
         session=SimpleNamespace(access_token="old-token", base_url="https://cloud.example.com"), forced=0
     )
 
-    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None):
+    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None, rejected_access_token=None):
         if force:
             state.forced += 1
             state.session = SimpleNamespace(access_token="new-token", base_url="https://cloud.example.com")
@@ -1261,7 +1285,7 @@ def stored_login(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(var, raising=False)
     state = SimpleNamespace(login=("a", 1), forced=0)
 
-    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None):
+    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None, rejected_access_token=None):
         if force:
             state.forced += 1
             state.login = (state.login[0], state.login[1] + 1)

@@ -1131,3 +1131,11 @@ def test_permissions_offers_no_cli_grant_it_would_then_refuse(tmp_path: Path, mo
     assert data["grant"] == {}, "`allow` would refuse, so no command is offered"
     assert "agent panel" in data["answer_in"]
     _validate(data)
+
+
+@pytest.mark.parametrize("runner", ["/site-packages/pytest/__main__.py", "/tools/other/__main__.py"])
+def test_embedding_main_module_does_not_change_user_cli_permission_hints(monkeypatch, runner):
+    from comfy_cli.agent.command import _cli_invocation
+
+    monkeypatch.setattr(sys, "argv", [runner])
+    assert _cli_invocation() == "comfy"

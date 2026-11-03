@@ -27,7 +27,7 @@ class _SignIn:
         self.forced = forced
         self.forced_calls = 0
 
-    def __call__(self, *, refresh=True, force=False, allow_clear=True, expect=None):
+    def __call__(self, *, refresh=True, force=False, allow_clear=True, rejected_access_token=None, expect=None):
         if force:
             self.forced_calls += 1
             if not self.forced:
@@ -181,7 +181,7 @@ def test_a_sign_in_to_another_environment_mid_run_is_never_sent_or_refreshed(mon
 
     refreshing: list[bool] = []
 
-    def get_session(*, refresh=True, force=False, allow_clear=True):
+    def get_session(*, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
         if refresh or force:
             refreshing.append(allow_clear)
         return stored
@@ -382,3 +382,28 @@ def test_a_holder_not_bound_to_an_account_refreshes_without_the_account_check(mo
 
     # Then: the refresh is asked exactly as before, with no expectation attached
     assert calls and all("expect" not in kwargs for kwargs in calls)
+
+
+def test_an_account_bound_holder_adopts_the_same_accounts_peer_refresh(login_race) -> None:
+    held = _save_login("a", expires_at=_LATER).access_token
+    token = DataPlaneToken(held, refreshes=True, base_url=_CLOUD, same_account=True)
+    peer = _jwt("a", 2)
+    from comfy_cli.auth import store
+
+    stored = store.get_cloud_session()
+    store.save_cloud_session(
+        base_url=stored.base_url,
+        resource=stored.resource,
+        client_id=stored.client_id,
+        scope=stored.scope,
+        access_token=peer,
+        refresh_token="refresh-a-peer",
+        token_type="Bearer",
+        expires_at=_LATER,
+    )
+
+    assert token.after_rejection() is True
+    assert token.current() == peer
+    assert login_race.refreshed == []
+    assert store.get_cloud_session().refresh_token == "refresh-a-peer"
+    assert token.account_replaced is False

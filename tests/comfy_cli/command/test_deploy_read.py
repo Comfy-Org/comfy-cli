@@ -481,3 +481,25 @@ def test_an_event_with_an_invalid_release_is_refused(release_id, monkeypatch) ->
     # Then
     assert result.exit_code == 1
     assert _envelope(result)["error"]["code"] == "deploy_server_error"
+
+
+def test_watch_recovery_command_is_read_only_and_runs_outside_a_spec(monkeypatch, tmp_path):
+    import shlex
+
+    from comfy_cli.command.deploy_progress import reattach_hint
+
+    builder = FakeBuilder()
+    client = ReadDeploy()
+    _install_clients(monkeypatch, builder, client)
+    status_module = importlib.import_module("comfy_cli.command.deploy_status")
+    monkeypatch.setattr(status_module, "_command_clients", lambda: (builder, client))
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+    assert not Path("comfy-build.yaml").exists()
+    args = shlex.split(reattach_hint("dep-read"))
+    assert args[0] == "comfy"
+    result = runner.invoke(app, ["--json", *args[1:]])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result)["data"]["id"] == "dep-read"
+    assert builder.calls == []
+    assert client.calls == [("show", "dep-read")]
