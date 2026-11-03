@@ -34,6 +34,7 @@ history.
   `asset_upload_refused`; new codes `asset_upload_invalid`,
   `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
   can end.
+
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
@@ -60,9 +61,17 @@ history.
 
 ### Fixed
 
-- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
-  when the server drops the connection partway through its error body, instead
-  of crashing with `IncompleteRead`.
+- Desktop discovery reads both modern and legacy registries. Callers with
+  running-server launch metadata select that exact instance, resolve its model
+  YAML and effective data/input/output paths, and keep ambiguous or relative
+  runtime identities unresolved. The optional discovery fields are documented
+  in the which/env schemas; unrelated launch arguments are excluded.
+
+- `comfy which` and `comfy env` report Desktop's split code, data and model
+  roots without changing launch/install selection. A nonexistent selected
+  workspace no longer succeeds in `which`; discovery reports malformed Desktop
+  configuration and marks inferred data roots as unverified.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
@@ -111,6 +120,10 @@ history.
   so the positional marker filter is skipped and a value of `"fixed"` stays a
   value. Saves with a real marker have one more value than sockets and still go
   through the filter.
+
+- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
+  when the server drops the connection partway through its error body, instead
+  of crashing with `IncompleteRead`.
 
 ## [1.24.0] - 2026-10-29
 
