@@ -1640,19 +1640,23 @@ can reverse two runs' ops at the same stamp. A uuid4 `op_id` minted before this
 amendment starts with a random hex digit, so at an equal stamp it usually
 outranks a new one (whose prefix starts with `1`), where two uuid4 ids were an
 even split. Ordering across processes needs a different stamp, not this
-tiebreak.
+tiebreak. The prefix also carries the minting host's clock, to the nanosecond,
+wherever the `op_id` travels.
 
-**Still refused.** Two guards from `set_dynamic_group_rows` stay until a
-follow-up retires them: a `set_dynamic_group_rows` whose group was already
-written at the batch's stamp, and a `set_widget` to a count or row field an earlier
-`set_dynamic_group_rows` in the batch replaced. Either one refuses the whole
-batch instead of letting the later spec win.
+**Still refused.** Three batch guards stay, and each refuses the whole batch
+instead of letting the later spec win: a `set_dynamic_group_rows` whose group
+was already written at the batch's stamp; a `set_widget` to a count or row
+field an earlier `set_dynamic_group_rows` in the batch replaced; and a second
+`connect` / `disconnect` to the same input. A follow-up may retire the first
+two.
 
 **Wire shape unchanged.** `op_id` is still exactly 32 lowercase hex chars
 (§8.2), the stamp is still `[base_version, actor]`, and `_stamp_key` /
 `_lww_gate` are unchanged. Receivers never parse or regenerate an `op_id`, so
-ops minted before this amendment replay as before, and stamp order still
-converges in any apply order.
+ops minted before this amendment replay as before. One batch shape still lands
+differently by apply order: a sub-widget write followed by a rebuild of its
+selector or count, because the rebuild resets the value but not the stamp
+(comfy-cli #1101).
 
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
