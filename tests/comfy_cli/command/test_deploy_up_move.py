@@ -80,6 +80,133 @@ def test_up_moves_the_one_deployment_onto_the_new_release(tmp_path, monkeypatch)
     jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
 
 
+@pytest.mark.parametrize(("flags", "sent"), [((), None), (("--editor",), True), (("--no-editor",), False)])
+def test_a_move_carries_editor_only_when_a_flag_says(tmp_path, monkeypatch, flags, sent) -> None:
+    # Given one deployment on v4 in a workspace with deployment updates on
+    client = FakeDeploy([_live("dep-1")])
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", *flags)
+
+    # Then the value rides on the move, with no edit of its own
+    assert result.exit_code == 0, result.stderr
+    assert client.move_calls == [("dep-1", 3, "release-5")]
+    assert client.move_editors == [sent]
+    assert client.editor_calls == []
+
+
+def test_a_move_that_lands_without_the_editor_value_asked_is_not_ok_and_keeps_the_move(tmp_path, monkeypatch) -> None:
+    """comfy-deploy keeps a move it took when the editor write fails, and answers the server as it is."""
+    # Given one deployment on v4 whose editor server comfy-deploy cannot turn off
+    client = FakeDeploy([_live("dep-1", editor=True)], keeps_editor=True)
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", "--no-editor")
+
+    # Then the move is reported as made, and the editor as not
+    assert result.exit_code == 1, result.stderr
+    envelope = _envelope(result)
+    assert envelope["ok"] is False
+    assert envelope["changed"] is True
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["data"]["deployment"]["revision"] == 4
+    assert envelope["data"]["previousRelease"] == {"id": "release-4", "version": 4}
+    assert client.move_calls == [("dep-1", 3, "release-5")]
+
+
+def _move_answers_without_editor(client: FakeDeploy) -> None:
+    """comfy-deploy leaves `editor` out of an answer where its lookup of it fails."""
+    original = client.move_deployment
+
+    def move(*args, **kwargs) -> JsonObject:
+        reply = original(*args, **kwargs)
+        reply.pop("editor", None)
+        return reply
+
+    client.move_deployment = move
+
+
+def _reads_after_the_move(client: FakeDeploy, *replies: str) -> None:
+    """Each read after the move, in turn: "fails" answers 503, "omits" leaves `editor` out, "row" is the row."""
+    original = client.get_deployment
+    queue = list(replies)
+
+    def read(deployment_id: str) -> JsonObject:
+        if not client.move_calls or not queue:
+            return original(deployment_id)
+        reply = queue.pop(0)
+        if reply == "fails":
+            raise DeployAPIError("deploy_server_error", "Service Unavailable", status=503, details={"status": 503})
+        row = original(deployment_id)
+        if reply == "omits":
+            row.pop("editor", None)
+        return row
+
+    client.get_deployment = read
+
+
+@pytest.mark.parametrize("keeps_editor", [False, True], ids=["answer_omits_editor", "editor_write_failed"])
+def test_a_move_whose_editor_read_fails_keeps_the_move(tmp_path, monkeypatch, keeps_editor) -> None:
+    """The move was taken, so a read that cannot confirm the editor costs the confirmation, never the move."""
+    # Given a move comfy-deploy takes, answering without `editor` or with the server still on,
+    # and a read after it that answers 503
+    client = FakeDeploy([_live("dep-1", editor=True)], keeps_editor=keeps_editor)
+    if not keeps_editor:
+        _move_answers_without_editor(client)
+    _reads_after_the_move(client, "fails")
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", "--no-editor", "--no-watch")
+
+    # Then the move is reported as made, and the editor as not confirmed
+    assert result.exit_code == 1, result.stderr
+    envelope = _envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["data"]["deployment"]["revision"] == 4
+    assert envelope["data"]["previousRelease"] == {"id": "release-4", "version": 4}
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["error"]["details"] == {
+        "deployment_id": "dep-1",
+        "requested": False,
+        "read_error": "Service Unavailable",
+    }
+    assert client.move_calls == [("dep-1", 3, "release-5")]
+
+
+def test_a_later_read_showing_the_editor_value_asked_confirms_it(tmp_path, monkeypatch) -> None:
+    """The latest read that answers `editor` is the one judged, so a watch read clears an earlier silence."""
+    # Given a move whose answer, and the read after it, leave `editor` out, and a watch read that has it
+    client = FakeDeploy([_live("dep-1", editor=True)])
+    _move_answers_without_editor(client)
+    _reads_after_the_move(client, "omits")
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", "--no-editor")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    envelope = _envelope(result)
+    assert envelope["ok"] is True
+    assert envelope["changed"] is True
+    assert envelope["data"]["deployment"]["revision"] == 4
+
+
+def test_a_later_read_showing_the_other_editor_value_is_not_ok(tmp_path, monkeypatch) -> None:
+    # Given a move whose answer leaves `editor` out, then reads showing the server still on
+    client = FakeDeploy([_live("dep-1", editor=True)], keeps_editor=True)
+    _move_answers_without_editor(client)
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5", "--no-editor")
+
+    # Then the move stands, and the editor is reported as not taken
+    assert result.exit_code == 1, result.stderr
+    envelope = _envelope(result)
+    assert envelope["changed"] is True
+    assert envelope["error"]["code"] == "deploy_editor_unchanged"
+    assert envelope["error"]["details"] == {"deployment_id": "dep-1", "requested": False}
+
+
 def test_up_outside_the_rollout_still_creates_a_deployment_for_the_new_release(tmp_path, monkeypatch) -> None:
     # Given the same deployment, read without a revision
     client = FakeDeploy([_live("dep-1", revision=None)])
@@ -699,8 +826,8 @@ def test_a_move_reply_without_a_revision_is_followed_not_failed(tmp_path, monkey
     )
     original = client.move_deployment
 
-    def move(*args) -> JsonObject:
-        reply = original(*args)
+    def move(*args, **kwargs) -> JsonObject:
+        reply = original(*args, **kwargs)
         reply.pop("revision")
         reply.pop("pendingUpdate")
         return reply

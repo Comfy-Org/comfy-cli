@@ -95,7 +95,15 @@ class DeployClient:
 
     @classmethod
     def from_credentials(cls, base_url: str | None = None) -> DeployClient:
-        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        """Build a client from a credential handed in by env when one is set, else from the sign-in.
+
+        ``COMFY_CLOUD_AUTH_TOKEN``, then ``COMFY_CLOUD_API_KEY``, outrank the
+        stored sign-in, which is then not refreshed; the saved set-key key comes
+        only after the sign-in.
+        """
+        token = credentials.platform_env_token()
+        if token:
+            return cls(base_url, token)
         key = credentials.platform_api_key()
         if key is None:
             try:
@@ -185,8 +193,9 @@ class DeployClient:
         *,
         idempotency_key: str | None = None,
         name: str | None = None,
+        editor: bool | None = None,
     ) -> dict:
-        """Start a deployment of the release. Without ``name``, comfy-deploy names it."""
+        """Start a deployment of the release. Without ``name`` or ``editor``, comfy-deploy's defaults decide."""
         if not release_id.strip():
             raise bad_request("releaseId is required")
         _validate_compute_config(compute_config)
@@ -202,6 +211,7 @@ class DeployClient:
                     "releaseId": release_id,
                     "computeConfig": compute_config,
                     **({"name": name} if name is not None else {}),
+                    **({"editor": editor} if editor is not None else {}),
                 },
                 headers=headers,
             )
@@ -250,13 +260,22 @@ class DeployClient:
         """Give the deployment a new name, unique among its Build's live deployments, and nothing else."""
         return self._patch("rename", ("deployments", deployment_id), {"name": name})
 
-    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> dict:
+    def set_deployment_editor(self, deployment_id: str, editor: bool) -> dict:
+        """Turn the deployment's editor CPU server on or off; it touches no compute and makes no new running copy."""
+        return self._patch("editor", ("deployments", deployment_id), {"editor": editor})
+
+    def move_deployment(
+        self, deployment_id: str, base_revision: int, release_id: str, *, editor: bool | None = None
+    ) -> dict:
         """Point the deployment at another release of its Build, keeping its id and URL.
 
         ``base_revision`` is the revision the caller read, so a change made
-        since is refused rather than undone.
+        since is refused rather than undone. ``editor``, when given, carries to
+        the deployment the new release's copy serves.
         """
         body = {"baseRevision": base_revision, "releaseId": release_id}
+        if editor is not None:
+            body["editor"] = editor
         return self._patch("move", ("deployments", deployment_id), body)
 
     def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> dict:

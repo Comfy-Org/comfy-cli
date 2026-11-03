@@ -34,6 +34,7 @@ _AUTHORING_FALLBACKS = {
     "packaging-publishing": "comfy-custom-nodes-packaging",
     "frontend-extension": "comfy-custom-nodes-frontend",
     "v1-to-v3-migration": "comfy-custom-nodes-migration",
+    "execution-caching": "comfy-custom-nodes-caching",
 }
 assert set(_AUTHORING_FALLBACKS) == set(knowledge.AUTHORING_CLASSES)
 
@@ -48,6 +49,7 @@ class AuthoringClass(str, Enum):
     packaging_publishing = "packaging-publishing"
     frontend_extension = "frontend-extension"
     v1_to_v3_migration = "v1-to-v3-migration"
+    execution_caching = "execution-caching"
 
 
 def _env_context() -> dict[str, Any]:
@@ -229,14 +231,23 @@ def resolve_cmd(
     if model_id is None:
         knowledge.log_query("knowledge resolve", logged, hit_ids=[], zero_hit=True, bundle=bundle)
         q = query.strip().lower()
+        candidates = knowledge.model_candidates(bundle, query)
+        hint = "run `comfy knowledge status` to confirm a bundle is loaded; try a different alias"
+        details = {
+            "query": query,
+            "close_matches": difflib.get_close_matches(q, list(bundle.aliases), n=5, cutoff=0.6),
+        }
+        if candidates:
+            details["candidate_ids"] = candidates
+            hint = (
+                f"possible model ids (up to 5): {', '.join(candidates)}; "
+                "ask which model is intended, then retry `comfy knowledge resolve <exact-id>`"
+            )
         renderer.error(
             code="knowledge_unknown_model",
             message=f"no knowledge row matches {query!r}",
-            hint="run `comfy knowledge status` to confirm a bundle is loaded; try a different alias",
-            details={
-                "query": query,
-                "close_matches": difflib.get_close_matches(q, list(bundle.aliases), n=5, cutoff=0.6),
-            },
+            hint=hint,
+            details=details,
         )
         raise typer.Exit(code=1)
     knowledge.log_query("knowledge resolve", logged, hit_ids=[model_id], zero_hit=False, bundle=bundle)

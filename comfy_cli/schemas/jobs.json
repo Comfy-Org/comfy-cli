@@ -42,7 +42,7 @@
     },
     "execution_error": {
       "type": ["object", "null"],
-      "description": "Cloud `jobs status`/`jobs watch`: the failed job's structured cause from `/api/jobs/<id>` (`JobDetailResponse.execution_error` — `node_id`, `node_type`, `exception_message`, `exception_type`, `traceback`). Null on every job the server reports no execution error for. `current_inputs` is always redacted — the failing node's widget values routinely carry API keys — and on the `jobs watch` terminal envelope `traceback` is capped at its last two frames, the same budget `error.details.traceback_tail` uses; `jobs status` carries it in full. The top-level `error_message` is the same record flattened to one human line; this key is what a `--json` consumer reads to get the fields back without re-parsing that line.",
+      "description": "`jobs status`/`jobs watch`, cloud from `/api/jobs/<id>` and local from `/history`: the failed job's structured cause from `/api/jobs/<id>` (`JobDetailResponse.execution_error` — `node_id`, `node_type`, `exception_message`, `exception_type`, `traceback`). Null on every job the server reports no execution error for. `current_inputs` is always redacted — the failing node's widget values routinely carry API keys — and on the `jobs watch` terminal envelope `traceback` is capped at its last two frames, the same budget `error.details.traceback_tail` uses; `jobs status` carries it in full. The top-level `error_message` is the same record flattened to one human line; this key is what a `--json` consumer reads to get the fields back without re-parsing that line.",
       "additionalProperties": true
     },
     "scope": {
@@ -54,11 +54,16 @@
     "completed_nodes": {"type": "array", "items": {"type": "string"}},
     "client_id": {
       "type": ["string", "null"],
-      "description": "`jobs watch` local terminal: the WS session id this watch listened as. ComfyUI addresses execution events to the submitting session only, so watch re-attaches with the prompt's own client_id when it can resolve one (job state file, /queue, /history) and falls back to a fresh id otherwise."
+      "description": "`jobs watch` local terminal: the WS session id this watch listened as, or null when it opened no socket at all. ComfyUI addresses execution events to the submitting session only, so watch re-attaches with the prompt's own client_id when it can resolve one (job state file, /queue, /history) and falls back to a fresh id otherwise. Null on the poll-only paths — a run that borrowed a live client's socket, a run whose record could not be read, and a prompt that was already terminal when the watch started."
     },
     "attached": {
       "type": "boolean",
-      "description": "`jobs watch` local terminal: true when `client_id` is the prompt's real submitting session — i.e. live execution events could reach this watch. False means the id could not be resolved and the envelope is snapshot-derived."
+      "description": "`jobs watch` local terminal: true when a socket was opened under an id believed to be the prompt's submitting session, so live execution events could reach this watch. An explicit --client-id is taken at its word and also reports true, without being checked against the real submitter. False means no live stream and a snapshot-derived envelope, for any of three reasons: the id could not be resolved, or it was resolved and deliberately withheld because attaching would cut off the live client the run was submitted for, or the prompt had already finished. See `poll_reason` to tell the withheld cases apart."
+    },
+    "poll_reason": {
+      "type": ["string", "null"],
+      "enum": ["borrowed", "indeterminate", null],
+      "description": "`jobs watch` local terminal: why this watch polled instead of opening a socket, or null when it attached (or when the prompt was already terminal). \"borrowed\" — the run was submitted for another client that is receiving its events, so attaching would cut that client off; drop --client-id and keep polling. \"indeterminate\" — nothing could vouch for the run (no readable job state file, and no readable server record for the prompt), so the marker was never ruled out; retry once the server answers, unless the prompt_id is a typo or already pruned."
     },
     "count": {"type": "integer"},
     "jobs": {

@@ -45,6 +45,10 @@ def _isolate_ambient_api_keys(monkeypatch):
     """
     monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    # Handed-in tokens outrank a stored sign-in, so one left in the shell would
+    # turn every signed-in test into a token one.
+    monkeypatch.delenv("COMFY_CLOUD_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("COMFY_BUILDER_TOKEN", raising=False)
 
 
 @pytest.fixture(autouse=True)

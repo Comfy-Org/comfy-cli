@@ -7,6 +7,8 @@ otherwise reject or crash on.
 
 from typing import Any
 
+import pytest
+
 from comfy_cli.cql.engine import Graph
 
 
@@ -447,6 +449,48 @@ class TestLoad3dViewportCapture:
             "1": {
                 "class_type": "Load3D",
                 "inputs": {"model_file": "m.glb", "image": {}, "width": 1024, "height": 1024},
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
+        }
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("frontend_capture_required", "image") in _codes(result)
+
+
+class TestRecordAudioCapture:
+    """RecordAudio requires the filename produced by the browser recorder."""
+
+    @pytest.mark.parametrize("audio", [None, ""])
+    def test_record_audio_without_browser_capture_is_an_error(self, audio):
+        info = _object_info()
+        info["SaveAudio"] = {
+            "input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {"default": "audio/ComfyUI"}]}},
+            "input_order": {"required": ["audio", "filename_prefix"]},
+            "output": [],
+            "output_node": True,
+        }
+        wf = {
+            "1": {"class_type": "RecordAudio", "inputs": {"audio": audio}},
+            "2": {"class_type": "SaveAudio", "inputs": {"audio": ["1", 0], "filename_prefix": "a"}},
+        }
+
+        result = Graph.from_object_info(info).validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("frontend_capture_required", "audio") in _codes(result)
+
+
+class TestWebcamCapture:
+    """WebcamCapture requires the filename produced at browser queue time."""
+
+    @pytest.mark.parametrize("image", [None, ""])
+    def test_webcam_without_browser_capture_is_an_error(self, image):
+        wf = {
+            "1": {
+                "class_type": "WebcamCapture",
+                "inputs": {"image": image, "width": 640, "height": 480, "capture_on_queue": True},
             },
             "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
         }

@@ -1,5 +1,9 @@
 # comfy-cli error codes
 
+The accepted compatibility decision for envelopes and registered error codes is
+recorded in
+[`ADR-AUTOMATION-0003`](../../docs/adr/AUTOMATION-0003-one-versioned-machine-output-dialect.md).
+
 Stable machine identifiers for `error.code` in the JSON envelope. The
 canonical list lives in `comfy_cli/error_codes.py` — this file is for humans.
 **Append-only** — never repurpose an existing code.

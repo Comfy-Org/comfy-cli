@@ -125,6 +125,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use ComfyUI's `File > Export (API)`",
     ),
     ErrorCode(
+        "invalid_output_node_ids",
+        "`comfy run --output-node-ids` named no ids, a node id that is not in the submitted "
+        "API-format workflow (`details.unknown_node_ids`), or a node that is not an output node "
+        "(`details.non_output_node_ids`; checked only when the node catalog is available). "
+        "Nothing was submitted.",
+        "pass ids of output nodes (e.g. SaveImage) from `comfy run --print-prompt`'s graph",
+    ),
+    ErrorCode(
         "workflow_read_error",
         "Workflow file exists but isn't readable as UTF-8 text (OSError / UnicodeDecodeError).",
         "check file permissions and encoding",
@@ -309,6 +317,39 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "background server is bad — clear it with `comfy stop`",
     ),
     ErrorCode(
+        "client_id_rejected",
+        "`--client-id` was combined with something it cannot serve. The flag names an "
+        "ALREADY-CONNECTED client (normally a browser tab) so ComfyUI addresses a run's execution "
+        "events to that client rather than to the invocation that submitted it. ComfyUI's `/ws` "
+        "handler evicts any socket already registered under an incoming clientId, so nothing may "
+        "attach as a borrowed id without silencing the very client the flag exists to feed. "
+        "Raised by two commands, and `details.reason` says which case. Both raise `empty` (the flag "
+        "was passed with a blank value). `comfy run` adds `cloud` (local-only — cloud fans execution "
+        "events out per user/workspace regardless of submitter) and `wait` (`--wait` would watch a "
+        "socket this run's events are deliberately not sent to). `comfy jobs watch` adds `borrowed` "
+        "(the prompt is marked as having borrowed a live client's id, so it is poll-only and no "
+        "override is honoured) and `indeterminate` (nothing vouched for the run — no readable job "
+        "state file, and the prompt's own server record could not be read, whether because the fetch "
+        "failed, the body was the wrong shape, or neither `/queue` nor `/history` mentions it, so the "
+        "marker was never ruled out). An override is honoured only once the state file or the "
+        "prompt's server record has positively cleared it. Refused before anything is submitted or "
+        "any socket is opened. `borrowed` covers the id as well as the prompt: naming a borrowed "
+        "client's id while watching a different, ordinary prompt is refused too, since attaching "
+        "evicts that client either way. Those ids come from `/queue`, and an override is refused "
+        "as `indeterminate` when that read did not come back whole, since an empty list of them "
+        "means 'nobody is borrowing' only once the queue was walked. Bounded by what a READ "
+        "`/queue` still shows — an id fed by a run that has already left the queue cannot be "
+        "recognised — and limited to runs comfy-cli submitted, since a browser tab submitting its "
+        "own prompt stamps no marker. A prompt that "
+        "is already terminal short-circuits earlier, where a NON-EMPTY flag is ignored rather than "
+        "refused because no socket is opened at all (`empty` is still raised there).",
+        "pass a non-empty id, or drop the conflicting flag: `--client-id` cannot be combined with "
+        "`--wait` or a cloud target, and `comfy jobs watch` on a borrowed run takes no `--client-id` "
+        "at all — poll it with `comfy jobs status`; on `indeterminate`, retry once the server answers "
+        "again, or drop `--client-id` to poll safely now — but if the prompt_id is a typo or already "
+        "pruned it stays unreadable and no id will work",
+    ),
+    ErrorCode(
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
@@ -373,6 +414,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "inspect the pruned branch's inputs; validate with `comfy --json validate` "
         "against `--where cloud` before re-running",
     ),
+    ErrorCode(
+        "partial_execution_targets_ignored",
+        "A `comfy run --output-node-ids` cloud run returned outputs from node(s) outside the "
+        "targets and their dependencies — the server likely ignored `partial_execution_targets` "
+        "and ran the whole graph. Surfaced as a non-fatal warning in `data.warnings`.",
+        "check whether the skipped branches had side effects; run against a server that supports "
+        "partial execution, or remove the branches from the workflow",
+    ),
     # --- models / templates introspection ------------------------------------
     ErrorCode(
         "invalid_argument",
@@ -417,6 +466,39 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "upload computed, which `assets library ls` reports per asset.",
         "pass the `hash` from `comfy --json assets library ls --name <file>`, or upload the file "
         "first with `comfy upload <file> --where cloud`",
+    ),
+    ErrorCode(
+        "asset_upload_invalid",
+        "`assets library upload` refused the file or `--type` before uploading anything: "
+        "`details.reason` is unsupported_file_type (not .safetensors), bad_filename, file_not_found, "
+        "file_unreadable (it could not be opened or its size read), empty_file, file_too_large (over 2 GB) "
+        "or unsupported_model_type (`details.valid_types` lists the folders the workspace takes).",
+        "fix the file or `--type` named in the message; nothing was sent",
+    ),
+    ErrorCode(
+        "asset_upload_refused",
+        "Comfy Cloud refused a model upload; the message is the server's. `details.server_code` is its "
+        "code, e.g. FEATURE_DISABLED (uploads are off for this workspace), MODEL_STORAGE_LIMIT_REACHED "
+        "(the message names the cap), UNSUPPORTED_FILE_TYPE, UNSUPPORTED_MODEL_TYPE or FILE_TOO_LARGE. "
+        "Retrying the same upload gets the same answer.",
+        "act on the server's message; do not retry unchanged",
+    ),
+    ErrorCode(
+        "asset_upload_failed",
+        "A model upload did not end in a stored asset: sending the bytes to storage failed after a fresh "
+        "retry (`details.status`, null when no answer came), the local file could not be read while it "
+        "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
+        "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
+        "file; not retried), or Comfy Cloud's storing task failed or was cancelled (the message carries the "
+        "task's error, e.g. not a valid .safetensors file).",
+        "retry for a storage failure; for an unreadable file or a task failure fix the file the message names; "
+        "for tls_setup fix the certificate setting the message names",
+    ),
+    ErrorCode(
+        "asset_upload_timeout",
+        "The model file was uploaded, but Comfy Cloud had not finished storing it when "
+        "`assets library upload` stopped waiting. `details.task_id` is the storing task, which goes on.",
+        "check `comfy assets library ls --tags models` later instead of uploading again",
     ),
     ErrorCode(
         "template_fetch_failed",
@@ -619,6 +701,23 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy agent permissions` to see the requests waiting and their ids; pass --data-dir if the agent "
         "uses another data dir",
     ),
+    ErrorCode(
+        "agent_running",
+        "`comfy agent allow` or `comfy agent deny` refused to write: an agent is answering on its port from "
+        "the same data dir. A running agent is the only writer of its permission files, so a write made here "
+        "would be ignored and then overwritten by the agent's next save.",
+        "answer a waiting request in the agent panel or on the card in chat, which call the running agent's "
+        "own API; to write these files from here instead, stop the agent first",
+    ),
+    ErrorCode(
+        "agent_unconfirmed",
+        "`comfy agent allow` or `comfy agent deny` refused to write: the data dir's agent.json names a port, "
+        "and something answered on it that did not answer as this agent — a probe that timed out, a body that "
+        "was not the agent's. Whether an agent is running is then unsettled, and a write made while one is "
+        "would be overwritten by its next save with nothing to show it was lost, so none was made.",
+        "if an agent is running, answer the request in the agent panel or on the card in chat; if none is, "
+        "delete the stale agent.json in that data dir and run the command again",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
@@ -675,6 +774,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "unknown class_type, missing node, bad slot/widget name, or malformed address.",
         "run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read "
         "(`comfy workflow slots <file>` for exact `<node_id>.<input>` addresses, `comfy nodes search` for class names)",
+    ),
+    ErrorCode(
+        "unknown_enum_value",
+        "A workflow edit supplied a value outside the live catalog's allowed options. Details carry the value, "
+        "field, valid options and any close match.",
+        "use `details.best_match`, `details.did_you_mean`, or an exact value from `details.valid_options`",
+    ),
+    ErrorCode(
+        "no_options_available",
+        "A workflow edit targeted a catalog field whose live option list is empty.",
+        "install the required option or select a catalog that provides one",
+    ),
+    ErrorCode(
+        "below_min",
+        "A workflow edit supplied a numeric value below the live catalog minimum. Details carry the field and bound.",
+        "raise the value to the minimum reported in details and retry",
+    ),
+    ErrorCode(
+        "above_max",
+        "A workflow edit supplied a numeric value above the live catalog maximum. Details carry the field and bound.",
+        "lower the value to the maximum reported in details and retry",
     ),
     ErrorCode(
         "workflow_clear_not_batchable",
@@ -960,8 +1080,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "download_no_outputs",
-        "The job has no output files (yet).",
-        "wait for the job to complete before downloading",
+        "The job has no output files: still running, failed, text output only, or nothing new saved (details.job_status says which when known).",
+        "running: wait for the job to complete; completed or failed: check `comfy jobs status <prompt_id>` — waiting will not help",
     ),
     ErrorCode(
         "download_no_prompt",
@@ -1185,10 +1305,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "installed_versions_unavailable",
         "`comfy node deps` could not read the workspace venv's installed packages (`pip list --format=json` "
-        "failed, timed out, or returned unparseable output), so every parseable requirement is reported with "
+        "timed out, returned unparseable output, or exited non-zero and its `importlib.metadata` fallback "
+        "failed too), so every parseable requirement is reported with "
         '`status: "unknown"`. Surfaced in `data.warnings[]` (not as an error envelope) so the declared '
         "requirements are still reported.",
-        "check the workspace venv has pip (`comfy env`), then re-run",
+        "check the workspace interpreter runs (`comfy env`), then re-run",
     ),
     ErrorCode(
         "pack_read_error",
@@ -1610,6 +1731,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
     ),
     ErrorCode(
+        "deploy_editor_unchanged",
+        "`comfy deploy up --editor` or `--no-editor` reached a deployment whose editor server was not read as asked: "
+        "the latest answer that showed one had the other value, or none did, or the read to confirm it failed "
+        "(`details.read_error` says why). Whatever else `up` did stands (a create, a move, a start, a bounds edit), "
+        "so `data` carries the full payload and `changed` says whether it changed anything; `details.requested` is "
+        "the value asked for.",
+        "run the same `comfy deploy up` again; until it is confirmed the editor server may still be on, and billing",
+    ),
+    ErrorCode(
         "deploy_watch_lost",
         "The deploy control plane left the reads of a watch (`comfy deploy up`, `promote`, `rollback`, "
         "`comfy deploy status --watch`) unanswered, with an HTTP 5xx or no response, for the whole retry window "
@@ -1787,8 +1917,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "knowledge_unknown_model",
-        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
-        "try one of `details.close_matches`",
+        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names. "
+        "When catalog ids or aliases share the query's family word and numeric components, in order, "
+        "`details.candidate_ids` lists up to five sorted canonical ids; these are suggestions only.",
+        "try one of `details.close_matches`, or ask which of `details.candidate_ids` is intended and retry "
+        "`comfy knowledge resolve <exact-id>`",
     ),
 )
 

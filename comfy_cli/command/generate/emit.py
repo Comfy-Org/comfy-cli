@@ -618,12 +618,22 @@ def write_frontend_workflow(
     actor: str = "cli",
     base_version: int = 0,
     output_prefix: str = "generate",
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]] | None, str | None]:
     """Build the workflow for ``model`` as a FRONTEND-format graph and write it
-    to ``path``; return ``(workflow, ops)`` where ``ops`` is the stamped
-    ``replace_ops`` batch that turns whatever ``path`` previously held into the
-    new graph (empty previous ⇒ no delete half), ready for the envelope exactly
-    like ``templates fetch --emit-ops``.
+    to ``path``; return ``(workflow, ops, ops_skipped)`` where ``ops`` is the
+    stamped ``replace_ops`` batch that turns whatever ``path`` previously held
+    into the new graph (empty previous ⇒ no delete half), ready for the envelope
+    exactly like ``templates fetch --emit-ops``.
+
+    ``ops`` is ``None`` with ``ops_skipped`` set when the batch cannot be minted.
+    That is NOT a failure of the request — the file is written either way, and a
+    consumer falls back to the whole-document path it had before ops existed,
+    exactly as ``templates fetch --emit-ops`` does. The reason it can happen at
+    all is the PREVIOUS document: ``replace_ops`` emits a ``delete_node`` per
+    node already at ``path``, so a target that holds a large workflow can push
+    the batch past the 1,024-op bound even though the graph being written is
+    tiny. That is ordinary user data, not a bug in the built graph, so failing
+    the whole command over it would discard a workflow that is perfectly good.
 
     Raises ``EmitError``/``UnsupportedModelError`` like :func:`write_workflow`;
     an applier failure surfaces as ``EmitError`` (the request itself was
@@ -665,10 +675,20 @@ def write_frontend_workflow(
     # `replace_ops` so the returned workflow, the file and the batch describe
     # one document.
     workflow_ops.strip_internal(workflow)
+    ops: list[dict[str, Any]] | None = None
+    ops_skipped: str | None = None
     try:
         ops = workflow_ops.replace_ops(previous, workflow, actor=actor, base_version=base_version)
-    except workflow_ops.NotExpressibleError as e:  # can't-happen for our own built graph; fail loudly if it does
-        raise EmitError(f"the {model!r} workflow cannot be expressed as ops: {e}") from e
+    except workflow_ops.NotExpressibleError as e:
+        # Non-fatal, like `templates fetch --emit-ops`: the workflow itself is
+        # fine and still gets written. This used to be commented as can't-happen
+        # for our own built graph, and for the STRUCTURAL reason it is — but the
+        # batch also counts a `delete_node` per node already at `path`, which is
+        # user data, so a large existing file could fail the whole command and
+        # write nothing. The umbrella `emit_workflow_failed` hint then told the
+        # caller to check the model name and its required inputs, for a failure
+        # neither of them caused.
+        ops_skipped = str(e)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(workflow, indent=2) + "\n", encoding="utf-8")
-    return workflow, ops
+    return workflow, ops, ops_skipped

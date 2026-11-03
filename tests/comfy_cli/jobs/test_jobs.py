@@ -6,6 +6,7 @@ ComfyUI server is a separate manual demo step.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -2400,6 +2401,268 @@ def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
     assert snap is not None
     assert snap["outputs_by_node"] == {}
     assert snap["outputs_by_item"] == {}
+    assert snap["text_outputs"] == {}
+    assert "note" not in snap
+
+
+class TestFinishedRunWithNothingToDownload:
+    """The job tools must agree about a run that completed with no output
+    files.
+
+    `comfy download` says which case it is (text output only / completed with
+    no files / failed) and, for the first two, names `comfy jobs status` as the
+    follow-up. These pin the other half of that contract: `jobs status` must
+    carry the text the hint promises, and must say what an empty completion
+    means instead of reporting a bare `completed` with `outputs: []`.
+    """
+
+    _TEXT_ONLY = {
+        "status": {"completed": True, "status_str": "success"},
+        "outputs": {"7": {"text": ["a detailed description of the uploaded image"]}},
+    }
+    _NOTHING = {"status": {"completed": True, "status_str": "success"}, "outputs": {}}
+
+    def test_cloud_snapshot_carries_the_text_the_download_hint_points_at(self, monkeypatch):
+        """A text-only cloud job: `download` refuses with "read the text with
+        `comfy jobs status <id>`", so that command has to return the text. The
+        cloud snapshot used to omit `text_outputs` entirely, making the hint a
+        dead end on exactly the target the hosted agent runs on."""
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._TEXT_ONLY))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-text-only")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["text_outputs"] == {"7": ["a detailed description of the uploaded image"]}
+
+    def test_text_only_completion_is_not_called_empty(self, monkeypatch):
+        """The run produced something, so the "nothing was saved" note must not
+        fire — it would contradict `download`'s own text-only branch."""
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._TEXT_ONLY))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-text-no-note")
+        assert snap is not None
+        assert "note" not in snap
+
+    def test_cloud_snapshot_says_a_completed_run_reported_nothing(self, monkeypatch):
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._NOTHING))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-empty")
+        assert snap is not None
+        # Truthful terminal state is preserved: it DID complete.
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["text_outputs"] == {}
+        assert snap["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+        note = snap["note"]
+        # The thing the agent got wrong in the reported session.
+        assert "not a service outage" in note
+        # It says what was observed, not more: a node can write a file and
+        # report nothing, so the note must not assert nothing was saved.
+        assert "reported no outputs" in note
+        assert "saved nothing" not in note
+        # A cache hit is a possibility, not the established cause — an empty
+        # outputs map does not prove one, and neither does a save node.
+        assert "cache hit is also possible" in note
+        assert "because the graph matched" not in note
+        # And the save/preview check comes before the seed advice, or a graph
+        # with no save node is sent back into the re-run loop.
+        assert note.index("save or preview node") < note.index("change an input or the seed")
+
+    def test_local_history_snapshot_says_a_completed_run_reported_nothing(self, monkeypatch):
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith("/history/pid-local-empty"):
+                return {"pid-local-empty": {"status": {"completed": True, "messages": []}, "outputs": {}}}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "pid-local-empty")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+
+    def test_local_history_snapshot_with_outputs_has_no_note(self, monkeypatch):
+        body = {
+            "status": {"completed": True, "messages": []},
+            "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+        }
+
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith("/history/pid-local-ok"):
+                return {"pid-local-ok": body}
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "pid-local-ok")
+        assert snap is not None
+        assert "note" not in snap
+
+    def test_a_failed_run_is_not_given_the_empty_completion_note(self, monkeypatch):
+        """`error` keeps its own classification; only a *completed* run that
+        reported nothing gets this note."""
+        failed = {
+            "status": {"completed": False, "status_str": "error"},
+            "outputs": {},
+        }
+
+        class _FailedClient(_CompletedCloudClient):
+            def get_job_status(self, prompt_id):
+                return {"status": "error", "error_message": "boom"}
+
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FailedClient(failed))
+        snap = jobs_mod._cloud_status_snapshot("pid-failed-empty")
+        assert snap is not None
+        assert snap["status"] == "error"
+        assert "note" not in snap
+
+    def test_state_file_fallback_reports_no_text_but_claims_nothing(self):
+        """The state-file fallback has no history record, so it cannot know a
+        run produced no text. It carries the key (so a consumer indexing it on
+        any `jobs status` payload is safe) and withholds the note rather than
+        asserting something it cannot see."""
+        from comfy_cli import jobs_state
+
+        st = jobs_state.new(prompt_id="pid-sf", client_id="c", workflow="w", where="local")
+        st.status = "completed"
+        st.outputs = []
+
+        snap = jobs_mod._state_file_snapshot(st, prompt_id="pid-sf", host="h", port=8188, server_running=False)
+        assert snap["status"] == "completed"
+        assert snap["text_outputs"] == {}
+        assert snap["source"] == "state_file"
+        assert "note" not in snap
+
+    def test_cloud_envelope_carries_the_note_and_the_text(self, monkeypatch, capsys):
+        """End to end through `jobs status --where cloud` — what the agent's
+        get_job tool actually reads."""
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(self._NOTHING))
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs status"))
+        jobs_mod._cloud_status("pid-env-empty")
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        env = json.loads(lines[-1])
+        assert env["type"] == "envelope" and env["ok"] is True
+        assert env["data"]["status"] == "completed"
+        assert env["data"]["outputs"] == []
+        assert env["data"]["text_outputs"] == {}
+        assert env["data"]["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+
+    # ---- the note is decided on the raw record, not on what we extracted ----
+
+    @pytest.mark.parametrize(
+        ("label", "node_output"),
+        [
+            # A custom UI key neither extractor knows (a tagger's tag list).
+            ("custom ui key", {"tags": ["1girl", "solo"]}),
+            # `text` as a bare string rather than a list of strings.
+            ("bare string text", {"text": "a description"}),
+            # `text` whose items are not `str`.
+            ("non-str text items", {"text": [{"value": "a description"}]}),
+        ],
+    )
+    def test_a_run_that_reported_an_unrecognized_shape_is_not_called_empty(self, monkeypatch, label, node_output):
+        """Both extractors recognize a narrow set of shapes: media entries, and
+        a `text` list of `str`. A node can report in neither, and such a run
+        must not be told it reported nothing and that re-running changes
+        nothing — so the note is decided on the raw record outputs."""
+        record = {"status": {"completed": True, "status_str": "success"}, "outputs": {"7": node_output}}
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
+
+        snap = jobs_mod._cloud_status_snapshot(f"pid-{label.replace(' ', '-')}")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        # Nothing the extractors could use, so both views are empty …
+        assert snap["outputs"] == []
+        assert snap["text_outputs"] == {}
+        # … and precisely because of that, the note must stay off.
+        assert "note" not in snap
+
+    def test_a_record_with_no_outputs_key_withholds_the_note(self, monkeypatch):
+        """On cloud, completion comes from `/api/jobs/<id>` while the history
+        record is fetched separately. A record that has not caught up carries
+        no `outputs` key, and establishes nothing — telling the agent "waiting
+        will not produce files" about outputs that have not propagated yet is
+        the same kind of false certainty this note exists to remove."""
+        monkeypatch.setattr(
+            jobs_mod,
+            "_cloud_client",
+            lambda: _CompletedCloudClient({"status": {"completed": True, "status_str": "success"}}),
+        )
+
+        snap = jobs_mod._cloud_status_snapshot("pid-record-lagging")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["text_outputs"] == {}
+        assert "note" not in snap
+
+    def test_a_node_entry_that_exists_but_is_empty_withholds_the_note(self, monkeypatch):
+        """`{"images": []}` is a node that reported, with nothing in it. Err
+        toward saying less."""
+        record = {"status": {"completed": True, "status_str": "success"}, "outputs": {"9": {"images": []}}}
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-empty-node-entry")
+        assert snap is not None
+        assert "note" not in snap
+
+    # ---- the note reaches the surface that waited for it ----
+
+    def test_jobs_wait_row_carries_the_note(self, monkeypatch, capsys):
+        """A wait row used to be a bare `completed` with no outputs, so the
+        caller had to ask `jobs status` the question it had just waited for an
+        answer to. `wait_cmd` copies only a few snapshot fields onto the row,
+        and the note is one of them now."""
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        snap = {
+            "prompt_id": "pid-wait-empty",
+            "status": "completed",
+            "outputs": [],
+            "note": jobs_mod._EMPTY_COMPLETION_NOTE,
+        }
+        monkeypatch.setattr(jobs_mod, "_server_or_error", lambda *a, **k: True)
+        monkeypatch.setattr(jobs_mod, "_resolve_host_port", lambda h, p: ("h", 8188))
+        monkeypatch.setattr(jobs_mod, "_wait_fetch_snapshot", lambda pid, **kw: snap)
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs wait"))
+        jobs_mod.wait_cmd(["pid-wait-empty"], poll_interval=0.01, timeout=5)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        env = json.loads(lines[-1])
+        assert env["data"]["jobs"][0]["status"] == "completed"
+        assert env["data"]["jobs"][0]["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+
+    # ---- the pretty text preview is server-supplied, so it is sanitized ----
+
+    def test_text_preview_strips_escape_bytes_from_node_text_and_ids(self):
+        """A `Text` cell declines to parse markup but still forwards `\\x1b`,
+        as this module's own badge comment notes. Node text is the one cell
+        here whose content can come from a model describing an
+        attacker-supplied input, so an ANSI/OSC sequence in it would otherwise
+        reach the terminal — and both pretty views feed this helper now."""
+        lines = jobs_mod._text_preview_lines({"7\x1b]0;pwned\x07": ["before\x1b[31m after\x1b]52;c;cGF5bG9hZA==\x07"]})
+        rendered = "".join(line.plain for line in lines)
+        assert "\x1b" not in rendered
+        assert "before" in rendered and "after" in rendered
+
+    def test_text_preview_bounds_a_long_node_id(self):
+        lines = jobs_mod._text_preview_lines({"n" * 500: ["ok"]})
+        assert len(lines) == 1
+        assert len(lines[0].plain) < 200
+
+    def test_text_preview_keeps_only_the_first_line(self):
+        lines = jobs_mod._text_preview_lines({"7": ["first line\n" + "x" * 100_000]})
+        assert len(lines) == 1
+        assert lines[0].plain == "[7] first line"
 
 
 def test_jobs_status_cloud_envelope_carries_grouped_outputs(monkeypatch, capsys):
@@ -3416,21 +3679,23 @@ def test_watch_executing_escapes_server_controlled_node_markup():
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_watch_client_id_prefers_the_job_state_file(monkeypatch):
-    """`comfy run` records the submitting client_id on disk — cheapest source,
-    and no HTTP call should be needed when it is there."""
+def test_select_watch_client_id_prefers_the_job_state_file(monkeypatch):
+    """`comfy run` records the submitting client_id on disk, and that record
+    wins over whatever the server's copy of extra_data says."""
     from comfy_cli import jobs_state
 
     jobs_state.write(jobs_state.new(prompt_id="pid-a", client_id="cid-from-state", workflow="w", where="local"))
 
-    def _no_http(url, **kw):
-        raise AssertionError(f"should not have queried the server: {url}")
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {"queue_running": [[0, "pid-a", {}, {"client_id": "cid-from-queue"}, {}]]}
+        raise AssertionError(f"unexpected url: {url}")
 
-    monkeypatch.setattr(jobs_mod, "_http_get_json", _no_http)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-a") == "cid-from-state"
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-a", None) == ("cid-from-state", None)
 
 
-def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
+def test_select_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
     """A prompt submitted by something else (browser, older CLI) has no state
     file — /queue's extra_data still carries the submitting client_id."""
 
@@ -3443,10 +3708,10 @@ def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
         raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-b") == "cid-from-queue"
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-b", None) == ("cid-from-queue", None)
 
 
-def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
+def test_select_watch_client_id_falls_back_to_history_then_none(monkeypatch):
     def fake_get(url, **kw):
         if url.endswith("/queue"):
             return {"queue_running": [], "queue_pending": []}
@@ -3455,17 +3720,21 @@ def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
         return {}
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-c") == "cid-from-history"
-    # Nothing anywhere -> None, so the caller can warn instead of pretending.
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-missing") is None
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-c", None) == ("cid-from-history", None)
+    # A prompt neither store mentions leaves its record unread, so nothing has
+    # ruled out the borrowed marker and the watch polls rather than attaching.
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-missing", None) == (None, "indeterminate")
 
 
-def test_resolve_watch_client_id_survives_an_unreachable_server(monkeypatch):
+def test_select_watch_client_id_polls_when_the_server_is_unreachable(monkeypatch):
+    """An unreachable server leaves borrowed-ness UNKNOWN, not disproved, so the
+    watch polls rather than attaching to an id it could not vet."""
+
     def boom(url, **kw):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-x") is None
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-x", None) == (None, "indeterminate")
 
 
 def test_history_completed_nodes_unions_cached_executed_and_output_nodes(monkeypatch):
@@ -3594,6 +3863,43 @@ def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
     assert env["data"]["attached"] is True and env["data"]["client_id"] == "cid-sub"
 
 
+def test_watch_live_execution_error_is_promoted_to_execution_error(monkeypatch, capsys):
+    """An attached watch that ends on the WS `execution_error` event publishes
+    the failure under `execution_error`, the same key the poll exits use — the
+    event payload itself has no `error` key to lift."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+    frames = [f"frame{i}" for i in range(6)]
+    event = {
+        "prompt_id": "pid-w",
+        "node_id": "5",
+        "node_type": "KSampler",
+        "exception_message": "boom",
+        "exception_type": "RuntimeError",
+        "traceback": frames,
+        "current_inputs": {"seed": 42},
+        "executed": ["1"],
+    }
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[{"type": "execution_error", "data": event}])
+
+    assert result.exit_code == 1, result.output
+    assert "clientId=cid-sub" in ws.url
+    env = lines[-1]
+    assert env["ok"] is False and env["error"]["code"] == "execution_error"
+    payload = env["error"]["details"]
+    assert payload["status"] == "error" and payload["attached"] is True
+    record = payload["execution_error"]
+    assert record["node_type"] == "KSampler" and record["node_id"] == "5"
+    assert record["exception_message"] == "boom"
+    # Same envelope hygiene as the poll exit: widget values redacted, traceback
+    # capped to its tail.
+    assert "current_inputs" not in record
+    assert record["traceback"] == frames[-2:]
+
+
 def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkeypatch, capsys):
     """Symptom 2 is independent of streaming: even with zero WS events, the
     envelope's `completed_nodes` comes from the server's own /history record."""
@@ -3604,7 +3910,7 @@ def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkey
         ]
     )
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots, None))
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: None)
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (None, None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"4", "1"})
 
     result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
@@ -3643,7 +3949,7 @@ def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, cap
 
 def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "resolved")
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (req or "resolved", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
     _result, ws, lines = _run_local_watch(
@@ -3659,7 +3965,7 @@ def test_watch_terminal_envelope_validates_against_the_jobs_schema(monkeypatch, 
     import jsonschema
 
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "cid")
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: ("cid", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
     _result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
@@ -4078,6 +4384,57 @@ def test_http_get_json_oversize_body_is_a_runtime_error_not_a_truncated_parse(mo
     with pytest.raises(RuntimeError) as exc_info:
         jobs_mod._http_get_json("http://127.0.0.1:8188/history")
     assert "http://127.0.0.1:8188/history" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        http.client.IncompleteRead(b"half"),
+        http.client.BadStatusLine("not a status line"),
+        ConnectionResetError("reset by peer"),
+    ],
+    ids=["remote-disconnected", "incomplete-read", "bad-status-line", "connection-reset"],
+)
+def test_http_get_json_turns_a_hangup_into_the_one_failure_family(monkeypatch: pytest.MonkeyPatch, raised):
+    """A server that accepts the connection and then hangs up is an ordinary
+    transient, not a traceback.
+
+    urllib only wraps what the *request* raises, so these surface raw out of
+    `getresponse()` — and `URLError` does not cover them. Every call site
+    catches RuntimeError and nothing else, so anything escaping as its own type
+    crashes the command; `jobs watch` in particular depends on this to decide a
+    run's ownership is unverifiable instead of dying mid-decision.
+    """
+    import comfy_cli.http as http_mod
+
+    def boom(req, timeout=None):
+        raise raised
+
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", boom)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jobs_mod._http_get_json("http://127.0.0.1:8188/queue")
+    assert "http://127.0.0.1:8188/queue" in str(exc_info.value)
+
+
+def test_watch_polls_when_a_hangup_hides_the_borrowed_marker(monkeypatch: pytest.MonkeyPatch):
+    """End to end: a mid-read hangup leaves ownership unverifiable, and an
+    explicit --client-id is refused rather than attached."""
+    import comfy_cli.http as http_mod
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_state, "read", lambda _: None)
+
+    def hangup(req, timeout=None):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", hangup)
+
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-h", None) == (None, "indeterminate")
+    with pytest.raises(jobs_mod._ClientIdRejected) as exc_info:
+        jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-h", "someone-elses-live-id")
+    assert exc_info.value.reason == "indeterminate"
 
 
 def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyPatch):

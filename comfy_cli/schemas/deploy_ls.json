@@ -24,6 +24,10 @@
           "createdAt": {"type": "string", "format": "date-time"},
           "deletedAt": {"type": ["string", "null"], "format": "date-time"},
           "deletedBy": {"type": ["string", "null"]},
+          "editor": {
+            "type": ["boolean", "null"],
+            "description": "Whether the deployment keeps a CPU server for the editor; null where comfy-deploy did not say."
+          },
           "endpointUrl": {"type": ["string", "null"]},
           "id": {"type": "string", "minLength": 1},
           "name": {

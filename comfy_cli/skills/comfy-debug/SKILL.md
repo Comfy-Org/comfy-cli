@@ -32,7 +32,7 @@ comfy cloud login                   # opens browser, OAuth + PKCE
 comfy cloud set-key --key sk-…      # alternative path; API key is a fallback, not an override
 comfy --json cloud whoami           # confirm signed_in: true (auth_method is "oauth" or "api_key")
 ```
-Auth precedence is **OAuth-first**: a live `comfy cloud login` session outranks `COMFY_CLOUD_API_KEY` env, which outranks a stored key. `comfy cloud whoami` shows which credential is active. If a stale session is causing 401s, `comfy cloud logout && comfy cloud login` — setting an API key will NOT override a live session.
+Auth precedence is **env first**: a credential handed in by the environment (`COMFY_CLOUD_AUTH_TOKEN`, then `COMFY_CLOUD_API_KEY`) outranks a live `comfy cloud login` session, which outranks a key saved with `comfy cloud set-key`. Empty or whitespace-only env values count as unset. While an env credential is set the stored session is not refreshed or used. `comfy --json cloud whoami` shows which credential is active in `credential_source`. If a stale session is causing 401s, `comfy cloud logout && comfy cloud login`, or unset the env credential if that is the one being refused.
 If you're on a custom env (PR preview), set the base URL first:
 ```
 comfy cloud set-base-url https://fe-pr-NNNNN.testenvs.comfy.org

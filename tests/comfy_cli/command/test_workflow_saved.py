@@ -224,6 +224,38 @@ class TestLocalList:
         assert env["data"]["count"] == 1
         assert env["data"]["workflows"][0]["id"] == "sub/wan.json"
 
+    def test_total_counts_every_match_and_pages_by_offset(self, local_target, monkeypatch, capsys):
+        # A page smaller than the store must not read as the whole store:
+        # `count` is this page, `total` is every saved workflow.
+        rows = [
+            {"path": f"t{i:02}.json", "size": 1, "modified": 1700000000000 + i, "created": 1700000000000 + i}
+            for i in range(30)
+        ]
+        _patch_urlopen(monkeypatch, {"/userdata": rows})
+        first = _run(["list", "--where", "local", "--limit", "20"], capsys)["data"]
+        assert (first["count"], first["total"], first["has_more"], first["next_offset"]) == (20, 30, True, 20)
+        assert first["workflows"][0]["id"] == "t29.json"  # newest first
+
+        last = _run(["list", "--where", "local", "--limit", "20", "--offset", "20"], capsys)["data"]
+        assert (last["count"], last["total"], last["has_more"]) == (10, 30, False)
+        assert "next_offset" not in last
+        assert [r["id"] for r in last["workflows"]] == [f"t{i:02}.json" for i in range(9, -1, -1)]
+
+    def test_offset_pages_are_stable_when_sort_keys_tie(self, local_target, monkeypatch, capsys):
+        # Same timestamp on every row: page 2 must not depend on /userdata's order.
+        rows = [{"path": f"t{i}.json", "size": 1, "modified": 1, "created": 1} for i in range(4)]
+        pages = []
+        for listing in (rows, rows[::-1]):
+            _patch_urlopen(monkeypatch, {"/userdata": listing})
+            data = _run(["list", "--where", "local", "--limit", "2", "--offset", "2"], capsys)["data"]
+            pages.append([r["id"] for r in data["workflows"]])
+        assert pages[0] == pages[1] == ["t1.json", "t0.json"]
+
+    def test_total_is_over_name_filter_matches(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/userdata": _USERDATA_LIST_RESPONSE})
+        env = _run(["list", "--where", "local", "--name", "wan"], capsys)
+        assert (env["data"]["count"], env["data"]["total"], env["data"]["has_more"]) == (1, 1, False)
+
     def test_missing_workflows_dir_is_empty_not_error(self, local_target, monkeypatch, capsys):
         # ComfyUI 404s when the workflows/ dir doesn't exist yet — that's "none saved".
         _patch_urlopen(monkeypatch, {"/userdata": _http_error(404)})
@@ -507,6 +539,71 @@ class TestList:
         calls = _patch_urlopen(monkeypatch, {"/api/workflows": _WORKFLOW_LIST_RESPONSE})
         _run(["list", "--name", "wan", "--where", "cloud"], capsys)
         assert "name=wan" in calls[0]["url"]
+
+    def test_forwards_server_total_and_pages_by_offset(self, cloud_target, monkeypatch, capsys):
+        # The server knows the user has 30; the default page is 20. Reporting
+        # only `count` is how the agent told a user "You have 20".
+        def page(start, n, has_more):
+            return {
+                "data": [{"id": f"wf-{i}", "name": f"T{i:02}"} for i in range(start, start + n)],
+                "pagination": {"total": 30, "limit": 20, "offset": start, "has_more": has_more},
+            }
+
+        calls = _patch_urlopen(monkeypatch, {"/api/workflows": page(0, 20, True)})
+        first = _run(["list", "--where", "cloud"], capsys)["data"]
+        assert (first["count"], first["total"], first["has_more"], first["next_offset"]) == (20, 30, True, 20)
+        assert "offset=" not in calls[0]["url"]
+
+        calls = _patch_urlopen(monkeypatch, {"/api/workflows": page(20, 10, False)})
+        last = _run(["list", "--where", "cloud", "--offset", "20"], capsys)["data"]
+        assert "offset=20" in calls[0]["url"]
+        assert (last["count"], last["total"], last["has_more"]) == (10, 30, False)
+        assert "next_offset" not in last
+
+    def test_omits_a_total_that_cannot_be_true(self, cloud_target, monkeypatch, capsys):
+        # Cursor-paged PaginationInfo may report total 0 beside a full page.
+        # That form may also ignore `?offset=`, so no `next_offset` is offered.
+        body = {"data": _WORKFLOW_LIST_RESPONSE["data"], "pagination": {"total": 0, "offset": 0, "has_more": True}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud"], capsys)["data"]
+        assert "total" not in env
+        assert env["has_more"] is True
+        assert "next_offset" not in env
+
+    def test_next_offset_only_when_paging_advances(self, cloud_target, monkeypatch, capsys):
+        rows = _WORKFLOW_LIST_RESPONSE["data"]
+        # The server answered offset 0 to a request for offset 20: it ignored it.
+        body = {"data": rows, "pagination": {"total": 30, "offset": 0, "has_more": True}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "20"], capsys)["data"]
+        assert env["has_more"] is True
+        assert "next_offset" not in env
+
+        # An empty page cannot advance, whatever `has_more` says.
+        body = {"data": [], "pagination": {"total": 30, "offset": 5, "has_more": True}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "5"], capsys)["data"]
+        assert "next_offset" not in env
+
+    def test_derives_has_more_from_total_when_server_omits_it(self, cloud_target, monkeypatch, capsys):
+        rows = _WORKFLOW_LIST_RESPONSE["data"]
+        body = {"data": rows, "pagination": {"total": 30, "offset": 0}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud"], capsys)["data"]
+        assert (env["total"], env["has_more"], env["next_offset"]) == (30, True, len(rows))
+
+    def test_keeps_total_on_an_empty_page_past_the_end(self, cloud_target, monkeypatch, capsys):
+        # An offset beyond the last row still learns how many exist; a zero
+        # total there is the cursor sentinel and stays omitted.
+        body = {"data": [], "pagination": {"total": 30, "has_more": False}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "40"], capsys)["data"]
+        assert (env["count"], env["total"], env["has_more"]) == (0, 30, False)
+
+        body = {"data": [], "pagination": {"total": 0, "has_more": False}}
+        _patch_urlopen(monkeypatch, {"/api/workflows": body})
+        env = _run(["list", "--where", "cloud", "--offset", "40"], capsys)["data"]
+        assert "total" not in env
 
 
 # ---------------------------------------------------------------------------

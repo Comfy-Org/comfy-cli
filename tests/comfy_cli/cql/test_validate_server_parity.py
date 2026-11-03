@@ -1015,6 +1015,39 @@ class TestDecoyKeysAreNotFollowed:
     the validator reported `dependency_cycle: 2 -> 3 -> 2`.
     """
 
+    @staticmethod
+    def _dynamic_graph(type_id: str = "COMFY_DYNAMICCOMBO_V3") -> Graph:
+        return Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                type_id,
+                                {
+                                    "options": [
+                                        {"key": "A", "inputs": {"required": {"value": ["STRING", {}]}}},
+                                        {"key": "B", "inputs": {"required": {"other": ["STRING", {}]}}},
+                                    ]
+                                },
+                            ]
+                        }
+                    },
+                    "input_order": {"required": ["model"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+
     def test_a_cycle_that_exists_only_through_a_decoy_key_is_not_reported(self, graph: Graph) -> None:
         wf = {
             "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
@@ -1042,3 +1075,165 @@ class TestDecoyKeysAreNotFollowed:
         }
         result = graph.validate_workflow(wf)
         assert result["valid"], result["errors"]
+
+    def test_a_stale_dynamic_combo_key_cannot_close_a_cycle(self) -> None:
+        graph = self._dynamic_graph()
+        wf = {
+            "1": {
+                "class_type": "DynamicPass",
+                "inputs": {"model": "A", "model.value": "ready", "model.other": ["2", 0]},
+            },
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_the_same_dynamic_combo_key_closes_a_cycle_when_selected(self) -> None:
+        graph = self._dynamic_graph()
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": "B", "model.other": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))
+
+    @pytest.mark.parametrize("selection", ["A", "B"])
+    def test_a_plain_combo_takes_no_dotted_keys_under_any_selection(self, selection: str) -> None:
+        # The frontend picks its dynamic-combo widget by type name, so a plain
+        # COMBO has one slot and no sub-inputs even when `options` is a tree.
+        graph = self._dynamic_graph("COMBO")
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": selection, "model.other": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        assert "dependency_cycle" not in _codes(graph.validate_workflow(wf))
+
+
+class TestUnresolvedDynamicComboSelections:
+    """A dotted sub-key is only STALE when the selection it belongs to actually
+    resolved. When the selection is unknowable — the selector is wired, its
+    option schema does not parse, the resolved option carries no ``inputs``
+    dict, or the nesting hits the depth cap — the server's expansion is
+    unknown, so the validator must stay conservative and keep the checks it
+    would otherwise run.
+
+    Reading those keys as undeclared demoted real ``dangling_edge`` /
+    ``bad_link_shape`` errors to warnings and stopped ``_declared_link_targets``
+    following the edge, which can drop a feeder node out of ``reachable`` and
+    hide a cycle the server rejects.
+    """
+
+    @staticmethod
+    def _graph(options: Any) -> Graph:
+        return Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {
+                            "model": ["COMFY_DYNAMICCOMBO_V3", {"options": options}],
+                            "seed": ["INT", {"default": 0}],
+                        }
+                    },
+                    "input_order": {"required": ["model", "seed"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+
+    _OPTIONS = [
+        {"key": "A", "inputs": {"required": {"value": ["STRING", {}]}}},
+        {"key": "B", "inputs": {"required": {"other": ["STRING", {}]}}},
+    ]
+
+    def test_a_dangling_edge_under_a_wired_selector_stays_an_error(self) -> None:
+        """The selector is a link, so which option expands is known only at
+        execution — the sub-key may well be one the server declares, and its
+        link points at a node that does not exist. The server rejects that."""
+        graph = self._graph(self._OPTIONS)
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": ["2", 0], "model.value": ["99", 0], "seed": 0}},
+            "2": {"class_type": "StringSink", "inputs": {"text": "x"}},
+            "3": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dangling_edge" in _codes(result), result
+
+    def test_a_bad_link_shape_under_an_unreadable_option_schema_stays_an_error(self) -> None:
+        """``options`` is a shape this parser cannot read, so no selection can
+        be resolved — a malformed link under it must not be downgraded."""
+        graph = self._graph({"not": "a list"})
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": "A", "model.value": ["2"], "seed": 0}},
+            "2": {"class_type": "StringSink", "inputs": {"text": "x"}},
+            "3": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "bad_link_shape" in _codes(result), result
+
+    def test_a_cycle_through_a_wired_selectors_sub_key_is_still_reported(self) -> None:
+        """``_declared_link_targets`` must keep following the edge: the feeder
+        is reachable only through the sub-key, and the server would reject the
+        cycle it closes."""
+        graph = self._graph(self._OPTIONS)
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": ["3", 0], "model.value": ["2", 0], "seed": 0}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+            "3": {"class_type": "StringSink", "inputs": {"text": "x"}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))
+
+    def test_a_resolved_selection_still_treats_the_other_options_key_as_stale(self) -> None:
+        """The conservative rule above must not swallow the PR's own case: a
+        selection that DID resolve can still call a leftover key stale."""
+        graph = self._graph(self._OPTIONS)
+        wf = {
+            "1": {
+                "class_type": "DynamicPass",
+                "inputs": {"model": "A", "model.value": "ready", "model.other": ["2", 0], "seed": 0},
+            },
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_an_absent_optional_selector_still_treats_its_sub_keys_as_stale(self) -> None:
+        """An absent OPTIONAL selector definitely did not expand, so its dotted
+        keys really are undeclared — the same split ``_check_dynamic_combo_input``
+        makes between a required and an optional absence."""
+        graph = Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {"seed": ["INT", {"default": 0}]},
+                        "optional": {"model": ["COMFY_DYNAMICCOMBO_V3", {"options": self._OPTIONS}]},
+                    },
+                    "input_order": {"required": ["seed"], "optional": ["model"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"seed": 0, "model.value": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]

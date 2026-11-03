@@ -7,7 +7,7 @@
     "workspace": { "type": "string", "description": "Resolved ComfyUI workspace path." },
     "python": {
       "type": "string",
-      "description": "Interpreter whose site-packages were probed (`pip list --format=json`, run once for the whole report)."
+      "description": "Interpreter whose site-packages were probed (`pip list --format=json`, run once for the whole report; an `importlib.metadata` listing in the same interpreter when it has no pip)."
     },
     "compiled_lock": {
       "type": "object",
@@ -109,7 +109,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Non-fatal problems. `installed_versions_unavailable` means the pip probe failed, so every requirement is `unknown`. `registry_unavailable` (transient — retry) / `registry_node_not_found` (permanent 404 — do NOT retry) / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; `registry_partial_dependency_metadata` means its `declared` list lost malformed entries and is incomplete; `registry_invalid_node_id` means a `--registry` value was blank or outside `[A-Za-z0-9._-]` and was rejected without a request. Every other row is unaffected.",
+      "description": "Non-fatal problems. `installed_versions_unavailable` means the installed-packages probe (pip, then importlib.metadata) failed, so every requirement is `unknown`. `registry_unavailable` (transient — retry) / `registry_node_not_found` (permanent 404 — do NOT retry) / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; `registry_partial_dependency_metadata` means its `declared` list lost malformed entries and is incomplete; `registry_invalid_node_id` means a `--registry` value was blank or outside `[A-Za-z0-9._-]` and was rejected without a request. Every other row is unaffected.",
       "items": {
         "type": "object",
         "properties": {

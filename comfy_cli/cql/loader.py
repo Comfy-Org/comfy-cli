@@ -233,9 +233,12 @@ def resilient_load_object_info(
         # would re-send the same dead token. Force-refresh spends the refresh
         # token so the retry carries a brand-new access token.
         try:
-            from comfy_cli.credentials import get_session
+            from comfy_cli.credentials import env_credential, get_session
 
-            get_session(refresh=True, force=True)
+            # A credential handed in by env was what the fetch sent; the stored
+            # sign-in is not refreshed on its behalf.
+            if env_credential("cloud") is None:
+                get_session(refresh=True, force=True)
         except Exception:  # noqa: BLE001 — refresh is best-effort
             pass
 

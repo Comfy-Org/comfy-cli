@@ -392,3 +392,31 @@ def test_json_rows_carry_a_name_null_where_comfy_deploy_sent_none(tmp_path: Path
     assert names == {"dep-a1": "production", "dep-c3": None, "dep-d4": None, "dep-e5": None}
     schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
     jsonschema.Draft202012Validator(schema).validate(_payload(result))
+
+
+def test_rows_carry_and_print_the_editor_value_and_blank_where_none_was_sent(tmp_path: Path, monkeypatch) -> None:
+    # Given one deployment with the editor on, one off, and one from a comfy-deploy that sends no editor
+    rows = [
+        {**_summary("dep-a1", "release-5"), "editor": True},
+        {**_summary("dep-b2", "release-5"), "editor": False},
+        _summary("dep-c3", "release-5"),
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path))
+    pretty = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert {row["id"]: row["editor"] for row in _deployments(as_json)} == {
+        "dep-a1": True,
+        "dep-b2": False,
+        "dep-c3": None,
+    }
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(_payload(as_json))
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "dep-a1  ready  v5  editor on" in pretty.stdout
+    assert "dep-b2  ready  v5  editor off" in pretty.stdout
+    assert "dep-c3  ready  v5\n" in pretty.stdout

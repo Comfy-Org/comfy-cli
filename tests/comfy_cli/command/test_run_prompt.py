@@ -43,6 +43,7 @@ class TestExecuteSubmitsPreloadedGraph:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -68,7 +69,7 @@ class TestExecuteSubmitsPreloadedGraph:
             patch("comfy_cli.command.run.ExecutionProgress"),
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
-            MockExec.return_value = MagicMock(outputs=[])
+            MockExec.return_value = MagicMock(outputs=[], borrowed_client_id=False)
             # Positional workflow is a bogus path — must be ignored.
             execute(
                 "/no/such/file.json",
@@ -169,7 +170,7 @@ class TestRuntimeCheckpointResolutionLocal:
             patch("comfy_cli.command.run.WorkflowExecution"),
         ]
         with stack[0], stack[1], stack[2], stack[3], stack[4] as MockExec:
-            MockExec.return_value = MagicMock(outputs=[])
+            MockExec.return_value = MagicMock(outputs=[], borrowed_client_id=False)
             if patch_pprint:
                 with patch("comfy_cli.command.run.preflight.pprint") as mock_pprint:
                     execute(None, host="127.0.0.1", port=8188, wait=True, timeout=30, preloaded=preloaded)

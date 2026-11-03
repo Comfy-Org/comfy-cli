@@ -52,6 +52,7 @@ from comfy_cli.command.deploy_up import (
     landed_result,
     move_line,
     move_text,
+    observe_editor,
     reconcile_up,
     release_or_id,
     replaced_message,
@@ -358,6 +359,15 @@ def up_cmd(
             help="Name the deployment this creates. Default: production for a Build's first, else deployment-N.",
         ),
     ] = None,
+    editor: Annotated[
+        bool | None,
+        typer.Option(
+            "--editor/--no-editor",
+            help="Keep a CPU server for opening the deployment in the editor. Use --no-editor for one only called "
+            "through the API. Omitted, a new deployment gets comfy-deploy's default, on, and an existing one keeps "
+            "what it has.",
+        ),
+    ] = None,
     # Watching is what someone who just asked for a deployment wants: the command
     # that starts a several-minute wait should say how the wait is going. Ctrl-C
     # and --no-watch both leave the deploy running and print how to re-attach.
@@ -382,6 +392,7 @@ def up_cmd(
             deployment_id=deployment_id,
             create=create,
             name=name,
+            editor=editor,
             watch=watch,
         )
         try:
@@ -418,12 +429,16 @@ def up_cmd(
                 # process: report where it had got to, and leave it be.
                 _warn_unapplied_bounds(renderer, result)
                 if last is not None:
-                    _render_result(renderer, replace(result, deployment=last, pending_bounds=None), watch=False)
+                    abandoned_at = replace(result, deployment=last, pending_bounds=None)
+                    _render_result(renderer, observe_editor(abandoned_at, last), watch=False)
 
             move = watched_move(result.release, result.previous_release, result.deployment) if moving else None
             outcomes = MoveOutcomes(client, watched_id, move) if move is not None else None
             watched = _watch(renderer, client, watched_id, outcomes=outcomes, on_abandon=abandoned)
-            result = finish_move(client, result, watched, outcomes) if outcomes else replace(result, deployment=watched)
+            if outcomes is not None:
+                result = finish_move(client, result, watched, outcomes)
+            else:
+                result = observe_editor(replace(result, deployment=watched), watched)
         _render_result(renderer, result, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         _render_spec_error(renderer, error)

@@ -139,6 +139,27 @@ class TestSubmitPrompt:
         assert body.keys() == {"prompt", "client_id", "extra_data"}
         assert body["extra_data"] == {"comfy_usage_source": "comfy-cli"}
 
+    @pytest.mark.parametrize("target", ["cloud", "local"])
+    def test_output_node_ids_sent_as_partial_execution_targets(self, target):
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            client = comfy_client.Client(CLOUD if target == "cloud" else LOCAL)
+            client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid", output_node_ids=["1"])
+        body = json.loads(urlopen.call_args.args[0].data)
+        assert body["partial_execution_targets"] == ["1"]
+
+    def test_no_output_node_ids_sends_no_partial_execution_targets(self):
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(CLOUD).submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+        assert "partial_execution_targets" not in json.loads(urlopen.call_args.args[0].data)
+
     def test_cloud_caller_extra_data_is_merged_not_overwritten(self):
         with patch.object(
             comfy_client._OPENER,

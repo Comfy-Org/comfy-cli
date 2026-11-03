@@ -81,6 +81,7 @@ REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-custom-nodes-packaging", "comfy-custom-nodes-packaging"),
     ("comfy-custom-nodes-frontend", "comfy-custom-nodes-frontend"),
     ("comfy-custom-nodes-migration", "comfy-custom-nodes-migration"),
+    ("comfy-custom-nodes-caching", "comfy-custom-nodes-caching"),
 )
 
 

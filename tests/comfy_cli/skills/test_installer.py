@@ -218,6 +218,7 @@ def test_custom_node_skill_snapshot_keeps_runtime_contract():
         "node_replacement",
         "Never put credentials in widget values",
         "object_info_stale",
+        "never compares equal to itself",
     ):
         assert needle in corpus
 
@@ -242,6 +243,52 @@ def test_custom_node_search_routes_have_positive_and_negative_controls():
     assert "untrusted" in text
 
 
+def test_custom_node_caching_fallback_states_the_silent_failure_mode():
+    """The two facts an author cannot read off their own node's source.
+
+    A signature that raises is swallowed into a NaN, so the symptom is endless
+    recomputation and never a crash — saying "crash" sends the author looking
+    for a traceback that is never emitted. And `rawLink` is the one input mode
+    where a linked input is not `None`, so a flat "every linked input is None"
+    is the wrong contract for it.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "never compares equal to itself" in text
+    assert "recomputes every run" in text
+    assert not re.search(r"(?i)\bis (therefore )?a crash\b", text)
+    assert "rawLink" in text
+    assert "every ancestor's signature" in text
+
+
+def test_custom_node_caching_fallback_names_the_hiddens_that_are_not_populated():
+    """The signature pass is not an execution pass, so most hiddens are empty.
+
+    `IsChangedCache.get` calls `get_input_data(node["inputs"], class_def, node_id, None)`
+    with no `dynprompt` and no `extra_data`, so `PROMPT` is `{}` and `DYNPROMPT`,
+    `EXTRA_PNGINFO`, `EXECUTION_LIST` and the auth-token hiddens are `None`. Only
+    `UNIQUE_ID` is real. An author told "hidden inputs are real" fingerprints a
+    constant and ships the stale-output bug this slice exists to prevent.
+    """
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "UNIQUE_ID" in text
+    assert "`PROMPT` arrives as `{}`" in text
+    assert not re.search(r"(?i)hidden inputs are real", text)
+
+
+def test_custom_node_caching_fallback_qualifies_size_and_mtime_with_a_digest():
+    """Size plus mtime misses a same-size in-place rewrite; core hashes contents."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "content digest" in text
+    assert "LoadImage" in text
+
+
+def test_custom_node_caching_fallback_states_what_to_hashable_accepts():
+    """`to_hashable` takes scalars, Mapping and Sequence; anything else is a sentinel."""
+    text = " ".join(skill_content("comfy-custom-nodes-caching").split())
+    assert "unhashable sentinel" in text
+    assert not re.search(r"(?i)containers of those", text)
+
+
 def test_custom_node_initial_context_and_jit_budget_fixture():
     """Measured fixture: unrelated turns pay only for the small router."""
     fixture = json.loads((Path(__file__).parent / "fixtures/custom_node_context_budget.json").read_text())
@@ -263,6 +310,7 @@ def test_custom_node_initial_context_and_jit_budget_fixture():
         "packaging-publishing",
         "frontend-extension",
         "v1-to-v3-migration",
+        "execution-caching",
     )
     assert sorted(jit_bytes) == sorted(fixture["jit_added"][key]["bytes"] for key in fixture_order)
     assert initial_bytes < before_body // 3
