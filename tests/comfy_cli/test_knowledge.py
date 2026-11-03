@@ -1217,6 +1217,98 @@ class TestCli:
         assert all(row["ranking"] == "unranked" for row in data["discovery"])
         _validate(data)
 
+    def test_pick_projects_and_bounds_discovery_fields(self, tmp_path, monkeypatch, capsys):
+        routes = [
+            {
+                "route": f"route-{i}",
+                "description": "d" * (knowledge.MAX_DISCOVERY_TEXT_CHARS + 20),
+                "templates": ["template", 7],
+                "nodes": [{"id": "Node", "description": None}, "bad"],
+                "requires": {"comfyui": "1.2.3", "distributions": ["local", 7], "unknown": "drop"},
+                "rank": 1,
+                "available_locally": True,
+            }
+            for i in range(knowledge.MAX_DISCOVERY_ROUTES + 2)
+        ]
+        routes.insert(0, {"route": 5, "description": None})
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": {}, "capabilities": {"c": {"id": "c", "picks": [], "discovery": routes}}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+
+        rc, env = _run(["pick", "c"], capsys)
+
+        assert rc == 0
+        discovery = env["data"]["discovery"]
+        assert len(json.dumps(discovery, ensure_ascii=False).encode()) <= knowledge.MAX_DISCOVERY_BYTES
+        assert [row["route"] for row in discovery] == [f"route-{i}" for i in range(len(discovery))]
+        assert all(len(row["description"]) == knowledge.MAX_DISCOVERY_TEXT_CHARS for row in discovery)
+        assert all(row["templates"] == ["template"] for row in discovery)
+        assert all(row["nodes"] == [{"id": "Node"}] for row in discovery)
+        assert all(row["requires"] == {"comfyui": "1.2.3", "distributions": ["local"]} for row in discovery)
+        assert all("rank" not in row and "available_locally" not in row for row in discovery)
+        _validate(env["data"])
+
+    def test_pick_pretty_prints_discovery_and_failure_policy(self, tmp_path, monkeypatch, capsys, pretty_no_stdout):
+        p = tmp_path / "k.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "models": {},
+                    "capabilities": {
+                        "c": {
+                            "id": "c",
+                            "picks": [],
+                            "discovery": [{"route": "Visible route", "templates": ["visible_template"]}],
+                            "failure_policy": "Report the failed step.",
+                        }
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        renderer = Renderer.resolve(
+            is_stdout_tty=True,
+            env={},
+            caller=Caller(kind="user", agentic=False, source_env=None),
+            json_flag=False,
+        )
+        renderer.mode = OutputMode.PRETTY
+        set_renderer(renderer)
+
+        result = CliRunner().invoke(knowledge_cmd.app, ["pick", "c"], standalone_mode=False)
+
+        assert result.exception is None, result.exception
+        rendered = result.stdout + result.stderr
+        assert "Unranked discovery routes" in rendered
+        assert "Visible route" in rendered
+        assert "visible_template" in rendered
+        assert "Authored failure policy" in rendered
+        assert "Report the failed step" in rendered
+
+    def test_pick_check_local_does_not_claim_discovery_was_checked(self, tmp_path, monkeypatch, capsys):
+        p = tmp_path / "k.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "models": {},
+                    "capabilities": {
+                        "c": {
+                            "id": "c",
+                            "picks": [],
+                            "discovery": [{"route": "Local route", "templates": ["local_template"]}],
+                        }
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+
+        rc, env = _run(["pick", "c", "--check-local"], capsys)
+
+        assert rc == 0
+        assert env["data"]["local_check"] == "discovery_not_checked"
+        _validate(env["data"])
+
     def test_pick_spelling_variant(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "Audio Generation"], capsys)
