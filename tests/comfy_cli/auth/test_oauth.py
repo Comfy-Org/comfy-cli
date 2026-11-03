@@ -703,7 +703,8 @@ class TestConcurrentRefresh:
 
     # (b) Double-check: if a peer already rotated the token between our pre-lock
     # read and the post-lock re-read, we adopt it and do NOT refresh again.
-    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch):
+    @pytest.mark.parametrize("peer_expiry", [None, 1, 4102444800], ids=["unknown-expiry", "expired", "known-unexpired"])
+    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch, peer_expiry):
         self._persist_expired(refresh_token="RT0")
 
         # Simulate a peer that rotated RT0 → RT1 while we waited for the lock:
@@ -716,7 +717,7 @@ class TestConcurrentRefresh:
             access_token="PEER_NEW",
             refresh_token="RT1",
             token_type="Bearer",
-            expires_at=int(time.time()) + 3600,
+            expires_at=peer_expiry,
             saved_at="2026-01-01T00:00:02+00:00",
         )
         reads = [self._stale(), fresh_peer]
@@ -735,6 +736,56 @@ class TestConcurrentRefresh:
 
         assert refreshed_access_token("BEFORE_OLD") == "NEW"
         assert auth_store.get_cloud_session().refresh_token == "RT1"
+
+    @pytest.mark.parametrize(
+        ("peer_access", "peer_expiry"),
+        [("PEER_UNUSABLE", None), ("PEER_UNUSABLE", 1), ("REJECTED_OLDER", 4102444800)],
+        ids=["unknown-expiry", "expired", "same-rejected-token"],
+    )
+    @pytest.mark.parametrize("peer_timing", ["already-stored", "after-first-read"])
+    def test_a_peer_token_that_cannot_be_retried_uses_its_available_refresh(
+        self, persisted, monkeypatch, peer_timing, peer_access, peer_expiry
+    ):
+        from comfy_cli.credentials import refreshed_access_token
+
+        def save(access, refresh, expiry):
+            return auth_store.save_cloud_session(
+                base_url="https://c",
+                resource="https://c/api",
+                client_id="cid",
+                scope="s",
+                access_token=access,
+                refresh_token=refresh,
+                token_type="Bearer",
+                expires_at=expiry,
+            )
+
+        save("REJECTED_OLDER", "RT0", 4102444800)
+        if peer_timing == "already-stored":
+            save(peer_access, "RT1", peer_expiry)
+        else:
+            real_read = auth_store.get_cloud_session
+
+            def read_then_peer_rotates():
+                session = real_read()
+                if session.refresh_token == "RT0":
+                    save(peer_access, "RT1", peer_expiry)
+                return session
+
+            monkeypatch.setattr(auth_store, "get_cloud_session", read_then_peer_rotates)
+        refreshes = []
+
+        def refresh(**kwargs):
+            refreshes.append(kwargs["refresh_token"])
+            return self._token_set(access="NEW", refresh="RT2")
+
+        monkeypatch.setattr(oauth, "refresh_tokens", refresh)
+
+        assert refreshed_access_token("REJECTED_OLDER") == "NEW"
+        stored = auth_store.get_cloud_session()
+        assert stored.access_token == "NEW"
+        assert stored.refresh_token == "RT2"
+        assert refreshes == ["RT1"]
 
     def _stale(self) -> auth_store.CloudSession:
         return auth_store.CloudSession(

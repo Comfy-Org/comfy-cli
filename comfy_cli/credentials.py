@@ -169,8 +169,18 @@ def sign_in_still_stored(base_url: str | None) -> bool:
     """
     if base_url is None:
         return False
+    from comfy_cli import locking
+    from comfy_cli.auth import store as auth_store
+
     try:
-        session = get_session(refresh=False)
+        # Do not spend another lock budget after session recovery timed out.
+        # The store's nested read reuses this thread's lock reentrantly.
+        with locking.file_lock(auth_store.lock_path(), timeout=0):
+            session = get_session(refresh=False)
+    except TimeoutError:
+        # Contention cannot prove the held sign-in disappeared. End only the
+        # watch, rather than hanging or prescribing another login.
+        return True
     except OSError as error:
         _log.warning("could not re-read the stored sign-in after a 401: %s", error)
         return False
