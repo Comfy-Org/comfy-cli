@@ -92,6 +92,7 @@ def get_session(
     force: bool = False,
     allow_clear: bool = True,
     expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
 ) -> CloudSession | None:
     """Read the stored Comfy Cloud OAuth session.
 
@@ -104,6 +105,8 @@ def get_session(
     ``force=True`` (implies the refresh path) refreshes unconditionally,
     ignoring the local expiry check. Reserved for the *reactive* path: after a
     server 401, the token is known-rejected even if our clock disagrees.
+    ``rejected_access_token`` lets that path adopt a peer's newer access token
+    instead of rotating it again; the comparison happens under the refresh lock.
 
     ``allow_clear=False`` forwards to ``ensure_fresh_session`` so a fatal
     refresh failure does NOT clear the stored session. Background watchers pass
@@ -117,9 +120,12 @@ def get_session(
     if refresh or force:
         from comfy_cli.cloud import oauth
 
+        options = {}
         if expect is not None:
-            return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear, expect=expect)
-        return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear)
+            options["expect"] = expect
+        if rejected_access_token is not None:
+            options["rejected_access_token"] = rejected_access_token
+        return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear, **options)
     from comfy_cli.auth import store as auth_store
 
     return auth_store.get_cloud_session()
@@ -140,12 +146,50 @@ def refreshed_access_token(
     :func:`get_session`.
     """
     if expect is not None:
-        session = get_session(refresh=True, force=True, allow_clear=allow_clear, expect=expect)
+        session = get_session(
+            refresh=True, force=True, allow_clear=allow_clear, expect=expect, rejected_access_token=rejected
+        )
     else:
-        session = get_session(refresh=True, force=True, allow_clear=allow_clear)
+        session = get_session(refresh=True, force=True, allow_clear=allow_clear, rejected_access_token=rejected)
     if session is None or not session.access_token or session.access_token == rejected:
         return None
     return session.access_token
+
+
+def sign_in_still_stored(base_url: str | None) -> bool:
+    """Whether a refreshable sign-in for the refused client's environment remains.
+
+    A 401 that outlives :func:`refreshed_access_token` and one retry does not show
+    that nobody is signed in: a peer process can hold the refresh lock past this
+    one's timeout, a refresh that fails on the network keeps the old token, and
+    the server can refuse a token it minted a moment ago. A sign-in without a
+    refresh token cannot recover this way and retains the sign-in guidance.
+    ``base_url`` is the environment the client's sign-in came from; ``None``,
+    for a key or a handed token, never matches.
+    """
+    if base_url is None:
+        return False
+    from comfy_cli import locking
+    from comfy_cli.auth import store as auth_store
+
+    try:
+        # Do not spend another lock budget after session recovery timed out.
+        # The store's nested read reuses this thread's lock reentrantly.
+        with locking.file_lock(auth_store.lock_path(), timeout=0):
+            session = get_session(refresh=False)
+    except TimeoutError:
+        # Contention cannot prove the held sign-in disappeared. End only the
+        # watch, rather than hanging or prescribing another login.
+        return True
+    except OSError as error:
+        _log.warning("could not re-read the stored sign-in after a 401: %s", error)
+        return False
+    return (
+        session is not None
+        and bool(session.access_token)
+        and bool(session.refresh_token)
+        and session.base_url == base_url
+    )
 
 
 class DataPlaneToken:

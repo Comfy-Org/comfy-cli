@@ -34,6 +34,7 @@ history.
   `asset_upload_refused`; new codes `asset_upload_invalid`,
   `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
   can end.
+
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
@@ -60,9 +61,18 @@ history.
 
 ### Fixed
 
-- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
-  when the server drops the connection partway through its error body, instead
-  of crashing with `IncompleteRead`.
+- Parallel build and deploy requests rejected on an old access token now adopt
+  a peer's refreshed token under the shared refresh lock instead of rotating it
+  again. Each rejected request retries at most once. If session recovery still
+  fails while a refreshable sign-in remains stored, the watch reports that the
+  remote work may continue instead of telling you to sign in again.
+  `comfy build release create --watch`, `comfy deploy up`, `promote`,
+  `rollback` and `comfy deploy status --watch` now end with the new code
+  `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint
+  names the command that reads the release or deployment again. A 401 before
+  anything was accepted, on a workspace API key, or when no refreshable sign-in
+  remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
@@ -111,6 +121,10 @@ history.
   so the positional marker filter is skipped and a value of `"fixed"` stays a
   value. Saves with a real marker have one more value than sockets and still go
   through the filter.
+
+- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
+  when the server drops the connection partway through its error body, instead
+  of crashing with `IncompleteRead`.
 
 ## [1.24.0] - 2026-10-29
 
