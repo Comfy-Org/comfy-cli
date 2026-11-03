@@ -1122,6 +1122,68 @@ class TestCli:
         assert by_model["testvid"]["template"] is None
         _validate(data)
 
+    def test_pick_exposes_discovery_routes_as_unranked(self, tmp_path, monkeypatch, capsys):
+        routes = [
+            {
+                "route": "Seamless texture node",
+                "description": "Turn an image into a tile.",
+                "nodes": [{"id": "Image Seamless Texture", "description": "Makes a seamless tile."}],
+            }
+        ]
+        failure_policy = "Name the route and actual failed step."
+        p = tmp_path / "k.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "models": {},
+                    "capabilities": {
+                        "tileable-texture": {
+                            "id": "tileable-texture",
+                            "picks": [],
+                            "discovery": routes,
+                            "failure_policy": failure_policy,
+                        }
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+
+        rc, env = _run(["pick", "tileable-texture"], capsys)
+
+        assert rc == 0
+        data = env["data"]
+        assert data["picks"] == []
+        assert data["discovery"] == [{**routes[0], "ranking": "unranked"}]
+        assert data["failure_policy"] == failure_policy
+        _validate(data)
+
+    def test_pick_preserves_ranked_projection_and_discovery_source_order(self, tmp_path, monkeypatch, capsys):
+        picks = [{"model": "x", "rank": 1, "route": "oss"}]
+        discovery = [
+            {"route": "first", "templates": ["template-a"]},
+            {"route": "second", "templates": ["template-b"]},
+        ]
+        p = tmp_path / "k.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "models": {"x": {"id": "x", "status": "available"}},
+                    "capabilities": {"mixed": {"id": "mixed", "picks": picks, "discovery": discovery}},
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+
+        rc, env = _run(["pick", "mixed"], capsys)
+
+        assert rc == 0
+        data = env["data"]
+        assert [(row["model"], row["rank"], row["route"]) for row in data["picks"]] == [("x", 1, "oss")]
+        assert [row["route"] for row in data["discovery"]] == ["first", "second"]
+        assert all(row["ranking"] == "unranked" for row in data["discovery"])
+        _validate(data)
+
     def test_pick_spelling_variant(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "Audio Generation"], capsys)

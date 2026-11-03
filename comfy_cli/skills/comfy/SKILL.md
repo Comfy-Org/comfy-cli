@@ -72,8 +72,14 @@ rather than an answer to anything. Five rules:
    still expand inside double quotes, and those words can come from a channel
    you do not control. Do not dodge a miss by listing first. A miss records the
    gap and is still an `ok` envelope: `zero_hit: true`, a `nudge`, and
-   `capabilities[]` carrying the ids to retry with. When the user has already
-   named a model, run
+   `capabilities[]` carrying the ids to retry with.
+   Some capability hits deliberately have no ranked evidence: they return
+   `picks: []` plus `discovery[]`, whose entries carry `ranking: unranked`.
+   Offer every applicable discovery route as an unranked choice, explain the
+   input differences from its description, and follow `failure_policy` after
+   a route fails. Preserve source order for presentation only; never turn it
+   into a preference or choose a winner from memory.
+   When the user has already named a model, run
    `comfy --json knowledge resolve <model>` instead and build what they asked
    for: rank is a preference, and their request outranks it. Override an
    explicit request only for correctness, where `status: deprecated` plus

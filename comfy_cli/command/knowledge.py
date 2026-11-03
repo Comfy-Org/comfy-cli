@@ -10,6 +10,7 @@ is a short courtesy view.
 
 from __future__ import annotations
 
+import copy
 import difflib
 import os
 from enum import Enum
@@ -358,7 +359,7 @@ def _check_picks_locally(picks: list[dict[str, Any]]) -> str:
     return "ok"
 
 
-@app.command("pick", help="Ranked model picks for a capability; omit it to list every capability.")
+@app.command("pick", help="Ranked model picks or unranked discovery routes; omit it to list every capability.")
 @tracking.track_command("knowledge")
 def pick_cmd(
     capability: Annotated[
@@ -395,6 +396,12 @@ def pick_cmd(
         if "fits" in p:
             entry["fits"] = p["fits"]
         picks.append(entry)
+    discovery = []
+    raw_discovery = cap.get("discovery")
+    if isinstance(raw_discovery, list):
+        for route in raw_discovery:
+            if isinstance(route, dict):
+                discovery.append({**copy.deepcopy(route), "ranking": "unranked"})
     payload = {
         "capability": capability_id,
         "zero_hit": False,
@@ -405,6 +412,10 @@ def pick_cmd(
         "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
+    if discovery:
+        payload["discovery"] = discovery
+    if failure_policy := _text(cap.get("failure_policy")):
+        payload["failure_policy"] = failure_policy
     if check_local:
         payload["local_check"] = _check_picks_locally(picks)
     if renderer.is_pretty():
