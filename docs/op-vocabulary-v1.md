@@ -1618,3 +1618,45 @@ a non-insert op carrying `definitions`, was correctly rejected and left
 `{"_applied_ops": []}` behind on a document that had no ledger at all.
 
 Both now run before the seed. No message or code changes.
+
+## 23. Amendment v1.14 — 2026-11-03 (later write in a batch wins)
+
+`apply_specs` stamps every op in a batch with the same `[base_version,
+actor]`, so two writes to one register in a batch tied on the stamp and the
+random uuid4 `op_id` picked the winner (the §11.1 batch caveat). The later
+write could be a silent no-op, and a write to a structural register (a
+dynamic-combo selector, a DynamicGroup count) could lose to an earlier one and
+make the specs that followed it fail.
+
+**The rule.** `_new_op` now mints `op_id` as 16 hex chars of a nanosecond
+clock that never repeats or goes backwards within the process, then 16 hex
+chars of random bits. Ops a writer mints later compare higher, so within one
+batch the later spec wins. This supersedes "uuid4 hex" in §§1, 2, 6 and 8.2
+(including the `"<uuid4 hex>"` envelope examples) and the §11.1 batch caveat.
+
+**Scope of the ordering.** The guarantee holds for ops one process mints.
+Across separate invocations the prefix follows the wall clock, so a clock step
+can reverse two runs' ops at the same stamp. A uuid4 `op_id` minted before this
+amendment starts with a random hex digit, so at an equal stamp it usually
+outranks a new one (whose prefix starts with `1`), where two uuid4 ids were an
+even split. Ordering across processes needs a different stamp, not this
+tiebreak. The prefix also carries the minting host's clock, to the nanosecond,
+wherever the `op_id` travels.
+
+**Still refused.** Three batch guards stay, and each refuses the whole batch
+instead of letting the later spec win: a `set_dynamic_group_rows` whose group
+was already written at the batch's stamp; a `set_widget` to a count or row
+field an earlier `set_dynamic_group_rows` in the batch replaced; and a second
+`connect` / `disconnect` to the same input. A follow-up may retire the first
+two.
+
+**Wire shape unchanged.** `op_id` is still exactly 32 lowercase hex chars
+(§8.2), the stamp is still `[base_version, actor]`, and `_stamp_key` /
+`_lww_gate` are unchanged. Receivers never parse or regenerate an `op_id`, so
+ops minted before this amendment replay as before. One batch shape still lands
+differently by apply order: a sub-widget write followed by a rebuild of its
+selector or count, because the rebuild resets the value but not the stamp
+(comfy-cli #1101).
+
+**No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.

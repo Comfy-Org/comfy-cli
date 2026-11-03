@@ -34,6 +34,10 @@ Convergence guarantees ``apply_op`` upholds, so any replay order reaches the sam
 * **Last-writer-wins on widgets** — two concurrent writes to the same widget
   converge on the value with the higher causal ``stamp`` ``[base_version, actor]``
   (``op_id`` breaks exact ties into a total order), independent of apply order.
+  Ops share one stamp within an ``apply_specs`` batch, and ``op_id`` is minted
+  in increasing order, so the later write in a batch wins unless a batch guard
+  refuses the batch; amendment v1.14 also names a rebuild shape that still
+  depends on apply order (#1101).
   The winning stamp per target is tracked in ``_widget_stamps`` (apply-only
   bookkeeping, stripped before serialization).
 * **Deterministic structure** — forking a shared subgraph definition mints an id
@@ -61,7 +65,9 @@ import json
 import math
 import random
 import re
-import uuid
+import secrets
+import threading
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -388,10 +394,25 @@ def mint_id() -> int:
     return _ID_FLOOR | random.getrandbits(52)
 
 
+_last_op_clock = 0
+_op_clock_lock = threading.Lock()
+
+
+def _new_op_id() -> str:
+    """32 lowercase hex chars (§8.2): a nanosecond clock that never repeats or
+    goes backwards in this process, then 64 random bits for uniqueness. Every op
+    in an ``apply_specs`` batch shares one stamp, so ``op_id`` is what breaks the
+    tie; minting it in increasing order makes the later spec win."""
+    global _last_op_clock
+    with _op_clock_lock:
+        clock = _last_op_clock = max(time.time_ns(), _last_op_clock + 1)
+    return f"{clock:016x}{secrets.token_hex(8)}"
+
+
 def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str, Any]:
     return {
         "op": kind,
-        "op_id": uuid.uuid4().hex,
+        "op_id": _new_op_id(),
         "actor": actor,
         "base_version": base_version,
         "stamp": [base_version, actor],
@@ -1313,8 +1334,8 @@ def set_dynamic_group_rows(
 
     The writes run on a copy, so ``workflow`` is unchanged when any is refused.
     The ops share one stamp, so an earlier write to the group at the same
-    stamp is refused rather than left to the ``op_id`` tiebreak (revisit once
-    #1007 makes the later write in a batch win). ``apply_op`` must replay them
+    stamp is refused rather than left to the ``op_id`` tiebreak (kept by
+    op-vocabulary amendment v1.14). ``apply_op`` must replay them
     in order, because this workflow model materializes rows from the count.
     """
     from comfy_cli.cql import engine as _engine
@@ -3698,8 +3719,7 @@ def apply_specs(
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
             # A later write at the batch's stamp would tie with the replacement
-            # and be settled by the random op_id. Revisit once #1007 makes the
-            # later write in a batch win.
+            # on the op_id tiebreak. Amendment v1.14 keeps this refusal.
             target = _write_target(op) if op.get("op") == "set_widget" else None
             if target in replaced:
                 raise ValueError(
