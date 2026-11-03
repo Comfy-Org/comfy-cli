@@ -1634,6 +1634,12 @@ chars of random bits. Ops a writer mints later compare higher, so within one
 batch the later spec wins. This supersedes "uuid4 hex" in §§2, 6 and 8.2 and
 the §11.1 batch caveat.
 
+**Still refused.** Two guards from `set_dynamic_group_rows` stay until a
+follow-up retires them: a `set_dynamic_group_rows` whose group was already
+written at the batch's stamp, and a `set_widget` to a count or row field an earlier
+`set_dynamic_group_rows` in the batch replaced. Either one refuses the whole
+batch instead of letting the later spec win.
+
 **Wire shape unchanged.** `op_id` is still exactly 32 lowercase hex chars
 (§8.2), the stamp is still `[base_version, actor]`, and `_stamp_key` /
 `_lww_gate` are unchanged. Receivers never parse or regenerate an `op_id`, so

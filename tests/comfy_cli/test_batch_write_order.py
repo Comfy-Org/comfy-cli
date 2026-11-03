@@ -111,3 +111,19 @@ def test_batch_replays_to_the_same_graph_in_any_order_and_twice():
         for op in order:
             workflow_ops.apply_op(wf, op, GRAPH)
         assert workflow_ops.canonical(wf) == expected
+
+
+def test_selector_batch_replays_to_the_same_graph_in_any_order_and_twice():
+    base, nid = _fresh()
+    specs = [
+        {"op": "set_widget", "node": nid, "widget": "model", "value": "base"},
+        {"op": "set_widget", "node": nid, "widget": "model", "value": "max"},
+        {"op": "set_widget", "node": nid, "widget": "model.mode", "value": "quality"},
+    ]
+    local, ops, _ = workflow_ops.apply_specs(copy.deepcopy(base), GRAPH, specs)
+    expected = workflow_ops.canonical(local)
+    for order in (ops, ops[::-1], ops + ops[::-1]):
+        wf = copy.deepcopy(base)
+        for op in order:
+            workflow_ops.apply_op(wf, op, GRAPH)
+        assert workflow_ops.canonical(wf) == expected
