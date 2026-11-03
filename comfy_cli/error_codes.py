@@ -468,6 +468,39 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "first with `comfy upload <file> --where cloud`",
     ),
     ErrorCode(
+        "asset_upload_invalid",
+        "`assets library upload` refused the file or `--type` before uploading anything: "
+        "`details.reason` is unsupported_file_type (not .safetensors), bad_filename, file_not_found, "
+        "file_unreadable (it could not be opened or its size read), empty_file, file_too_large (over 2 GB) "
+        "or unsupported_model_type (`details.valid_types` lists the folders the workspace takes).",
+        "fix the file or `--type` named in the message; nothing was sent",
+    ),
+    ErrorCode(
+        "asset_upload_refused",
+        "Comfy Cloud refused a model upload; the message is the server's. `details.server_code` is its "
+        "code, e.g. FEATURE_DISABLED (uploads are off for this workspace), MODEL_STORAGE_LIMIT_REACHED "
+        "(the message names the cap), UNSUPPORTED_FILE_TYPE, UNSUPPORTED_MODEL_TYPE or FILE_TOO_LARGE. "
+        "Retrying the same upload gets the same answer.",
+        "act on the server's message; do not retry unchanged",
+    ),
+    ErrorCode(
+        "asset_upload_failed",
+        "A model upload did not end in a stored asset: sending the bytes to storage failed after a fresh "
+        "retry (`details.status`, null when no answer came), the local file could not be read while it "
+        "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
+        "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
+        "file; not retried), or Comfy Cloud's storing task failed or was cancelled (the message carries the "
+        "task's error, e.g. not a valid .safetensors file).",
+        "retry for a storage failure; for an unreadable file or a task failure fix the file the message names; "
+        "for tls_setup fix the certificate setting the message names",
+    ),
+    ErrorCode(
+        "asset_upload_timeout",
+        "The model file was uploaded, but Comfy Cloud had not finished storing it when "
+        "`assets library upload` stopped waiting. `details.task_id` is the storing task, which goes on.",
+        "check `comfy assets library ls --tags models` later instead of uploading again",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",
@@ -1884,8 +1917,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "knowledge_unknown_model",
-        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
-        "try one of `details.close_matches`",
+        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names. "
+        "When catalog ids or aliases share the query's family word and numeric components, in order, "
+        "`details.candidate_ids` lists up to five sorted canonical ids; these are suggestions only.",
+        "try one of `details.close_matches`, or ask which of `details.candidate_ids` is intended and retry "
+        "`comfy knowledge resolve <exact-id>`",
     ),
 )
 

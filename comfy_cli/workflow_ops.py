@@ -10,11 +10,15 @@ diverging.
 
 Design (settled by the identity spike):
 
-* **Identity is leaderless & collision-free.** New node/link ids are random
-  53-bit integers (``mint_id``): no shared counter, no coordination, and still
-  ``int``-typed so the API converter (which gates link ids on ``isinstance(int)``)
-  and an int-keyed frontend keep working. ``last_node_id``/``last_link_id`` are
-  kept only as advisory high-water marks, never as allocators.
+* **Identity is leaderless.** New node/link ids are random integers with bit 40
+  set (``mint_id``), all below ``2**52``: no shared counter or coordination, and
+  still ``int``-typed so the API converter (which gates link ids on
+  ``isinstance(int)``) and an int-keyed frontend keep working. Agent-bound
+  frontend ids clear bit 40, separating frontend and structured-edit ranges;
+  bit 41 alone is not the discriminator. Structured-edit writers share one
+  random range regardless of their ``actor``, so collisions remain possible.
+  This module maintains ``last_node_id``/``last_link_id`` as advisory high-water
+  marks but never allocates from them; legacy frontend code may still do so.
 * **Widgets are name-addressed, never index-addressed.** ``set_widget`` carries
   the widget *name*; ``apply_op`` resolves name → ``widgets_values`` index against
   the live schema at apply time, so an op survives widget-layout drift.
@@ -30,6 +34,10 @@ Convergence guarantees ``apply_op`` upholds, so any replay order reaches the sam
 * **Last-writer-wins on widgets** — two concurrent writes to the same widget
   converge on the value with the higher causal ``stamp`` ``[base_version, actor]``
   (``op_id`` breaks exact ties into a total order), independent of apply order.
+  Ops share one stamp within an ``apply_specs`` batch, and ``op_id`` is minted
+  in increasing order, so the later write in a batch wins unless a batch guard
+  refuses the batch; amendment v1.14 also names a rebuild shape that still
+  depends on apply order (#1101).
   The winning stamp per target is tracked in ``_widget_stamps`` (apply-only
   bookkeeping, stripped before serialization).
 * **Deterministic structure** — forking a shared subgraph definition mints an id
@@ -57,7 +65,9 @@ import json
 import math
 import random
 import re
-import uuid
+import secrets
+import threading
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -74,8 +84,9 @@ from comfy_cli.cql.engine import (
     saved_widget_order,
 )
 
-# New ids live in [2**40, 2**53): always large (never collides with small
-# frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
+# New ids have bit 40 set and are below 2**52. Agent-bound frontend ids clear
+# bit 40 (and set bit 41), so bit 40 is the cross-actor discriminator. Agent ids
+# may also have bit 41 set. Random draws within this actor range can still collide.
 _ID_FLOOR = 1 << 40
 
 # Mirrored EXACTLY from comfy-multi-player's `src/limits.ts` at
@@ -379,14 +390,29 @@ def _rebind_op_digest(workflow: dict, op: dict, applied: str | None) -> None:
 
 
 def mint_id() -> int:
-    """A leaderless, collision-free, int-typed identity for a node or link."""
+    """A leaderless, random, int-typed identity for a node or link."""
     return _ID_FLOOR | random.getrandbits(52)
+
+
+_last_op_clock = 0
+_op_clock_lock = threading.Lock()
+
+
+def _new_op_id() -> str:
+    """32 lowercase hex chars (§8.2): a nanosecond clock that never repeats or
+    goes backwards in this process, then 64 random bits for uniqueness. Every op
+    in an ``apply_specs`` batch shares one stamp, so ``op_id`` is what breaks the
+    tie; minting it in increasing order makes the later spec win."""
+    global _last_op_clock
+    with _op_clock_lock:
+        clock = _last_op_clock = max(time.time_ns(), _last_op_clock + 1)
+    return f"{clock:016x}{secrets.token_hex(8)}"
 
 
 def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str, Any]:
     return {
         "op": kind,
-        "op_id": uuid.uuid4().hex,
+        "op_id": _new_op_id(),
         "actor": actor,
         "base_version": base_version,
         "stamp": [base_version, actor],
@@ -1308,8 +1334,8 @@ def set_dynamic_group_rows(
 
     The writes run on a copy, so ``workflow`` is unchanged when any is refused.
     The ops share one stamp, so an earlier write to the group at the same
-    stamp is refused rather than left to the ``op_id`` tiebreak (revisit once
-    #1007 makes the later write in a batch win). ``apply_op`` must replay them
+    stamp is refused rather than left to the ``op_id`` tiebreak (kept by
+    op-vocabulary amendment v1.14). ``apply_op`` must replay them
     in order, because this workflow model materializes rows from the count.
     """
     from comfy_cli.cql import engine as _engine
@@ -3693,8 +3719,7 @@ def apply_specs(
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
             # A later write at the batch's stamp would tie with the replacement
-            # and be settled by the random op_id. Revisit once #1007 makes the
-            # later write in a batch win.
+            # on the op_id tiebreak. Amendment v1.14 keeps this refusal.
             target = _write_target(op) if op.get("op") == "set_widget" else None
             if target in replaced:
                 raise ValueError(
@@ -4625,10 +4650,12 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     """Replace the whole document with the empty baseline, bookkeeping included.
 
     Unlike ``_apply_clear`` this drops ``last_node_id``/``last_link_id``,
-    ``_applied_ops``, ``_widget_stamps`` and deferred writes — the history
-    barrier of §1.6. Ids
-    are minted at random in ``[2**40, 2**53)`` (``mint_id``), never allocated
-    from the high-water marks, so resetting them to 0 cannot cause id reuse.
+    ``_applied_ops``, ``_widget_stamps`` and deferred writes
+    (``_pending_dynamic_connects``, ``_deferred_widget_ops``) — the history
+    barrier of §1.6. Structured-edit ids are random and independent of the
+    high-water marks; resetting the marks also deliberately resets any legacy
+    frontend allocator because no pre-reset identity or replay history survives
+    this operation.
     """
     kept = {k: workflow[k] for k in _RESET_DOC_KEEP if k in workflow}
     workflow.clear()

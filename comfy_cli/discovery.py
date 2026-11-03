@@ -198,6 +198,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy assets push": "assets",
     "comfy assets library ls": "assets_library",
     "comfy assets library ensure": "assets_library",
+    "comfy assets library upload": "assets_library",
     # config
     "comfy set-default": "set_default",
     # Not a subcommand: the root `--version` flag emits `command="version"`,
@@ -227,6 +228,7 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy jobs watch": "run_event",
     # upload progress; under plain --json the same lines go to stderr
     "comfy build push": "build_push_event",
+    "comfy assets library upload": "build_push_event",
     # the deployment coming up; same rule about stderr
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",
