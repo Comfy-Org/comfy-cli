@@ -47,7 +47,7 @@ def _rows(links: Any) -> list[list]:
 
 
 def _scope_findings(nodes: list, links: Any, prefix: str | None) -> tuple[list[dict], list[dict]]:
-    from comfy_cli.workflow_ops import _types_compatible
+    from comfy_cli.workflow_ops import _input_accepts
 
     def addr(nid: Any) -> str:
         return f"{prefix}/{nid}" if prefix else str(nid)
@@ -143,7 +143,7 @@ def _scope_findings(nodes: list, links: Any, prefix: str | None) -> tuple[list[d
         candidates = [
             str(i.get("name"))
             for i in inputs
-            if i.get("link") is None and i.get("name") and _types_compatible(source_type, i.get("type"))
+            if i.get("link") is None and i.get("name") and _input_accepts(source_type, i)
         ]
         where = (
             f"link {link_id} from {'the subgraph input' if src_is_proxy else f'node {addr(src_id)} output {src_slot}'} "

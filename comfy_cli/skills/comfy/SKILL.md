@@ -486,9 +486,10 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   are addressed **by name**. Discover them with `comfy --json nodes show <class>`
   (input/output slot names) and `comfy --json workflow slots <file>` (widget
   names — note `slots` lists **widgets only**, not connection slots).
-- **Identity:** `add-node` mints a **large random integer** id (leaderless,
-  collision-free) and returns it in `data.op.node_id`; **capture it** to wire the
-  new node (e.g. `id=$(comfy --json workflow add-node … | jq -r .data.op.node_id)`).
+- **Identity:** `add-node` mints a **large random integer** id (leaderless;
+  collisions are possible but unlikely) and returns it in `data.op.node_id`;
+  **capture it** to wire the new node (e.g.
+  `id=$(comfy --json workflow add-node … | jq -r .data.op.node_id)`).
   Do not assume small/sequential ids. `add-node` fills widget defaults (COMBO →
   first choice), so a new node is runtime-valid without extra `set-widget` calls.
 - **The op** (`data.op`): `{op, op_id, node_id/link_id, actor, base_version, stamp}`
@@ -898,8 +899,14 @@ running (or removing) every other branch. The ids are the API-format graph's
 node ids (`--print-prompt` shows them) and must be output nodes; an unknown id
 fails with `invalid_output_node_ids` before submit, and so does a non-output
 node whenever the node catalog is available. Validation covers only the nodes
-that run, but `--allow-spend` is still needed when a paid partner node sits
-anywhere in the workflow: a server that ignores the targets runs it. On a
+that run, except that a missing or unknown `class_type` anywhere in the workflow
+still fails with `workflow_unknown_nodes` (ComfyUI rejects those before it
+applies the targets). `--allow-spend` is still needed when a paid partner node
+sits anywhere in the workflow: a server that ignores the targets runs it. On a
+local server that ignores the targets, a partner node outside them receives an
+explicit `--api-key`, or a resolved partner credential when the targeted
+subgraph contains a partner node. If no partner credential is sent, it may fail
+mid-run with `execution_error`. On a
 `--where cloud --wait` run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
 when a targeted node returned nothing, and `partial_execution_targets_ignored`
 when the server ran untargeted nodes anyway.

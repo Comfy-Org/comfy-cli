@@ -45,7 +45,7 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 
 from comfy_cli.cloud import (
@@ -55,6 +55,11 @@ from comfy_cli.cloud import (
     get_base_url,
 )
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from comfy_cli.auth.store import CloudSession
 
 # ---------------------------------------------------------------------------
 # Error types — caller maps these to renderer.error(code=...) codes.
@@ -90,6 +95,19 @@ class OAuthRefreshError(OAuthError):
 
 class OAuthTimeout(OAuthError):
     code = "oauth_timeout"
+
+
+class SessionReplaced(Exception):
+    """The stored sign-in is not the one ``ensure_fresh_session(expect=...)`` was asked to refresh.
+
+    Raised before anything is refreshed, persisted or cleared, so another
+    sign-in stored while the caller waited is left exactly as it was.
+    ``session`` is the sign-in found in its place.
+    """
+
+    def __init__(self, session: CloudSession) -> None:
+        super().__init__("the stored sign-in was replaced by another")
+        self.session = session
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +776,13 @@ def take_last_fatal_refresh_reason() -> str | None:
     return reason
 
 
-def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
+def ensure_fresh_session(
+    *,
+    leeway_s: int = 60,
+    force: bool = False,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
     is available.
@@ -787,6 +811,13 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     session lifecycle. The refresh still returns ``None`` so the caller knows it
     could not freshen the token; it just declines to destroy the shared session.
 
+    ``expect`` is for a caller bound to one sign-in (an upload finished as the
+    account that started it). It is called with the stored session on the first
+    read and again under the lock, before any refresh, persist or clear; when it
+    returns ``False`` another sign-in replaced that one (``comfy cloud login`` in
+    another shell), so :class:`SessionReplaced` is raised and the store is left
+    untouched. Without it every stored session is refreshed, as before.
+
     Concurrency: the auth server rotates the refresh token on every refresh and
     invalidates the old one. A parallel ``comfy run`` fan-out (plus background
     ``jobs watch`` processes) would otherwise have N processes each load the
@@ -800,6 +831,8 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     from comfy_cli.auth import store as auth_store
 
     session = auth_store.get_cloud_session()
+    if session is not None and expect is not None and not expect(session):
+        raise SessionReplaced(session)
     if session is None or not session.refresh_token:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
@@ -821,6 +854,7 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
                 leeway_s=leeway_s,
                 force=force,
                 allow_clear=allow_clear,
+                expect=expect,
             )
     except TimeoutError:
         # A peer has held the lock longer than a refresh should take. Don't
@@ -833,7 +867,15 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
         return session
 
 
-def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, force: bool, allow_clear: bool = True):
+def _locked_refresh(
+    auth_store,
+    *,
+    observed_refresh_token: str,
+    leeway_s: int,
+    force: bool,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+):
     """Decide → POST → persist, executed while holding the secrets lock.
 
     Re-reads the persisted session first (double-checked locking): if a peer
@@ -841,6 +883,10 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     one rather than spending the now-consumed token we observed before locking.
     """
     session = auth_store.get_cloud_session()
+    # Checked under the lock: another login stored since the first read is
+    # neither refreshed nor cleared on this caller's behalf.
+    if session is not None and expect is not None and not expect(session):
+        raise SessionReplaced(session)
     if session is None or not session.refresh_token:
         return session
 

@@ -413,6 +413,22 @@ def test_promotion_traversal_limit_is_a_structured_print_failure():
     assert exc.value.reasons == ["promoted input traversal exceeded"]
 
 
+def test_saved_layout_failure_is_a_structured_print_failure():
+    from comfy_cli.cql.engine import SavedWidgetLayoutError
+
+    with (
+        mock.patch(
+            "comfy_cli.workflow_print._render_py",
+            side_effect=SavedWidgetLayoutError("saved widget is absent from the current catalog"),
+        ),
+        pytest.raises(PrintUnsupported, match="absent from the current catalog") as exc,
+    ):
+        render_py({}, None)
+
+    assert exc.value.reasons == ["saved widget is absent from the current catalog"]
+    assert isinstance(exc.value.__cause__, SavedWidgetLayoutError)
+
+
 def test_reroute_is_spliced(sd15_graph):
     wf = _mini(
         [

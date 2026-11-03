@@ -3021,6 +3021,19 @@ class TestLoad3DInjectedButtonSlots:
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
 
+    def test_advanced_variant_single_marker_is_the_viewport_value(self, object_info_3d):
+        # Only two consecutive markers mark the legacy layout (the editor's
+        # rule). A lone marker is the viewport's value, so width/height stay put.
+        ui = self._workflow("Load3DAdvanced", ["m.fbx", "upload3dmodel", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "upload3dmodel", "width": 800, "height": 600}
+
+    def test_load3d_still_skips_a_single_marker_run(self, object_info_3d):
+        # Plain Load3D always carries its buttons, so the run-skip is unchanged.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "", 800, 600])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 800, "height": 600}
+
     def test_truncated_legacy_advanced_variant_keeps_its_viewport_input(self, object_info_3d):
         # A legacy save cut off after the button markers still describes a
         # LOAD_3D slot; omitting viewport_state would leave a required input

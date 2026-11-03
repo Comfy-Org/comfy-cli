@@ -59,8 +59,12 @@ def _node(wf: dict, node_id: Any) -> dict:
     return next(n for n in wf["nodes"] if n["id"] == node_id)
 
 
+def _is_widget_socket(entry: dict) -> bool:
+    return "widget" in entry and "grow_id" not in entry
+
+
 def _inputs(wf: dict, node_id: Any) -> list[str]:
-    return [i["name"] for i in _node(wf, node_id).get("inputs") or []]
+    return [i["name"] for i in _node(wf, node_id).get("inputs") or [] if not _is_widget_socket(i)]
 
 
 def _link_of(wf: dict, node_id: Any, name: str):
@@ -152,7 +156,7 @@ def _add_loader(wf: dict, graph: Graph, class_type: str) -> tuple[dict, int]:
 def test_add_node_writes_frontend_width_widgets_and_no_group_inputs(graph):
     wf, _ = workflow_ops.add_node(_empty(), graph, "MinimaxHailuo03ReferenceNode")
     node = wf["nodes"][0]
-    assert node["inputs"] == []
+    assert [i for i in node["inputs"] if not _is_widget_socket(i)] == []
     order = graph.widget_order_default("MinimaxHailuo03ReferenceNode")
     assert len(node["widgets_values"]) == len(order) == 8
     by_name = dict(zip(order, node["widgets_values"]))
@@ -171,7 +175,7 @@ def test_connect_grows_first_nested_slot_by_its_schema_name(graph):
     wf, b = _add_loader(wf, graph, "GeminiNanoBanana2V2")
     widgets_before = list(_node(wf, b)["widgets_values"])
     wf, op = workflow_ops.connect(wf, graph, a, "IMAGE", b, "model.images.image_1")
-    grown = _node(wf, b)["inputs"]
+    grown = [i for i in _node(wf, b)["inputs"] if not _is_widget_socket(i)]
     assert [i["name"] for i in grown] == ["model.images.image_1"]
     assert grown[0]["type"] == "IMAGE"
     assert grown[0]["link"] == op["link_id"]
@@ -446,13 +450,29 @@ def test_full_group_reports_full_before_the_next_key_hint(graph):
 
 def test_a_real_widget_name_outranks_the_bare_element_guess():
     """A node whose group's bare element vocabulary collides with a real
-    widget name keeps the widget→input conversion (the existing precedence)."""
+    widget name resolves to that widget's own input, never the group guess."""
     oi = json.loads(FIXTURE.read_text())
     oi["BatchImagesNode"]["input"]["required"]["image0"] = ["STRING", {"default": ""}]
     oi["BatchImagesNode"]["input_order"]["required"].append("image0")
     g = Graph.from_object_info(oi)
     wf, batch = _add_loader(_empty(), g, "BatchImagesNode")
-    _idx, grow = workflow_ops._resolve_input_target(_node(wf, batch), g, "image0", "STRING")
+    node = _node(wf, batch)
+    idx, grow = workflow_ops._resolve_input_target(node, g, "image0", "STRING")
+    assert grow is None
+    assert node["inputs"][idx] == {"name": "image0", "type": "STRING", "widget": {"name": "image0"}, "link": None}
+
+
+def test_a_real_combo_widget_name_outranks_the_bare_element_guess():
+    """A node saved before COMBO widgets had socket entries takes the
+    widget→input conversion, still ahead of the group's element guess."""
+    oi = json.loads(FIXTURE.read_text())
+    oi["BatchImagesNode"]["input"]["required"]["image0"] = [["a", "b"]]
+    oi["BatchImagesNode"]["input_order"]["required"].append("image0")
+    g = Graph.from_object_info(oi)
+    wf, batch = _add_loader(_empty(), g, "BatchImagesNode")
+    node = _node(wf, batch)
+    node["inputs"] = [i for i in node["inputs"] if i["name"] != "image0"]
+    _idx, grow = workflow_ops._resolve_input_target(node, g, "image0", "STRING")
     assert grow == {"name": "image0", "type": "STRING", "widget": "image0"}
 
 

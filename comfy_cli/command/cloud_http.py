@@ -13,6 +13,9 @@ import json
 
 import typer
 
+# The most of a response body ``http_request`` reads.
+_MAX_BODY_BYTES = 64 * 1024 * 1024
+
 
 def cloud_target_or_local_error(where: str | None, renderer):
     """Resolve a cloud Target, or emit ``cloud_only_command`` for a non-cloud target."""
@@ -71,7 +74,15 @@ def http_request(
     raises ``ResponseUnparseable``. The two are different answers ("nothing to
     say" vs. "a malformed answer"), and a listing caller that conflates them
     reports a proxy or captive-portal error page as a successful empty listing.
+
+    A connection that closes before the body it declared has arrived raises
+    ``http.client.IncompleteRead``, never a decode failure: the answer was cut
+    off in transit, not malformed, and a retry may get all of it.
+
+    A body longer than ``_MAX_BODY_BYTES``, chunked or not, is never parsed; it
+    gets the decode-failure outcome, since the bytes read are not the whole answer.
     """
+    import http.client
     import urllib.request
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -79,14 +90,27 @@ def http_request(
     req = _authed_request(url, target, method=method, data=data, content_type=ct)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         status = resp.status
-        raw = resp.read(64 * 1024 * 1024)  # 64 MiB cap
+        # One byte past the cap tells a body longer than the cap apart from one
+        # exactly the cap, with or without a Content-Length.
+        raw = resp.read(_MAX_BODY_BYTES + 1)
+        # A chunked body cut short raises IncompleteRead inside `read`, but a
+        # bounded read of a Content-Length body returns whatever arrived;
+        # http.client still counts the declared bytes that did not (`length`).
+        unread = getattr(resp, "length", None)
+    over_cap = len(raw) > _MAX_BODY_BYTES
+    if isinstance(unread, int) and unread > 0 and not over_cap:
+        raise http.client.IncompleteRead(raw, unread)
     # `.strip()` so a whitespace-only body counts as empty rather than as a
     # decode failure: identical to the old behaviour on the default path (it
     # collapsed to `None` either way), but it keeps `strict_json` from calling a
     # server that answers `b"\n"` malformed.
-    if not raw.strip():
+    if not over_cap and not raw.strip():
         return status, None
     try:
+        if over_cap:
+            # The body runs past the cap: the prefix may happen to be valid
+            # JSON, but it is not the answer.
+            raise ValueError(f"response body larger than {_MAX_BODY_BYTES} bytes")
         return status, json.loads(raw)
     except (ValueError, RecursionError) as e:
         # Catch the ``ValueError`` BASE, not ``JSONDecodeError``: handed raw bytes,
@@ -107,6 +131,7 @@ def http_request(
 
 def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``."""
+    import http.client
     import urllib.error
 
     if isinstance(e, urllib.error.HTTPError):
@@ -114,9 +139,15 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
             from comfy_cli.command._cloud_errors import read_unauthorized_body
 
             # Detection sees more of the body than the capped `details.body`.
+            # read_unauthorized_body degrades a broken read to empty bodies.
             scope_body, body = read_unauthorized_body(e)
         else:
-            body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+            # Best effort: a server that drops the connection partway through its
+            # error body must not keep the status from being classified.
+            try:
+                body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+            except (http.client.HTTPException, OSError):
+                body = ""
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
