@@ -73,7 +73,49 @@ on:
 # group while its `uses:` job waits on the identical group.
 
 jobs:
+  # Fails the tick BEFORE the reusable starts, when the App credentials are in
+  # the half-configured state this file's header warns about: APP_ID present
+  # (often inherited from the org) with the private key missing or rotated out.
+  #
+  # The reusable gates token minting on `bot_app_id != ''` — the ID alone, not
+  # the key — so that combination does not degrade to github-actions[bot]. It
+  # mints in the `file` job, which runs AFTER the finder and verifier agents
+  # have already billed through ANTHROPIC_API_KEY, so the run pays for findings
+  # and then discards them at the token step. That is what has happened on every
+  # scheduled tick since 2026-10-27.
+  #
+  # Three lines of shell turn a daily paid failure into a daily free one. It does
+  # not fix the cause: either set the private key or unset APP_ID so the reusable
+  # degrades to github-actions[bot], both of which are repository settings.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse a half-configured bot identity before anything bills
+        env:
+          APP_ID: ${{ vars.APP_ID }}
+          BOT_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+        run: |
+          app_id="$(printf '%s' "${APP_ID:-}" | tr -d '[:space:]')"
+          bot_key="$(printf '%s' "${BOT_KEY:-}" | tr -d '[:space:]')"
+          if [ -n "$app_id" ] && [ -z "$bot_key" ]; then
+            echo "::error::vars.APP_ID is set but secrets.CLOUD_CODE_BOT_PRIVATE_KEY is empty."
+            echo "These are ALL-OR-NOTHING (see this file's header). The reusable gates App"
+            echo "token minting on the ID alone, so this combination does not degrade to"
+            echo "github-actions[bot] -- it mints in the 'file' job, after the finder and"
+            echo "verifier agents have billed, and discards that run's findings."
+            echo
+            echo "A repository admin picks one, under Settings:"
+            echo "  - set secrets.CLOUD_CODE_BOT_PRIVATE_KEY (issues file as the bot), or"
+            echo "  - unset vars.APP_ID (issues file as github-actions[bot])"
+            echo
+            echo "Stopping here so the tick costs nothing instead of paying to be discarded."
+            exit 1
+          fi
+
   groom:
+    needs: preflight
     permissions:
       # REQUIRED UNION. A reusable's nested jobs cannot request more GITHUB_TOKEN
       # scope than the caller grants, and GitHub validates this at STARTUP, so a
