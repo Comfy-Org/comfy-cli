@@ -34,6 +34,7 @@ history.
   `asset_upload_refused`; new codes `asset_upload_invalid`,
   `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
   can end.
+
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
@@ -60,9 +61,21 @@ history.
 
 ### Fixed
 
-- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
-  when the server drops the connection partway through its error body, instead
-  of crashing with `IncompleteRead`.
+- `comfy update` no longer dies with a `FileNotFoundError` traceback when the
+  configured workspace directory does not exist (never installed, or deleted).
+  It now fails with a `not_in_workspace` error that points at `comfy install`,
+  including when `--recent` cannot resolve a workspace, keeping the resolver's
+  exit status.
+
+- `comfy update cli` works for a `uv tool install` of comfy-cli. Those envs ship
+  without pip, so the old `python -m pip install -U` always failed; it now runs
+  `uv tool upgrade comfy-cli`, and any installer failure is reported as an
+  `update_cli_failed` error rather than a traceback. The upgrade targets the
+  running installation's tool directory even when `UV_TOOL_DIR` is absent or
+  selects a different directory in the current shell. An exact uv version pin
+  is preserved and reported with manual reinstall guidance. Installer diagnostics
+  stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
@@ -111,6 +124,10 @@ history.
   so the positional marker filter is skipped and a value of `"fixed"` stays a
   value. Saves with a real marker have one more value than sockets and still go
   through the filter.
+
+- `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
+  when the server drops the connection partway through its error body, instead
+  of crashing with `IncompleteRead`.
 
 ## [1.24.0] - 2026-10-29
 
