@@ -35,7 +35,9 @@ Convergence guarantees ``apply_op`` upholds, so any replay order reaches the sam
   converge on the value with the higher causal ``stamp`` ``[base_version, actor]``
   (``op_id`` breaks exact ties into a total order), independent of apply order.
   Ops share one stamp within an ``apply_specs`` batch, and ``op_id`` is minted
-  in increasing order, so the later write in a batch wins.
+  in increasing order, so the later write in a batch wins unless a batch guard
+  refuses the batch; amendment v1.14 also names a rebuild shape that still
+  depends on apply order (#1101).
   The winning stamp per target is tracked in ``_widget_stamps`` (apply-only
   bookkeeping, stripped before serialization).
 * **Deterministic structure** — forking a shared subgraph definition mints an id
