@@ -63,6 +63,7 @@ import json
 import math
 import random
 import re
+import secrets
 import time
 from decimal import Decimal
 from typing import Any
@@ -400,7 +401,7 @@ def _new_op_id() -> str:
     tie; minting it in increasing order makes the later spec win."""
     global _last_op_clock
     _last_op_clock = max(time.time_ns(), _last_op_clock + 1)
-    return f"{_last_op_clock:016x}{random.getrandbits(64):016x}"
+    return f"{_last_op_clock:016x}{secrets.token_hex(8)}"
 
 
 def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str, Any]:
