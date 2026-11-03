@@ -64,6 +64,7 @@ import math
 import random
 import re
 import secrets
+import threading
 import time
 from decimal import Decimal
 from typing import Any
@@ -392,6 +393,7 @@ def mint_id() -> int:
 
 
 _last_op_clock = 0
+_op_clock_lock = threading.Lock()
 
 
 def _new_op_id() -> str:
@@ -400,8 +402,9 @@ def _new_op_id() -> str:
     in an ``apply_specs`` batch shares one stamp, so ``op_id`` is what breaks the
     tie; minting it in increasing order makes the later spec win."""
     global _last_op_clock
-    _last_op_clock = max(time.time_ns(), _last_op_clock + 1)
-    return f"{_last_op_clock:016x}{secrets.token_hex(8)}"
+    with _op_clock_lock:
+        clock = _last_op_clock = max(time.time_ns(), _last_op_clock + 1)
+    return f"{clock:016x}{secrets.token_hex(8)}"
 
 
 def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str, Any]:

@@ -1631,8 +1631,16 @@ make the specs that followed it fail.
 **The rule.** `_new_op` now mints `op_id` as 16 hex chars of a nanosecond
 clock that never repeats or goes backwards within the process, then 16 hex
 chars of random bits. Ops a writer mints later compare higher, so within one
-batch the later spec wins. This supersedes "uuid4 hex" in §§2, 6 and 8.2 and
-the §11.1 batch caveat.
+batch the later spec wins. This supersedes "uuid4 hex" in §§1, 2, 6 and 8.2
+(including the `"<uuid4 hex>"` envelope examples) and the §11.1 batch caveat.
+
+**Scope of the ordering.** The guarantee holds for ops one process mints.
+Across separate invocations the prefix follows the wall clock, so a clock step
+can reverse two runs' ops at the same stamp. A uuid4 `op_id` minted before this
+amendment starts with a random hex digit, so at an equal stamp it usually
+outranks a new one (whose prefix starts with `1`), where two uuid4 ids were an
+even split. Ordering across processes needs a different stamp, not this
+tiebreak.
 
 **Still refused.** Two guards from `set_dynamic_group_rows` stay until a
 follow-up retires them: a `set_dynamic_group_rows` whose group was already
@@ -1646,5 +1654,5 @@ batch instead of letting the later spec win.
 ops minted before this amendment replay as before, and stamp order still
 converges in any apply order.
 
-**No change to §§3-5, 7, 8.** No op kind was added, removed, or re-scoped;
+**No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
