@@ -1184,6 +1184,39 @@ class TestCli:
         assert all(row["ranking"] == "unranked" for row in data["discovery"])
         _validate(data)
 
+    def test_pick_exposes_all_virtual_try_on_paths_without_ranking_them(self, tmp_path, monkeypatch, capsys):
+        discovery = [
+            {
+                "route": "Nano Banana flat-lay / lookbook templates",
+                "templates": ["templates-fashion_shoot_vton", "templates_rob_fashion_shoot_vton-4in1.app"],
+            },
+            {"route": "Flux Virtual Try-On", "templates": ["api_flux_vto"]},
+        ]
+        p = tmp_path / "k.json"
+        p.write_text(
+            json.dumps(
+                {
+                    "models": {},
+                    "capabilities": {"virtual-try-on": {"id": "virtual-try-on", "picks": [], "discovery": discovery}},
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+
+        rc, env = _run(["pick", "virtual-try-on"], capsys)
+
+        assert rc == 0
+        data = env["data"]
+        assert data["picks"] == []
+        assert [row["route"] for row in data["discovery"]] == [row["route"] for row in discovery]
+        assert [template for row in data["discovery"] for template in row["templates"]] == [
+            "templates-fashion_shoot_vton",
+            "templates_rob_fashion_shoot_vton-4in1.app",
+            "api_flux_vto",
+        ]
+        assert all(row["ranking"] == "unranked" for row in data["discovery"])
+        _validate(data)
+
     def test_pick_spelling_variant(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "Audio Generation"], capsys)
