@@ -27,7 +27,6 @@ _EMPTY_DEFINITION: JsonObject = {"models": [], "customNodes": []}
 # Keyed on the URL *path* so a route carrying query parameters (`?cursor=`,
 # `?os=&gpu=`) still matches.
 _ROUTES: dict[tuple[str, str], tuple[int, JsonObject]] = {
-    ("POST", "/v1/snapshots/resolve"): (200, {"definition": _EMPTY_DEFINITION, "report": {}}),
     ("POST", "/v1/builds"): (201, {"id": BUILD_ID, "updatedAt": REVISION}),
     ("GET", "/v1/builds"): (200, {"builds": [{"id": BUILD_ID, "name": "Matrix"}]}),
     ("GET", f"/v1/builds/{BUILD_ID}"): (
@@ -99,6 +98,8 @@ class RecordingTransport:
         path = urlsplit(url).path
         if (method, path) == ("POST", "/v1/models/resolve"):
             return 200, {"results": _resolved_filenames(body)}
+        if (method, path) == ("POST", "/v1/snapshots/resolve"):
+            return 200, {"definition": {"models": [], "customNodes": _placed_nodes(body)}, "report": {}}
         route = _ROUTES.get((method, path))
         if route is None:
             pytest.fail(f"unexpected Builder call: {method} {url}")
@@ -111,6 +112,24 @@ def _resolved_filenames(body: JsonObject | None) -> list[JsonValue]:
     filenames = body["filenames"]
     assert isinstance(filenames, list)
     return [{"filename": filename, "candidates": []} for filename in filenames]
+
+
+def _placed_nodes(body: JsonObject | None) -> list[JsonValue]:
+    """Every pack the snapshot names, placed as asked: the importer vouches for
+    each pin, so a push or dry run that sends one gets past its pin check."""
+    assert body is not None
+    snapshot = body["snapshot"]
+    assert isinstance(snapshot, dict)
+    placed: list[JsonValue] = []
+    for entry in snapshot.get("snapshots") or []:
+        assert isinstance(entry, dict)
+        for node in entry.get("customNodes") or []:
+            assert isinstance(node, dict)
+            if node["type"] == "cnr":
+                placed.append({"name": node["dirName"], "id": node["id"], "registryVersion": node["version"]})
+            else:
+                placed.append({"name": node["dirName"], "repository": node["url"]})
+    return placed
 
 
 def write_snapshot(root: Path) -> Path:
