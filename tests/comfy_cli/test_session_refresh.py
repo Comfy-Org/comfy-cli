@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import http.client
 import io
+import os
+import threading
 import time
 import urllib.error
 from types import SimpleNamespace
@@ -543,3 +545,133 @@ def test_a_deploy_watch_on_a_credential_it_cannot_refresh_keeps_the_sign_in_code
 
     # Then the credential the client sent is the one to replace
     assert exc_info.value.code == "deploy_not_signed_in"
+
+
+@pytest.fixture
+def peer_takes_refresh_lock_after_first_read(monkeypatch, tmp_path):
+    """Own a real secrets lock; compress only its contended acquisition attempts."""
+    from comfy_cli import locking
+    from comfy_cli.auth import store
+    from comfy_cli.cloud import oauth
+
+    monkeypatch.setenv("COMFY_SECRETS_PATH", str(tmp_path / "secrets.json"))
+    store.save_cloud_session(
+        base_url="https://cloud.comfy.org",
+        resource="https://cloud.comfy.org/api",
+        client_id="cli",
+        scope="s",
+        access_token="signed-in",
+        refresh_token="RT0",
+        token_type="Bearer",
+        expires_at=4102444800,
+    )
+    initial = store.secrets_path().read_bytes()
+    state = SimpleNamespace(armed=False, started=False, contended=False, timeouts=[], errors=[])
+    held, release = threading.Event(), threading.Event()
+    real_acquire, real_read = locking._acquire, store.get_cloud_session
+    lock_stat = store.lock_path().stat()
+
+    def peer():
+        try:
+            with locking.file_lock(store.lock_path(), timeout=0):
+                state.contended = True
+                held.set()
+                if not release.wait(5):
+                    raise AssertionError("test did not release its owned secrets lock")
+            state.contended = False
+        except BaseException as error:
+            state.errors.append(error)
+            held.set()
+
+    owner = threading.Thread(target=peer)
+
+    def acquire(fd, *, timeout):
+        info = os.fstat(fd)
+        owns_path = (info.st_dev, info.st_ino) == (lock_stat.st_dev, lock_stat.st_ino)
+        if owns_path and state.contended:
+            state.timeouts.append(timeout)
+            if timeout is None:
+                pytest.fail("unbounded secrets read after the refresh lock timed out")
+            # Exercise the actual contended OS lock without waiting out the
+            # production refresh budget. Classification already requests zero.
+            return real_acquire(fd, timeout=0)
+        return real_acquire(fd, timeout=timeout)
+
+    def read():
+        session = real_read()
+        if state.armed and not state.started:
+            state.started = True
+            owner.start()
+            assert held.wait(5), "test peer never acquired its secrets lock"
+            assert not state.errors
+        return session
+
+    monkeypatch.setattr(locking, "_acquire", acquire)
+    monkeypatch.setattr(store, "get_cloud_session", read)
+    monkeypatch.setattr(oauth, "refresh_tokens", lambda **_: pytest.fail("must not refresh outside the held lock"))
+
+    def release_peer():
+        release.set()
+        if owner.ident is not None:
+            # Acquisition was nonblocking; the only possible wait is our own
+            # event, released above even when a regression assertion fails.
+            owner.join()
+        assert not state.errors
+
+    state.release_peer = release_peer
+    try:
+        yield state
+    finally:
+        release_peer()
+        assert store.secrets_path().read_bytes() == initial
+
+
+@pytest.mark.parametrize("kind", ["builder", "deploy"])
+def test_a_watch_does_not_wait_again_when_a_peer_outlives_the_refresh_lock(
+    monkeypatch, capsys, peer_takes_refresh_lock_after_first_read, kind
+):
+    import json
+
+    import typer
+
+    from comfy_cli import credentials
+    from comfy_cli.caller import Caller
+    from comfy_cli.command.build import _watched_release
+    from comfy_cli.command.deploy_runtime import DeployWatchAuthLostError, exit_watch_lost, poll_deployment
+    from comfy_cli.output.renderer import Renderer
+
+    state = peer_takes_refresh_lock_after_first_read
+    client = BuilderClient.from_session(_BUILDER_URL) if kind == "builder" else DeployClient.from_session(_DEPLOY_URL)
+    requests = []
+
+    def refused(url, target, **kwargs):
+        requests.append(target.auth_token)
+        state.armed = True
+        raise urllib.error.HTTPError(url, 401, "refused", http.client.HTTPMessage(), io.BytesIO(b"{}"))
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", refused)
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", refused)
+    renderer = Renderer.resolve(
+        is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
+    )
+    with pytest.raises(typer.Exit) as stopped:
+        if kind == "builder":
+            _watched_release(renderer, client, "r1")
+        else:
+            try:
+                poll_deployment(client, "dep-1", lambda _: pytest.fail("must not sleep after the refused read"))
+            except DeployWatchAuthLostError as error:
+                exit_watch_lost(renderer, error)
+
+    envelope = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert stopped.value.exit_code == 75
+    assert envelope["error"]["code"] == "watch_auth_lost"
+    assert "comfy cloud login" not in envelope["error"]["hint"]
+    assert requests == ["signed-in"]
+    assert state.timeouts == [90.0, 0]
+    assert state.started is True
+
+    # With the same real store readable again, the nested lock is reentrant.
+    state.release_peer()
+    assert credentials.sign_in_still_stored("https://cloud.comfy.org") is True
+    assert credentials.sign_in_still_stored(None) is False

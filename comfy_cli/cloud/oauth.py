@@ -903,6 +903,7 @@ def _locked_refresh(
     if (
         rejected_access_token is not None
         and session.access_token != rejected_access_token
+        and session.expires_at is not None
         and not session.is_expired(leeway_s=leeway_s)
     ):
         return session
@@ -911,7 +912,10 @@ def _locked_refresh(
     # blocked: if the stored refresh token rotated away from what we observed
     # before locking, the family already advanced — use it, never re-send the
     # consumed token (that is exactly what trips reuse-detection).
-    if session.refresh_token != observed_refresh_token:
+    # A usable reactive peer already returned above. Otherwise refresh its
+    # current family, never replaying the older token observed before locking.
+    # Ordinary proactive callers still coalesce on any peer rotation.
+    if session.refresh_token != observed_refresh_token and rejected_access_token is None:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
         # Peer advanced the access token's expiry without us noticing a token
