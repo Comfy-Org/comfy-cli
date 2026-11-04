@@ -708,7 +708,8 @@ def test_status_glyph_keeps_its_own_tags_live(pretty):
 
     from comfy_cli.output.glyphs import status_glyph
 
-    console = Console(file=pretty, force_terminal=True, width=80)
+    # This tests authored styling, independently of the caller's terminal type.
+    console = Console(file=pretty, force_terminal=True, width=80, _environ={"TERM": "xterm-256color"})
     console.print(status_glyph("success"))
     out = pretty.getvalue()
 
