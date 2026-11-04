@@ -733,13 +733,13 @@ class TestSave:
             "created_at": "2026-05-23T00:00:00Z",
             "updated_at": "2026-05-23T00:00:00Z",
         }
-        calls = _patch_urlopen(monkeypatch, {"/api/workflows": created})
+        calls = _patch_urlopen(monkeypatch, {"/api/features": _FLAG_OFF, "/api/workflows": created})
         env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
         assert env["ok"] is True
         assert env["data"]["workflow_id"] == "new-uuid"
         # POSTed JSON carries the workflow_json + name.
-        assert calls[0]["method"] == "POST"
-        sent = json.loads(calls[0]["body"])
+        assert calls[-1]["method"] == "POST"
+        sent = json.loads(calls[-1]["body"])
         assert sent["name"] == "my workflow"
         assert sent["workflow_json"] == wf_data
 
@@ -757,6 +757,229 @@ class TestSave:
         env = _run(["save", str(tmp_path / "missing.json"), "--name", "x", "--where", "cloud"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_not_found"
+
+
+# ---------------------------------------------------------------------------
+# save into a Cloud Workflows-sidebar folder (the cli_cloud_save_enabled flag)
+# ---------------------------------------------------------------------------
+
+_FLAG_OFF = {"cli_cloud_save_enabled": False}
+_FLAG_ON = {"cli_cloud_save_enabled": True}
+_WF_DATA = {"1": {"class_type": "KSampler", "inputs": {"steps": 20}}}
+_RECORD_CREATED = {"id": "new-uuid", "name": "flux", "latest_version": 1}
+_WORKSPACE = {"id": "ws_123", "name": "Personal", "type": "personal", "role": "owner"}
+
+
+def _patch_cloud(monkeypatch: pytest.MonkeyPatch, handler):
+    """Route every request through ``handler(method, url, body)``.
+
+    It returns a JSON-able payload, ``(bytes, status)``, or an Exception to
+    raise. Records each call as ``_patch_urlopen`` does.
+    """
+    calls: list[dict] = []
+
+    def _fake(req, timeout=None):
+        call = {"url": req.full_url, "method": req.get_method(), "body": req.data, "headers": dict(req.headers)}
+        calls.append(call)
+        payload = handler(call["method"], call["url"], call["body"])
+        if isinstance(payload, Exception):
+            raise payload
+        if isinstance(payload, tuple):
+            return _fake_resp(*payload)
+        return _fake_resp(json.dumps(payload).encode())
+
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
+    return calls
+
+
+def _sidebar(features=_FLAG_ON, *, taken=(), conflict=(), workspace=_WORKSPACE):
+    """A fake Cloud: ``taken`` folders list files, a POST into a ``conflict`` folder gets 409."""
+    import urllib.parse
+
+    def handler(method, url, body):
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.path == "/api/features":
+            return features
+        if parsed.path == "/api/workspaces/current":
+            return workspace
+        if parsed.path == "/api/userdata" and method == "GET":
+            folder = urllib.parse.parse_qs(parsed.query)["dir"][0].removeprefix("workflows/")
+            if folder in taken:
+                return [f"{folder}/old.json"]
+            return _http_error(404)
+        if parsed.path.startswith("/api/userdata/") and method == "POST":
+            key = urllib.parse.unquote(parsed.path.removeprefix("/api/userdata/"))
+            assert urllib.parse.parse_qs(parsed.query) == {"overwrite": ["false"]}
+            folder = key.split("/")[1]
+            if folder in conflict:
+                return _http_error(409)
+            return {"path": key, "size": len(body), "modified": 1700000000000}
+        if parsed.path == "/api/workflows":
+            return _RECORD_CREATED
+        raise AssertionError(f"unexpected {method} {url}")
+
+    return handler
+
+
+def _posts(calls):
+    return [c for c in calls if c["method"] == "POST"]
+
+
+class TestSaveToSidebarFolder:
+    @pytest.fixture
+    def wf_path(self, tmp_path):
+        p = tmp_path / "wf.json"
+        p.write_text(json.dumps(_WF_DATA, indent=2))
+        return p
+
+    def test_writes_the_file_into_a_new_folder_and_prints_its_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar())
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["filename"] == "workflows/flux/flux.json"
+        assert data["folder"] == "flux"
+        assert data["name"] == "flux/flux"
+        assert data["workspace_id"] == "ws_123"
+        assert data["deployment"] == "standard"
+        assert data["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert "warnings" not in data
+        (post,) = _posts(calls)
+        assert post["url"] == "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json?overwrite=false"
+        # The file's bytes go up as they are on disk; no record-only POST is made.
+        assert post["body"] == wf_path.read_bytes()
+        assert not any("/api/workflows" in c["url"] for c in calls)
+
+    def test_deployment_option_goes_into_the_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar())
+        env = _run(["save", str(wf_path), "--name", "flux", "--deployment", "dep_9", "--where", "cloud"], capsys)
+        assert env["data"]["deployment"] == "dep_9"
+        assert env["data"]["url"].endswith("&deployment=dep_9")
+
+    def test_bad_deployment_id_is_refused_before_any_request(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar())
+        env = _run(["save", str(wf_path), "--name", "flux", "--deployment", "a&b=c", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    def test_a_folder_with_files_moves_on_to_a_numbered_one(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar(taken={"flux", "flux (2)"}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["filename"] == "workflows/flux (3)/flux.json"
+        # Spaces are %20 in the link: the editor reads a '+' as a literal plus.
+        assert "workflows=flux%20%283%29" in env["data"]["url"]
+        assert len(_posts(calls)) == 1
+
+    def test_a_409_moves_on_and_nothing_is_overwritten(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar(conflict={"flux"}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+        posts = _posts(calls)
+        assert len(posts) == 2
+        assert all(c["url"].endswith("?overwrite=false") for c in posts)
+        assert not any(c["method"] in ("PUT", "DELETE") for c in calls)
+
+    def test_every_folder_taken_saves_nothing(self, cloud_target, wf_path, monkeypatch, capsys):
+        taken = {"flux"} | {f"flux ({n})" for n in range(2, workflow_cmd._MAX_FOLDER_TRIES + 1)}
+        calls = _patch_cloud(monkeypatch, _sidebar(taken=taken))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_folder_unavailable"
+        assert _posts(calls) == []
+
+    @pytest.mark.parametrize(
+        ("name", "folder"),
+        [
+            ("flux.json", "flux"),
+            ("team/flux", "team-flux"),
+            ("a,b\\c", "a-b-c"),
+            ("../..secret", "-.secret"),
+            ("  .hidden.  ", "hidden"),
+            ("two   spaces", "two spaces"),
+            ("...", "workflow"),
+        ],
+    )
+    def test_folder_names_are_one_safe_segment(self, name, folder):
+        assert workflow_cmd._cloud_folder_name(name) == folder
+
+    def test_description_is_reported_as_ignored(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar())
+        env = _run(["save", str(wf_path), "--name", "flux", "--description", "d", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert [w["code"] for w in env["data"]["warnings"]] == ["description_ignored"]
+
+    @pytest.mark.parametrize("workspace", [_http_error(500), {"id": "bad id"}, {}])
+    def test_unknown_workspace_still_saves_and_links_the_folder(
+        self, cloud_target, wf_path, monkeypatch, capsys, workspace
+    ):
+        _patch_cloud(monkeypatch, _sidebar(workspace=workspace))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workspace_id"] is None
+        assert env["data"]["url"] == "https://cloud.example.com/?workflows=flux"
+        assert [w["code"] for w in env["data"]["warnings"]] == ["workspace_unknown"]
+
+    def test_a_failed_write_is_an_error_not_a_retry(self, cloud_target, wf_path, monkeypatch, capsys):
+        base = _sidebar()
+
+        def handler(method, url, body):
+            if method == "POST":
+                return _http_error(500)
+            return base(method, url, body)
+
+        calls = _patch_cloud(monkeypatch, handler)
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert len(_posts(calls)) == 1
+
+
+class TestSaveFlagOffKeepsTheRecordSave:
+    """Flag off, missing, or unreadable: the save is the record-only POST, as before the flag."""
+
+    @pytest.mark.parametrize(
+        "features",
+        [
+            pytest.param(_FLAG_OFF, id="off"),
+            pytest.param({}, id="missing"),
+            pytest.param({"cli_cloud_save_enabled": "true"}, id="not-a-bool"),
+            pytest.param([], id="not-an-object"),
+            pytest.param(_http_error(500), id="http-500"),
+            pytest.param(_http_error(401), id="http-401"),
+            pytest.param(urllib.error.URLError("down"), id="unreachable"),
+            pytest.param(TimeoutError("slow"), id="timeout"),
+            pytest.param((b"<html>", 200), id="unparseable"),
+        ],
+    )
+    def test_record_save_unchanged(self, cloud_target, tmp_path, monkeypatch, capsys, features):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text(json.dumps(_WF_DATA))
+        calls = _patch_cloud(monkeypatch, _sidebar(features=features))
+        env = _run(["save", str(wf_path), "--name", "flux", "--description", "d", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"] == {
+            "workflow_id": "new-uuid",
+            "name": "flux",
+            "latest_version": 1,
+            "source": str(wf_path),
+        }
+        assert [c["url"] for c in calls] == [
+            "https://cloud.example.com/api/features",
+            "https://cloud.example.com/api/workflows",
+        ]
+        assert calls[0]["method"] == "GET"
+        assert json.loads(calls[1]["body"]) == {"name": "flux", "workflow_json": _WF_DATA, "description": "d"}
+
+    def test_features_read_sends_the_users_auth(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path = tmp_path / "wf.json"
+        wf_path.write_text(json.dumps(_WF_DATA))
+        calls = _patch_cloud(monkeypatch, _sidebar(features=_FLAG_OFF))
+        _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        # urllib stores header names capitalized: X-API-Key -> X-api-key.
+        assert calls[0]["url"].endswith("/api/features")
+        assert calls[0]["headers"].get("X-api-key") == "test-key"
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +1040,7 @@ class TestUnparseableResponse:
     def test_save_surfaces_error_not_null_id(self, cloud_target, tmp_path, monkeypatch, capsys, raw):
         wf_path = tmp_path / "wf.json"
         wf_path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}))
-        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        _patch_urlopen(monkeypatch, {"/api/features": _FLAG_OFF, "/api/workflows": (raw, 200)})
         env = _run(["save", str(wf_path), "--name", "x", "--where", "cloud"], capsys)
         # Must NOT claim success with a null workflow_id.
         assert env["ok"] is False

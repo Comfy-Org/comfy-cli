@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy workflow save` on Comfy Cloud, when the workspace's
+  `cli_cloud_save_enabled` flag is on, writes the workflow into a new folder in
+  the Cloud Workflows sidebar (`<name>`, then `<name> (2)` and so on; it never
+  replaces a file) and prints a link that opens the folder, on Comfy Cloud
+  itself or on the build `--deployment <id>` names. With the flag off, or when
+  Cloud's features cannot be read, the save is unchanged.
 - `comfy knowledge pick` includes authored discovery-only routes in a separate
   `discovery` list, marks every route `ranking: "unranked"`, and carries the
   capability's `failure_policy` without promoting or reordering ranked picks.

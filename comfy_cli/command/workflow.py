@@ -21,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import unicodedata
 from pathlib import Path
@@ -1386,6 +1387,237 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
     renderer.emit(payload, command="workflow delete", where="local", changed=True)
 
 
+# ---------------------------------------------------------------------------
+# Cloud save into a new Workflows-sidebar folder, behind a server flag.
+#
+# ``POST /api/workflows`` makes a workflow record with no file behind it, and
+# the Cloud Workflows sidebar lists ``/userdata`` files, so a record-only save
+# never shows there. When Cloud's ``/api/features`` says
+# ``cli_cloud_save_enabled`` is true, ``save`` writes the workflow as a
+# userdata file in a folder of its own instead (Cloud mirrors that file into
+# a workflow record by itself) and prints a link that opens the folder. Any
+# other answer, or no answer, keeps the record-only save exactly as before.
+# The file is written with ``overwrite=false``, so nothing that exists is
+# ever replaced: a name already taken moves on to ``<name> (2)``, ``(3)``, ...
+# ---------------------------------------------------------------------------
+
+_CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"
+
+# How long the flag read may take before ``save`` keeps the record-only path.
+_FEATURES_TIMEOUT_S = 10.0
+
+# Folder names tried per save: ``<name>``, then ``<name> (2)`` up to this.
+_MAX_FOLDER_TRIES = 20
+
+# Longest folder name ``save`` makes, before any `` (n)`` suffix.
+_MAX_FOLDER_NAME = 100
+
+# The ``deployment`` link value the Cloud editor reads as Comfy Cloud itself.
+_STANDARD_DEPLOYMENT = "standard"
+
+# Workspace and deployment ids that go into the link as they are.
+_LINK_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _cli_cloud_save_enabled(target) -> bool:
+    """True only when Cloud's ``/api/features`` answers ``cli_cloud_save_enabled: true``.
+
+    A missing key, any other value, or a request that fails in any way reads
+    as off, so ``save`` keeps its record-only path.
+    """
+    import urllib.error
+
+    try:
+        _, body = _http_request(target.url("features"), target, timeout=_FEATURES_TIMEOUT_S)
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        ValueError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ):
+        return False
+    return isinstance(body, dict) and body.get(_CLI_CLOUD_SAVE_FLAG) is True
+
+
+def _cloud_folder_name(name: str) -> str:
+    """A one-level folder name for ``--name`` that Cloud and its link both accept.
+
+    The editor opens a folder from a link only when its name is one path
+    segment with no ``..`` or ``,``; Cloud refuses paths that start with a dot
+    and hides any segment that does. So slashes and commas become ``-``, runs
+    of dots become one, and edge dots and spaces go: ``team/flux.json`` →
+    ``team-flux``.
+    """
+    stem = name.strip()
+    if stem.lower().endswith(".json"):
+        stem = stem[: -len(".json")]
+    stem = _strip_terminal_controls(stem)
+    stem = re.sub(r"\s+", " ", stem)
+    stem = re.sub(r"[\\/,]", "-", stem)
+    stem = re.sub(r"\.{2,}", ".", stem)
+    stem = stem.strip(" .")[:_MAX_FOLDER_NAME].strip(" .")
+    return stem or "workflow"
+
+
+def _cloud_folder_is_empty(target, folder: str) -> bool:
+    """True when Cloud lists no file under ``workflows/<folder>/``. Raises request errors."""
+    import urllib.error
+    import urllib.parse
+
+    url = target.url("userdata") + "?" + urllib.parse.urlencode({"dir": f"{_WORKFLOWS_DIR}/{folder}"})
+    try:
+        _, body = _http_request(url, target)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return True
+        raise
+    return not body
+
+
+def _cloud_link_id(value: Any) -> str | None:
+    return value if isinstance(value, str) and _LINK_ID_PATTERN.fullmatch(value) else None
+
+
+def _cloud_workspace_id(target) -> str | None:
+    """The id of the workspace the save landed in, or None when Cloud does not say."""
+    import urllib.error
+
+    try:
+        _, body = _http_request(target.url("workspaces", "current"), target)
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        ValueError,
+        _ResponseUnparseable,
+        _ResponseTooLarge,
+    ):
+        return None
+    return _cloud_link_id(body.get("id")) if isinstance(body, dict) else None
+
+
+def _cloud_folder_link(target, *, workspace_id: str | None, folder: str, deployment: str) -> str | None:
+    """The Cloud editor link that opens ``folder``, or None for an unusable base URL.
+
+    ``deployment`` is a deployment id, or ``standard`` for Comfy Cloud itself.
+    It goes in only with the workspace, since the editor reads it only then.
+    """
+    import urllib.parse
+
+    origin = urllib.parse.urlsplit(target.base_url)
+    if origin.username is not None or origin.password is not None or not origin.hostname:
+        return None
+    query: dict[str, str] = {}
+    if workspace_id:
+        query["workspace"] = workspace_id
+    query[_WORKFLOWS_DIR] = folder
+    if workspace_id:
+        query["deployment"] = deployment
+    encoded = urllib.parse.urlencode(query, quote_via=urllib.parse.quote)
+    return urllib.parse.urlunsplit((origin.scheme, origin.netloc, "/", encoded, ""))
+
+
+def _cloud_folder_save(
+    renderer,
+    target,
+    *,
+    path: Path,
+    text: str,
+    name: str,
+    description: str | None,
+    deployment: str | None,
+) -> None:
+    """Write the workflow as ``workflows/<new folder>/<name>.json`` and print its link."""
+    import urllib.error
+
+    base = _cloud_folder_name(name)
+    file_name = f"{base}.json"
+    saved = None
+    for attempt in range(1, _MAX_FOLDER_TRIES + 1):
+        folder = base if attempt == 1 else f"{base} ({attempt})"
+        key = f"{folder}/{file_name}"
+        try:
+            if not _cloud_folder_is_empty(target, folder):
+                continue
+            _, raw = _userdata_request(
+                _userdata_file_url(target, key, query={"overwrite": "false"}),
+                target,
+                method="POST",
+                data=text.encode("utf-8"),
+                content_type="application/json",
+            )
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                continue
+            raise _handle_cloud_http_error(renderer, e, operation="save") from e
+        except (urllib.error.URLError, OSError, ValueError, _ResponseUnparseable, _ResponseTooLarge) as e:
+            raise _handle_cloud_http_error(renderer, e, operation="save") from e
+        saved = (folder, key, raw)
+        break
+    if saved is None:
+        renderer.error(
+            code="workflow_folder_unavailable",
+            message=f"the Cloud Workflows sidebar already has files in {base!r} and every "
+            f"{base!r} (n) folder up to ({_MAX_FOLDER_TRIES}); nothing was saved",
+            hint="pass a different `--name`",
+            details={"folder": base, "tries": _MAX_FOLDER_TRIES},
+        )
+        raise typer.Exit(code=1)
+
+    folder, key, raw = saved
+    info = None
+    try:
+        info = json.loads(raw)
+    except (ValueError, RecursionError):
+        pass
+    workspace_id = _cloud_workspace_id(target)
+    url = _cloud_folder_link(
+        target, workspace_id=workspace_id, folder=folder, deployment=deployment or _STANDARD_DEPLOYMENT
+    )
+    payload: dict[str, Any] = {
+        "name": key[: -len(".json")],
+        "filename": f"{_WORKFLOWS_DIR}/{key}",
+        "folder": folder,
+        "url": url,
+        "workspace_id": workspace_id,
+        "deployment": deployment or _STANDARD_DEPLOYMENT,
+        "source": str(path),
+        "size": info.get("size") if isinstance(info, dict) else None,
+        "modified": info.get("modified") if isinstance(info, dict) else None,
+    }
+    warnings: list[dict[str, str]] = []
+    if description:
+        warnings.append(
+            {
+                "code": "description_ignored",
+                "message": "--description is ignored: a workflow file in the Cloud Workflows sidebar has no "
+                "description",
+            }
+        )
+    if url is not None and workspace_id is None:
+        warnings.append(
+            {
+                "code": "workspace_unknown",
+                "message": "Cloud did not say which workspace the save went to, so the link opens the folder in "
+                "the browser's current workspace",
+            }
+        )
+    if warnings:
+        payload["warnings"] = warnings
+    if renderer.is_pretty():
+        rprint(
+            f"[green]✓[/green] saved to the Cloud Workflows sidebar as "
+            f"[bold]{sanitize_markup(payload['filename'])}[/bold]"
+        )
+        if url is not None:
+            rprint(f"open it: {sanitize_markup(url)}")
+        for w in warnings:
+            rprint(f"[yellow]![/yellow] {sanitize_markup(w['message'])}")
+    renderer.emit(payload, command="workflow save", where="cloud", changed=True)
+
+
 @app.command("list", help="List saved workflows (cloud store, or local ComfyUI /userdata with --where local).")
 @tracking.track_command("workflow")
 def list_cmd(
@@ -1631,7 +1863,9 @@ def get_cmd(
 
 @app.command(
     "save",
-    help="Save a workflow JSON to the saved-workflow store (cloud, or local ComfyUI /userdata with --where local).",
+    help="Save a workflow JSON to the saved-workflow store (cloud, or local ComfyUI /userdata with --where local). "
+    "On a cloud workspace with `cli_cloud_save_enabled` on, it goes into a new Workflows-sidebar folder and the "
+    "command prints a link that opens it.",
 )
 @tracking.track_command("workflow")
 def save_cmd(
@@ -1646,6 +1880,15 @@ def save_cmd(
         str | None,
         typer.Option("--description", show_default=False, help="Optional description (cloud only; ignored on local)."),
     ] = None,
+    deployment: Annotated[
+        str | None,
+        typer.Option(
+            "--deployment",
+            show_default=False,
+            help="Cloud, when the save goes to a sidebar folder: the deployment id the printed link opens the "
+            "folder on. Default `standard`, Comfy Cloud itself.",
+        ),
+    ] = None,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import urllib.error
@@ -1654,6 +1897,13 @@ def save_cmd(
     target = _resolve_where_target(where)
     if not target.is_cloud:
         return _local_save(renderer, target, workflow_file, name, description)
+    if deployment is not None and _cloud_link_id(deployment) is None:
+        renderer.error(
+            code="invalid_argument",
+            message=f"--deployment {deployment!r} is not a deployment id",
+            hint="pass the deployment's id (letters, digits, `-` and `_`), or `standard` for Comfy Cloud itself",
+        )
+        raise typer.Exit(code=1)
 
     path = Path(workflow_file).expanduser()
     if not path.is_file():
@@ -1663,8 +1913,9 @@ def save_cmd(
             hint="check the path",
         )
         raise typer.Exit(code=1)
+    text = path.read_text(encoding="utf-8")
     try:
-        workflow_json = json.loads(path.read_text(encoding="utf-8"))
+        workflow_json = json.loads(text)
     except json.JSONDecodeError as e:
         renderer.error(
             code="workflow_invalid_json",
@@ -1679,6 +1930,11 @@ def save_cmd(
             hint="use ComfyUI's `File > Save` to export",
         )
         raise typer.Exit(code=1)
+
+    if _cli_cloud_save_enabled(target):
+        return _cloud_folder_save(
+            renderer, target, path=path, text=text, name=name, description=description, deployment=deployment
+        )
 
     body: dict[str, Any] = {"name": name, "workflow_json": workflow_json}
     if description:

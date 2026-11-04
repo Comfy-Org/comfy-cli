@@ -715,6 +715,15 @@ comfy --json workflow save my.json --name "X" --description "Y"
 comfy --json workflow delete <id>
 ```
 
+When the cloud workspace has `cli_cloud_save_enabled` on (`GET /api/features`),
+`workflow save` instead writes the file into a new folder in the Cloud
+Workflows sidebar, named after `--name` (`<name> (2)` and so on when taken;
+nothing is ever replaced), and `data.url` is a link that opens that folder.
+The link opens Comfy Cloud itself unless `--deployment <id>` names a build.
+`data.warnings[]` may carry `description_ignored` or `workspace_unknown`.
+With the flag off, or when the features read fails, the save is the
+record-only `/api/workflows` save above.
+
 ## Cancel a running job
 
 ```bash
