@@ -300,13 +300,14 @@ def test_atomic_write_bytes_cleans_up_tmp_on_failure(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
-def test_atomic_write_bytes_new_file_uses_umask_default(tmp_path, monkeypatch   ):
+def test_atomic_write_bytes_new_file_uses_umask_default(tmp_path, monkeypatch):
     # The templates gallery cache relies on this: the old inline mkstemp left it
     # at 0600, and the switch to the umask-derived default is intended.
     monkeypatch.setattr(file_utils, "_UMASK", 0o022)
     target = tmp_path / "fresh.bin"
     atomic_write_bytes(target, b"data")
     assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
+
 
 # ---------------------------------------------------------------------------
 # cleanup_stale_tmp_files — sweeping stranded atomic-write temps
