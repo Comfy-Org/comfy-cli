@@ -179,9 +179,9 @@ def test_print_unsupported_lists_reasons(tmp_path, capsys):
 
 
 def test_print_rejects_unknown_format(capsys):
-    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "json"], capsys, expect_ok=False)
+    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "yaml"], capsys, expect_ok=False)
     assert env["error"]["code"] == "workflow_print_unsupported"
-    assert env["error"]["details"]["reasons"] == ["format 'json'"]
+    assert env["error"]["details"]["reasons"] == ["format 'yaml'"]
 
 
 def test_print_payload_validates_against_schema(capsys):
@@ -234,3 +234,13 @@ def test_print_renders_a_stale_input_slot_link_and_reports_it(tmp_path, capsys):
         "link 7 targets input slot 6 on node 2, which has 2 inputs; a leftover row — input 'samples' already gets "
         "that value from node 1 output 0 through another link, so nothing needs re-wiring"
     ]
+
+
+def test_print_json_payload_validates_against_schema(capsys):
+    import jsonschema
+
+    schema = json.loads((Path(workflow_cmd.__file__).parent.parent / "schemas" / "workflow.json").read_text())
+    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "json"], capsys)
+    assert env["data"]["format"] == "json"
+    assert {n["id"] for n in env["data"]["nodes"]} == set(env["data"]["bindings"].values())
+    jsonschema.Draft202012Validator(schema).validate(env["data"])

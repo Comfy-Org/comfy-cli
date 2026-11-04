@@ -41,7 +41,40 @@
         }
       }
     },
-    "format": { "type": "string", "enum": ["py"], "description": "print: output form. Only `py` today." },
+    "format": { "type": "string", "enum": ["py", "json"], "description": "print: output form. `json` adds `nodes`." },
+    "nodes": {
+      "type": "array",
+      "description": "print --format json: one record per printed node, taken while its line is rendered; a subgraph interior appears once per instance address (\"57/3\").",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "type", "title", "mode", "collapsed", "pinned", "outputs", "widgets", "links", "promoted"],
+        "properties": {
+          "id": { "type": "string", "description": "the address the edit commands take, e.g. \"3\" or \"57/3\"" },
+          "name": { "type": "string", "description": "the binding name in `source`" },
+          "type": { "type": "string" },
+          "title": { "type": "string", "description": "the node's own title; empty when it has none or it equals the class" },
+          "mode": { "type": "string", "description": "normal, muted or bypassed (another litegraph mode as its number)" },
+          "collapsed": { "type": "boolean" },
+          "pinned": { "type": "boolean" },
+          "outputs": { "type": "array", "items": { "type": ["string", "null"] }, "description": "output names in slot order" },
+          "widgets": { "type": "object", "description": "widget name -> value, as printed" },
+          "links": {
+            "type": "object",
+            "description": "input name -> {node, output, slot}, or null for an empty socket (including an auto-grow group's open slot)",
+            "additionalProperties": {
+              "type": ["object", "null"],
+              "properties": { "node": { "type": "string" }, "output": { "type": "string" }, "slot": {} }
+            }
+          },
+          "promoted": { "type": "object", "description": "interior widget -> {instance, widget}: the subgraph input (IN.<name>) that sets it; the value is the instance's" },
+          "subgraph": { "type": "string", "description": "the definition id, on a subgraph instance" },
+          "definition": { "type": "string", "description": "the definition id, on an interior node" },
+          "definition_missing": { "type": "boolean" },
+          "class_unknown": { "type": "boolean" },
+          "widgets_positional": { "type": "array", "description": "raw widgets_values when they cannot be named" }
+        }
+      }
+    },
     "source": { "type": "string", "description": "print: the rendered Python-like source, one line per node." },
     "bindings": {
       "type": "object",
