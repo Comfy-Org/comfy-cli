@@ -56,6 +56,11 @@ MAX_LIST_ITEMS = 8
 # under that.
 MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
+MAX_DISCOVERY_ROUTES = 8
+MAX_DISCOVERY_ITEMS = 8
+MAX_DISCOVERY_TEXT_CHARS = 1024
+MAX_DISCOVERY_ID_CHARS = 256
+MAX_DISCOVERY_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
 MAX_AUTHORING_SLICE_BYTES = 8192
@@ -975,6 +980,60 @@ def pick_entry(bundle: Bundle, p: dict) -> dict:
     if best_for := [x for x in _str_list(row.get("best_for")) if x][:MAX_PICK_BEST_FOR]:
         entry["best_for"] = best_for
     return entry
+
+
+def discovery_entries(capability: dict) -> list[dict]:
+    """Project authored discovery routes into a bounded, explicitly unranked contract."""
+    raw_routes = capability.get("discovery")
+    if not isinstance(raw_routes, list):
+        return []
+    out: list[dict] = []
+    for raw in raw_routes[:MAX_DISCOVERY_ROUTES]:
+        if not isinstance(raw, dict):
+            continue
+        route = _text(raw.get("route"))
+        if not route:
+            continue
+        entry: dict[str, Any] = {"route": route[:MAX_DISCOVERY_ID_CHARS], "ranking": "unranked"}
+        if description := _text(raw.get("description")):
+            entry["description"] = description[:MAX_DISCOVERY_TEXT_CHARS]
+        templates = [x[:MAX_DISCOVERY_ID_CHARS] for x in _str_list(raw.get("templates"))[:MAX_DISCOVERY_ITEMS]]
+        if templates:
+            entry["templates"] = templates
+        nodes = []
+        raw_nodes = raw.get("nodes")
+        if isinstance(raw_nodes, list):
+            for raw_node in raw_nodes[:MAX_DISCOVERY_ITEMS]:
+                if not isinstance(raw_node, dict) or not (node_id := _text(raw_node.get("id"))):
+                    continue
+                node = {"id": node_id[:MAX_DISCOVERY_ID_CHARS]}
+                if description := _text(raw_node.get("description")):
+                    node["description"] = description[:MAX_DISCOVERY_TEXT_CHARS]
+                nodes.append(node)
+        if nodes:
+            entry["nodes"] = nodes
+        raw_requires = raw.get("requires")
+        if isinstance(raw_requires, dict):
+            requires: dict[str, Any] = {}
+            if comfyui := _text(raw_requires.get("comfyui")):
+                requires["comfyui"] = comfyui[:MAX_VERSION_CHARS]
+            distributions = [
+                x[:MAX_VERSION_CHARS] for x in _str_list(raw_requires.get("distributions"))[:MAX_DISCOVERY_ITEMS]
+            ]
+            if distributions:
+                requires["distributions"] = distributions
+            if requires:
+                entry["requires"] = requires
+        out.append(entry)
+    while out and len(json.dumps(out, ensure_ascii=False).encode()) > MAX_DISCOVERY_BYTES:
+        out.pop()
+    return out
+
+
+def discovery_failure_policy(capability: dict) -> str | None:
+    """Return the bounded authored reporting policy for a capability, when present."""
+    policy = _text(capability.get("failure_policy"))
+    return policy[:MAX_DISCOVERY_TEXT_CHARS] if policy else None
 
 
 def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:
