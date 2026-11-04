@@ -84,31 +84,51 @@ jobs:
   # and then discards them at the token step. That is what has happened on every
   # scheduled tick since 2026-10-27.
   #
-  # Three lines of shell turn a daily paid failure into a daily free one. It does
-  # not fix the cause: either set the private key or unset APP_ID so the reusable
-  # degrades to github-actions[bot], both of which are repository settings.
+  # This detects an ABSENT key only. A stale, revoked, or wrong-App PEM is
+  # non-empty, passes here, and still fails at token minting after the agents
+  # have billed -- validating that would mean minting a throwaway token in this
+  # job, which trades the cheap check for a dependency on the token action.
+  # Scoped deliberately to the state that is actually occurring.
+  #
+  # It does not fix the cause either: set the private key, or clear APP_ID so the
+  # reusable degrades to github-actions[bot]. Both are settings, not code.
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Needs no token, and must not hold the App private key: the checks below
+    # take PRESENCE FLAGS, not the values.
+    permissions: {}
     steps:
       - name: Refuse a half-configured bot identity before anything bills
         env:
-          APP_ID: ${{ vars.APP_ID }}
-          BOT_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+          # Evaluated by GitHub with the SAME `!= ''` comparison the reusable
+          # gates on, which is the point: testing a trimmed copy here would let a
+          # whitespace-only APP_ID read as unset while the reusable still reads it
+          # as set, mints in the `file` job, and fails after the agents have
+          # billed -- precisely the failure this job exists to prevent.
+          #
+          # Flags also keep the PEM out of this job's environment entirely.
+          APP_ID_SET: ${{ vars.APP_ID != '' }}
+          BOT_KEY_SET: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY != '' }}
         run: |
-          app_id="$(printf '%s' "${APP_ID:-}" | tr -d '[:space:]')"
-          bot_key="$(printf '%s' "${BOT_KEY:-}" | tr -d '[:space:]')"
-          if [ -n "$app_id" ] && [ -z "$bot_key" ]; then
+          if [ "$APP_ID_SET" = "true" ] && [ "$BOT_KEY_SET" = "false" ]; then
             echo "::error::vars.APP_ID is set but secrets.CLOUD_CODE_BOT_PRIVATE_KEY is empty."
             echo "These are ALL-OR-NOTHING (see this file's header). The reusable gates App"
             echo "token minting on the ID alone, so this combination does not degrade to"
             echo "github-actions[bot] -- it mints in the 'file' job, after the finder and"
             echo "verifier agents have billed, and discards that run's findings."
             echo
-            echo "A repository admin picks one, under Settings:"
-            echo "  - set secrets.CLOUD_CODE_BOT_PRIVATE_KEY (issues file as the bot), or"
-            echo "  - unset vars.APP_ID (issues file as github-actions[bot])"
+            echo "Two ways out, both repository or organization settings:"
+            echo "  - set secrets.CLOUD_CODE_BOT_PRIVATE_KEY, so issues file as the bot; or"
+            echo "  - clear APP_ID, so the reusable degrades to github-actions[bot]."
+            echo
+            echo "Check APP_ID's SCOPE before trying the second one. If it is inherited from"
+            echo "the organization, deleting a repository variable does not remove it, and"
+            echo "changing the organization variable needs an org admin and affects every"
+            echo "other repository that reads it. In that case prefer setting the key, or"
+            echo "shadow the inherited value with an empty repository variable if that is"
+            echo "acceptable for this repo alone."
             echo
             echo "Stopping here so the tick costs nothing instead of paying to be discarded."
             exit 1
