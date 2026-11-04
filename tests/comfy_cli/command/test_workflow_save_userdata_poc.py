@@ -65,6 +65,7 @@ class _UserdataContract:
         self.files: dict[str, dict[str, bytes]] = {"workspace-a": {}, "workspace-b": {}, "local": {}}
         self.receipts: list[dict[str, Any]] = []
         self.mirror_fails = False
+        self.mirror_failures = 0
 
     def scope(self, handler: BaseHTTPRequestHandler) -> str | None:
         if not self.cloud:
@@ -139,6 +140,8 @@ class _Handler(BaseHTTPRequestHandler):
         # Matches the pinned handler: the durable file write is authoritative;
         # SyncFromUserdata is best effort and does not turn its failure into a
         # failed or repeated upload. The response intentionally has no ID.
+        if self.server.contract.mirror_fails:
+            self.server.contract.mirror_failures += 1
         info = {"path": relative, "modified": 1700000002000, "size": len(body)}
         self._send(200, json.dumps(info).encode())
 
@@ -343,6 +346,7 @@ def test_missing_id_and_best_effort_mirror_failure_do_not_repeat_upload(
         assert rc == 0 and envelope["ok"] is True
         assert envelope["data"]["workflow_id"] is None
         assert [w["code"] for w in envelope["data"]["warnings"]] == ["workflow_record_id_unavailable"]
+        assert cloud.mirror_failures == 1
         assert [(r["method"], r["path"]) for r in cloud.receipts] == [("POST", "/api/userdata/workflows%2Fno-id.json")]
 
 
