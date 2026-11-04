@@ -53,6 +53,7 @@ class FixtureKind(Enum):
     VALIDATE_REMOTE_LOOKUP = "validate --remote (lookupable)"
     PUSH = "push"
     PUSH_DRY_RUN = "push --dry-run"
+    PUSH_DRY_RUN_PINNED = "push --dry-run (public pins)"
     PULL = "pull"
     STATUS = "status"
     LS = "ls"
@@ -95,7 +96,10 @@ BUILD_AUTH_CASES = (
     BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 1),
     BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 2),
     BuildAuthCase(FixtureKind.PUSH, "push", True, _ONE_PLUS),
+    # A dry run asks the builder only to place the spec's public pins, the read the
+    # push makes before it saves, so a spec without one stays signed out and silent.
     BuildAuthCase(FixtureKind.PUSH_DRY_RUN, "push", False, _ZERO),
+    BuildAuthCase(FixtureKind.PUSH_DRY_RUN_PINNED, "push", True, _ONE_PLUS, 1),
     BuildAuthCase(FixtureKind.PULL, "pull", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.STATUS, "status", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.LS, "ls", True, _ONE_PLUS),
@@ -164,6 +168,15 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
             return ["build", "push", str(root)]
         case FixtureKind.PUSH_DRY_RUN:
             write_spec(root, models=[], nodes=[])
+            return ["build", "push", "--dry-run", str(root)]
+        case FixtureKind.PUSH_DRY_RUN_PINNED:
+            write_spec(
+                root,
+                models=[],
+                nodes=[
+                    {"name": "registry-node", "id": "registry-node", "registryVersion": "1.0.0", "source": "registry"}
+                ],
+            )
             return ["build", "push", "--dry-run", str(root)]
         case FixtureKind.PULL:
             write_spec(root, models=[], nodes=[])

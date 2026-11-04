@@ -65,6 +65,8 @@ history.
 
 ### Fixed
 
+- `comfy build push --dry-run` now runs the push's registry-pin check, so a pin the builder cannot place fails the dry run with the push's own `build_registry_pin_missing` error instead of passing it. A version the registry has Flagged was the common case: the dry run passed, and the push was refused only after the plan had been disclosed. The check asks the builder's snapshot importer to place each public pack, a read that writes nothing, and the dry run still uploads and saves nothing. A spec that pins a public pack now needs sign-in for its dry run (`build_not_signed_in` otherwise); a spec whose packs are all local still sends no request.
+
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
