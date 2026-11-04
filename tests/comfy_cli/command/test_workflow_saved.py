@@ -685,10 +685,15 @@ class TestHttpRequestCap:
 
     @pytest.mark.parametrize("verb", ["list", "get", "save", "delete"])
     def test_every_call_site_routes_oversize_to_envelope(self, verb, cloud_target, tmp_path, monkeypatch, capsys):
-        # Each of the four _http_request call sites must catch _ResponseTooLarge;
+        # Each of the four HTTP call sites must catch _ResponseTooLarge;
         # an uncaught one would surface as a traceback rather than an envelope.
-        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
-        _patch_urlopen(monkeypatch, {"/api/workflows": (b'{"data": []}', 200)})
+        if verb == "save":
+            monkeypatch.setattr(workflow_cmd, "_USERDATA_MAX_BYTES", 4)
+            route = "/api/userdata/"
+        else:
+            monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
+            route = "/api/workflows"
+        _patch_urlopen(monkeypatch, {route: (b'{"data": []}', 200)})
         args = {
             "list": ["list"],
             "get": ["get", "wf-uuid"],
@@ -720,28 +725,24 @@ class TestHttpRequestCap:
 
 
 class TestSave:
-    def test_posts_workflow_payload(self, cloud_target, tmp_path, monkeypatch, capsys):
+    def test_posts_sidebar_userdata_file(self, cloud_target, tmp_path, monkeypatch, capsys):
         wf_path = tmp_path / "wf.json"
         wf_data = {"1": {"class_type": "KSampler", "inputs": {"steps": 20}}}
         wf_path.write_text(json.dumps(wf_data))
 
-        created = {
-            "id": "new-uuid",
-            "name": "my workflow",
-            "latest_version": 1,
-            "created_by": "user",
-            "created_at": "2026-05-23T00:00:00Z",
-            "updated_at": "2026-05-23T00:00:00Z",
-        }
-        calls = _patch_urlopen(monkeypatch, {"/api/workflows": created})
+        receipt = {"path": "workflows/my workflow.json", "modified": 1700000002000, "size": 61}
+        calls = _patch_urlopen(monkeypatch, {"/api/userdata/": receipt})
         env = _run(["save", str(wf_path), "--name", "my workflow", "--where", "cloud"], capsys)
         assert env["ok"] is True
-        assert env["data"]["workflow_id"] == "new-uuid"
-        # POSTed JSON carries the workflow_json + name.
+        # The userdata receipt has no record UUID. Keep the established record
+        # field honest rather than fabricating one from the path.
+        assert env["data"]["workflow_id"] is None
+        assert env["data"]["filename"] == "my workflow.json"
         assert calls[0]["method"] == "POST"
-        sent = json.loads(calls[0]["body"])
-        assert sent["name"] == "my workflow"
-        assert sent["workflow_json"] == wf_data
+        assert "workflows%2Fmy%20workflow.json" in calls[0]["url"]
+        assert "overwrite=true" in calls[0]["url"]
+        assert "full_info=true" in calls[0]["url"]
+        assert json.loads(calls[0]["body"]) == wf_data
 
     def test_invalid_json_file_surfaces_workflow_invalid_json(self, cloud_target, tmp_path, monkeypatch, capsys):
         wf_path = tmp_path / "bad.json"
@@ -814,15 +815,20 @@ class TestUnparseableResponse:
         assert env["error"]["details"]["operation"] == "list"
 
     @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
-    def test_save_surfaces_error_not_null_id(self, cloud_target, tmp_path, monkeypatch, capsys, raw):
+    def test_save_keeps_file_success_when_receipt_metadata_is_unparseable(
+        self, cloud_target, tmp_path, monkeypatch, capsys, raw
+    ):
         wf_path = tmp_path / "wf.json"
         wf_path.write_text(json.dumps({"1": {"class_type": "KSampler", "inputs": {}}}))
-        _patch_urlopen(monkeypatch, {"/api/workflows": (raw, 200)})
+        _patch_urlopen(monkeypatch, {"/api/userdata/": (raw, 200)})
         env = _run(["save", str(wf_path), "--name", "x", "--where", "cloud"], capsys)
-        # Must NOT claim success with a null workflow_id.
-        assert env["ok"] is False
-        assert env["error"]["code"] == "workflow_unparseable"
-        assert env["error"]["details"]["operation"] == "save"
+        # The write has already succeeded. Optional receipt metadata and record
+        # identity may be absent; neither should invite a duplicate upload.
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] is None
+        assert env["data"]["size"] is None
+        assert env["data"]["modified"] is None
+        assert env["data"]["warnings"][0]["code"] == "workflow_record_id_unavailable"
 
     @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
     def test_get_surfaces_error_not_missing_content(self, cloud_target, monkeypatch, capsys, raw):

@@ -793,7 +793,9 @@ def print_cmd(
 #
 # These four subcommands route through ``--where``:
 #
-#   cloud  → Comfy Cloud's ``/api/workflows`` store (UUID-keyed, versioned).
+# Cloud list/get/delete use the UUID-keyed, versioned ``/api/workflows`` store.
+# Cloud save's minimal sidebar-visible path writes the frontend workflow file
+# through ``/api/userdata/workflows/...``.
 #   local  → the running ComfyUI's ``/userdata`` file store, under the same
 #            ``workflows/`` dir the ComfyUI frontend uses. A workflow's id on
 #            the local path is its path *relative to* ``workflows/`` (e.g.
@@ -825,7 +827,8 @@ _HTTP_MAX_BYTES = 64 * 1024 * 1024
 _TOO_LARGE_HINTS = {
     "list": "narrow the result set with `--limit` or `--name`",
     "get": "the saved workflow is unexpectedly large; inspect it directly in the cloud UI",
-    "save": "the workflow may still have been saved; confirm with `comfy --json workflow list`",
+    "save": "the workflow file may still have been saved; confirm in the Cloud Workflows sidebar and do not repeat "
+    "the upload merely to obtain receipt metadata",
     "delete": "the workflow may still have been deleted; confirm with `comfy --json workflow list`",
 }
 
@@ -1104,11 +1107,12 @@ def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | 
         )
         return typer.Exit(code=1)
     if isinstance(e, _ResponseTooLarge):
+        limit = _USERDATA_MAX_BYTES if operation == "save" else _HTTP_MAX_BYTES
         renderer.error(
             code="workflow_too_large",
-            message=f"cloud API response during {operation} exceeded the {_HTTP_MAX_BYTES // (1024 * 1024)} MiB cap",
+            message=f"cloud API response during {operation} exceeded the {limit // (1024 * 1024)} MiB cap",
             hint=_TOO_LARGE_HINTS.get(operation, "the cloud response was unexpectedly large"),
-            details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": _HTTP_MAX_BYTES},
+            details={"operation": operation, "workflow_id": workflow_id, "limit_bytes": limit},
         )
         return typer.Exit(code=1)
 
@@ -1368,6 +1372,125 @@ def _local_save(renderer, target, workflow_file: str, name: str, description: st
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] saved [dim]{stored_id}[/dim]")
     renderer.emit(payload, command="workflow save", where="local", changed=True)
+
+
+def _cloud_sidebar_key(renderer, name: str) -> str:
+    """Return the safe lowercase-json path the Cloud sidebar will discover."""
+    key = name if name.endswith(".json") else f"{name}.json"
+    key = _reject_unsafe_workflow_key(renderer, key)
+    if key.rsplit("/", 1)[-1] == ".index.json":
+        renderer.error(
+            code="invalid_argument",
+            message=f"{key!r} is the workflows/ folder's favorites index, not a workflow name",
+            hint="pass a different `--name`",
+        )
+        raise typer.Exit(code=1)
+    if any(part.startswith(".") for part in key.split("/")):
+        renderer.error(
+            code="invalid_argument",
+            message=f"{key!r} is hidden from the Cloud Workflows sidebar",
+            hint="use a name with no dot-prefixed file or folder components",
+        )
+        raise typer.Exit(code=1)
+    return key
+
+
+def _cloud_save_userdata(renderer, target, workflow_file: str, name: str, description: str | None) -> None:
+    """Minimal Cloud save POC: write exactly the file the sidebar discovers.
+
+    The pinned backend treats workflow-record mirroring as best effort, and its
+    userdata receipt has no record UUID. Do not look a record up, retry the
+    upload, or turn a successful file write into failure merely to obtain one.
+    """
+    import urllib.error
+
+    path = Path(workflow_file).expanduser()
+    if not path.is_file():
+        renderer.error(
+            code="workflow_not_found",
+            message=f"local workflow file not found: {path}",
+            hint="check the path",
+        )
+        raise typer.Exit(code=1)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="workflow_read_error",
+            message=f"could not read {path}: {e}",
+            hint="check file permissions and encoding",
+        )
+        raise typer.Exit(code=1) from e
+    try:
+        workflow_json = json.loads(text)
+    except json.JSONDecodeError as e:
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"{path} is not valid JSON: {e}",
+            hint="re-export the workflow from ComfyUI",
+        )
+        raise typer.Exit(code=1) from e
+    if not isinstance(workflow_json, dict):
+        renderer.error(
+            code="workflow_not_api_format",
+            message="workflow_json must be a JSON object",
+            hint="use ComfyUI's `File > Save` to export",
+        )
+        raise typer.Exit(code=1)
+    key = _cloud_sidebar_key(renderer, name)
+    # Save has historically replaced an existing name. Keep that policy
+    # explicit in the wire request instead of adding another CLI flag to this
+    # POC; the backend's overwrite=false collision contract remains separate.
+    url = _userdata_file_url(target, key, query={"overwrite": "true", "full_info": "true"})
+    try:
+        _, raw = _userdata_request(
+            url, target, method="POST", data=text.encode("utf-8"), content_type="application/json"
+        )
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _ResponseTooLarge,
+    ) as e:
+        raise _handle_cloud_http_error(renderer, e, operation="save") from e
+
+    info = None
+    try:
+        info = json.loads(raw)
+    except (ValueError, RecursionError):
+        pass
+
+    payload: dict[str, Any] = {
+        # This remains the record-ID field for compatibility. A userdata path
+        # is not a record UUID, so null is the only honest value here.
+        "workflow_id": None,
+        "name": name,
+        "filename": key,
+        "latest_version": None,
+        "source": str(path),
+        "size": info.get("size") if isinstance(info, dict) else None,
+        "modified": info.get("modified") if isinstance(info, dict) else None,
+    }
+    warnings: list[dict[str, str]] = []
+    if description:
+        warnings.append(
+            {
+                "code": "description_ignored",
+                "message": "--description is ignored: the Cloud Workflows sidebar file has no description field",
+            }
+        )
+    warnings.append(
+        {
+            "code": "workflow_record_id_unavailable",
+            "message": "The workflow file was saved, but this minimal path does not resolve a separate Cloud "
+            "workflow record ID; workflow_id is null. Use the Workflows sidebar file and do not repeat the save "
+            "to obtain an ID.",
+        }
+    )
+    payload["warnings"] = warnings
+    if renderer.is_pretty():
+        rprint(f"[green]✓[/green] saved to the Cloud Workflows sidebar as [dim]{_WORKFLOWS_DIR}/{key}[/dim]")
+    renderer.emit(payload, command="workflow save", where="cloud", changed=True)
 
 
 def _local_delete(renderer, target, workflow_id: str) -> None:
@@ -1648,63 +1771,11 @@ def save_cmd(
     ] = None,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
-    import urllib.error
-
     renderer = get_renderer()
     target = _resolve_where_target(where)
     if not target.is_cloud:
         return _local_save(renderer, target, workflow_file, name, description)
-
-    path = Path(workflow_file).expanduser()
-    if not path.is_file():
-        renderer.error(
-            code="workflow_not_found",
-            message=f"local workflow file not found: {path}",
-            hint="check the path",
-        )
-        raise typer.Exit(code=1)
-    try:
-        workflow_json = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        renderer.error(
-            code="workflow_invalid_json",
-            message=f"{path} is not valid JSON: {e}",
-            hint="re-export the workflow from ComfyUI",
-        )
-        raise typer.Exit(code=1) from e
-    if not isinstance(workflow_json, dict):
-        renderer.error(
-            code="workflow_not_api_format",
-            message="workflow_json must be a JSON object",
-            hint="use ComfyUI's `File > Save` to export",
-        )
-        raise typer.Exit(code=1)
-
-    body: dict[str, Any] = {"name": name, "workflow_json": workflow_json}
-    if description:
-        body["description"] = description
-    url = target.url("workflows")
-    try:
-        _, resp = _http_request(url, target, method="POST", body=body)
-    except (
-        urllib.error.HTTPError,
-        urllib.error.URLError,
-        OSError,
-        _ResponseUnparseable,
-        _ResponseTooLarge,
-    ) as e:
-        raise _handle_cloud_http_error(renderer, e, operation="save") from e
-
-    workflow_id = (resp or {}).get("id") if isinstance(resp, dict) else None
-    payload = {
-        "workflow_id": workflow_id,
-        "name": name,
-        "latest_version": (resp or {}).get("latest_version") if isinstance(resp, dict) else None,
-        "source": str(path),
-    }
-    if renderer.is_pretty():
-        rprint(f"[green]✓[/green] saved {name!r} → [dim]{workflow_id}[/dim]")
-    renderer.emit(payload, command="workflow save", where="cloud", changed=True)
+    return _cloud_save_userdata(renderer, target, workflow_file, name, description)
 
 
 @app.command("delete", help="Delete a saved workflow (cloud, or local ComfyUI /userdata with --where local).")
