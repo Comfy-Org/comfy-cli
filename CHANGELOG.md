@@ -65,6 +65,8 @@ history.
 
 ### Fixed
 
+- Parallel build and deploy requests rejected on an old access token now adopt a peer's refreshed token under the shared refresh lock instead of rotating it again. Each rejected request retries at most once. If session recovery still fails while a refreshable sign-in remains stored, the watch reports that the remote work may continue instead of telling you to sign in again. `comfy build release create --watch`, `comfy deploy up`, `promote`, `rollback` and `comfy deploy status --watch` now end with the new code `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint names the command that reads the release or deployment again. A 401 before anything was accepted, on a workspace API key, or when no refreshable sign-in remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
+
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
