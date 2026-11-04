@@ -1759,13 +1759,52 @@ def update(
         raise typer.Exit(code=1)
 
     if "cli" == target:
-        from comfy_cli.update import upgrade_cli
+        from comfy_cli.update import UpgradeUnavailable, upgrade_cli
 
         rprint("Updating comfy-cli...")
-        upgrade_cli()
+        try:
+            upgrade_cli()
+        except UpgradeUnavailable as e:
+            get_renderer().error(code="update_cli_failed", message=str(e), hint=e.hint)
+            raise typer.Exit(code=1) from e
+        except subprocess.CalledProcessError as e:
+            get_renderer().error(
+                code="update_cli_failed",
+                message=f"`{' '.join(map(str, e.cmd))}` failed with exit code {e.returncode}.",
+                hint="see the installer output above; re-running `comfy update cli` is safe",
+                details={"returncode": e.returncode},
+            )
+            raise typer.Exit(code=1) from e
+        except subprocess.TimeoutExpired as e:
+            get_renderer().error(
+                code="update_cli_failed",
+                message=f"The comfy-cli installer timed out after {e.timeout} seconds.",
+                hint="check the installer output, then re-run `comfy update cli`",
+                details={"timeout": e.timeout},
+            )
+            raise typer.Exit(code=1) from e
+        except OSError as e:
+            get_renderer().error(
+                code="update_cli_failed",
+                message=f"Could not start the comfy-cli installer: {e}",
+                hint="check the installer executable and its permissions, then re-run `comfy update cli`",
+            )
+            raise typer.Exit(code=1) from e
+        get_renderer().emit({"target": "cli"}, command="update")
         return
 
-    comfy_path = workspace_manager.workspace_path
+    try:
+        comfy_path = workspace_manager.workspace_path
+    except typer.Exit as error:
+        if target != "comfy":
+            raise
+        get_renderer().error(
+            code="not_in_workspace",
+            message="ComfyUI workspace could not be resolved.",
+            hint="run `comfy install`, or pass `--workspace` to point at an existing install",
+            exit_code=error.exit_code,
+        )
+        raise
 
     if "all" == target:
         # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
@@ -1798,10 +1837,20 @@ def update(
             )
             raise typer.Exit(code=code) from e
     else:
-        rprint(f"Updating ComfyUI in {comfy_path}...")
-        if comfy_path is None:
-            rprint("ComfyUI path is not found.")
+        # The default workspace path comes from config and can name a directory that
+        # was never installed (or was deleted), so check existence, not just None.
+        if comfy_path is None or not os.path.isdir(comfy_path):
+            get_renderer().error(
+                code="not_in_workspace",
+                message=(
+                    "ComfyUI workspace not found."
+                    if comfy_path is None
+                    else f"ComfyUI workspace not found: {comfy_path}"
+                ),
+                hint="run `comfy install`, or pass `--workspace` to point at an existing install",
+            )
             raise typer.Exit(code=1)
+        rprint(f"Updating ComfyUI in {comfy_path}...")
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
