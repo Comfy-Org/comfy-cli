@@ -17,6 +17,11 @@ history.
 
 ### Added
 
+- `comfy knowledge pick` includes authored discovery-only routes in a separate
+  `discovery` list, marks every route `ranking: "unranked"`, and carries the
+  capability's `failure_policy` without promoting or reordering ranked picks.
+  `--check-local` reports `discovery_not_checked` when ranked-pick checks pass
+  but discovery routes are present.
 - `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
   model file of up to 2 GB into your Comfy Cloud workspace's model library,
   e.g. `comfy assets library upload my_style.safetensors --type loras`. The
