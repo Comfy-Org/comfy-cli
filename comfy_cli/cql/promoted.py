@@ -939,6 +939,13 @@ def set_host_value(workflow: dict, instance: dict, name: str, value: Any, graph)
             values.append(None if seeded is UNSET else seeded)
     values[pi.value_index] = value
     instance["widgets_values"] = values
+    # Positional write with no maintained name map: drop it rather than leave
+    # a map that disagrees with the array. See engine._drop_named_values.
+    # Local import: engine and promoted import each other (see this module's
+    # other function-scope engine imports).
+    from comfy_cli.cql.engine import _drop_named_values
+
+    _drop_named_values(instance)
     for entry in _quarantine_entries(instance):
         original = entry.get("originalEntry")
         if isinstance(original, list) and len(original) >= 2 and str(original[0]) == "-1" and original[1] == name:
@@ -2183,6 +2190,13 @@ def flush_proxy_migration(
             value = source_value(workflow, sg, p, graph, defs)
         values.append(None if value is UNSET else value)
     instance["widgets_values"] = values
+    # Positional write with no maintained name map: drop it rather than leave
+    # a map that disagrees with the array. See engine._drop_named_values.
+    # Local import: engine and promoted import each other (see this module's
+    # other function-scope engine imports).
+    from comfy_cli.cql.engine import _drop_named_values
+
+    _drop_named_values(instance)
     return report
 
 

@@ -83,8 +83,14 @@ def test_group_with_upload_keeps_serializable_values_editable(shape, node_type, 
     }
 
 
-@pytest.mark.parametrize("named", [None, [], "invalid", {"value": 1}])
-def test_plain_node_edit_leaves_named_sidecar_unchanged(named):
+@pytest.mark.parametrize("named", [None, [], "invalid"])
+def test_plain_node_edit_leaves_an_unusable_named_sidecar_unchanged(named):
+    """A malformed sidecar is left exactly as found, and does not refuse the edit.
+
+    Only a grouped node's edit restructures this map, so only there is an
+    unusable one fatal. Here the edit would merely mirror a scalar into it, and
+    refusing an edit this path has always allowed is worse than skipping it.
+    """
     saved_named = copy.deepcopy(named)
     graph = Graph.from_object_info({"Plain": {"input": {"required": {"value": ["INT", {"default": 1}]}}}})
     workflow = {
@@ -96,6 +102,31 @@ def test_plain_node_edit_leaves_named_sidecar_unchanged(named):
 
     assert edited["nodes"][0]["widgets_values"] == [2]
     assert edited["nodes"][0]["widgets_values_named"] == saved_named
+
+
+def test_plain_node_edit_mirrors_into_a_usable_named_sidecar():
+    """CHANGED BEHAVIOUR, deliberately: a usable sidecar now follows the edit.
+
+    This case previously asserted the sidecar stayed at its saved value, which
+    arrived with the DynamicGroup work in #973 as that change's boundary --
+    grouped nodes maintained the map, plain ones were left alone.
+
+    Left alone means left STALE. ComfyUI_frontend writes this map on every save
+    and prefers it over the positional array when restoring a node, so after a
+    CLI edit the two disagree and the one the frontend reaches for first holds
+    the value the edit replaced. Latent only because the frontend's named-restore
+    path sits behind a setting that defaults off.
+    """
+    graph = Graph.from_object_info({"Plain": {"input": {"required": {"value": ["INT", {"default": 1}]}}}})
+    workflow = {
+        "nodes": [{"id": 1, "type": "Plain", "widgets_values": [1], "widgets_values_named": {"value": 1}}],
+        "links": [],
+    }
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "value", 2)
+
+    assert edited["nodes"][0]["widgets_values"] == [2]
+    assert edited["nodes"][0]["widgets_values_named"] == {"value": 2}
 
 
 @pytest.mark.parametrize("shape", ["array", "object", "explicit_form"])
