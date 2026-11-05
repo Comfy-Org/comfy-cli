@@ -926,6 +926,8 @@ _UPLOAD_ROUTES = {
         "status": "created",
     },
     ("GET", "/api/tasks/task-1"): [{"id": "task-1", "status": "running"}, _DONE],
+    # Read after the hash check, for Comfy Cloud's loader_path.
+    ("GET", "/api/assets/asset-9"): {"id": "asset-9", "hash": _MODEL_HASH, "loader_path": "style.safetensors"},
 }
 
 
@@ -965,6 +967,7 @@ class TestUpload:
             "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete",
             "/api/tasks/task-1",
             "/api/tasks/task-1",
+            "/api/assets/asset-9",
         ]
         assert cloud.calls[2][2] == {"filename": "style.safetensors", "size_bytes": 16, "tags": ["models", "loras"]}
         assert cloud.calls[3][2] == {"filename": "style.safetensors", "tags": ["models", "loras"]}
@@ -1247,7 +1250,7 @@ class TestUploadOutlastsTheToken:
         assert signed_in.forced == 1
         assert len(storage.puts) == 1
         assert cloud.paths().count(_COMPLETE_1) == 2
-        assert cloud.auth[3:] == ["Bearer old-token"] + ["Bearer new-token"] * 3
+        assert cloud.auth[3:] == ["Bearer old-token"] + ["Bearer new-token"] * 4
 
     def test_a_401_on_a_task_poll_refreshes_the_sign_in_and_keeps_waiting(
         self, signed_in, monkeypatch, capsys, model_file, no_wait
@@ -1391,7 +1394,7 @@ class TestUploadKeepsItsAccount:
         )
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth == [f"Bearer {_jwt('a')}"] * 6
+        assert cloud.auth == [f"Bearer {_jwt('a')}"] * 7
         assert stored_login.login == ("b", 1) and stored_login.forced == 0
         assert len(storage.puts) == 1
 
@@ -1424,7 +1427,7 @@ class TestUploadKeepsItsAccount:
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth[3:] == [f"Bearer {_jwt('a', 2)}"] * 3
+        assert cloud.auth[3:] == [f"Bearer {_jwt('a', 2)}"] * 4
         assert stored_login.forced == 0
 
     def test_the_same_login_is_refreshed_after_a_401(self, stored_login, monkeypatch, capsys, model_file, no_wait):
@@ -1432,7 +1435,7 @@ class TestUploadKeepsItsAccount:
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth[3:] == [f"Bearer {_jwt('a')}"] + [f"Bearer {_jwt('a', 2)}"] * 3
+        assert cloud.auth[3:] == [f"Bearer {_jwt('a')}"] + [f"Bearer {_jwt('a', 2)}"] * 4
         assert stored_login.forced == 1
 
     @pytest.mark.parametrize("explicit", ["env-token", "api-key"])
@@ -1450,7 +1453,7 @@ class TestUploadKeepsItsAccount:
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth == [sent] * 6
+        assert cloud.auth == [sent] * 7
         assert stored_login.forced == 0
 
 
@@ -1900,7 +1903,8 @@ class TestUploadVerifies:
             "id": None,
             "name": "style.safetensors",
             "folder": "loras",
-            "loader_path": "style.safetensors",
+            # No record exists yet, so Comfy Cloud has no loader_path to give.
+            "loader_path": None,
             "hash": _MODEL_HASH,
             "sha256": _MODEL_SHA256,
             "size": 16,
@@ -2101,6 +2105,38 @@ class TestUploadVerifies:
 
         assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["loader_path"] == "style.safetensors"
         assert cloud.paths()[-1] == "/api/assets/asset-9"
+        assert cloud.paths().count("/api/assets/asset-9") == 1
+
+    @pytest.mark.parametrize("answer", [_http_error(500), b"not json"], ids=["asset-unreadable", "asset-unparseable"])
+    def test_a_record_that_cannot_be_read_after_a_verified_upload_leaves_loader_path_null(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, answer
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets/asset-9")] = answer
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        # The task's hash already matched, so the bytes are verified; only the loader_path is missing.
+        assert rc == 0 and env["ok"] is True and env["data"]["uploaded"] is True
+        assert env["data"]["id"] == "asset-9" and env["data"]["loader_path"] is None
+        assert cloud.paths()[-1] == "/api/assets/asset-9" and len(storage.puts) == 1
+
+    @pytest.mark.parametrize("present", [False, True], ids=["uploaded", "already-present"])
+    def test_a_record_without_loader_path_reports_null_not_the_file_name(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, present
+    ):
+        import jsonschema
+
+        # Comfy Cloud gives no loader_path when the name does not form a valid model path.
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets/asset-9")] = {"id": "asset-9", "hash": _MODEL_HASH, "loader_path": None}
+        if present:
+            row = {k: v for k, v in _row().items() if k != "loader_path"}
+            routes[("GET", "/api/assets")] = {"assets": [row], "has_more": False}
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["loader_path"] is None
+        assert env["data"]["already_present"] is present and env["data"]["uploaded"] is not present
+        jsonschema.Draft202012Validator(_model_schema()).validate(env["data"])
 
     @pytest.mark.parametrize(
         "answer", [_http_error(500), {"id": "asset-9"}], ids=["asset-unreadable", "asset-without-hash"]
@@ -2171,7 +2207,7 @@ class TestModelUpload:
         assert rc == 0 and env["command"] == "model upload"
         data = env["data"]
         assert data["sha256"] == _MODEL_SHA256 and data["hash"] == _MODEL_HASH
-        assert data["workspace_id"] == "ws-1" and data["loader_path"] == "style.safetensors"
+        assert data["workspace_id"] == "ws-1" and data["loader_path"] is None
         assert data["dry_run"] is True and data["uploaded"] is False and data["already_present"] is False
         jsonschema.Draft202012Validator(_model_schema()).validate(data)
         assert cloud.paths() == ["/api/workspaces/current", "/api/features", "/api/assets"]

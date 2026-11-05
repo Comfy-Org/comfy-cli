@@ -65,7 +65,9 @@ history.
   the dry run reported. `--workspace <id>` uploads nothing unless this sign-in
   uploads into that workspace (`asset_upload_wrong_workspace`). The `--json`
   output (the `model_upload` schema) carries `loader_path`, the value a
-  workflow's loader node takes to load the file on Comfy Cloud. Builds on #1008.
+  workflow's loader node takes to load the file on Comfy Cloud. It is Comfy
+  Cloud's own value from its record of the model, and null when Comfy Cloud
+  gives none or when a dry run would upload. Builds on #1008.
 - `comfy model upload` and `comfy assets library upload` upload only the file
   named, and succeed only once Comfy Cloud's hash of the stored file equals the
   local file's. Before anything is sent they look the name up in that folder of

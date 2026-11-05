@@ -34,7 +34,7 @@
   "folder": { "type": "string" },
   "size": { "type": "integer", "minimum": 1 },
   "task_id": { "type": ["string", "null"] },
-  "loader_path": { "type": "string" },
+  "loader_path": { "type": ["string", "null"] },
   "sha256": { "type": "string" },
   "workspace_id": { "type": ["string", "null"] },
   "uploaded": { "type": "boolean" },

@@ -846,11 +846,12 @@ def _current_workspace(target, sign_in) -> str | None:
     return ws if isinstance(ws, str) and ws else None
 
 
-def _loader_path(asset: dict | None, name: str) -> str:
-    """The value a loader widget takes for the model. Comfy Cloud gives a model's
-    as its name; its own answer wins when the record carries one."""
+def _loader_path(asset: dict | None) -> str | None:
+    """The value a loader widget takes for the model, as Comfy Cloud's record
+    gives it; ``None`` when there is no record or it gives none (Comfy Cloud
+    could not derive one from the name)."""
     value = asset.get("loader_path") if isinstance(asset, dict) else None
-    return value if isinstance(value, str) and value else name
+    return value if isinstance(value, str) and value else None
 
 
 @app.command(
@@ -1017,7 +1018,7 @@ def run_upload(
             "id": asset_id,
             "name": name,
             "folder": folder,
-            "loader_path": _loader_path(asset, name),
+            "loader_path": _loader_path(asset),
             "hash": local_hash,
             "sha256": sha256,
             "size": size,
@@ -1180,6 +1181,10 @@ def run_upload(
         )
         raise typer.Exit(code=1)
 
+    # The bytes are verified; the record is read only for its loader_path,
+    # which stays null when it cannot be read.
+    if asset is None:
+        asset = _stored_asset(target, sign_in, asset_id)
     name = result["filename"] if isinstance(result.get("filename"), str) else item.filename
     payload = report(asset_id, task_id=task_id, uploaded=True, name=name, asset=asset)
     if renderer.is_pretty():

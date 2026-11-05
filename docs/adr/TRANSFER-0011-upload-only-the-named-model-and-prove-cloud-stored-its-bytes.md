@@ -69,8 +69,14 @@ keeps its approval idea and builds on the presigned upload already in
   asset equals the local blake3. The task result is read first, then the asset.
   A different hash, or none, ends as `asset_upload_unverified`.
 - The output's `loader_path` is the value a loader node takes to load the file
-  on Comfy Cloud. The CLI uses the server's `loader_path` when it sends one, and
-  the file name otherwise.
+  on Comfy Cloud. The CLI reports only Comfy Cloud's own value: from the
+  matching row when the bytes are already present, and from the asset's record,
+  read after the hash check, when they were uploaded. It is null when Comfy
+  Cloud gives none, when that read fails, and for a dry run that would upload.
+  Comfy Cloud gives null when the name does not form a valid model path, and
+  its own model list then leaves the model out, so the CLI does not put the
+  file name in its place. A failed read does not fail an upload whose hash
+  already matched.
 
 ## Alternatives considered
 
@@ -120,11 +126,12 @@ keeps its approval idea and builds on the presigned upload already in
 `tests/comfy_cli/command/test_assets_library.py` covers each refusal above, the
 lookup's workspace-library query, the skip for bytes already present, a file
 changed after it was hashed sending none of the changed bytes and never
-completing, a stored hash that differs or is missing, and the `--yes` refusal for an
-agent caller.
+completing, a stored hash that differs or is missing, the `--yes` refusal for an
+agent caller, and a `loader_path` that is null when Comfy Cloud gives none or
+its record cannot be read after the upload.
 
 ## Revisit triggers
 
 - Comfy Cloud loads models by hash instead of by folder and name.
-- Comfy Cloud starts returning `loader_path` values that differ from the file
-  name.
+- Comfy Cloud stops sending `loader_path` on asset records, so every upload
+  reports null.
