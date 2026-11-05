@@ -1028,7 +1028,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "workspace_unknown",
         "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not say which "
-        "workspace it went to, so `data.url` leaves out the workspace and deployment and opens the folder in "
+        "workspace it went to, so `data.url` leaves out the workspace and deployment and opens the saved file or folder in "
         "whatever workspace the browser is on. Surfaced in `data.warnings[]` (not as an error envelope) "
         "because the save itself succeeded.",
         "switch the browser to the workspace `comfy cloud whoami` shows before opening the link",

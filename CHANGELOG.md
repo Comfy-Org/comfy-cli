@@ -15,6 +15,13 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- Cloud sidebar saves print a link to the exact saved workflow when Cloud
+  enables saved-file links and returns a valid file UUID. The JSON receipt
+  includes `saved_file_id`; otherwise it is null and the folder link stays.
+  Record-only saves keep their existing output.
+
 ### Added
 
 - The `comfy-run-on-cloud` agent skill, installed with the other bundled
@@ -31,7 +38,7 @@ history.
   uploads with `--no-upload` and then uploads only the approved files with
   `--allow-upload`, and the agent runs
   one real job before it saves with `comfy workflow save --where cloud` and
-  hands back the folder link (or says there is none for a record-only save).
+  hands back the saved link (or says there is none for a record-only save).
   `comfy_cli/skills/comfy-run-on-cloud/PROMPT-TEMPLATE.md` is the prompt local
   ComfyUI's Copy prompt button gives the agent. `comfy-build` points a
   single-workflow request at the new skill, `comfy-build-failures` says a

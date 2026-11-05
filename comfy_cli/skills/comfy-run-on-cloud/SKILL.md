@@ -336,9 +336,14 @@ comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id
 ```
 
 It saves into a new folder in the Cloud Workflows sidebar and never replaces a
-file. `data.url` opens that folder in the person's workspace:
-`?workspace=<id>&workflows=<folder>&deployment=<id or standard>`. If `data.url`
-is missing, the save is a record only: nothing was added to the Workflows
+file. Hand back `data.url` as returned. When `data.saved_file_id` is set, the
+link opens that exact file in the person's workspace:
+`?workspace=<id>&savedFile=<saved_file_id>&deployment=<id or standard>`.
+Otherwise it opens the folder with `workflows=<folder>`. The exact-file link
+requires Cloud's `private_saved_file_links_enabled` setting to be true and a
+valid saved-file UUID in the save reply. `data.workflow_id` still names the
+workflow record used by `workflow get` and `workflow delete`.
+If `data.url` is missing, the save is a record only: nothing was added to the Workflows
 sidebar and there is no link. Say that plainly, give `data.workflow_id`, and do
 not point them at a sidebar entry. Then read `data.warnings[]` for the reason:
 

@@ -720,8 +720,11 @@ When the cloud workspace has `cli_cloud_save_enabled` on (`GET /api/features`),
 `workflow save` of an editor-format workflow (`nodes[]`) instead writes the
 file into a new folder in the Cloud Workflows sidebar, named after `--name`
 (`<name> (2)` and so on when the folder has files or a workflow of that name
-exists; nothing is ever replaced), and `data.url` is a link that opens that
-folder. `data.workflow_id` is still the saved workflow's id. The link opens
+exists; nothing is ever replaced). Hand back `data.url` as returned. It opens
+the exact saved file when `private_saved_file_links_enabled` is true and the
+save reply supplies a valid UUID (`data.saved_file_id`); otherwise it opens the
+folder and `data.saved_file_id` is null. `data.workflow_id` still names the
+workflow record. The link opens
 Comfy Cloud itself unless `--deployment <id>` names a build. `data.warnings[]`
 may carry `description_ignored`, `workspace_unknown` or
 `workflow_record_unknown`. An API-format workflow keeps the record-only save,
