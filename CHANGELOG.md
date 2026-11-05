@@ -67,6 +67,23 @@ history.
 
 - `comfy build push --dry-run` now runs the push's registry-pin check, so a pin the builder cannot place fails the dry run with the push's own `build_registry_pin_missing` error instead of passing it. A version the registry has Flagged was the common case: the dry run passed, and the push was refused only after the plan had been disclosed. The check asks the builder's snapshot importer to place each public pack, a read that writes nothing, and the dry run still uploads and saves nothing. The `--json` payload of a push and a dry run carries `public_pins_checked`, the number of public pins the builder placed (0 when the spec has none and the builder was not asked), so a script can tell a checked pin set from a spec with nothing to check. A spec that pins a public pack now needs sign-in for its dry run (`build_not_signed_in` otherwise); a spec whose packs are all local still sends no request. Push and dry run also refuse when the registry did not answer for a pack (the importer's `unverifiedPins`), instead of treating the unchecked pin as resolved; refuse with `build_spec_invalid`, before sending anything, a `repository` that is not a public GitHub address (`https://github.com/<org>/<repo>`, `git@github.com:<org>/<repo>.git` or `ssh://git@github.com/<org>/<repo>`), so one that carries a user name or token, does not parse, or names another host never leaves the machine; and report a builder response that times out or drops mid-body as `build_builder_error` instead of an internal error.
 
+- `comfy update` no longer dies with a `FileNotFoundError` traceback when the
+  configured workspace directory does not exist (never installed, or deleted).
+  It now fails with a `not_in_workspace` error that points at `comfy install`,
+  including when `--recent` cannot resolve a workspace, keeping the resolver's
+  exit status.
+
+- `comfy update cli` works for a `uv tool install` of comfy-cli. Those envs ship
+  without pip, so the old `python -m pip install -U` always failed; it now runs
+  `uv tool upgrade comfy-cli`, and any installer failure is reported as an
+  `update_cli_failed` error rather than a traceback. The upgrade targets the
+  running installation's tool directory even when `UV_TOOL_DIR` is absent or
+  selects a different directory in the current shell; when `uv` is not on PATH,
+  the hint names that directory too. The installer still runs without a time
+  limit, since stopping it partway can leave comfy-cli half-replaced. An exact uv version pin
+  is preserved and reported with manual reinstall guidance. Installer diagnostics
+  stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
+
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
