@@ -104,7 +104,9 @@ comfy --json workflow check run-on-cloud/<name>/original.json --where cloud \
 
 Run `cloud.json` from here on. If any of its `models[]` rows is still
 `unverified`, it is the `covered_needs_check` case: run it, and name those
-models in the report.
+models in the report. A `remap_not_applied` warning means `cloud.json` still
+names the local file on that node: do not run it; report that node and model
+as what blocks the run.
 
 ## 4. Something is missing: pick the route in this order
 
