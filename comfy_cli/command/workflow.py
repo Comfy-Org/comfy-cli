@@ -1403,7 +1403,8 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # files as editor graphs. The CLI never deletes a sidebar file: Cloud's file
 # DELETE takes no condition, so it could remove an edit made in the browser
 # since the CLI last read the file. With the flag on, ``delete`` removes only
-# the record, as before, and warns when the record's sidebar file stays.
+# the record, as before, and warns when a sidebar file shown to be that
+# record's stays.
 # ---------------------------------------------------------------------------
 
 _CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"
@@ -1704,24 +1705,43 @@ def _cloud_folder_save(
 
 
 def _cloud_sidebar_file(target, workflow_id: str) -> str | None:
-    """The Workflows-sidebar file a Cloud record is named after, as a key under ``workflows/``, or None.
+    """The Workflows-sidebar file a Cloud record mirrors, as a key under ``workflows/``, or None.
 
-    Cloud names the record it makes from ``workflows/<name>.json`` ``<name>``,
-    and deleting the record leaves that file in the sidebar. This only reads:
-    it asks for the record's name, then for the file. It must run before the
-    record DELETE, which renames the record. A failed or odd read answers
-    None, so ``delete`` then reports no file.
+    Cloud makes the record named ``<name>`` from ``workflows/<name>.json``,
+    and deleting the record leaves that file in the sidebar. A name alone does
+    not prove the file is this record's: ``POST /api/workflows`` makes a
+    record with no file, and several live records can share a name, so a
+    record-only workflow ``flux/flux`` can sit beside the file of another
+    record named ``flux/flux``. So, as Cloud does before it retires a mirror,
+    the file counts only when this record is the one live record of that
+    name and the file's JSON equals the record's latest version. A later
+    record-only save that moved the latest version on answers None, which
+    leaves out a warning rather than name another workflow's file.
+
+    This only reads: the record's name, the file, the records of that name,
+    then the record's latest content. It must run before the record DELETE,
+    which renames the record. A failed or odd read answers None, so
+    ``delete`` then reports no file.
     """
     import urllib.parse
 
+    record_path = urllib.parse.quote(workflow_id, safe="")
     try:
-        _, record = _http_request(target.url("workflows", urllib.parse.quote(workflow_id, safe="")), target)
+        _, record = _http_request(target.url("workflows", record_path), target)
         name = record.get("name") if isinstance(record, dict) else None
         if not isinstance(name, str) or any(p in ("", ".", "..") for p in name.split("/")) or "\\" in name:
             return None
         key = f"{name}.json"
-        _userdata_request(_userdata_file_url(target, key), target)
-    except _request_errors():
+        _, raw = _userdata_request(_userdata_file_url(target, key), target)
+        same_name = _cloud_records_named(target, name)
+        if not same_name or len(same_name) != 1 or same_name[0].get("id") != workflow_id:
+            return None
+        _, content = _http_request(target.url("workflows", record_path, "content"), target)
+        if not isinstance(content, dict) or "workflow_json" not in content:
+            return None
+        if json.loads(raw) != content["workflow_json"]:
+            return None
+    except (*_request_errors(), RecursionError):
         return None
     return key
 

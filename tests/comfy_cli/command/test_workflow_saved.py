@@ -688,8 +688,14 @@ class TestHttpRequestCap:
     def test_every_call_site_routes_oversize_to_envelope(self, verb, cloud_target, tmp_path, monkeypatch, capsys):
         # Each of the four _http_request call sites must catch _ResponseTooLarge;
         # an uncaught one would surface as a traceback rather than an envelope.
-        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", 4)
-        _patch_urlopen(monkeypatch, {"/api/workflows": (b'{"data": []}', 200)})
+        # save and delete read /api/features first. The cap fits its flag-off
+        # answer exactly, so they take the record path and reach the oversize
+        # /api/workflows body, rather than reading the flag as off because the
+        # features body itself was too large.
+        flag_off = json.dumps(_FLAG_OFF).encode()
+        monkeypatch.setattr(workflow_cmd, "_HTTP_MAX_BYTES", len(flag_off))
+        oversize = json.dumps({"data": [], "pad": "x" * len(flag_off)}).encode()
+        calls = _patch_urlopen(monkeypatch, {"/api/features": (flag_off, 200), "/api/workflows": (oversize, 200)})
         args = {
             "list": ["list"],
             "get": ["get", "wf-uuid"],
@@ -706,6 +712,9 @@ class TestHttpRequestCap:
         # The hint must speak to the operation that actually failed; a single
         # hardcoded "saved workflow is too large" is wrong for list/save/delete.
         assert env["error"]["hint"] == workflow_cmd._TOO_LARGE_HINTS[verb]
+        if verb in ("save", "delete"):
+            assert calls[0]["url"] == "https://cloud.example.com/api/features"
+            assert "/api/workflows" in calls[-1]["url"]
 
     @pytest.mark.parametrize("verb", ["save", "delete"])
     def test_mutating_verbs_do_not_claim_the_write_was_rejected(self, verb):
@@ -1142,21 +1151,46 @@ class TestDelete:
         assert env["error"]["code"] == "workflow_not_found"
 
 
-def _sidebar_delete(features=_FLAG_ON, *, record=None, file=None, record_delete=(b"", 204)):
-    """A fake Cloud for delete: record ``rec-1`` and, unless ``file`` is None, its sidebar file's bytes.
+def _sidebar_delete(
+    features=_FLAG_ON,
+    *,
+    record=None,
+    file=None,
+    record_delete=(b"", 204),
+    others=(),
+    content=None,
+    search=None,
+):
+    """A fake Cloud for delete: record ``rec-1`` and, unless ``file`` is None, the sidebar file of its name.
 
-    It refuses any userdata DELETE: the CLI must never delete a sidebar file.
+    ``others`` are more live records, each ``(id, name)``, that the name
+    search lists beside ``rec-1``. ``content`` is ``rec-1``'s latest version
+    (``_UI_DATA`` unless given). ``search``, when set, answers the name search
+    in place of the records. It refuses any userdata DELETE: the CLI must
+    never delete a sidebar file.
     """
     import urllib.parse
 
     record = {"id": "rec-1", "name": "flux/flux", "latest_version": 1} if record is None else record
+    content = {"version": 1, "workflow_json": _UI_DATA} if content is None else content
 
     def handler(method, url, body):
-        path = urllib.parse.urlsplit(url).path
+        parsed = urllib.parse.urlsplit(url)
+        path = parsed.path
         if path == "/api/features":
             return features
         if path == "/api/workflows/rec-1" and method == "GET":
             return record
+        if path == "/api/workflows/rec-1/content" and method == "GET":
+            return content
+        if path == "/api/workflows" and method == "GET":
+            if search is not None:
+                return search
+            needle = urllib.parse.parse_qs(parsed.query)["name"][0].lower()
+            rows = [{"id": "rec-1", "name": record["name"], "latest_version": 1}]
+            rows += [{"id": i, "name": n, "latest_version": 1} for i, n in others]
+            rows = [r for r in rows if needle in r["name"].lower()]
+            return {"data": rows, "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
         if path.startswith("/api/userdata/") and method == "GET":
             return _http_error(404) if file is None else file
         if path == "/api/workflows/rec-1" and method == "DELETE":
@@ -1188,13 +1222,78 @@ class TestDeleteKeepsTheSidebarFile:
         assert warning["filename"] == "workflows/flux/flux.json"
         assert "workflows/flux/flux.json" in warning["message"]
         assert self._deletes(calls) == [self._RECORD_DELETE]
-        # The record's name and file are read before the DELETE renames the record.
+        # The record's name, its file, the records of that name and the
+        # record's content are all read before the DELETE renames the record.
         assert [(c["method"], c["url"]) for c in calls] == [
             ("GET", "https://cloud.example.com/api/features"),
             ("GET", "https://cloud.example.com/api/workflows/rec-1"),
             ("GET", "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json"),
+            ("GET", "https://cloud.example.com/api/workflows?name=flux%2Fflux&limit=100&offset=0&sort=name&order=asc"),
+            ("GET", "https://cloud.example.com/api/workflows/rec-1/content"),
             ("DELETE", "https://cloud.example.com/api/workflows/rec-1"),
         ]
+
+    @pytest.mark.parametrize(
+        "others, content",
+        [
+            # The finding's case: file A at workflows/flux/flux.json mirrors
+            # record rec-A, and rec-1 is a record-only workflow B of the same
+            # name with other content.
+            pytest.param([("rec-A", "flux/flux")], {"workflow_json": _WF_DATA}, id="other-record-other-content"),
+            # B was posted with A's exact content: the file still cannot be told apart.
+            pytest.param([("rec-A", "flux/flux")], None, id="other-record-same-content"),
+            # A's record is gone and B is the only record of the name.
+            pytest.param([], {"workflow_json": _WF_DATA}, id="only-record-other-content"),
+        ],
+    )
+    def test_a_same_named_file_of_another_workflow_is_not_named(
+        self, cloud_target, monkeypatch, capsys, others, content
+    ):
+        # Cloud lets several live records share a name, and a record made by
+        # POST /api/workflows has no file. So deleting rec-1 must not call
+        # workflows/flux/flux.json rec-1's file, or the person would remove
+        # another workflow's file. The delete itself is unchanged.
+        handler = _sidebar_delete(file=(json.dumps(_UI_DATA).encode(), 200), others=others, content=content)
+        calls = _patch_cloud(monkeypatch, handler)
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == [self._RECORD_DELETE]
+
+    def test_a_record_with_a_longer_name_still_gives_the_warning(self, cloud_target, monkeypatch, capsys):
+        # Cloud's name search matches a substring, so it also lists "flux/flux v2";
+        # only an exact name counts as a second record of this name.
+        handler = _sidebar_delete(file=(json.dumps(_UI_DATA).encode(), 200), others=[("rec-C", "flux/flux v2")])
+        _patch_cloud(monkeypatch, handler)
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        [warning] = env["data"]["warnings"]
+        assert warning["code"] == "sidebar_file_kept"
+        assert warning["filename"] == "workflows/flux/flux.json"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({"search": _http_error(500)}, id="name-search-fails"),
+            pytest.param({"search": {"data": "x"}}, id="name-search-odd"),
+            pytest.param({"content": _http_error(500)}, id="content-read-fails"),
+            pytest.param({"content": {"version": 1}}, id="content-without-workflow-json"),
+            pytest.param({"file": (b"<html>", 200)}, id="file-not-json"),
+        ],
+    )
+    def test_an_unproven_file_gives_the_plain_delete(self, cloud_target, monkeypatch, capsys, kwargs):
+        handler = _sidebar_delete(**{"file": (json.dumps(_UI_DATA).encode(), 200), **kwargs})
+        calls = _patch_cloud(monkeypatch, handler)
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == [self._RECORD_DELETE]
+
+    def test_a_name_search_past_the_page_cap_gives_the_plain_delete(self, cloud_target, monkeypatch, capsys):
+        monkeypatch.setattr(workflow_cmd, "_RECORD_PAGE_SIZE", 1)
+        monkeypatch.setattr(workflow_cmd, "_MAX_RECORD_PAGES", 1)
+        handler = _sidebar_delete(file=(json.dumps(_UI_DATA).encode(), 200))
+        calls = _patch_cloud(monkeypatch, handler)
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == [self._RECORD_DELETE]
 
     def test_no_file_gives_the_plain_delete(self, cloud_target, monkeypatch, capsys):
         calls = _patch_cloud(monkeypatch, _sidebar_delete(file=None))

@@ -728,7 +728,9 @@ with an `api_format_saved_as_record` warning. `workflow delete <id>` only ever
 deletes the record; with the flag on, when the workflow's sidebar file still
 exists, `data.warnings[]` carries `sidebar_file_kept` with the file's path
 (`filename`). The file stays in the sidebar until the person removes it in
-Comfy Cloud. With the flag off, or when the features read fails, save is the
+Comfy Cloud. The file counts as the workflow's only when no other live
+workflow has the same name and the file matches the workflow's latest
+version; a same-named file that may be another workflow's gets no warning. With the flag off, or when the features read fails, save is the
 record-only `/api/workflows` call above.
 
 ## Cancel a running job

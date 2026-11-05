@@ -26,7 +26,10 @@ history.
   `latest_version`. An API-format workflow keeps the record-only save.
   `comfy workflow delete` still deletes only the record; with the flag on it
   warns (`sidebar_file_kept`) when the workflow's sidebar file stays, naming
-  the file to remove in Comfy Cloud. With the flag off, or when Cloud's
+  the file to remove in Comfy Cloud. A file counts as the workflow's only when
+  no other live workflow has its name and it matches the workflow's latest
+  version, so a same-named file of another workflow is never named. With the
+  flag off, or when Cloud's
   features cannot be read, save and delete are unchanged.
 - `comfy knowledge pick` includes authored discovery-only routes in a separate
   `discovery` list, marks every route `ranking: "unranked"`, and carries the

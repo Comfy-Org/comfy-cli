@@ -996,9 +996,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "sidebar_file_kept",
         "`comfy workflow delete` on a Comfy Cloud workspace with `cli_cloud_save_enabled` on deleted the "
-        "workflow record, but the Workflows-sidebar file the record is named after (`filename` in the "
-        "warning) still exists. The CLI never deletes sidebar files, so it stays in the sidebar. Surfaced in "
-        "`data.warnings[]` (not as an error envelope) because the record delete succeeded.",
+        "workflow record, but the Workflows-sidebar file the record was made from (`filename` in the "
+        "warning) still exists. The file counts as the record's only when the record is the one live "
+        "workflow of its name and the file matches the record's latest version; a file that only shares the "
+        "name may be another workflow's, and gets no warning. The CLI never deletes sidebar files, so it "
+        "stays in the sidebar. Surfaced in `data.warnings[]` (not as an error envelope) because the record "
+        "delete succeeded.",
         "remove the file from the Workflows sidebar in Comfy Cloud",
     ),
     ErrorCode(
