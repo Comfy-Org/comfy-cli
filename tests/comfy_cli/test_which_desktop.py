@@ -156,6 +156,25 @@ def test_which_names_unreadable_desktop_records_in_the_output(comfy_desktop, fal
     assert "installations.json" in problems[0]
 
 
+def test_workspace_warning_codes_are_not_published_as_error_codes(comfy_desktop, fallback_workspace):
+    """Both codes only ever appear in ``warnings[]`` of a successful result, so
+    ``comfy discover`` does not list them among the failure categories."""
+    from comfy_cli import error_codes
+    from comfy_cli.discovery import load_error_codes
+
+    (comfy_desktop["app"] / "installations.json").write_text("{not json")
+
+    result, envelope = _invoke("--json", "which")
+
+    assert result.exit_code == 0, result.output
+    assert envelope["ok"] is True and envelope["error"] is None
+    warned = [w["code"] for w in envelope["data"]["warnings"]]
+    assert warned == ["workspace_not_found", "desktop_config_unreadable"]
+    published = {row["code"] for row in load_error_codes()}
+    assert not set(warned) & published
+    assert not any(error_codes.is_registered(code) for code in warned)
+
+
 def test_which_warns_when_desktop_settings_are_unreadable(comfy_desktop, fallback_workspace):
     (comfy_desktop["app"] / "settings.json").write_text("[broken")
 

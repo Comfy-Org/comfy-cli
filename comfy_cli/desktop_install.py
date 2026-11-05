@@ -16,7 +16,7 @@ Everything is read from files Desktop maintains in its app-data dir
 per XDG: ``installations.json`` under ``XDG_DATA_HOME`` and ``settings.json``
 under ``XDG_CONFIG_HOME``. Nothing here starts Desktop, talks to a server, or
 writes a file, and a path that cannot be checked is reported as a problem
-rather than raised.
+rather than raised (see :data:`_PATH_ERRORS`).
 """
 
 from __future__ import annotations
@@ -179,14 +179,23 @@ class DesktopDetection:
         return block
 
 
+#: What checking a path from Desktop's records or a server's argv can raise:
+#: ``OSError`` (permission denied, a missing parent), ``ValueError`` (an
+#: embedded NUL) and ``RuntimeError`` (on Python 3.10, ``Path.resolve()`` on a
+#: symlink loop and ``Path.expanduser()``/``Path.home()`` without a home
+#: directory; ``RecursionError`` from a deeply nested file is one too). Every
+#: boundary that turns a path failure into a problem catches exactly this.
+_PATH_ERRORS = (OSError, RuntimeError, ValueError)
+
+
 def _same_path(a: str, b: str) -> bool:
     try:
         return os.path.samefile(a, b)
-    except (OSError, ValueError):
+    except _PATH_ERRORS:
         pass
     try:
         return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
-    except (OSError, ValueError):
+    except _PATH_ERRORS:
         return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
@@ -235,7 +244,7 @@ def _code_dir(install_path: Path) -> Path:
 def _version_from_marker(code_dir: Path) -> str | None:
     try:
         match = _VERSION_MARKER_RE.search((code_dir / "comfyui_version.py").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
+    except _PATH_ERRORS:
         return None
     return match.group(1) if match else None
 
@@ -430,7 +439,7 @@ def _add_config_roots(config_path: Path, roots: list[ModelRoot], problems: list[
             for path in paths:
                 if not any(_same_path(str(path), root.path) for root in roots):
                     roots.append(ModelRoot(str(path), "install", _is_dir(path)))
-    except (OSError, ValueError, yaml.YAMLError) as error:
+    except (*_PATH_ERRORS, yaml.YAMLError) as error:
         problems.append(f"{config_path}: {error}")
 
 
@@ -497,14 +506,24 @@ def _for_server(
     roots = [root for root in chosen.model_roots if root.source != "data"] if not configs else []
     roots.insert(0, ModelRoot(models_dir, "data", _is_dir(models_dir)))
     problems = list(found.problems)
-    # ComfyUI loads ``extra_model_paths.yaml`` beside its main.py before any
-    # ``--extra-model-paths-config`` file.
-    local_config = Path(os.path.realpath(chosen.code_dir)) / "extra_model_paths.yaml"
-    local_state = _regular_file(local_config)
-    if isinstance(local_state, OSError):
-        problems.append(f"{local_config}: {local_state}")
-    elif local_state:
-        _add_config_roots(local_config, roots, problems)
+    # ComfyUI loads ``extra_model_paths.yaml`` beside the main.py it runs
+    # (``realpath(__file__)``) before any ``--extra-model-paths-config`` file.
+    # That is the server's own script, ``argv[0]``, not the recorded checkout:
+    # a process matched by its base dir or generated config can run a bundled
+    # main.py elsewhere. A script path that is not absolute leaves it unknown.
+    script = argv[0] if argv and Path(argv[0]).name == "main.py" and Path(argv[0]).is_absolute() else None
+    if script is None:
+        problems.append(
+            "running server script location is unknown; the extra_model_paths.yaml beside its main.py "
+            "is not in model_roots"
+        )
+    else:
+        local_config = Path(os.path.dirname(os.path.realpath(script))) / "extra_model_paths.yaml"
+        local_state = _regular_file(local_config)
+        if isinstance(local_state, OSError):
+            problems.append(f"{local_config}: {local_state}")
+        elif local_state:
+            _add_config_roots(local_config, roots, problems)
     for config in configs:
         config_path = Path(config).expanduser()
         if not config_path.is_absolute():
@@ -537,7 +556,7 @@ def _for_server(
 def _with_server(found: DesktopDetection, stats: dict[str, Any], *, filesystem_verified: bool) -> DesktopDetection:
     try:
         return _for_server(found, stats, filesystem_verified=filesystem_verified)
-    except (OSError, ValueError) as error:
+    except _PATH_ERRORS as error:
         return replace(
             found,
             selected=None,
@@ -566,9 +585,12 @@ def detect(
     matching strings or a loopback URL alone are insufficient.
     """
     if app_data_dir is None:
-        detections = [
-            found for directory in app_data_dirs() if (found := _detect_dir(directory, legacy_dir)) is not None
-        ]
+        try:
+            directories = app_data_dirs()
+        except _PATH_ERRORS as error:
+            # No home directory to find Desktop's app-data dir under.
+            return DesktopDetection(app_data_dir="", problems=(f"Desktop app-data dir: {error}",))
+        detections = [found for directory in directories if (found := _detect_dir(directory, legacy_dir)) is not None]
         if not detections:
             return None
         installs = tuple(install for found in detections for install in found.installs)
@@ -592,7 +614,7 @@ def _detect_dir(app_dir: Path, legacy_dir: Path | None, settings_dir: Path | Non
     """One registry folder. A filesystem error becomes a problem, never an exception."""
     try:
         return _read_registry(app_dir, legacy_dir, settings_dir)
-    except (OSError, ValueError) as error:
+    except _PATH_ERRORS as error:
         return DesktopDetection(app_data_dir=str(app_dir), problems=(f"{app_dir}: {error}",))
 
 
@@ -607,7 +629,7 @@ def _read_registry(app_dir: Path, legacy_dir: Path | None, settings_dir: Path | 
     problems: list[str] = []
     try:
         records = _read_json(installations_file)
-    except (OSError, UnicodeDecodeError, ValueError) as error:
+    except _PATH_ERRORS as error:
         return DesktopDetection(app_data_dir=str(app_dir), problems=(f"{installations_file}: {error}",))
     if not isinstance(records, list):
         return DesktopDetection(
@@ -625,7 +647,7 @@ def _read_registry(app_dir: Path, legacy_dir: Path | None, settings_dir: Path | 
                 raise state
             settings = _read_json(settings_file)
             shared_dirs = _str_list(settings.get("modelsDirs")) if isinstance(settings, dict) else []
-        except (OSError, UnicodeDecodeError, ValueError) as error:
+        except _PATH_ERRORS as error:
             problems.append(f"{settings_file}: {error} (shared model roots are missing from model_roots)")
         break
 
@@ -640,7 +662,7 @@ def _read_registry(app_dir: Path, legacy_dir: Path | None, settings_dir: Path | 
             config = _read_json(legacy_file)
             base = config.get("basePath") if isinstance(config, dict) else None
             legacy_base_path = base if isinstance(base, str) and base else None
-        except (OSError, UnicodeDecodeError, ValueError) as error:
+        except _PATH_ERRORS as error:
             legacy_base_path = None
             problems.append(f"{legacy_file}: {error}")
 

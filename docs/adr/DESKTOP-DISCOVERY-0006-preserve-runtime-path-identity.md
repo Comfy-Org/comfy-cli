@@ -50,9 +50,12 @@ files while reporting the wrong version.
   output fields. Zero or conflicting matches leave selection unresolved instead of combining
   unrelated installations.
 - Derive effective code/data/model/input/output roots from that selected process.
-  Resolve its model-path configuration the way ComfyUI loads it: the checkout's
-  own `extra_model_paths.yaml` first, then each `--extra-model-paths-config`;
-  `--models-directory` replaces the data dir's `models/`. Retain external paths
+  Resolve its model-path configuration the way ComfyUI loads it: the
+  `extra_model_paths.yaml` beside the `main.py` the process runs (ComfyUI takes
+  it from its script's real path, which for a bundled launch is not the
+  recorded checkout) first, then each `--extra-model-paths-config`;
+  `--models-directory` replaces the data dir's `models/`. A script path that is
+  not absolute leaves that local file unresolved. Retain external paths
   explicitly.
   Report the running version when supplied. The output root is the explicit
   launch path or that process's data/output default, with its source recorded.
@@ -63,8 +66,11 @@ files while reporting the wrong version.
 - Surface missing directories with existence flags and warnings. A missing
   selected workspace leaves `which`'s exit code and `ok: true` envelope as they
   were under envelope/1; `exists: false` and a `workspace_not_found` warning
-  report it. A Desktop path that cannot be checked (for example, permission
-  denied) is a warning, never a failed command. Discovery is read-only: it
+  report it. A Desktop path that cannot be checked (permission denied, a
+  symlink loop, a `~` with no home directory to expand) is a warning, never a
+  failed command. These warning codes stay in `warnings[]` and are not
+  registered error codes: under ADR-AUTOMATION-0003 registered codes are
+  failure categories. Discovery is read-only: it
   creates no default workspace, installs nothing and grants no permission to
   inspect/upload every file under a shared root.
 - Optional which/env discovery fields remain additive. Runtime launch reporting

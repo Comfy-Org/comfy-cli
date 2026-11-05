@@ -771,3 +771,172 @@ def test_relative_models_directory_is_unverified(tmp_path):
 
     assert found.selected is None
     assert any("relative" in problem for problem in found.problems)
+
+
+def _generated_config(app: Path, install_id: str) -> Path:
+    config = app / "instance-model-paths" / f"{install_id}.yaml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("{}")
+    return config
+
+
+def test_bundled_process_reads_the_yaml_beside_its_own_main_py_not_the_recorded_checkout(tmp_path):
+    """ComfyUI loads extra_model_paths.yaml from ``realpath(__file__)``'s dir: the running script's."""
+    code = _checkout(tmp_path / "recorded" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    unused = tmp_path / "unused-private-models"
+    (code / "extra_model_paths.yaml").write_text(f"unused:\n  base_path: {unused}\n  checkpoints: checkpoints\n")
+    bundled = _checkout(tmp_path / "bundled")
+    bundled_root = tmp_path / "bundled-models"
+    (bundled / "extra_model_paths.yaml").write_text(f"bundled:\n  base_path: {bundled_root}\n  loras: loras\n")
+    config = _generated_config(app, "live")
+
+    found = desktop_install.detect(
+        app,
+        tmp_path / "no-legacy",
+        server_stats={"system": {"argv": [str(bundled / "main.py"), "--extra-model-paths-config", str(config)]}},
+        server_filesystem_verified=True,
+    )
+
+    assert found.selected.install_id == "live"
+    paths = [root.path for root in found.selected.model_roots]
+    assert str(unused) not in paths
+    assert str(bundled_root) in paths
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_local_yaml_is_found_through_the_real_path_of_a_symlinked_main_py(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    local_root = tmp_path / "local-models"
+    (code / "extra_model_paths.yaml").write_text(f"local:\n  base_path: {local_root}\n  checkpoints: checkpoints\n")
+    launcher = tmp_path / "launcher"
+    launcher.mkdir()
+    (launcher / "main.py").symlink_to(code / "main.py")
+    config = _generated_config(app, "live")
+
+    found = desktop_install.detect(
+        app,
+        tmp_path / "no-legacy",
+        server_stats={"system": {"argv": [str(launcher / "main.py"), "--extra-model-paths-config", str(config)]}},
+        server_filesystem_verified=True,
+    )
+
+    assert str(local_root) in [root.path for root in found.selected.model_roots]
+
+
+def test_relative_server_script_leaves_the_local_yaml_unresolved(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    checkout_root = tmp_path / "checkout-models"
+    (code / "extra_model_paths.yaml").write_text(f"local:\n  base_path: {checkout_root}\n  checkpoints: checkpoints\n")
+    config = _generated_config(app, "live")
+
+    found = desktop_install.detect(
+        app,
+        tmp_path / "no-legacy",
+        server_stats={"system": {"argv": ["main.py", "--extra-model-paths-config", str(config)]}},
+        server_filesystem_verified=True,
+    )
+
+    assert found.selected.install_id == "live"
+    assert str(checkout_root) not in [root.path for root in found.selected.model_roots]
+    assert any("script location is unknown" in problem for problem in found.problems)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_local_yaml_symlink_loop_does_not_crash_discovery(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop.name)
+    (code / "extra_model_paths.yaml").write_text(f"loop:\n  checkpoints: {loop}\n")
+
+    found = desktop_install.detect(
+        app,
+        tmp_path / "no-legacy",
+        server_stats={"system": {"argv": [str(code / "main.py")]}},
+        server_filesystem_verified=True,
+    )
+
+    assert found.selected.install_id == "live"
+    assert found.selected.model_roots[0].path == str(code / "models")
+
+
+@pytest.mark.parametrize("failure", ["symlink-loop", "no-home"])
+def test_path_resolution_and_expansion_failures_in_a_yaml_are_problems(tmp_path, monkeypatch, failure):
+    """Python 3.10 raises RuntimeError from Path.resolve() on a loop and from
+    Path.expanduser() without a home; either is a problem for that file only."""
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    local = code / "extra_model_paths.yaml"
+    local.write_text("local:\n  base_path: ~/models\n  checkpoints: checkpoints\n")
+    explicit = tmp_path / "explicit.yaml"
+    explicit.write_text(f"explicit:\n  loras: {tmp_path / 'explicit-loras'}\n")
+    if failure == "symlink-loop":
+        real_resolve = Path.resolve
+
+        def resolve(self, *args, **kwargs):
+            if "models" in self.parts:
+                raise RuntimeError(f"Symlink loop from {str(self)!r}")
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve)
+    else:
+        real_expanduser = Path.expanduser
+
+        def expanduser(self):
+            if str(self).startswith("~"):
+                raise RuntimeError("Could not determine home directory.")
+            return real_expanduser(self)
+
+        monkeypatch.setattr(Path, "expanduser", expanduser)
+
+    found = desktop_install.detect(
+        app,
+        tmp_path / "no-legacy",
+        settings_dir=app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--extra-model-paths-config", str(explicit)]}},
+        server_filesystem_verified=True,
+    )
+
+    assert found.selected.install_id == "live"
+    assert [problem for problem in found.problems if problem.startswith(str(local))]
+    assert str(tmp_path / "explicit-loras") in [root.path for root in found.selected.model_roots]
+
+
+def test_expansion_failure_in_server_argv_is_a_problem_not_a_crash(tmp_path, monkeypatch):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "registry", [{"id": "live", "installPath": str(code.parent)}])
+    real_expanduser = Path.expanduser
+
+    def expanduser(self):
+        if str(self).startswith("~"):
+            raise RuntimeError("Could not determine home directory.")
+        return real_expanduser(self)
+
+    monkeypatch.setattr(Path, "expanduser", expanduser)
+
+    found = desktop_install.detect(
+        app,
+        tmp_path / "no-legacy",
+        settings_dir=app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--extra-model-paths-config", "~/models.yaml"]}},
+        server_filesystem_verified=True,
+    )
+
+    assert found.selected is None
+    assert any("could not be checked" in problem and "home directory" in problem for problem in found.problems)
+
+
+def test_no_home_directory_for_the_default_app_data_dir_is_a_problem(monkeypatch):
+    def no_home():
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(desktop_install, "app_data_dirs", no_home)
+
+    found = desktop_install.detect()
+
+    assert found is not None
+    assert found.selected is None
+    assert any("home directory" in problem for problem in found.problems)

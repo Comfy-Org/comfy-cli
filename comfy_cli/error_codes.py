@@ -12,6 +12,12 @@ list via ``comfy discover`` and branch on the codes; if you rename, deprecate,
 or remove one, you're breaking the contract and the tests fail before merge.
 
 Codes are snake_case and match ``^[a-z][a-z0-9_]*$``.
+
+Registered codes are failure categories (ADR-AUTOMATION-0003). A code a
+command only emits inside ``data.warnings[]`` of a successful result is not
+registered here; the warning object carries its own ``code`` string. The
+warning-only codes registered before this rule stay (the registry is
+append-only) and are listed in the registry test.
 """
 
 from __future__ import annotations
@@ -64,19 +70,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "not_in_workspace",
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
-    ),
-    ErrorCode(
-        "workspace_not_found",
-        "The workspace `comfy which` / `comfy env` report does not exist on disk (`exists: false`); the message "
-        "names the missing directory. Surfaced in `data.warnings[]` (not as an error envelope) so the command "
-        "still succeeds.",
-        "run `comfy install`, or pass `--workspace /path/to/ComfyUI`",
-    ),
-    ErrorCode(
-        "desktop_config_unreadable",
-        "Comfy Desktop installation records or settings could not be read; discovery may be incomplete. Surfaced "
-        "in `data.warnings[]` (not as an error envelope) so the command still succeeds.",
-        "check the Desktop configuration file named in the warning",
     ),
     # --- launch / stop lifecycle ---------------------------------------------
     ErrorCode(
