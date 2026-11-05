@@ -53,6 +53,12 @@ workflow's name with every character other than a letter, digit, `-` or `_`
 turned into `-` (`My flow (2)` gives `run-on-cloud/My-flow--2-`). Quote every
 path in the commands.
 
+First make sure the address is ComfyUI: `curl -sf "<server>/api/system_stats"`
+must answer JSON with `system.comfyui_version`. Anything else (no answer, a web
+page, plain text) means another program holds that port: stop, and tell the
+person the address does not answer as ComfyUI. Never run the check on what such
+an address returns.
+
 ```shell
 mkdir -p "<work>/inputs"
 curl -sf "<server>/api/userdata/workflows%2F<encoded name>.json" \
@@ -82,8 +88,12 @@ comfy --json workflow check "<work>/original.json" --where cloud \
 Without `--models-dir` the check cannot see a local file, so a model the person
 has in a different version than Cloud's never shows up as `different_file`.
 `which` names the install comfy-cli tracks, which may not be the one serving
-`<server>`. If the check finds no `local_paths` for models the workflow loads,
-ask the person where that server keeps its models and pass that folder instead.
+`<server>`. For a model with no `local_paths`, ask the server whether it has the
+file: `curl -sf "<server>/api/models/<folder>"` lists the file names it loads
+from that folder. Listed there: the `--models-dir` folders are the wrong ones;
+ask the person where that server keeps its models and check again with that
+folder. Not listed: the file is not on this machine either, so there is nothing
+to ask; go on with the verdict.
 
 `data.verdict` decides the next step:
 
@@ -134,7 +144,7 @@ at the first that works:
    served release has every pack and model the workflow needs. Keep the workflow
    unchanged and run it there (step 6). A build with no running deployment needs
    a yes to start one (`comfy-deploy`).
-2. **A lossless node swap**, made on a copy without asking.
+2. **A lossless node swap**, made on a copy without asking (below).
 3. **A lossy swap**, asked first. A yes runs the copy on Comfy Cloud. A no goes
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
@@ -150,6 +160,15 @@ at the first that works:
 | Lossy | Anything else that changes what is generated: another model, LoRA, VAE, ControlNet, upscaler or embedding; dropping a LoRA or a node that touches pixels; another implementation of the same job | Ask first (below) |
 | Not swappable | A node that does the core work and has no core equivalent on Cloud | Existing build or custom build |
 
+**Making a swap.** Copy the workflow to `"<work>/cloud.json"` (or edit
+`cloud.json` if the remap already wrote it) and run every edit on that copy with
+`--where cloud`: `comfy --json workflow add-node`, then `workflow connect` for
+each link, `workflow set-widget` for each value, and `workflow delete-nodes` for
+the nodes it replaces. Name slots in `connect`, never their numbers
+(`<id>.INT`, not `<id>.0`): the core node may list its outputs in another
+order, so a number can wire a FLOAT where an INT went. `comfy workflow slots
+"<work>/cloud.json"` prints each node's slot names.
+
 **Asking about a lossy swap.** One message: each swap as `original -> replacement`
 and how the output may change; then two choices. **Swap**: runs on Comfy Cloud,
 nothing to build, output may differ. **Keep the original**: a custom build, with
@@ -159,12 +178,12 @@ its costs. Offer only replacements from the same model family, taken from
 **Check every changed copy before running it.** Pack versions move widget values:
 
 ```shell
-comfy --json run --workflow <copy> --print-prompt --where cloud > preview.json
-jq '.data.prompt' preview.json > api.json
-comfy --json workflow validate --workflow api.json --where cloud
+comfy --json run --workflow "<work>/cloud.json" --print-prompt --where cloud > "<work>/preview.json"
+jq '.data.prompt' "<work>/preview.json" > "<work>/api.json"
+comfy --json workflow validate --workflow "<work>/api.json" --where cloud
 ```
 
-Fix a widget by name with `comfy --json workflow set-widget <copy>
+Fix a widget by name with `comfy --json workflow set-widget "<work>/cloud.json"
 <node>.<widget> <value> --where cloud`, only to a value that keeps the saved
 behavior.
 
@@ -234,7 +253,7 @@ Never call it working before a real job succeeds.
   `IMPORT FAILED` for a pack the workflow uses. Make the API file against the
   local server, which has the packs:
   `COMFY_LOCAL_URL=<server> comfy --json run --workflow <file> --print-prompt --where local`,
-  `.data.prompt` into `api.json`.
+  `.data.prompt` into `"<work>/api.json"`.
 
   `deploy run` sends local files on its own. Any string input in `api.json`
   with a file extension can match a file, whatever the node type, so a custom
@@ -244,7 +263,7 @@ Never call it working before a real job succeeds.
   which reuses files the deployment already has and sends none:
 
   ```shell
-  comfy --json deploy run --deployment <id> --workflow api.json --no-upload \
+  comfy --json deploy run --deployment <id> --workflow "<work>/api.json" --no-upload \
     --wait --output-dir "<work>/outputs"
   ```
 
@@ -258,7 +277,7 @@ Never call it working before a real job succeeds.
   by one `--allow-upload <hash>` per approved file:
 
   ```shell
-  comfy --json deploy run --deployment <id> --workflow api.json \
+  comfy --json deploy run --deployment <id> --workflow "<work>/api.json" \
     --allow-upload <hash> --allow-upload <hash> \
     --wait --output-dir "<work>/outputs"
   ```

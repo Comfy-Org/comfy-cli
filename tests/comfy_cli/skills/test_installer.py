@@ -1421,3 +1421,19 @@ def test_run_on_cloud_skill_fetches_files_with_any_name():
     assert '--data-urlencode "subfolder=<subfolder>"' in text
     assert "a space as `%20`" in text
     assert "run-on-cloud/<name>" not in text
+
+
+def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
+    """Another program on the prompt's port answers every path with 200, so the
+    skill confirms ComfyUI before fetching; a model with no local copy is asked
+    about only when the server has it; a swap wires slots by name; and every
+    file it writes stays under `<work>`."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert '"<server>/api/system_stats"' in text
+    assert "`system.comfyui_version`" in text
+    assert '"<server>/api/models/<folder>"' in text
+    assert "Name slots in `connect`, never their numbers" in text
+    assert '> "<work>/preview.json"' in text
+    assert '--workflow "<work>/api.json"' in text
+    assert "> preview.json" not in text
+    assert "--workflow api.json" not in text
