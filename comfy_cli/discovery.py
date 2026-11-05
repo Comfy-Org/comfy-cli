@@ -166,6 +166,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy model download-status": "download_status",
     "comfy model download-cancel": "download_status",
     "comfy model downloads": "downloads",
+    # one local model file into the Comfy Cloud model library
+    "comfy model upload": "model_upload",
     # partner-model discovery (`comfy generate`'s two read-only sub-actions —
     # they are argv-tail actions, not Typer subcommands, so they have no node in
     # the help tree; agents resolve them through `command_schemas`).
@@ -231,6 +233,7 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     # upload progress; under plain --json the same lines go to stderr
     "comfy build push": "build_push_event",
     "comfy assets library upload": "build_push_event",
+    "comfy model upload": "build_push_event",
     # the deployment coming up; same rule about stderr
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",

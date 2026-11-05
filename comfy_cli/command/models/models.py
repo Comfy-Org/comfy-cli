@@ -18,6 +18,7 @@ from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.command.models import search as models_search_command
+from comfy_cli.command.models import upload as models_upload_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
@@ -2459,3 +2460,7 @@ def list_command(
 # setup on the whole noun would leak it onto those.
 app.registered_commands.extend(models_search_command.app.registered_commands)
 app.registered_groups.extend(models_search_command.app.registered_groups)
+# `comfy model upload` (the Comfy Cloud model library) lives in its own module
+# and is carried over the same way. It is not on the `comfy models` alias,
+# which covers the discovery leaves only.
+app.registered_commands.extend(models_upload_command.app.registered_commands)

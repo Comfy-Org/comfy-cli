@@ -61,6 +61,41 @@ history.
   `asset_upload_refused`; new codes `asset_upload_invalid`,
   `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
   can end.
+- `comfy model upload <file> --type <folder> --where cloud` uploads one local
+  model file into your Comfy Cloud model library, so a workflow run on Comfy
+  Cloud can load it, e.g. `comfy model upload my_style.safetensors --type loras
+  --where cloud`. Run it with `--dry-run` first: it checks the file, the folder
+  and the library, uploads nothing, and prints the file's sha256. Check that
+  sha256 with `shasum -a 256` before you approve. The real upload asks before it
+  starts. An agent (or any `--json` caller the CLI takes for one) must pass
+  `--yes`, or it gets `model_upload_needs_confirm` and nothing is sent.
+  `--expected-sha256 <sha>` uploads nothing unless the file still has the bytes
+  the dry run reported. `--workspace <id>` uploads nothing unless this sign-in
+  uploads into that workspace (`asset_upload_wrong_workspace`). The `--json`
+  output (the `model_upload` schema) carries `loader_path`, the value a
+  workflow's loader node takes to load the file on Comfy Cloud. It is Comfy
+  Cloud's own value from its record of the model, and null when Comfy Cloud
+  gives none or when a dry run would upload. Builds on #1008.
+- `comfy model upload` and `comfy assets library upload` upload only the file
+  named, and succeed only once Comfy Cloud's hash of the stored file equals the
+  local file's. Before anything is sent they look the name up in that folder of
+  the workspace's model library: every member's models, the ones a run on Comfy
+  Cloud loads, and no public ones.
+  The same bytes under that name are reported as `already_present` and not sent
+  again (for `comfy assets library upload`, only when they are the only model of
+  that name). `comfy model upload` refuses other bytes under that name
+  (`asset_upload_invalid`, `details.reason` `name_in_use`), because a second
+  file would change what that name loads for every workflow in the workspace.
+  `comfy assets library upload` still uploads them, as a new version of the
+  name, so a script that replaces a model that way keeps working. The upload sends only bytes
+  that were hashed: each 1 MiB block is checked against its hash before any of
+  it is sent. A file that changed after it was hashed stops the upload before
+  the changed bytes are sent, and is never completed (`asset_upload_failed`,
+  `file_changed`). A stored
+  hash that differs, or that Comfy Cloud does not report, ends as
+  `asset_upload_unverified`. `comfy assets library upload` gains `--dry-run`,
+  and its `--json` output gains `loader_path`, `sha256`, `workspace_id`,
+  `uploaded`, `already_present` and `dry_run`.
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
