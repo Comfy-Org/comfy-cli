@@ -958,7 +958,15 @@ def deepest_source(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> tuple[
         path.append(current.source_node)
         if not current.nested:
             return path, str(current.source_widget)
-        inner = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == current.source_node), None)
+        nodes = current_sg.get("nodes")
+        inner = next(
+            (
+                n
+                for n in (nodes if isinstance(nodes, list) else [])
+                if isinstance(n, dict) and str(n.get("id")) == current.source_node
+            ),
+            None,
+        )
         inner_def = defs.get(str(inner.get("type", ""))) if inner is not None else None
         if inner_def is None or current.source_input is None:
             return None

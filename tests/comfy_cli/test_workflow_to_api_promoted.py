@@ -1575,3 +1575,46 @@ def test_source_widget_value_without_a_source_is_unset():
     from comfy_cli.cql import promoted
 
     assert workflow_to_api._source_widget_value({"9:text": {"inputs": {"value": "x"}}}, "9", None) is promoted.UNSET
+
+
+def test_unset_host_value_skips_non_dict_nodes_on_the_nested_source_walk():
+    outer_id, outer = _nested_outer()
+    outer["nodes"].insert(0, 5)
+    workflow = {"nodes": [{"id": 9, "type": outer_id}], "links": []}
+    api = _socket_api("9:inner")
+
+    workflow_to_api._overlay_promoted_host_values(
+        api, workflow, {outer_id: outer, _SOCKET_SG: _prompt_to_widget_and_socket()}
+    )
+
+    assert api["9:inner:switch"]["inputs"]["on_false"] == "interior default"
+
+
+def test_unset_host_value_never_fans_out_a_wired_source():
+    workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG}], "links": []}
+    api = _socket_api("9")
+    api["9:text"]["inputs"]["value"] = ["7", 0]
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
+
+    assert "on_false" not in api["9:switch"]["inputs"], "a link pair must not be copied into sibling targets"
+
+
+def test_unset_host_value_source_walk_runs_once_per_definition_input(monkeypatch):
+    from comfy_cli.cql import promoted
+
+    calls = []
+    original = promoted.deepest_source
+
+    def counted(sg, pi, defs):
+        calls.append(pi.index)
+        return original(sg, pi, defs)
+
+    monkeypatch.setattr(promoted, "deepest_source", counted)
+    workflow = {"nodes": [{"id": i, "type": _SOCKET_SG} for i in (8, 9)], "links": []}
+    api = {**_socket_api("8"), **_socket_api("9")}
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
+
+    assert calls == [0]
+    assert api["8:switch"]["inputs"]["on_false"] == api["9:switch"]["inputs"]["on_false"] == "interior default"
