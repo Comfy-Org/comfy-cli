@@ -2291,6 +2291,28 @@ class _ClientIdRejected(ValueError):
 # cadence for the whole watch, not just the first read, which is affordable
 # against a loopback/LAN ComfyUI.
 _POLL_ONLY_WATCH_POLL_S = 2.0
+_WATCH_HISTORY_SETTLE_S = 2.0
+_WATCH_HISTORY_RETRY_S = 0.05
+
+
+def _settled_terminal_snapshot(host: str, port: int, prompt_id: str) -> dict | None:
+    """Read the terminal history record after a live completion, with a short bound.
+
+    ComfyUI can publish ``execution_success`` just before the corresponding
+    history record becomes visible.  A watch must not turn that ordering gap
+    into a permanently missing completion note, but it also must not wait
+    indefinitely when history storage is unavailable.
+    """
+    deadline = time.monotonic() + _WATCH_HISTORY_SETTLE_S
+    snapshot = None
+    while True:
+        snapshot = _snapshot(host, port, prompt_id)
+        if snapshot and snapshot.get("status") in {"completed", "error", "cancelled"}:
+            return snapshot
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return snapshot
+        time.sleep(min(_WATCH_HISTORY_RETRY_S, remaining))
 
 
 def _get_json_object(url: str) -> dict[str, Any]:
@@ -2972,10 +2994,14 @@ def watch_cmd(
         # live envelope; the stream remains authoritative for output URLs and
         # all of the watch metadata above.
         terminal_snapshot = state.end_details if isinstance(state.end_details, dict) else None
-        if not isinstance((terminal_snapshot or {}).get("note"), str):
-            terminal_snapshot = _snapshot(h, p, prompt_id)
+        if not terminal_snapshot or terminal_snapshot.get("status") not in {"completed", "error", "cancelled"}:
+            terminal_snapshot = _settled_terminal_snapshot(h, p, prompt_id)
         if isinstance(terminal_snapshot, dict) and isinstance(terminal_snapshot.get("note"), str):
             payload["note"] = terminal_snapshot["note"]
+            if renderer.is_pretty():
+                from rich.text import Text
+
+                renderer.console().print(Text(sanitize(payload["note"]), style="dim"))
     if state.end_details is not None:
         details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}
         if final_status == "error" and isinstance(details.get("error"), dict):

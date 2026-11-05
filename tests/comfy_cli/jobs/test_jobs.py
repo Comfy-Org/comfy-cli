@@ -4108,8 +4108,8 @@ class _ScriptedWS:
         self.closed = True
 
 
-def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_extra=()):
-    """Drive `jobs watch` (local, NDJSON) over a scripted WS; return the lines."""
+def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_extra=(), pretty=False):
+    """Drive local `jobs watch` over a scripted WS; return any NDJSON lines."""
     from typer.testing import CliRunner
 
     from comfy_cli.output import Renderer, set_renderer
@@ -4118,7 +4118,8 @@ def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_e
     ws = _ScriptedWS(messages)
     monkeypatch.setattr(jobs_mod, "_server_or_error", lambda h, p, **kw: True)
     monkeypatch.setattr(jobs_mod, "WebSocket", lambda *a, **k: ws)
-    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    mode = OutputMode.PRETTY if pretty else OutputMode.NDJSON
+    set_renderer(Renderer(mode=mode, command="jobs watch"))
     result = CliRunner().invoke(
         jobs_mod.app,
         ["watch", prompt_id, "--where", "local", "--timeout", "1", *argv_extra],
@@ -4184,6 +4185,7 @@ def test_watch_live_completion_copies_snapshot_note_without_replacing_stream_pay
     snapshots = iter(
         [
             {"prompt_id": "pid-w", "status": "running", "outputs": []},
+            {"prompt_id": "pid-w", "status": "running", "outputs": []},
             {"prompt_id": "pid-w", "status": "completed", "outputs": [], "note": note},
         ]
     )
@@ -4210,6 +4212,47 @@ def test_watch_live_completion_copies_snapshot_note_without_replacing_stream_pay
     assert payload["completed_nodes"] == ["7"]
     assert payload["attached"] is True and payload["client_id"] == "cid-sub"
     assert "clientId=cid-sub" in ws.url
+
+
+def test_watch_live_completion_note_is_visible_in_pretty_mode(monkeypatch, capsys):
+    """Pretty watches print the snapshot note instead of silently discarding it."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    note = "reported key [bold]tags[/bold] with no file"
+    snapshots = iter(
+        [
+            {"prompt_id": "pid-w", "status": "running", "outputs": []},
+            {"prompt_id": "pid-w", "status": "completed", "outputs": [], "note": note},
+        ]
+    )
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots))
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+
+    result, _ws, _lines = _run_local_watch(
+        monkeypatch,
+        capsys,
+        messages=[{"type": "execution_success", "data": {"prompt_id": "pid-w"}}],
+        pretty=True,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert note in result.output
+
+
+def test_watch_live_completion_history_retry_is_bounded(monkeypatch):
+    """A missing terminal history record does not make a completed watch hang."""
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []},
+    )
+    clock = iter([0.0, jobs_mod._WATCH_HISTORY_SETTLE_S + 1.0])
+    monkeypatch.setattr(jobs_mod.time, "monotonic", lambda: next(clock))
+
+    snapshot = jobs_mod._settled_terminal_snapshot("127.0.0.1", 8188, "pid-w")
+
+    assert snapshot == {"prompt_id": "pid-w", "status": "running", "outputs": []}
 
 
 def test_watch_live_execution_error_is_promoted_to_execution_error(monkeypatch, capsys):
