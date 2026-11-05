@@ -2573,7 +2573,14 @@ class TestFinishedRunWithNothingToDownload:
         """Both extractors recognize a narrow set of shapes: media entries, and
         a `text` list of `str`. A node can report in neither, and such a run
         must not be told it reported nothing and that re-running changes
-        nothing — so the note is decided on the raw record outputs."""
+        nothing — so the EMPTY note is decided on the raw record outputs.
+
+        It must not be answered with silence either: `jobs ls` reports cloud's
+        `outputs_count`, which counts these entries, so the listing says 1
+        where this payload says `outputs: []`. That unexplained disagreement is
+        what the reported session read as a dead service, so the run gets the
+        unresolved note instead — which says what was observed without
+        claiming the run reported nothing."""
         record = {"status": {"completed": True, "status_str": "success"}, "outputs": {"7": node_output}}
         monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
 
@@ -2583,8 +2590,14 @@ class TestFinishedRunWithNothingToDownload:
         # Nothing the extractors could use, so both views are empty …
         assert snap["outputs"] == []
         assert snap["text_outputs"] == {}
-        # … and precisely because of that, the note must stay off.
-        assert "note" not in snap
+        # … so the note says that, and says it is not an outage.
+        note = snap["note"]
+        assert "cannot resolve to a file or to text" in note
+        assert "not a service outage" in note
+        # The empty-completion claim and its cache-hit possibility belong to a
+        # record that reported nothing. This one reported something.
+        assert "reported no outputs" not in note
+        assert "cache" not in note
 
     def test_a_record_with_no_outputs_key_withholds_the_note(self, monkeypatch):
         """On cloud, completion comes from `/api/jobs/<id>` while the history
@@ -2604,15 +2617,159 @@ class TestFinishedRunWithNothingToDownload:
         assert snap["text_outputs"] == {}
         assert "note" not in snap
 
-    def test_a_node_entry_that_exists_but_is_empty_withholds_the_note(self, monkeypatch):
-        """`{"images": []}` is a node that reported, with nothing in it. Err
-        toward saying less."""
-        record = {"status": {"completed": True, "status_str": "success"}, "outputs": {"9": {"images": []}}}
+    @pytest.mark.parametrize(
+        ("label", "outputs"),
+        [
+            # A node that reported, with nothing in it.
+            ("empty node list", {"9": {"images": []}}),
+            # `animated` holds `(True,)` flags, not file entries, and cloud's
+            # own count skips the key — so neither tool saw an output here.
+            ("animated flags only", {"6": {"animated": [True]}}),
+            ("no node at all", {}),
+        ],
+    )
+    def test_a_record_that_reported_no_items_is_an_empty_completion(self, monkeypatch, label, outputs):
+        """An empty array is not a payload: no node reported an item, which is
+        the empty completion whatever shape the map took.
+
+        This used to withhold the note, on the reading that a present node
+        entry is a report. The cost was the silence this whole class exists to
+        remove: `{"images": []}` is the most natural "nothing came out" shape
+        after `{}`, and it answered with a bare `completed` / `outputs: []`.
+        The reviewed decision it narrows — never deciding the EMPTY note on
+        what the EXTRACTORS recognized — is untouched: a record that reported
+        an item in an unreadable shape still gets the unresolved note, not
+        this one."""
+        record = {"status": {"completed": True, "status_str": "success"}, "outputs": outputs}
         monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
 
-        snap = jobs_mod._cloud_status_snapshot("pid-empty-node-entry")
+        snap = jobs_mod._cloud_status_snapshot(f"pid-{label.replace(' ', '-')}")
         assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        assert snap["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+
+    # ---- the listing's count and this payload must stop contradicting ----
+
+    def test_the_note_reconciles_the_count_jobs_ls_reports(self, monkeypatch):
+        """ "the listing and the status must agree on the output count" — the
+        half of it that is fixable in this tool.
+
+        `jobs ls` reports cloud's `/api/jobs` `outputs_count`, which counts
+        every non-null item under every node-output key bar `animated`/`result`
+        (measured against `common.CountOutputs`: a `{"tags": [...]}` entry
+        counts 1). `jobs status` reports what the extractors can turn into a
+        `/view` URL or a text string. The two vocabularies differ, so one job
+        reads as `outputs: 1` in the listing and `outputs: []` here — and the
+        agent goes looking for a file that was never there. The note has to
+        name that, or the contradiction is merely explained to nobody."""
+        record = {
+            "status": {"completed": True, "status_str": "success"},
+            "outputs": {"7": {"tags": ["1girl", "solo"]}},
+        }
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-count-disagreement")
+        assert snap is not None
+        note = snap["note"]
+        # Both entries are counted, and the key is named so the caller can see
+        # what the listing counted.
+        assert "2 output entries" in note
+        assert "key: tags" in note
+        assert "`jobs ls` counts these entries" in note
+        assert "not a file this tool failed to fetch" in note
+
+    def test_a_null_output_entry_is_named_as_a_dropped_upload(self, monkeypatch):
+        """The one shape where silence is worst: a hosted deployment persists
+        `null` in a node's array for an output it recorded and then could not
+        upload.
+        Both counts then read zero — so there is no numeric disagreement to
+        notice — and the run still arrives as a bare `completed` with
+        `outputs: []` and no error anywhere. Named as a possible cause, not an
+        established one: a null item is the shape, not the proof.
+
+        Driven through the LOCAL snapshot because that path runs the real
+        extractors (the cloud fake in this file indexes `item["filename"]`)."""
+
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith("/history/pid-null-entry"):
+                return {
+                    "pid-null-entry": {
+                        "status": {"completed": True, "messages": []},
+                        "outputs": {"9": {"images": [None]}},
+                    }
+                }
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "pid-null-entry")
+        assert snap is not None
+        assert snap["status"] == "completed"
+        assert snap["outputs"] == []
+        note = snap["note"]
+        assert "no file reference at all (a null entry)" in note
+        assert "upload did not land" in note
+        assert "a possible cause here, not an established one" in note
+        assert "not a service outage" in note
+        # Zero on both sides here, so there is no count to reconcile and the
+        # sentence that would reconcile one must stay off.
+        assert "jobs ls" not in note
+        # And it must not claim the run reported nothing: it reported an entry.
+        assert "reported no outputs" not in note
+
+    def test_an_output_this_tool_can_show_gets_no_note(self, monkeypatch):
+        """The gate is "is there anything to show", so a resolvable file or
+        node text keeps both notes off — including for a record whose other
+        nodes reported unusable entries."""
+
+        def fake_get(url, timeout=10.0):
+            if url.endswith("/queue"):
+                return {"queue_running": [], "queue_pending": []}
+            if url.endswith("/history/pid-mixed"):
+                return {
+                    "pid-mixed": {
+                        "status": {"completed": True, "messages": []},
+                        "outputs": {
+                            "9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]},
+                            "4": {"tags": ["1girl"]},
+                        },
+                    }
+                }
+            raise AssertionError(url)
+
+        monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+        snap = jobs_mod._snapshot("h", 8188, "pid-mixed")
+        assert snap is not None
+        assert len(snap["outputs"]) == 1
         assert "note" not in snap
+
+    def test_the_unresolved_note_bounds_and_sanitizes_server_supplied_keys(self):
+        """Output keys come from whatever node produced them, and the note is
+        prose a consumer may print raw — `rich.Text` forwards `\\x1b`, which is
+        why the text preview sanitizes too. Keys are capped in count and in
+        length so one node cannot turn this sentence into a wall."""
+        note = jobs_mod._nothing_to_show_note(
+            "completed",
+            {"1": {"ta\x1b]0;pwned\x07gs": ["x"], "b" * 500: ["y"], "c": ["z"], "d": ["w"], "e": ["v"]}},
+        )
+        assert note is not None
+        assert "\x1b" not in note
+        # Four keys at most, each bounded, and the truncation is visible.
+        assert ", …)" in note
+        assert "b" * 500 not in note
+        assert len(note) < 700
+
+    def test_a_non_dict_node_entry_is_reported_rather_than_dropped(self):
+        """A node entry that is not a map at all is unusable and is still a
+        report. There is no key to name for it, so the note carries the count
+        without a key list rather than inventing one."""
+        note = jobs_mod._nothing_to_show_note("completed", {"9": "something unexpected"})
+        assert note is not None
+        assert "1 output entry" in note
+        assert "key" not in note
+        assert "not a service outage" in note
 
     # ---- the note reaches the surface that waited for it ----
 
@@ -2640,6 +2797,64 @@ class TestFinishedRunWithNothingToDownload:
         env = json.loads(lines[-1])
         assert env["data"]["jobs"][0]["status"] == "completed"
         assert env["data"]["jobs"][0]["note"] == jobs_mod._EMPTY_COMPLETION_NOTE
+
+    def test_jobs_wait_row_carries_the_unresolved_note_too(self, monkeypatch, capsys):
+        """`wait_for_job` is the tool the agent calls first, so the second note
+        has to survive the same row projection the first one was dropped by."""
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        note = jobs_mod._nothing_to_show_note("completed", {"7": {"tags": ["1girl"]}})
+        assert note is not None
+        snap = {"prompt_id": "pid-wait-unresolved", "status": "completed", "outputs": [], "note": note}
+        monkeypatch.setattr(jobs_mod, "_server_or_error", lambda *a, **k: True)
+        monkeypatch.setattr(jobs_mod, "_resolve_host_port", lambda h, p: ("h", 8188))
+        monkeypatch.setattr(jobs_mod, "_wait_fetch_snapshot", lambda pid, **kw: snap)
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs wait"))
+        jobs_mod.wait_cmd(["pid-wait-unresolved"], poll_interval=0.01, timeout=5)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        env = json.loads(lines[-1])
+        assert env["data"]["jobs"][0]["note"] == note
+
+    def test_cloud_envelope_carries_the_unresolved_note(self, monkeypatch, capsys):
+        """End to end through `jobs status --where cloud` — what the agent's
+        get_job tool reads on the target the hosted agent runs on."""
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        record = {
+            "status": {"completed": True, "status_str": "success"},
+            "outputs": {"7": {"tags": ["1girl"]}},
+        }
+        monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs status"))
+        jobs_mod._cloud_status("pid-env-unresolved")
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        env = json.loads(lines[-1])
+        assert env["type"] == "envelope" and env["ok"] is True
+        assert env["data"]["status"] == "completed"
+        assert env["data"]["outputs"] == []
+        assert "cannot resolve to a file or to text" in env["data"]["note"]
+
+    def test_a_failed_run_never_gets_the_unresolved_note(self, monkeypatch):
+        """Terminal classification is preserved for the second note as well: a
+        failed run keeps its own cause and is not handed an explanation about
+        output shapes."""
+
+        class _FailedClient(_CompletedCloudClient):
+            def get_job_status(self, prompt_id):
+                return {"status": "error", "error_message": "boom"}
+
+        record = {"status": {"completed": False, "status_str": "error"}, "outputs": {"7": {"tags": ["x"]}}}
+        monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _FailedClient(record))
+
+        snap = jobs_mod._cloud_status_snapshot("pid-failed-unresolved")
+        assert snap is not None
+        assert snap["status"] == "error"
+        assert "note" not in snap
 
     # ---- the pretty text preview is server-supplied, so it is sanitized ----
 

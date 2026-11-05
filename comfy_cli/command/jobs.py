@@ -963,41 +963,179 @@ _EMPTY_COMPLETION_NOTE = (
 )
 
 
-def _empty_completion_note(status: Any, record_outputs: Any) -> str | None:
-    """``_EMPTY_COMPLETION_NOTE`` for a completed run whose history record
-    carries an empty outputs map, else ``None``.
+# The OTHER way a completion arrives with nothing to show, and the one that
+# was still silent: the record DID report output entries, and not one of them
+# resolves to a file this tool can fetch or to text it can read.
+#
+# It is also the half of "the listing and the status must agree on the output
+# count" that is fixable in this tool, and the reason they can disagree. `jobs ls`
+# reports cloud's `/api/jobs` `outputs_count`, which counts every non-null item
+# under every node-output key (bar `animated`/`result`), while `jobs status`
+# reports what the extractors can turn into a `/view` URL or a text string —
+# dicts carrying a `filename`, and a `text` list of `str`. The two vocabularies
+# are not the same, so one job legitimately reads as `outputs: 1` in the
+# listing and `outputs: []` in the status, with nothing said about why. That
+# contradiction is what the reported session read as a dead generation service.
+#
+# Same discipline as the note above: it states what the record carries and
+# names a possible cause as possible.
+#
+# * "cannot resolve", not "produced nothing" — the entry IS a report, in a
+#   shape this tool does not consume (a tagger's `{"tags": [...]}`, a
+#   bare-string `text`, a dict with no `filename`).
+# * a null item is called out separately because a hosted deployment writes
+#   one into the node's array for an output it recorded and then could not
+#   upload, and that is the one case where silence is worst. Named as a
+#   possible cause, since the null is the shape and not the proof.
+# * it reconciles the count explicitly, because an agent that sees 1 in the
+#   listing and 0 here will otherwise go looking for a lost file.
+_UNRESOLVED_OUTPUTS_NOTE = (
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}.{dropped} "
+    "There is nothing to download, and waiting will not change that.{listed} This is not a service outage."
+)
+_UNRESOLVED_DROPPED_CLAUSE = (
+    " {subject} no file reference at all (a null entry), which is what a recorded output whose upload did "
+    "not land leaves behind — a possible cause here, not an established one."
+)
+_UNRESOLVED_LISTED_CLAUSE = (
+    " `jobs ls` counts these entries, so an output count above zero there is not a file this tool failed to fetch."
+)
+
+# Keys are server-supplied. Bounded and sanitized before they enter the note:
+# the note is prose a consumer may print raw, and `rich.Text` forwards `\x1b`
+# (the same reason the text preview sanitizes).
+_MAX_NOTE_KEYS = 4
+_MAX_NOTE_KEY_CHARS = 24
+
+
+def _nothing_to_show_note(status: Any, record_outputs: Any) -> str | None:
+    """What a completed run with nothing to show means, or ``None``.
+
+    Two notes, because there are two observations and they are not the same
+    claim: the record reported no output items at all
+    (``_EMPTY_COMPLETION_NOTE``), or it reported items none of which this tool
+    can resolve (``_UNRESOLVED_OUTPUTS_NOTE``). Both end in "this is not a
+    service outage", which is the sentence the reported session needed.
+
+    The item census uses the SAME vocabulary as cloud's ``/api/jobs``
+    ``outputs_count`` (``common.CountOutputs``): per node, per list-valued key
+    other than ``animated``/``result``, every non-null item. That is deliberate
+    — it is what lets this note explain the listing's count instead of adding a
+    third number.
 
     Decided on the RAW record outputs rather than on this module's extracted
-    `outputs` / `text_outputs`, for two reasons, both of which are ways of
-    not asserting more than the record establishes:
+    `outputs` / `text_outputs` alone, for two reasons, both of which are ways
+    of not asserting more than the record establishes:
 
     * The extractors recognize media entries and a ``text`` list of ``str``.
       A node can report in neither shape — a custom UI key such as a tagger's
       ``{"tags": [...]}``, a bare-string ``text``, non-``str`` text items — and
-      deciding on what they recognized would tell a run that *did* report
-      something that it reported nothing.
+      deciding the EMPTY note on what they recognized would tell a run that
+      *did* report something that it reported nothing. Such a run now gets the
+      unresolved note instead of silence, which says what was observed without
+      claiming the run reported nothing.
     * A record that carries no ``outputs`` key at all establishes nothing. On
       cloud, completion comes from ``/api/jobs/<id>`` while the record is
       fetched separately, so a status-only record that has not caught up must
       not produce "waiting will not produce files". Requiring the key is what
       closes that; a source with no record at all (the state-file fallback,
       which stores output URLs flat and no node text) passes ``None`` and
-      withholds the note entirely.
+      withholds both notes entirely.
 
     Deliberately NOT also requiring the record's own status to confirm
     completion: ``/api/jobs/<id>`` is the authority on terminal state on cloud
     and the same body's status block already decided it on local, while the
     record's ``status`` is ``omitempty`` — requiring it would silently disable
-    this note on any deployment that omits the field.
+    these notes on any deployment that omits the field.
     """
     if status != "completed" or not isinstance(record_outputs, dict):
         return None
-    # Any per-node payload with anything in it counts, whatever its shape.
-    # A node entry that exists but is empty (`{"images": []}`) is truthy, so it
-    # withholds the note too — erring toward saying less.
-    if any(record_outputs.values()):
+    # Imported here, not at module scope, like every other use of the client in
+    # this module.
+    from comfy_cli.comfy_client import extract_output_entries, extract_text_outputs
+
+    # Anything the caller can actually be shown means there is nothing to
+    # explain: a file URL, or node text. Checked on the extracted views because
+    # that is exactly the question "is there something to show?".
+    record = {"outputs": record_outputs}
+    if extract_output_entries(record) or extract_text_outputs(record):
         return None
-    return _EMPTY_COMPLETION_NOTE
+
+    # Three counts, because they answer three different questions and
+    # collapsing them is how a note starts asserting more than it saw:
+    #
+    # * `total` — everything the record reported that this tool cannot use. It
+    #   is what the note's "N output entries" states, so a payload in a shape
+    #   nothing here reads (a bare-string `text`, a non-dict node entry) has to
+    #   count: it IS a report.
+    # * `listed` — the subset cloud's `/api/jobs` `outputs_count` also counts
+    #   (a non-null item inside a list). The `jobs ls` reconciliation sentence
+    #   is appended only when this is nonzero, since otherwise the listing
+    #   reports 0 as well and there is no count to reconcile.
+    # * `dropped` — null items, the shape a recorded-but-unuploaded output
+    #   leaves behind.
+    total = 0
+    listed = 0
+    dropped = 0
+    keys: list[str] = []
+
+    def note_key(key: Any) -> None:
+        text = str(key)
+        if text not in keys:
+            keys.append(text)
+
+    for node_output in record_outputs.values():
+        if not isinstance(node_output, dict):
+            # A node entry that is not a map at all. Unusable, and still a
+            # report — there is no key to name for it.
+            if node_output:
+                total += 1
+            continue
+        for key, items in node_output.items():
+            # `animated` holds `(True,)` flags and `result` holds the legacy
+            # PreviewUI3D strings; cloud's count skips both, so this does too.
+            if key in ("animated", "result"):
+                continue
+            if not isinstance(items, list):
+                # A non-list payload under an output key: `{"text": "a
+                # description"}` is the shape the text extractor misses. Cloud
+                # does not count it either, so it is not `listed`.
+                if items:
+                    total += 1
+                    note_key(key)
+                continue
+            for item in items:
+                total += 1
+                if item is None:
+                    dropped += 1
+                else:
+                    listed += 1
+                note_key(key)
+
+    if total == 0:
+        # No node reported a single item — `{}`, `{"images": []}`, or flags
+        # only. That is the empty completion, whatever shape the map took.
+        return _EMPTY_COMPLETION_NOTE
+
+    entries = "1 output entry" if total == 1 else f"{total} output entries"
+    shown = [sanitize(k)[:_MAX_NOTE_KEY_CHARS] for k in keys[:_MAX_NOTE_KEYS]]
+    shown = [k for k in shown if k]
+    keys_clause = ""
+    if shown:
+        label = "key" if len(shown) == 1 else "keys"
+        more = ", …" if len(keys) > len(shown) else ""
+        keys_clause = f" ({label}: {', '.join(shown)}{more})"
+    dropped_clause = ""
+    if dropped:
+        if dropped == total:
+            subject = "It carries" if total == 1 else "All of them carry"
+        else:
+            subject = "1 of them carries" if dropped == 1 else f"{dropped} of them carry"
+        dropped_clause = _UNRESOLVED_DROPPED_CLAUSE.format(subject=subject)
+    listed_clause = _UNRESOLVED_LISTED_CLAUSE if listed else ""
+    return _UNRESOLVED_OUTPUTS_NOTE.format(
+        entries=entries, keys=keys_clause, dropped=dropped_clause, listed=listed_clause
+    )
 
 
 def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, server_running: bool) -> dict:
@@ -1029,8 +1167,8 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
         # but empty, so a consumer indexing it on any `jobs status` success
         # payload stays safe. `source: "state_file"` is how a caller tells this
         # apart from a record-backed `{}` — which is also why this path has no
-        # history record to pass to `_empty_completion_note` and so never
-        # carries the empty-completion note.
+        # history record to pass to `_nothing_to_show_note` and so never
+        # carries either nothing-to-show note.
         "text_outputs": {},
         "workflow_size": None,
         "error": st.error,
@@ -1400,7 +1538,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
         "host": host,
         "port": port,
     }
-    if note := _empty_completion_note(status, body.get("outputs")):
+    if note := _nothing_to_show_note(status, body.get("outputs")):
         snap["note"] = note
     return snap
 
@@ -2946,8 +3084,10 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
-            # The raw map, for `_empty_completion_note`'s own gate — see there
-            # for why the extracted views below are the wrong thing to judge on.
+            # The raw map, for `_nothing_to_show_note`'s own census — see there
+            # for why WHICH note is chosen cannot be decided on the extracted
+            # views below (they recognize a narrower set of shapes than the
+            # record, and than cloud's own output count).
             record_outputs = record.get("outputs")
             node_outputs = client.extract_outputs(record)
             outputs = [o["url"] for o in node_outputs]
@@ -3023,7 +3163,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
-    if note := _empty_completion_note(state, record_outputs):
+    if note := _nothing_to_show_note(state, record_outputs):
         snap["note"] = note
     return snap
 
