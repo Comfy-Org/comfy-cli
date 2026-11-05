@@ -38,7 +38,7 @@ def upload_command(
             "`comfy model list-folders --where cloud` lists them.",
         ),
     ],
-    workspace: Annotated[
+    workspace_id: Annotated[
         str | None,
         typer.Option(
             "--workspace",
@@ -74,7 +74,7 @@ def upload_command(
         where=where,
         dry_run=dry_run,
         command="model upload",
-        workspace=workspace,
+        workspace=workspace_id,
         expected_sha256=expected_sha256,
         yes=yes,
         ctx=ctx,

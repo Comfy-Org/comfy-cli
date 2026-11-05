@@ -546,6 +546,21 @@ class TestTrackCommandRedaction:
         assert "private" not in str(properties)
         assert "a-secret-sha" not in str(properties)
 
+    def test_model_upload_workspace_and_hash_are_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def upload(workspace_id, expected_sha256, folder):
+            return None
+
+        upload(workspace_id="w-private", expected_sha256="a-private-hash", folder="loras")
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["workspace_id"] == "<redacted>"
+        assert properties["expected_sha256"] == "<redacted>"
+        assert properties["folder"] == "loras"
+        assert "private" not in str(properties)
+
     def test_add_node_text_is_redacted(self, tracking_module):
         # `comfy workflow add-node <file> Note --text "..."` carries a note body
         # the user wrote: free-form prose that can hold anything (paths, prompts,
