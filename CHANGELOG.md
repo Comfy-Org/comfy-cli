@@ -23,10 +23,11 @@ history.
   on; it never replaces a file or adds to an existing workflow) and prints a
   link that opens the folder, on Comfy Cloud itself or on the build
   `--deployment <id>` names. The output keeps `workflow_id` and
-  `latest_version`. An API-format workflow keeps the record-only save. With the
-  flag on, `comfy workflow delete` also removes the workflow's sidebar file.
-  With the flag off, or when Cloud's features cannot be read, save and delete
-  are unchanged.
+  `latest_version`. An API-format workflow keeps the record-only save.
+  `comfy workflow delete` still deletes only the record; with the flag on it
+  warns (`sidebar_file_kept`) when the workflow's sidebar file stays, naming
+  the file to remove in Comfy Cloud. With the flag off, or when Cloud's
+  features cannot be read, save and delete are unchanged.
 - `comfy knowledge pick` includes authored discovery-only routes in a separate
   `discovery` list, marks every route `ranking: "unranked"`, and carries the
   capability's `failure_policy` without promoting or reordering ranked picks.

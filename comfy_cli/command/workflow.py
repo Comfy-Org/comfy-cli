@@ -1400,8 +1400,10 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # The file is written with ``overwrite=false``, so nothing that exists is
 # ever replaced: a name already taken moves on to ``<name> (2)``, ``(3)``, ...
 # Only a frontend-format workflow goes into a folder, since the sidebar opens
-# files as editor graphs. With the flag on, ``delete`` removes a record's
-# sidebar file along with the record, so the two never part.
+# files as editor graphs. The CLI never deletes a sidebar file: Cloud's file
+# DELETE takes no condition, so it could remove an edit made in the browser
+# since the CLI last read the file. With the flag on, ``delete`` removes only
+# the record, as before, and warns when the record's sidebar file stays.
 # ---------------------------------------------------------------------------
 
 _CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"
@@ -1701,33 +1703,27 @@ def _cloud_folder_save(
     renderer.emit(payload, command="workflow save", where="cloud", changed=True)
 
 
-def _cloud_backing_file(target, workflow_id: str) -> str | None:
-    """The sidebar file a Cloud record mirrors, as a key under ``workflows/``, or None.
+def _cloud_sidebar_file(target, workflow_id: str) -> str | None:
+    """The Workflows-sidebar file a Cloud record is named after, as a key under ``workflows/``, or None.
 
-    A record made from ``workflows/<name>.json`` carries ``<name>``. The file
-    counts as the record's only when it exists and holds the same workflow as
-    the record's latest version; a record saved through ``/api/workflows``
-    with an unrelated file of the same name keeps the record-only delete.
-    Any failed or odd read also answers None, so ``delete`` falls back to
-    the record-only delete it always made.
+    Cloud names the record it makes from ``workflows/<name>.json`` ``<name>``,
+    and deleting the record leaves that file in the sidebar. This only reads:
+    it asks for the record's name, then for the file. It must run before the
+    record DELETE, which renames the record. A failed or odd read answers
+    None, so ``delete`` then reports no file.
     """
     import urllib.parse
 
     try:
-        quoted = urllib.parse.quote(workflow_id, safe="")
-        _, record = _http_request(target.url("workflows", quoted), target)
+        _, record = _http_request(target.url("workflows", urllib.parse.quote(workflow_id, safe="")), target)
         name = record.get("name") if isinstance(record, dict) else None
         if not isinstance(name, str) or any(p in ("", ".", "..") for p in name.split("/")) or "\\" in name:
             return None
         key = f"{name}.json"
-        _, raw = _userdata_request(_userdata_file_url(target, key), target)
-        file_json = json.loads(raw.decode("utf-8"))
-        _, content = _http_request(target.url("workflows", quoted, "content"), target)
-    except (*_request_errors(), RecursionError):
+        _userdata_request(_userdata_file_url(target, key), target)
+    except _request_errors():
         return None
-    if not isinstance(content, dict) or "workflow_json" not in content:
-        return None
-    return key if content["workflow_json"] == file_json else None
+    return key
 
 
 @app.command("list", help="List saved workflows (cloud store, or local ComfyUI /userdata with --where local).")
@@ -2094,8 +2090,7 @@ def save_cmd(
 @app.command(
     "delete",
     help="Delete a saved workflow (cloud, or local ComfyUI /userdata with --where local). On a cloud workspace "
-    "with `cli_cloud_save_enabled` on, a workflow whose Workflows-sidebar file holds the same workflow is deleted "
-    "with that file.",
+    "with `cli_cloud_save_enabled` on, a workflow's Workflows-sidebar file is not deleted; a warning names it.",
 )
 @tracking.track_command("workflow")
 def delete_cmd(
@@ -2114,28 +2109,9 @@ def delete_cmd(
 
     import urllib.parse as _up
 
-    # A record a sidebar file mirrors is deleted through the file: Cloud then
-    # removes the file and retires the record together. Deleting only the
-    # record would leave the file in the sidebar.
-    key = _cloud_backing_file(target, workflow_id) if _cli_cloud_save_enabled(target) else None
-    if key is not None:
-        try:
-            _userdata_request(_userdata_file_url(target, key), target, method="DELETE")
-        except urllib.error.HTTPError as e:
-            if e.code != 404:
-                raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
-            key = None
-        except _request_errors() as e:
-            raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
-    if key is not None:
-        payload = {"workflow_id": workflow_id, "deleted": True, "filename": f"{_WORKFLOWS_DIR}/{key}"}
-        if renderer.is_pretty():
-            rprint(
-                f"[green]✓[/green] deleted [dim]{sanitize_markup(workflow_id)}[/dim] and its sidebar file "
-                f"[dim]{sanitize_markup(payload['filename'])}[/dim]"
-            )
-        renderer.emit(payload, command="workflow delete", where="cloud", changed=True)
-        return
+    # Read the sidebar file's name before the DELETE, which renames the record.
+    # The file itself is never deleted here (see the section comment above).
+    kept = _cloud_sidebar_file(target, workflow_id) if _cli_cloud_save_enabled(target) else None
 
     url = target.url("workflows", _up.quote(workflow_id, safe=""))
     try:
@@ -2149,9 +2125,21 @@ def delete_cmd(
     ) as e:
         raise _handle_cloud_http_error(renderer, e, operation="delete", workflow_id=workflow_id) from e
 
-    payload = {"workflow_id": workflow_id, "deleted": True}
+    payload: dict[str, Any] = {"workflow_id": workflow_id, "deleted": True}
+    if kept is not None:
+        filename = f"{_WORKFLOWS_DIR}/{kept}"
+        payload["warnings"] = [
+            {
+                "code": "sidebar_file_kept",
+                "message": f"the workflow record is deleted, but its file {filename} stays in the Cloud "
+                "Workflows sidebar; remove it there in Comfy Cloud",
+                "filename": filename,
+            }
+        ]
     if renderer.is_pretty():
         rprint(f"[green]✓[/green] deleted [dim]{workflow_id}[/dim]")
+        for w in payload.get("warnings", []):
+            rprint(f"[yellow]![/yellow] {sanitize_markup(w['message'])}")
     renderer.emit(payload, command="workflow delete", where="cloud", changed=True)
 
 

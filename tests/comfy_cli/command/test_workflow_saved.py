@@ -1142,15 +1142,11 @@ class TestDelete:
         assert env["error"]["code"] == "workflow_not_found"
 
 
-def _sidebar_delete(
-    features=_FLAG_ON,
-    *,
-    record=None,
-    file=None,
-    content=None,
-    file_delete=(b"", 204),
-):
-    """A fake Cloud for delete: record ``rec-1``, its sidebar ``file`` bytes, its latest ``content``."""
+def _sidebar_delete(features=_FLAG_ON, *, record=None, file=None, record_delete=(b"", 204)):
+    """A fake Cloud for delete: record ``rec-1`` and, unless ``file`` is None, its sidebar file's bytes.
+
+    It refuses any userdata DELETE: the CLI must never delete a sidebar file.
+    """
     import urllib.parse
 
     record = {"id": "rec-1", "name": "flux/flux", "latest_version": 1} if record is None else record
@@ -1161,59 +1157,82 @@ def _sidebar_delete(
             return features
         if path == "/api/workflows/rec-1" and method == "GET":
             return record
-        if path == "/api/workflows/rec-1/content":
-            return {"id": "v1", "version": 1, "workflow_json": _UI_DATA if content is None else content}
         if path.startswith("/api/userdata/") and method == "GET":
-            return _http_error(404) if file is None else (file, 200)
-        if path.startswith("/api/userdata/") and method == "DELETE":
-            return file_delete
+            return _http_error(404) if file is None else file
         if path == "/api/workflows/rec-1" and method == "DELETE":
-            return (b"", 204)
+            return record_delete
         raise AssertionError(f"unexpected {method} {url}")
 
     return handler
 
 
-class TestDeleteSidebarFile:
-    """Flag on: a record a sidebar file mirrors is deleted through that file, so the file goes too."""
+class TestDeleteKeepsTheSidebarFile:
+    """Flag on: delete removes only the record, as with the flag off, and names a sidebar file that stays."""
+
+    _RECORD_DELETE = {"url": "https://cloud.example.com/api/workflows/rec-1", "method": "DELETE"}
 
     def _deletes(self, calls):
-        return [c["url"] for c in calls if c["method"] == "DELETE"]
+        return [{"url": c["url"], "method": c["method"]} for c in calls if c["method"] != "GET"]
 
-    def test_a_matching_file_is_deleted_with_the_record(self, cloud_target, monkeypatch, capsys):
-        # Cloud's DELETE /api/workflows/<id> leaves the file, which stays in
-        # the sidebar. DELETE /api/userdata/<file> removes the file and
-        # retires the record that mirrors it.
-        file = json.dumps(_UI_DATA, indent=2).encode()
-        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file))
+    def test_a_kept_file_is_named_in_a_warning(self, cloud_target, monkeypatch, capsys):
+        # Cloud's DELETE /api/workflows/<id> leaves workflows/flux/flux.json,
+        # which stays in the sidebar. The CLI says so instead of deleting it:
+        # Cloud's file DELETE takes no condition and could remove a newer edit.
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=(json.dumps(_UI_DATA).encode(), 200)))
         env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
         assert env["ok"] is True
-        assert env["data"] == {"workflow_id": "rec-1", "deleted": True, "filename": "workflows/flux/flux.json"}
-        assert self._deletes(calls) == ["https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json"]
+        assert env["data"]["workflow_id"] == "rec-1"
+        assert env["data"]["deleted"] is True
+        [warning] = env["data"]["warnings"]
+        assert warning["code"] == "sidebar_file_kept"
+        assert warning["filename"] == "workflows/flux/flux.json"
+        assert "workflows/flux/flux.json" in warning["message"]
+        assert self._deletes(calls) == [self._RECORD_DELETE]
+        # The record's name and file are read before the DELETE renames the record.
+        assert [(c["method"], c["url"]) for c in calls] == [
+            ("GET", "https://cloud.example.com/api/features"),
+            ("GET", "https://cloud.example.com/api/workflows/rec-1"),
+            ("GET", "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json"),
+            ("DELETE", "https://cloud.example.com/api/workflows/rec-1"),
+        ]
 
-    def test_a_file_with_other_content_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys):
-        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=json.dumps({"nodes": []}).encode()))
-        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
-        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
-        assert self._deletes(calls) == ["https://cloud.example.com/api/workflows/rec-1"]
-
-    def test_no_file_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys):
+    def test_no_file_gives_the_plain_delete(self, cloud_target, monkeypatch, capsys):
         calls = _patch_cloud(monkeypatch, _sidebar_delete(file=None))
         env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
         assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
-        assert self._deletes(calls) == ["https://cloud.example.com/api/workflows/rec-1"]
+        assert self._deletes(calls) == [self._RECORD_DELETE]
 
-    @pytest.mark.parametrize("name", ["../x", "a//b", "", None])
-    def test_a_name_that_is_no_file_path_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys, name):
-        record = {"id": "rec-1", "name": name}
-        calls = _patch_cloud(monkeypatch, _sidebar_delete(record=record, file=b"{}"))
+    @pytest.mark.parametrize(
+        "file",
+        [
+            pytest.param(_http_error(500), id="500"),
+            pytest.param(http.client.IncompleteRead(b"{"), id="truncated"),
+            pytest.param(urllib.error.URLError("unreachable"), id="unreachable"),
+        ],
+    )
+    def test_a_failed_file_read_gives_the_plain_delete(self, cloud_target, monkeypatch, capsys, file):
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file))
         env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
-        assert env["ok"] is True
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == [self._RECORD_DELETE]
+
+    def test_a_failed_record_read_gives_the_plain_delete(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(record=_http_error(500), file=(b"{}", 200)))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == [self._RECORD_DELETE]
+        assert not any("/api/userdata/" in c["url"] for c in calls)
+
+    @pytest.mark.parametrize("name", ["../x", "a//b", "a\\b", "", None])
+    def test_a_name_that_is_no_file_path_is_not_looked_up(self, cloud_target, monkeypatch, capsys, name):
+        record = {"id": "rec-1", "name": name}
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(record=record, file=(b"{}", 200)))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
         assert not any("/api/userdata/" in c["url"] for c in calls)
 
     def test_flag_off_never_looks_for_a_file(self, cloud_target, monkeypatch, capsys):
-        file = json.dumps(_UI_DATA).encode()
-        calls = _patch_cloud(monkeypatch, _sidebar_delete(features=_FLAG_OFF, file=file))
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(features=_FLAG_OFF, file=(b"{}", 200)))
         env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
         assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
         assert [c["url"] for c in calls] == [
@@ -1221,21 +1240,13 @@ class TestDeleteSidebarFile:
             "https://cloud.example.com/api/workflows/rec-1",
         ]
 
-    def test_a_file_gone_before_the_delete_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys):
-        file = json.dumps(_UI_DATA).encode()
-        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file, file_delete=_http_error(404)))
-        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
-        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
-        assert self._deletes(calls)[-1] == "https://cloud.example.com/api/workflows/rec-1"
-
-    def test_a_refused_file_delete_is_an_error_and_keeps_the_record(self, cloud_target, monkeypatch, capsys):
-        # Cloud refuses with 500 when it cannot prove the record mirrors the
-        # file; nothing is deleted, so the record must not go either.
-        file = json.dumps(_UI_DATA).encode()
-        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file, file_delete=_http_error(500)))
+    def test_a_failed_record_delete_is_the_same_error_as_before(self, cloud_target, monkeypatch, capsys):
+        handler = _sidebar_delete(file=(b"{}", 200), record_delete=_http_error(404))
+        calls = _patch_cloud(monkeypatch, handler)
         env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
         assert env["ok"] is False
-        assert len(self._deletes(calls)) == 1
+        assert env["error"]["code"] == "workflow_not_found"
+        assert self._deletes(calls) == [self._RECORD_DELETE]
 
 
 # ---------------------------------------------------------------------------

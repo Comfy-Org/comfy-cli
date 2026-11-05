@@ -724,10 +724,12 @@ folder. `data.workflow_id` is still the saved workflow's id. The link opens
 Comfy Cloud itself unless `--deployment <id>` names a build. `data.warnings[]`
 may carry `description_ignored`, `workspace_unknown` or
 `workflow_record_unknown`. An API-format workflow keeps the record-only save,
-with an `api_format_saved_as_record` warning. With the flag on, `workflow
-delete <id>` also removes that workflow's sidebar file (`data.filename`). With
-the flag off, or when the features read fails, save and delete are the
-record-only `/api/workflows` calls above.
+with an `api_format_saved_as_record` warning. `workflow delete <id>` only ever
+deletes the record; with the flag on, when the workflow's sidebar file still
+exists, `data.warnings[]` carries `sidebar_file_kept` with the file's path
+(`filename`). The file stays in the sidebar until the person removes it in
+Comfy Cloud. With the flag off, or when the features read fails, save is the
+record-only `/api/workflows` call above.
 
 ## Cancel a running job
 

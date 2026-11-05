@@ -994,6 +994,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "save the editor format (ComfyUI `File > Save`) to get a sidebar folder and a link",
     ),
     ErrorCode(
+        "sidebar_file_kept",
+        "`comfy workflow delete` on a Comfy Cloud workspace with `cli_cloud_save_enabled` on deleted the "
+        "workflow record, but the Workflows-sidebar file the record is named after (`filename` in the "
+        "warning) still exists. The CLI never deletes sidebar files, so it stays in the sidebar. Surfaced in "
+        "`data.warnings[]` (not as an error envelope) because the record delete succeeded.",
+        "remove the file from the Workflows sidebar in Comfy Cloud",
+    ),
+    ErrorCode(
         "cql_query_invalid",
         "Grammar query failed to parse or evaluate.",
         "check the grammar; `comfy nodes ls --help` has examples",
