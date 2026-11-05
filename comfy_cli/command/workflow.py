@@ -1404,7 +1404,9 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # DELETE takes no condition, so it could remove an edit made in the browser
 # since the CLI last read the file. With the flag on, ``delete`` removes only
 # the record, as before, and warns when a sidebar file shown to be that
-# record's stays.
+# record's stays. The Cloud behavior this rests on, and these rules, are
+# recorded in
+# docs/adr/WORKFLOW-CLOUD-0009-save-into-a-new-sidebar-folder-and-delete-only-the-record.md.
 # ---------------------------------------------------------------------------
 
 _CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"
@@ -1511,17 +1513,25 @@ def _cloud_records_named(target, name: str) -> list[dict] | None:
     Cloud mirrors ``workflows/<name>.json`` into the record named ``<name>``,
     and a file write adds a version to a record of that name that already
     exists, so this is what a new file would land on. None means the search
-    ran past ``_MAX_RECORD_PAGES`` pages without an answer.
+    ran past ``_MAX_RECORD_PAGES`` pages without an answer, or Cloud said
+    more rows follow and sent none.
+
+    ``pagination.has_more`` decides whether another page follows, as in
+    ``list_cmd``: Cloud honors ``limit`` up to 100 today, but a short page with
+    ``has_more`` true would otherwise end the search before a record of this
+    name. Only when Cloud leaves ``has_more`` out does a short page end it.
+    The next offset moves by the rows Cloud sent, not by the limit asked for.
     """
     import urllib.parse
 
     matches: list[dict] = []
-    for page in range(_MAX_RECORD_PAGES):
+    offset = 0
+    for _ in range(_MAX_RECORD_PAGES):
         query = urllib.parse.urlencode(
             {
                 "name": name,
                 "limit": _RECORD_PAGE_SIZE,
-                "offset": page * _RECORD_PAGE_SIZE,
+                "offset": offset,
                 "sort": "name",
                 "order": "asc",
             }
@@ -1531,8 +1541,15 @@ def _cloud_records_named(target, name: str) -> list[dict] | None:
         if not isinstance(rows, list):
             raise _ResponseUnparseable()
         matches.extend(r for r in rows if isinstance(r, dict) and r.get("name") == name)
-        if len(rows) < _RECORD_PAGE_SIZE:
+        pagination = body.get("pagination")
+        has_more = pagination.get("has_more") if isinstance(pagination, dict) else None
+        if not isinstance(has_more, bool):
+            has_more = len(rows) >= _RECORD_PAGE_SIZE
+        if not has_more:
             return matches
+        if not rows:
+            return None
+        offset += len(rows)
     return None
 
 

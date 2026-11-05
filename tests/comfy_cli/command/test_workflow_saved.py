@@ -978,6 +978,71 @@ class TestSaveToSidebarFolder:
         env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
         assert env["data"]["folder"] == "flux (2)"
 
+    @staticmethod
+    def _paged_search(pages):
+        """A fake Cloud whose search for ``flux/flux`` answers ``pages`` by offset; the rest is ``_sidebar()``."""
+        import urllib.parse
+
+        base = _sidebar()
+
+        def handler(method, url, body):
+            parsed = urllib.parse.urlsplit(url)
+            query = urllib.parse.parse_qs(parsed.query)
+            if parsed.path == "/api/workflows" and method == "GET" and query.get("name") == ["flux/flux"]:
+                return pages[int(query["offset"][0])]
+            return base(method, url, body)
+
+        return handler
+
+    @staticmethod
+    def _search_offsets(calls):
+        import urllib.parse
+
+        return [
+            urllib.parse.parse_qs(urllib.parse.urlsplit(c["url"]).query)["offset"][0]
+            for c in calls
+            if c["method"] == "GET" and "/api/workflows?name=flux%2Fflux&" in c["url"]
+        ]
+
+    def test_a_short_page_with_more_to_come_keeps_searching(self, cloud_target, wf_path, monkeypatch, capsys):
+        # Cloud sends 2 rows where 100 were asked for and says more follow. The
+        # record named flux/flux is on the next page, so flux is taken, and the
+        # next page starts after the 2 rows sent, not at offset 100.
+        pages = {
+            0: {
+                "data": [{"id": "r1", "name": "a flux/flux"}, {"id": "r2", "name": "b flux/flux"}],
+                "pagination": {"total": 3, "limit": 2, "offset": 0, "has_more": True},
+            },
+            2: {
+                "data": [{"id": "r3", "name": "flux/flux"}],
+                "pagination": {"total": 3, "limit": 2, "offset": 2, "has_more": False},
+            },
+        }
+        calls = _patch_cloud(monkeypatch, self._paged_search(pages))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+        assert self._search_offsets(calls) == ["0", "2"]
+
+    def test_a_full_page_with_nothing_more_ends_the_search(self, cloud_target, wf_path, monkeypatch, capsys):
+        full_page = {
+            "data": [{"id": f"r{i}", "name": f"x flux/flux {i}"} for i in range(100)],
+            "pagination": {"total": 100, "limit": 100, "offset": 0, "has_more": False},
+        }
+        calls = _patch_cloud(monkeypatch, self._paged_search({0: full_page}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux"
+        # The search before the write and the one after it each read one page.
+        assert set(self._search_offsets(calls)) == {"0"}
+
+    def test_more_to_come_with_no_rows_counts_as_taken(self, cloud_target, wf_path, monkeypatch, capsys):
+        # has_more true on an empty page cannot move the offset; asking again
+        # would get the same page, so the search has no answer.
+        empty = {"data": [], "pagination": {"total": 5, "limit": 100, "offset": 0, "has_more": True}}
+        calls = _patch_cloud(monkeypatch, self._paged_search({0: empty}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+        assert self._search_offsets(calls) == ["0"]
+
     def test_a_failed_record_search_saves_nothing(self, cloud_target, wf_path, monkeypatch, capsys):
         base = _sidebar()
 
