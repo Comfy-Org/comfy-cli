@@ -715,7 +715,13 @@ def notes_cmd(
 @tracking.track_command("workflow")
 def print_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    fmt: Annotated[str, typer.Option("--format", help="Output form. Only `py` today.")] = "py",
+    fmt: Annotated[
+        str,
+        typer.Option(
+            "--format",
+            help="Output form: `py` (source and bindings) or `json` (the same plus `nodes`, one structured record per node).",
+        ),
+    ] = "py",
     input_path: Annotated[
         str | None,
         typer.Option("--input", show_default=False, help="Offline object_info.json dump for widget names."),
@@ -735,10 +741,10 @@ def print_cmd(
     from comfy_cli.workflow_print import PrintUnsupported, render_py
 
     renderer = get_renderer()
-    if fmt != "py":
+    if fmt not in ("py", "json"):
         renderer.error(
             code="workflow_print_unsupported",
-            message=f"unknown --format {fmt!r}; only `py` is supported",
+            message=f"unknown --format {fmt!r}; use `py` or `json`",
             details={"reasons": [f"format {fmt!r}"]},
         )
         raise typer.Exit(code=1)
@@ -769,13 +775,15 @@ def print_cmd(
         warnings.append(f"object_info_stale: {_stale['source']}: {_stale['reason']}")
     payload = {
         "workflow": str(p),
-        "format": "py",
+        "format": fmt,
         "source": res.source,
         "bindings": res.bindings,
         "node_count": res.node_count,
         "skipped": res.skipped,
         "warnings": warnings,
     }
+    if fmt == "json":
+        payload["nodes"] = res.nodes
     if select is not None:
         from comfy_cli.selector import emit_selected
 
@@ -783,6 +791,9 @@ def print_cmd(
         return emit_selected(renderer, select_payload, select, command="workflow print")
     if renderer.is_pretty():
         typer.echo(_strip_terminal_controls(res.source), nl=False)
+        if fmt == "json":
+            # json.dumps escapes control characters, so no stripping is needed.
+            typer.echo(json.dumps(res.nodes, indent=2))
         for w in warnings:
             typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
     renderer.emit(payload, command="workflow print")
@@ -2752,3 +2763,11 @@ app.command("capture", help="Project a workflow into a reusable recipe (the op-b
 app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(
     _wedit.foreach_cmd
 )
+
+# `comfy workflow check --where cloud`: can Comfy Cloud run this workflow as it is?
+from comfy_cli.command import workflow_check as _wcheck  # noqa: E402
+
+app.command(
+    "check",
+    help="Check whether Comfy Cloud runs a workflow as it is, with model remaps, or only with a build.",
+)(_wcheck.check_cmd)

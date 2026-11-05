@@ -17,6 +17,14 @@ history.
 
 ### Added
 
+- `comfy workflow check <file> --where cloud` says whether Comfy Cloud runs a
+  workflow with no custom build. Signed in, it reads Cloud's node list and your
+  uploaded models, and answers `covered`, `covered_with_remaps` (a model sits in
+  another folder on Cloud), `covered_needs_check` (a model is not proven the
+  same file) or `needs_build`, with each blocking node type or model, its models
+  folder and any local copy. `--models-dir` hashes local copies against Cloud's;
+  `--apply-remaps --out <file>` writes a remapped copy and leaves the original
+  alone.
 - `comfy workflow save` on Comfy Cloud, when the workspace's
   `cli_cloud_save_enabled` flag is on, writes an editor-format workflow into a
   new folder in the Cloud Workflows sidebar (`<name>`, then `<name> (2)` and so
@@ -76,6 +84,11 @@ history.
   accepted silently. A `COMBO` widget socket still accepts `COMBO`, `STRING`,
   `INT` and `FLOAT`, because that is how a computed file name or a numeric
   option reaches a combo; every other source type is refused.
+- Commands that load a node catalog but read only a few classes (`workflow
+  print`, `workflow validate`, `workflow slots`, `nodes show`) no longer parse
+  every class in it: a class is parsed when first looked up, and the type
+  indexes that discovery commands (`nodes upstream`, `downstream`, `path`,
+  `types`, `ls`) read are built on first use. Output is unchanged.
 
 ### Fixed
 
