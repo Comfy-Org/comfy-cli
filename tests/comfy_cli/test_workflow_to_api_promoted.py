@@ -1367,11 +1367,6 @@ def test_promotion_traversal_limit_is_a_structured_conversion_failure(object_inf
 
 
 def test_qwen_image_2_1_edit_prompt_reaches_the_switch_socket(object_info):
-    """The template's ``prompt`` input feeds both TextGenerate's ``prompt``
-    widget and a ``ComfySwitchNode``'s any-type ``on_false`` socket, the branch
-    the switch takes while the prompt enhancer is off. The frontend inlines the
-    host value into both; dropping the socket made the switch yield ``None`` and
-    the image encoder encode the string "None"."""
     api = convert_ui_to_api(_load("image_qwen_image_2_1_image_edit.json"), object_info)
     prompt = _api_node(api, "TextGenerate", "459:500")["inputs"]["prompt"]
     switch = _api_node(api, "ComfySwitchNode", "459:484")["inputs"]
@@ -1455,8 +1450,6 @@ def test_host_value_reaches_a_socket_through_a_nested_instance():
 
 
 def test_socket_only_input_gets_no_host_value():
-    """An input that feeds no widget has no host widget in the frontend, so
-    nothing is inlined into its socket; a stray host value stays unused."""
     sg = _prompt_to_widget_and_socket()
     sg["inputs"][0]["linkIds"] = [2]
     sg["links"] = [link for link in sg["links"] if link["id"] == 2]
@@ -1493,9 +1486,6 @@ def test_external_link_into_the_input_leaves_the_socket_to_expansion(object_info
 
 
 def test_unset_host_value_feeds_the_socket_the_interior_source_value(object_info):
-    """With no host value the frontend seeds the promoted widget from its
-    interior source widget and inlines that into every target, so the switch
-    socket gets TextGenerate's interior prompt rather than nothing."""
     wf = _load("image_qwen_image_2_1_image_edit.json")
     next(n for n in wf["nodes"] if n["id"] == 459)["widgets_values"] = []
     sg = wf["definitions"]["subgraphs"][0]
@@ -1509,8 +1499,6 @@ def test_unset_host_value_feeds_the_socket_the_interior_source_value(object_info
 
 
 def test_unset_host_value_feeds_every_target_the_source_value():
-    """The frontend inlines the one seeded value into every target, so a second
-    interior widget takes the source widget's value, not its own default."""
     sg = _prompt_to_widget_and_socket()
     sg["nodes"].append(
         {
@@ -1545,9 +1533,6 @@ def test_unset_host_value_reaches_a_socket_through_a_nested_instance():
 
 
 def test_known_divergence_unemitted_source_leaves_the_socket_empty():
-    """Known divergence: the frontend still seeds from a muted source widget,
-    but the converter reads the seed from the emitted prompt, so a muted source
-    leaves the socket empty."""
     workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG}], "links": []}
     api = _socket_api("9")
     del api["9:text"]
@@ -1558,8 +1543,6 @@ def test_known_divergence_unemitted_source_leaves_the_socket_empty():
 
 
 def test_unset_outer_value_seeds_from_the_concrete_widget_not_the_inner_host():
-    """The frontend seeds a nested promotion from the deepest concrete widget;
-    an inner instance's own host value is linked over from the outer input."""
     outer_id, outer = _nested_outer(inner_values=["inner host"])
     workflow = {"nodes": [{"id": 9, "type": outer_id}], "links": []}
     api = _socket_api("9:inner")

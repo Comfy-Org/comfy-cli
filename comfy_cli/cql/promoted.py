@@ -2187,10 +2187,7 @@ def flush_proxy_migration(
 
 
 def boundary_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
-    """Every concrete ``(interior node path, input)`` a promoted input feeds —
-    widgets and plain sockets alike, all of its boundary links, through nested
-    instances. A repaired primitive fan-out has several; :func:`deepest_source`
-    reports only the first."""
+    """Every ``(interior node path, input)`` the input's boundary links reach, sockets included."""
     cache = getattr(defs, "promotion_boundaries", None)
     cache_key = (id(sg), pi.index)
     raw_inputs = sg.get("inputs")
@@ -2369,9 +2366,7 @@ def _boundary_targets(
                     )
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
-            # A socket without a widget marker (a switch's any-type input) is a
-            # target too: the frontend inlines the host value into whatever
-            # input the boundary link reaches (``ExecutableNodeDTO.resolveInput``).
+            # Unmarked sockets count too: the frontend inlines into any input the link reaches (resolveInput).
             marker = entry.get("widget")
             widget = marker.get("name") if isinstance(marker, dict) else None
             name = widget or entry.get("name")

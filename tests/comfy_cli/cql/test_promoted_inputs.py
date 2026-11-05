@@ -440,7 +440,6 @@ def test_socket_targets_count_against_the_boundary_output_cap():
     definitions = {"sg": sg}
 
     assert len(promoted._boundary_targets(sg, sg["inputs"][0], definitions, 0, _output_budget=[2])) == 2
-    # Two targets, room for one: the socket must be charged like the widget.
     with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
         promoted._boundary_targets(sg, sg["inputs"][0], {"sg": sg}, 0, _output_budget=[1])
 

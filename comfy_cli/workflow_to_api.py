@@ -291,19 +291,12 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
-                # No host value: the frontend seeds the host widget from its
-                # interior source widget and inlines that value into every
-                # target, as emitted above (already wrapped).
+                # No host value: the frontend seeds the promoted widget from its interior source widget.
                 value = _source_widget_value(api_prompt, prefix, _promoted.deepest_source(sg, pi, subgraph_defs))
                 if value is _promoted.UNSET:
                     continue
             else:
-                # Same wrapping every widget value gets, so a two-item list
-                # host value is never read back as a ``[node, slot]`` link.
                 value = _wrap_widget_value(value)
-            # Every interior input the boundary link feeds, widget or socket
-            # (the frontend inlines the host value into both) — a repaired
-            # primitive fan-out links one host value into several targets.
             targets = _promoted.boundary_targets(sg, pi, subgraph_defs)
             if len(targets) > visit_budget[0]:
                 raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
@@ -328,8 +321,6 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
 
 
 def _source_widget_value(api_prompt: dict, prefix: str, source: tuple[list[str], str] | None) -> Any:
-    """The emitted value of a promoted input's interior source widget, or
-    ``UNSET`` when that node was not emitted."""
     from comfy_cli.cql import promoted as _promoted
 
     if source is None:
