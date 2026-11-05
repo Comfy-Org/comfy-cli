@@ -11,7 +11,7 @@ Refresh with:
 
 ```bash
 cd tests/comfy_cli/fixtures/gallery
-for f in 02_qwen_Image_edit_subgraphed 05_audio_ace_step_1_t2a_song_subgraphed image_z_image_turbo audio_minimax_music_3 api_seedance2_5_video_extend templates_graphic_design_recomposer template_horizontal_vertical_extension flux_dev_checkpoint_example image_qwen_image_2_1_image_edit; do
+for f in 02_qwen_Image_edit_subgraphed 05_audio_ace_step_1_t2a_song_subgraphed image_z_image_turbo audio_minimax_music_3 api_seedance2_5_video_extend templates_graphic_design_recomposer template_horizontal_vertical_extension flux_dev_checkpoint_example; do
   curl -sfL "https://raw.githubusercontent.com/Comfy-Org/workflow_templates/main/templates/${f}.json" -o "${f}.json"
 done
 ```
@@ -35,8 +35,10 @@ cloud catalog entries (tooltips stripped, structure verbatim).
 `TextGenerate` widget and a `ComfySwitchNode` `on_false` socket) backs the
 socket-target tests in `tests/comfy_cli/test_workflow_to_api_promoted.py`; its
 node classes were added to `../object_info_subgraph_promoted.json` the same way.
-Its "Note: Model links" MarkdownNote text is blanked (a UI-only node) because
-the public-repo hygiene check reads its model links as repository references.
+It is NOT verbatim and is left out of the refresh loop above: its "Note: Model
+links" MarkdownNote text is blanked (a UI-only node) because the public-repo
+hygiene check reads its model links as repository references, and the tests rely
+on its prompt text and on `prompt` linking the switch socket before the widget.
 
 `templates_graphic_design_recomposer.json` (two `PrimitiveNode` fan-outs and a
 labelled value widget promoted only through legacy `proxyWidgets`),

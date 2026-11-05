@@ -1456,6 +1456,9 @@ def test_socket_only_input_gets_no_host_value():
     sg["inputs"][0]["linkIds"] = [2]
     sg["links"] = [link for link in sg["links"] if link["id"] == 2]
     sg["nodes"][0]["inputs"][0]["link"] = None
+    from comfy_cli.cql import promoted
+
+    assert [pi.is_widget for pi in promoted.promoted_inputs(sg, {_SOCKET_SG: sg})] == [False]
     workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG, "widgets_values": ["stray"]}], "links": []}
     api = _socket_api("9")
 
@@ -1618,3 +1621,18 @@ def test_unset_host_value_source_walk_runs_once_per_definition_input(monkeypatch
 
     assert calls == [0]
     assert api["8:switch"]["inputs"]["on_false"] == api["9:switch"]["inputs"]["on_false"] == "interior default"
+
+
+def test_known_divergence_unset_host_value_fans_out_the_processed_dynamic_prompt(object_info):
+    wf = _load("image_qwen_image_2_1_image_edit.json")
+    next(n for n in wf["nodes"] if n["id"] == 459)["widgets_values"] = []
+    sg = wf["definitions"]["subgraphs"][0]
+    next(n for n in sg["nodes"] if n["id"] == 500)["widgets_values"][0] = "a {red|red} cat // note"
+
+    api = convert_ui_to_api(wf, object_info)
+
+    emitted = _api_node(api, "TextGenerate", "459:500")["inputs"]["prompt"]
+    assert emitted == "a red cat "
+    assert _api_node(api, "ComfySwitchNode", "459:484")["inputs"]["on_false"] == emitted, (
+        "known divergence: the frontend sends the raw text; the converter fans out the emitted value"
+    )
