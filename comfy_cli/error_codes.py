@@ -977,6 +977,40 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "drop `--description`; a sidebar file carries only its name and contents",
     ),
     ErrorCode(
+        "workspace_unknown",
+        "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not say which "
+        "workspace it went to, so `data.url` leaves out the workspace and deployment and opens the folder in "
+        "whatever workspace the browser is on. Surfaced in `data.warnings[]` (not as an error envelope) "
+        "because the save itself succeeded.",
+        "switch the browser to the workspace `comfy cloud whoami` shows before opening the link",
+    ),
+    ErrorCode(
+        "workflow_record_unknown",
+        "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not show the "
+        "workflow record it makes from that file, so `data.workflow_id` and `data.latest_version` are null. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) because the file itself was saved.",
+        "find the record with `comfy --json workflow list --name <data.name>`",
+    ),
+    ErrorCode(
+        "api_format_saved_as_record",
+        "`comfy workflow save` on a Comfy Cloud workspace that saves into Workflows-sidebar folders was given "
+        "an API-format workflow. The sidebar opens files as editor graphs and would show it empty, so it was "
+        "saved the record-only way, with no folder and no `data.url`. Surfaced in `data.warnings[]` (not as an "
+        "error envelope) because the record save succeeded.",
+        "save the editor format (ComfyUI `File > Save`) to get a sidebar folder and a link",
+    ),
+    ErrorCode(
+        "sidebar_file_kept",
+        "`comfy workflow delete` on a Comfy Cloud workspace with `cli_cloud_save_enabled` on deleted the "
+        "workflow record, but the Workflows-sidebar file the record was made from (`filename` in the "
+        "warning) still exists. The file counts as the record's only when the record is the one live "
+        "workflow of its name and the file matches the record's latest version; a file that only shares the "
+        "name may be another workflow's, and gets no warning. The CLI never deletes sidebar files, so it "
+        "stays in the sidebar. Surfaced in `data.warnings[]` (not as an error envelope) because the record "
+        "delete succeeded.",
+        "remove the file from the Workflows sidebar in Comfy Cloud",
+    ),
+    ErrorCode(
         "cql_query_invalid",
         "Grammar query failed to parse or evaluate.",
         "check the grammar; `comfy nodes ls --help` has examples",
