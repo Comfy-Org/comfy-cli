@@ -560,6 +560,21 @@ class TestTrackCommandRedaction:
         assert properties["no_upload"] is True
         assert "private" not in str(properties)
 
+    def test_model_upload_workspace_and_hash_are_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("model")
+        def upload(workspace_id, expected_sha256, folder):
+            return None
+
+        upload(workspace_id="w-private", expected_sha256="a-private-hash", folder="loras")
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["workspace_id"] == "<redacted>"
+        assert properties["expected_sha256"] == "<redacted>"
+        assert properties["folder"] == "loras"
+        assert "private" not in str(properties)
+
     def test_add_node_text_is_redacted(self, tracking_module):
         # `comfy workflow add-node <file> Note --text "..."` carries a note body
         # the user wrote: free-form prose that can hold anything (paths, prompts,
@@ -694,6 +709,17 @@ class TestTrackCommandRedaction:
         assert filter_command_kwargs({"from_workflow": None})["from_workflow"] is None
         assert "from_workflow" not in filter_command_kwargs({"name": "demo"})
         assert filter_command_kwargs({"from_workflow": "/Users/someone/wf.json"})["from_workflow"] == "<redacted>"
+
+    def test_local_model_folders_and_out_paths_are_redacted(self, tracking_module):
+        """`workflow check --models-dir` is a repeatable `str` option (a list) and
+        `--out` a `str` path: both are JSON-serializable, so both would ship verbatim."""
+        from comfy_cli.tracking import filter_command_kwargs
+
+        props = filter_command_kwargs(
+            {"models_dir": ["/Users/someone/Private Clients/models"], "out": "/Users/someone/acme/wf.json"}
+        )
+        assert props == {"models_dir": "<redacted>", "out": "<redacted>"}
+        assert filter_command_kwargs({"models_dir": None, "out": None}) == {"models_dir": None, "out": None}
 
     def test_underscore_ctx_is_excluded(self, tracking_module):
         import click

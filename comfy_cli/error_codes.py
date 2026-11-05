@@ -153,9 +153,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_write_error",
-        "`workflow get --out` could not write the fetched workflow to disk (OSError: permissions, "
-        "missing parent dir, full disk, invalid path).",
+        "`workflow get --out` could not write the fetched workflow to disk, or `workflow check --apply-remaps "
+        "--out` could not write the remapped copy (OSError: permissions, missing parent dir, full disk, "
+        "invalid path).",
         "check the --out path is writable and the disk has space",
+    ),
+    ErrorCode(
+        "workflow_format_unknown",
+        "`workflow check` read valid JSON that is neither a ComfyUI save (an object with `nodes[]`) nor an "
+        "API export (an object of nodes, each with a `class_type`). `details.path` carries the file.",
+        "pass a workflow saved from ComfyUI or its API export",
+    ),
+    ErrorCode(
+        "workflow_out_is_input",
+        "`workflow check --apply-remaps --out` named the workflow being checked; the check never changes "
+        "its input, so nothing was written. `details.path` carries the file.",
+        "pass a new file name to --out",
     ),
     ErrorCode(
         "workflow_too_large",
@@ -483,11 +496,33 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "asset_upload_invalid",
-        "`assets library upload` refused the file or `--type` before uploading anything: "
+        "`model upload` or `assets library upload` refused the file or `--type` before uploading anything: "
         "`details.reason` is unsupported_file_type (not .safetensors), bad_filename, file_not_found, "
-        "file_unreadable (it could not be opened or its size read), empty_file, file_too_large (over 2 GB) "
-        "or unsupported_model_type (`details.valid_types` lists the folders the workspace takes).",
-        "fix the file or `--type` named in the message; nothing was sent",
+        "file_unreadable (it could not be opened or its size read), empty_file, file_too_large (over 2 GB), "
+        "unsupported_model_type (`details.valid_types` lists the folders the workspace takes), "
+        "bad_expected_sha256 (`--expected-sha256` is not 64 hex), file_changed (the file's sha256, "
+        "`details.sha256`, is not `details.expected_sha256`: it changed since the dry run that was approved), "
+        "name_in_use (`model upload` only: the folder of the workspace's model library, every member's models, "
+        "already holds a model of this name with other bytes, `details.existing`; a second one would change "
+        "what the name loads for every workflow in the workspace) or "
+        "name_unverified (`model upload` only: too many models with similar names to check that none holds other bytes).",
+        "fix the file or `--type` named in the message; for file_changed run the dry run again and get the "
+        "new sha256 approved; for name_in_use or name_unverified rename the file; nothing was sent",
+    ),
+    ErrorCode(
+        "asset_upload_wrong_workspace",
+        "`model upload --workspace` named a workspace this sign-in does not upload into "
+        "(`details.reason` workspace_mismatch; `details.current_workspace` is the one it does), or Comfy "
+        "Cloud did not say which workspace that is (`details.reason` workspace_unknown). Nothing was sent.",
+        "check `comfy cloud status`; sign in to the approved workspace with `comfy cloud login`, or get the "
+        "upload approved for the current one",
+    ),
+    ErrorCode(
+        "model_upload_needs_confirm",
+        "`model upload` was run without `--yes` where nothing can answer a prompt. Nothing was sent. "
+        "`details.file`, `details.type`, `details.sha256` and `details.workspace_id` name what would be "
+        "uploaded; `details.question` is the confirmation nothing could answer.",
+        "ask the person to approve uploading the file named, then pass `--yes --expected-sha256 <sha256>`",
     ),
     ErrorCode(
         "asset_upload_refused",
@@ -503,16 +538,30 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "retry (`details.status`, null when no answer came), the local file could not be read while it "
         "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
         "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
-        "file; not retried), or Comfy Cloud's storing task failed or was cancelled (the message carries the "
-        "task's error, e.g. not a valid .safetensors file).",
+        "file; not retried), a block of the file read for sending was not the block hashed before it "
+        "(`details.reason` file_changed: something wrote the file meanwhile; the blocks before it were sent, "
+        "none of the changed bytes were, and the upload was not completed, so no asset was added), or "
+        "Comfy Cloud's storing task failed or was cancelled (the message carries the task's error, e.g. not a "
+        "valid .safetensors file).",
         "retry for a storage failure; for an unreadable file or a task failure fix the file the message names; "
-        "for tls_setup fix the certificate setting the message names",
+        "for tls_setup fix the certificate setting the message names; for file_changed wait until nothing "
+        "writes the file, then run the dry run again",
     ),
     ErrorCode(
         "asset_upload_timeout",
         "The model file was uploaded, but Comfy Cloud had not finished storing it when "
-        "`assets library upload` stopped waiting. `details.task_id` is the storing task, which goes on.",
+        "`model upload` or `assets library upload` stopped waiting. `details.task_id` is the storing task, "
+        "which goes on.",
         "check `comfy assets library ls --tags models` later instead of uploading again",
+    ),
+    ErrorCode(
+        "asset_upload_unverified",
+        "Comfy Cloud stored the uploaded file as an asset (`details.asset_id`), but its hash of the stored "
+        "bytes is not the local file's (`details.reason` hash_mismatch; `details.stored_hash` against "
+        "`details.hash`), or it could not be read to check (`details.reason` hash_unavailable). The asset "
+        "exists; do not run a workflow that loads it until it is checked.",
+        "for hash_mismatch delete the asset and upload again; for hash_unavailable compare the asset's hash "
+        "in `comfy assets library ls --name <file> --tags models` with `details.hash`",
     ),
     ErrorCode(
         "template_fetch_failed",
@@ -912,8 +961,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_conversion_failed",
-        "`comfy workflow decompose` could not flatten a frontend-format workflow to "
-        "API format (malformed graph, or object_info that doesn't match the nodes).",
+        "`comfy workflow decompose` or `comfy workflow check` could not flatten a frontend-format workflow "
+        "to API format (malformed graph, or object_info that doesn't match the nodes).",
         "re-export from ComfyUI, or pass a matching --input object_info.json",
     ),
     ErrorCode(

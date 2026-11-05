@@ -127,6 +127,16 @@ _SENSITIVE_EXACT = frozenset(
         "text",
         # `deploy run --allow-upload` names the hashes of a person's own files.
         "allow_upload",
+        # `model upload --workspace` names a Comfy Cloud workspace, which can
+        # identify a customer; `--expected-sha256` names one of their files.
+        # The kwarg is `workspace_id`, not `workspace`, so `deploy --workspace`
+        # (a bool) stays measurable.
+        "workspace_id",
+        "expected_sha256",
+        # `--models-dir` (repeatable, so a list: the whole list is redacted) and
+        # `--out` are local paths, typed `str` like `--workflow`.
+        "models_dir",
+        "out",
     }
 )
 
