@@ -613,7 +613,7 @@ class _RotatingSignIn:
     def __init__(self) -> None:
         self.token = "token-at-start"
 
-    def __call__(self, *, refresh=True, force=False, allow_clear=True):
+    def __call__(self, *, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
         return SimpleNamespace(access_token=self.token, base_url="https://cloud.comfy.org")
 
 
@@ -673,7 +673,7 @@ def test_an_unreadable_sign_in_at_cancel_still_cancels_with_the_token_the_run_ho
     monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: None)
     store = {"readable": True}
 
-    def get_session(*, refresh=True, force=False, allow_clear=True):
+    def get_session(*, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
         if not store["readable"]:
             raise OSError("auth store lock unavailable")
         return SimpleNamespace(access_token="cloud-secret", base_url="https://cloud.comfy.org")

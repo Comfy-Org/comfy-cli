@@ -76,7 +76,10 @@ blob      ls                                    (hidden; workspace private blobs
   that reaches the builder need it; a plain scan and a plain `validate` do not.
   A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
   key wins over a stored sign-in, so when the hint says that key was refused,
-  signing in cannot help: replace the key.
+  signing in cannot help: replace the key. `watch_auth_lost` (exit 75) means
+  `release create --watch` was refused after the cut despite session recovery,
+  while a refreshable sign-in remains stored. The release may still be building.
+  Read it with `comfy build release show <id>` before considering a new sign-in.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
