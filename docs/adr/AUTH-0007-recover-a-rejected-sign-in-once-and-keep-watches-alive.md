@@ -44,8 +44,11 @@ must keep. They belong in an ADR, not only in code comments.
 ### One owner of the token family at a time
 
 - Only a process holding the cross-process secrets lock
-  (`auth_store.lock_path()`) may refresh or write the stored session. The lock
-  wait is bounded at 90 seconds (`_REFRESH_LOCK_TIMEOUT_S`).
+  (`auth_store.lock_path()`) may refresh or write the stored session. The wait
+  for the lock that guards the refresh is bounded at 90 seconds
+  (`_REFRESH_LOCK_TIMEOUT_S`). The first read of the store, before a refresh
+  is decided (`auth_store.get_cloud_session()`), takes the same lock with no
+  timeout, as it did before this decision; see Known limits.
 - Under the lock the process re-reads the store and decides from what is
   stored now, never from what it read before locking. It never sends a
   refresh token it observed before taking the lock if the store has since
@@ -151,8 +154,8 @@ or a handed token, or a 401 with no recoverable sign-in left.
   token.
 - Clearing the stored session on a refresh failure that does not mean the
   family is dead, or from a watch that ends with `watch_auth_lost`.
-- Waiting on the secrets lock with no timeout on any path that runs after a
-  401.
+- Waiting with no timeout for the lock that guards the refresh, on any path
+  that runs after a 401. The first store read is not covered; see Known limits.
 - Exit 1 for a watch that ended while the server-side work may still be
   running.
 - Reusing `watch_auth_lost` for a failure before the server accepted the work.
@@ -183,6 +186,11 @@ or a handed token, or a 401 with no recoverable sign-in left.
 
 - The lock is a file lock on one machine. Two machines sharing one stored
   session (a synced home directory) are not coordinated.
+- Only the refresh wait is bounded. The first store read in the shared refresh
+  (`auth_store.get_cloud_session()`) waits for the secrets lock with no
+  timeout, so a peer that already holds the lock when recovery starts can
+  keep a request or a watch waiting until it lets go. This is unchanged from
+  before; bounding that read is a separate change to the secret store.
 - The tests cover real temporary credential storage and a real OS lock, with
   mocked HTTP. They do not cover a live OAuth server's reuse detection under
   concurrency.
