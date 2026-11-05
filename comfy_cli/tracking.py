@@ -125,6 +125,10 @@ _SENSITIVE_EXACT = frozenset(
         # `workflow add-node --text`: a note body is verbatim user content, like
         # `--prompt` — analytics only learns that the option was supplied.
         "text",
+        # `--models-dir` (repeatable, so a list: the whole list is redacted) and
+        # `--out` are local paths, typed `str` like `--workflow`.
+        "models_dir",
+        "out",
     }
 )
 
