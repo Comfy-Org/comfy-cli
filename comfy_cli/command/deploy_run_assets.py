@@ -101,7 +101,10 @@ def resolve_assets(plan: WorkflowAssetPlan, context: AssetResolveContext) -> Res
         if not isinstance(asset_id, str) or not asset_id:
             raise server_shape_error("the data plane returned an asset without an id")
         asset_ids[asset.marker] = asset_id
-        results[index] = (result, DisclosedAsset(asset.local_path, asset.file_path, size, bool(result.uploaded)))
+        # An upload reports the bytes it sent: an approved file can be replaced
+        # by other approved bytes between the probe and the upload.
+        sent = result.bytes if result.uploaded else size
+        results[index] = (result, DisclosedAsset(asset.local_path, asset.file_path, sent, bool(result.uploaded)))
 
     for index, asset in enumerate(plan.assets):
         size = asset.local_path.stat().st_size

@@ -884,3 +884,39 @@ def test_a_refused_file_fails_the_run_before_an_approved_one_is_sent(
     assert [entry["local_path"] for entry in missing if isinstance(entry, dict)] == [str(portrait)]
     assert uploaded == []
     assert job_client.requests == []
+
+
+def test_an_approved_upload_reports_the_bytes_it_sent(tmp_path: Path) -> None:
+    """Given an approved file that is replaced by other approved bytes after the
+    probe, When it uploads, Then `assets.files[].bytes` is what was sent, not
+    the size read before the probe."""
+    from comfy_cli.command import deploy_run_assets
+    from comfy_cli.deploy_assets import DeployAssetMissingError
+
+    # Given
+    portrait = tmp_path / "portrait.png"
+    portrait.write_bytes(b"abc")
+    plan = deploy_workflow.WorkflowAssetPlan(
+        workflow={"1": {"inputs": {"image": "marker-1"}}},
+        assets=(deploy_workflow.WorkflowAsset("marker-1", portrait, "portrait.png"),),
+    )
+
+    class ProbeThenUpload:
+        def resolve_asset(self, request: AssetResolveRequest) -> AssetResolveResult:
+            if not request.upload_enabled:
+                raise DeployAssetMissingError(request, "hash-a", 3)
+            return AssetResolveResult(asset={"id": "asset-1"}, uploaded=1, deduped=0, bytes=7)
+
+    context = deploy_run_assets.AssetResolveContext(
+        client=ProbeThenUpload(),  # type: ignore[arg-type]
+        renderer=SimpleNamespace(is_pretty=lambda: False),  # type: ignore[arg-type]
+        upload_enabled=True,
+        allowed_hashes=frozenset({"hash-a", "hash-b"}),
+    )
+
+    # When
+    resolved = deploy_run_assets.resolve_assets(plan, context)
+
+    # Then
+    assert [file.bytes for file in resolved.files] == [7]
+    assert resolved.bytes == 7
