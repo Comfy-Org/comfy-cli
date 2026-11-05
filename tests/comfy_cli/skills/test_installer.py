@@ -608,12 +608,23 @@ def test_run_on_cloud_skill_says_a_record_only_save_has_no_link():
     assert "then Workflows, then" not in text
 
 
-def test_run_on_cloud_skill_drops_the_later_milestone_links():
-    """Saved-file ids, `workflow ui` and `deploy ui` links are not part of this
-    route, and `build inventory --cloud` gave way to `workflow check`."""
+def test_run_on_cloud_skill_drops_the_retired_commands():
+    """`workflow ui` and `deploy ui` are not part of this route, and
+    `build inventory --cloud` gave way to `workflow check`."""
     text = skill_content("comfy-run-on-cloud")
-    for gone in ("saved_file_id", "workflow ui", "deploy ui", "build inventory"):
+    for gone in ("workflow ui", "deploy ui", "build inventory"):
         assert gone not in text, f"comfy-run-on-cloud skill should not mention {gone}"
+
+
+def test_run_on_cloud_skill_explains_exact_file_links_and_folder_fallback():
+    """Hand back the save's URL; its file id is distinct from the record id."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Hand back `data.url` as returned" in text
+    assert "When `data.saved_file_id` is set, the link opens that exact file" in text
+    assert "Otherwise it opens the folder with `workflows=<folder>`" in text
+    assert "`private_saved_file_links_enabled` setting to be true" in text
+    assert "valid saved-file UUID in the save reply" in text
+    assert "`data.workflow_id` still names the workflow record" in text
 
 
 def test_run_on_cloud_skill_asks_before_every_upload_and_lossy_swap():
