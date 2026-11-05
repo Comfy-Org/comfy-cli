@@ -13,7 +13,13 @@ from pathlib import Path
 from comfy_cli.command.build_spec import JsonObject, JsonValue
 from comfy_cli.command.deploy_types import server_shape_error
 from comfy_cli.command.deploy_workflow import WorkflowAssetPlan, materialize_workflow_assets
-from comfy_cli.deploy_assets import AssetResolveRequest, AssetResolveResult, DeployAssetClient
+from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.deploy_assets import (
+    AssetResolveRequest,
+    AssetResolveResult,
+    DeployAssetClient,
+    DeployAssetMissingError,
+)
 from comfy_cli.output.renderer import Renderer
 
 
@@ -60,27 +66,53 @@ class AssetResolveContext:
     client: DeployAssetClient
     renderer: Renderer
     upload_enabled: bool
+    allowed_hashes: frozenset[str] | None = None
+
+
+def _missing_error(missing: list[JsonValue]) -> DeployAPIError:
+    """One refusal naming every file the run may not upload.
+
+    It lists them all, not just the first, so ``details.missing`` is the whole
+    upload plan: each absolute ``local_path`` the scanner picked, its ``bytes``
+    and its ``hash``. ``file_path`` and ``hash`` still name the first, as before.
+    """
+    first = missing[0]
+    assert isinstance(first, dict)
+    count = len(missing)
+    return DeployAPIError(
+        code="deploy_asset_missing",
+        message=f"{count} local file{'' if count == 1 else 's'} the deployment does not have may not be uploaded",
+        details={"file_path": first["file_path"], "hash": first["hash"], "missing": missing},
+    )
 
 
 def resolve_assets(plan: WorkflowAssetPlan, context: AssetResolveContext) -> ResolvedAssets:
     asset_ids: dict[str, str] = {}
     results: list[AssetResolveResult] = []
     disclosed: list[DisclosedAsset] = []
+    missing: list[JsonValue] = []
     for asset in plan.assets:
         size = asset.local_path.stat().st_size
         if context.renderer.is_pretty():
             # Announced BEFORE the call, not after: a disclosure the user only
             # reads once the bytes are already gone is not a disclosure.
             context.renderer.info(f"Sending workflow asset {asset.local_path} ({size} bytes)")
-        result = context.client.resolve_asset(
-            AssetResolveRequest(asset.local_path, asset.file_path, context.upload_enabled)
-        )
+        try:
+            result = context.client.resolve_asset(
+                AssetResolveRequest(asset.local_path, asset.file_path, context.upload_enabled, context.allowed_hashes)
+            )
+        except DeployAssetMissingError as error:
+            # Keep going, so the refusal names every file, not only the first.
+            missing.append(error.details)
+            continue
         asset_id = result.asset.get("id")
         if not isinstance(asset_id, str) or not asset_id:
             raise server_shape_error("the data plane returned an asset without an id")
         asset_ids[asset.marker] = asset_id
         results.append(result)
         disclosed.append(DisclosedAsset(asset.local_path, asset.file_path, size, bool(result.uploaded)))
+    if missing:
+        raise _missing_error(missing)
     return ResolvedAssets(
         workflow=materialize_workflow_assets(plan, asset_ids),
         uploaded=sum(result.uploaded for result in results),

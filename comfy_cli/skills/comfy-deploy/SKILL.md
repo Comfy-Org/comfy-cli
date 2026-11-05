@@ -354,6 +354,9 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   `uploaded`/`deduped`/`bytes` totals never name a filename. A user who is about
   to send files off their machine is owed that list. `--no-upload` turns a needed
   upload into `deploy_asset_missing` instead, for when nothing may leave the box.
+  Its `details.missing[]` lists every file it would have sent: the absolute
+  `local_path`, `bytes` and `hash`. `--allow-upload <hash>` (repeatable) then
+  uploads only those exact files; any other file fails the same way.
 - **It waits and downloads by default.** Outputs land in `./outputs/` unless
   `--output-dir` says otherwise, and each is reported with its `node_id`, `name`,
   `type` and `path`. `--no-wait` returns the job id immediately instead.

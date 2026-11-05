@@ -17,6 +17,17 @@ history.
 
 ### Added
 
+- `comfy deploy run --allow-upload <hash>` (repeatable) uploads a local file
+  the deployment lacks only if its hash is listed; any other file fails with
+  `deploy_asset_missing` and is not sent. A file Cloud already holds is reused
+  by hash with no copy. A file it must upload is copied once to a private
+  temporary file, checked against the approved hash and sent from that copy,
+  so a file rewritten in between cannot send bytes nobody approved. That
+  refusal, and the one from
+  `--no-upload`, now lists every such file in `details.missing[]` (absolute
+  `local_path`, `bytes`, `hash`) rather than stopping at the first, so a person
+  can approve the exact files the scanner picked. When two asset folders hold
+  files of the same name, this shows which one it picked.
 - `comfy workflow save` on Comfy Cloud, when the workspace's
   `cli_cloud_save_enabled` flag is on, writes an editor-format workflow into a
   new folder in the Cloud Workflows sidebar (`<name>`, then `<name> (2)` and so

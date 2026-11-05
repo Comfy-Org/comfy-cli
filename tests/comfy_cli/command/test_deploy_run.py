@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import http.client
+import io
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,12 +19,13 @@ from typing_extensions import NotRequired, TypedDict
 
 from comfy_cli import deploy_jobs
 from comfy_cli.cmdline import app
-from comfy_cli.command import deploy, deploy_run
+from comfy_cli.command import deploy, deploy_run, deploy_workflow
 from comfy_cli.command.build_spec import JsonObject, JsonValue
 from comfy_cli.deploy_assets import AssetResolveRequest, AssetResolveResult
 from comfy_cli.deploy_events import JobWatchResult
 from comfy_cli.deploy_jobs import JobSubmitRequest
 from comfy_cli.discovery import COMMAND_SCHEMAS
+from comfy_cli.hashing import blake3_file
 from comfy_cli.target import Target
 
 SCHEMAS_DIR = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas"
@@ -189,6 +194,7 @@ def test_deploy_run_is_registered_with_the_complete_option_surface() -> None:
         "--timeout",
         "--no-upload",
         "--asset-root",
+        "--allow-upload",
     } <= option_names("run")
 
 
@@ -697,3 +703,155 @@ def test_an_unreadable_sign_in_at_cancel_still_cancels_with_the_token_the_run_ho
     assert result.exit_code == 130, result.stdout
     assert cancels == ["cloud-secret"]
     assert envelope_error(result)["details"] == {"job_id": "job-1", "cancel_requested": True}
+
+
+# --- the upload plan a person approves ---------------------------------------
+
+
+def two_portraits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    """A Build folder (the cwd) and the tracked workspace each hold a different
+    `portrait.png`. The Build folder also holds `customer.csv`, which a custom
+    node names as `input/customer.csv`. Returns the Build folder, the workspace
+    and the API workflow."""
+    build = tmp_path / "build"
+    (build / "input").mkdir(parents=True)
+    (build / "comfy-build.yaml").write_text("schema: build-spec/1\n", encoding="utf-8")
+    (build / "input" / "portrait.png").write_bytes(b"build portrait")
+    (build / "input" / "customer.csv").write_bytes(b"name,email\n")
+    workspace = tmp_path / "workspace"
+    (workspace / "input").mkdir(parents=True)
+    (workspace / "input" / "portrait.png").write_bytes(b"workspace portrait")
+
+    class TrackedWorkspace:
+        workspace_path = str(workspace)
+
+    monkeypatch.setattr(deploy_workflow, "WorkspaceManager", TrackedWorkspace)
+    monkeypatch.chdir(build)
+    workflow = tmp_path / "api.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "portrait.png"}},
+                "2": {"class_type": "CustomerLookup", "inputs": {"table": "input/customer.csv"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return build, workspace, workflow
+
+
+def deployment_holds_nothing(monkeypatch: pytest.MonkeyPatch, job_client: FakeJobClient) -> list[str]:
+    """Run against the real asset client, whose every hash probe misses.
+
+    Returns the names of the files it uploads; each upload answers with a new asset.
+    """
+    control = FakeControl("https://dep-id.run.comfy.app")
+    monkeypatch.setattr(deploy_run, "_command_clients", lambda: (FakeBuilder(), control))
+    monkeypatch.setattr(deploy_run, "DeployJobClient", lambda *_args, **_kwargs: job_client)
+
+    def probe(url: str, *_args, **_kwargs):
+        raise urllib.error.HTTPError(url, 404, "not found", http.client.HTTPMessage(), io.BytesIO(b""))
+
+    uploaded: list[str] = []
+
+    class Created:
+        status = 201
+
+        def __init__(self, request: urllib.request.Request) -> None:
+            body = request.data
+            assert body is not None and not isinstance(body, bytes)
+            chunks = b"".join(body)  # type: ignore[arg-type]
+            uploaded.append(chunks.split(b'filename="', 1)[1].split(b'"', 1)[0].decode())
+            self._body = io.BytesIO(json.dumps({"id": f"asset-{len(uploaded)}"}).encode())
+
+        def __enter__(self) -> Created:
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self, amount: int = -1) -> bytes:
+            return self._body.read(amount)
+
+    monkeypatch.setattr("comfy_cli.deploy_assets.request_json", probe)
+    monkeypatch.setattr("comfy_cli.deploy_assets.no_redirect_urlopen", lambda request, *, timeout: Created(request))
+    return uploaded
+
+
+def test_a_no_upload_refusal_lists_the_file_the_scanner_picked_by_full_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given two different `portrait.png` files, When a `--no-upload` run refuses,
+    Then it lists every file it would send, with the full path it picked: the
+    Build folder's `portrait.png`, not the workspace's, and the custom node's
+    `customer.csv`. This list is what a person approves."""
+    # Given
+    build, _workspace, workflow = two_portraits(tmp_path, monkeypatch)
+    job_client = FakeJobClient(job())
+    uploaded = deployment_holds_nothing(monkeypatch, job_client)
+    portrait = (build / "input" / "portrait.png").resolve()
+    customers = (build / "input" / "customer.csv").resolve()
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id", "--no-upload")
+
+    # Then
+    assert result.exit_code == 1, result.stdout
+    error = envelope_error(result)
+    assert error["code"] == "deploy_asset_missing"
+    details = error["details"]
+    assert isinstance(details, dict)
+    assert details["missing"] == [
+        {"file_path": "portrait.png", "hash": blake3_file(portrait), "local_path": str(portrait), "bytes": 14},
+        {"file_path": "customer.csv", "hash": blake3_file(customers), "local_path": str(customers), "bytes": 11},
+    ]
+    assert uploaded == []
+    assert job_client.requests == []
+
+
+def test_allow_upload_sends_only_the_approved_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given a person approved the workspace's `portrait.png`, When the run picks
+    the Build folder's one instead, Then nothing is uploaded and the refusal
+    names the file it picked. Approving the listed hashes uploads exactly those."""
+    # Given
+    build, workspace, workflow = two_portraits(tmp_path, monkeypatch)
+    job_client = FakeJobClient(job())
+    uploaded = deployment_holds_nothing(monkeypatch, job_client)
+    portrait = (build / "input" / "portrait.png").resolve()
+    customers = (build / "input" / "customer.csv").resolve()
+    wrong = blake3_file(workspace / "input" / "portrait.png")
+
+    # When the approval names the other portrait
+    refused = invoke(workflow, "--deployment", "dep-id", "--no-wait", "--allow-upload", wrong)
+
+    # Then
+    assert refused.exit_code == 1, refused.stdout
+    details = envelope_error(refused)["details"]
+    assert isinstance(details, dict)
+    missing = details["missing"]
+    assert isinstance(missing, list)
+    assert [entry["local_path"] for entry in missing if isinstance(entry, dict)] == [str(portrait), str(customers)]
+    assert uploaded == []
+    assert job_client.requests == []
+
+    # When the approval names the plan the refusal listed
+    allowed = invoke(
+        workflow,
+        "--deployment",
+        "dep-id",
+        "--no-wait",
+        "--allow-upload",
+        blake3_file(portrait),
+        "--allow-upload",
+        blake3_file(customers),
+    )
+
+    # Then
+    assert allowed.exit_code == 0, allowed.stdout
+    assert uploaded == ["portrait.png", "customer.csv"]
+    assets = envelope_data(allowed)["assets"]
+    assert isinstance(assets, dict)
+    files = assets["files"]
+    assert isinstance(files, list)
+    assert [entry["local_path"] for entry in files if isinstance(entry, dict)] == [str(portrait), str(customers)]
+    assert len(job_client.requests) == 1

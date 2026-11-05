@@ -69,7 +69,7 @@ argument you pass.
 | `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; the job was not submitted | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
-| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
+| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set, or its hash is not one `--allow-upload` names | `details.missing[]` lists each file: `local_path`, `bytes`, `hash`. Rerun with `--allow-upload <hash>` per approved file, drop `--no-upload`, or pre-upload it |
 | `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read | Confirm the file is stable, retry |
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
