@@ -1,3 +1,4 @@
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -733,7 +734,7 @@ class TestWorkspaceFreeCommands:
             result = CliRunner().invoke(app, ["--json", "which"])
 
         assert result.exit_code == 0, result.output
-        assert str(workspace) in result.output
+        assert json.dumps(str(workspace)) in result.output
 
     def test_gitpython_is_not_imported(self):
         import subprocess
