@@ -12,6 +12,12 @@ list via ``comfy discover`` and branch on the codes; if you rename, deprecate,
 or remove one, you're breaking the contract and the tests fail before merge.
 
 Codes are snake_case and match ``^[a-z][a-z0-9_]*$``.
+
+Registered codes are failure categories (ADR-AUTOMATION-0003). A code a
+command only emits inside ``data.warnings[]`` of a successful result is not
+registered here; the warning object carries its own ``code`` string. The
+warning-only codes registered before this rule stay (the registry is
+append-only) and are listed in the registry test.
 """
 
 from __future__ import annotations

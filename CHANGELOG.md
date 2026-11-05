@@ -98,6 +98,9 @@ history.
   is preserved and reported with manual reinstall guidance. Installer diagnostics
   stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
 
+- Desktop discovery reads both modern and legacy registries and keeps each registry's shared model roots with its own installs. The selected Desktop install is a registry-derived candidate (the only usable install, or the most recently launched); it is not matched to a running server.
+- `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. On Linux, shared model roots are read from `settings.json` under `XDG_CONFIG_HOME`, where Desktop keeps it. A nonexistent selected workspace still exits 0 but reports `exists: false` and a `workspace_not_found` warning; discovery reports malformed or unreadable Desktop configuration, and Desktop paths that cannot be checked (permission denied, a symlink loop, no home directory), as `desktop_config_unreadable` warnings and marks inferred data roots as unverified. Both codes appear only in `data.warnings[]`; they are not error codes and `comfy discover` does not list them under `data.error_codes`.
+
 - `comfy node deps` reports malformed installed package versions as `unknown`
   consistently across supported `packaging` versions. One metadata probe
   preserves raw installed versions with or without pip. Every `===` clause

@@ -807,6 +807,23 @@ userinfo are replaced with `***`. The full traceback still goes to stderr.
 Whether anything was written depends on where the command crashed, so re-read
 state before retrying.
 
+### Warning codes
+
+A warning is an object in `data.warnings[]` of a successful envelope
+(`ok: true`, exit `0`), with its own `code` and `message`. Registered error
+codes are failure categories, so a code a command only emits as a warning is
+not registered and is not listed in `comfy --json discover` under
+`data.error_codes`. `comfy which` and `comfy env` emit two such codes:
+
+| `code`                      | Emitted when                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `workspace_not_found`       | The selected workspace does not exist on disk (`exists: false`); the message names the missing directory      |
+| `desktop_config_unreadable` | A Comfy Desktop record, settings file or path could not be read or checked; Desktop discovery may be incomplete |
+
+Some warning codes registered before this rule, such as `partial_execution`,
+are still listed under `data.error_codes`, because registered codes are never
+removed. Read a code inside `data.warnings[]` as a warning either way.
+
 ### Workflow-edit refusal fields
 
 `workflow set-widget` / `set-slot` / `ls-nodes` add these fields for agents:
