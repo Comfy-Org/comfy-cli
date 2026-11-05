@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Protocol, TypeAlias, runtime_checkable
 
 import pytest
@@ -477,6 +478,83 @@ def test_no_usable_temp_folder_is_still_reported_as_a_local_failure(tmp_path: Pa
     assert error.code == "deploy_asset_upload_failed"
     assert error.details["local_path"] == str(path)
     assert error.details["temp_dir"] is None
+
+
+def test_a_temp_folder_without_room_for_the_copy_is_refused_before_copying(tmp_path, monkeypatch):
+    """Given an approved upload Cloud lacks, When the temp folder has less free
+    space than the file, Then no byte is copied, nothing is sent, the error is
+    the local copy failure naming the file, the folder and both sizes, and the
+    empty copy is gone."""
+    # Given
+    path = tmp_path / "input.png"
+    path.write_bytes(b"abc")
+    private = tmp_path / "tmp"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    monkeypatch.setattr(
+        "comfy_cli.deploy_assets.request_json",
+        _JsonTransport([], _http_error(404, "blob_not_found")),
+    )
+    checked: list[str] = []
+
+    def two_bytes_free(folder: str) -> SimpleNamespace:
+        checked.append(folder)
+        return SimpleNamespace(total=100, used=98, free=2)
+
+    def copy_tripwire(*_args, **_kwargs):
+        raise AssertionError("a temp folder without room started the copy")
+
+    def multipart_tripwire(*_args, **_kwargs):
+        raise AssertionError("a refused copy constructed a multipart request")
+
+    monkeypatch.setattr("comfy_cli.deploy_assets.shutil.disk_usage", two_bytes_free)
+    monkeypatch.setattr("comfy_cli.deploy_assets.shutil.copyfileobj", copy_tripwire)
+    monkeypatch.setattr("comfy_cli.deploy_assets._multipart_request", multipart_tripwire)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployAssetClient(_BASE_URL, "jwt-token").resolve_asset(_request(path, allowed_hashes=frozenset({_HASH})))
+
+    # Then
+    error = exc_info.value
+    assert error.code == "deploy_asset_upload_failed"
+    assert str(path) in str(error)
+    assert checked == [str(private)]
+    assert error.details["local_path"] == str(path)
+    assert error.details["temp_dir"] == str(private)
+    assert error.details["reason"] == "the copy needs 3 bytes and 2 are free"
+    assert list(private.iterdir()) == []
+
+
+def test_a_temp_folder_whose_free_space_cannot_be_read_still_uploads(tmp_path, monkeypatch):
+    """Given an approved upload Cloud lacks, When the temp folder's free space
+    cannot be read, Then the copy is made and sent as before; a write that fails
+    still reports the local copy failure."""
+    # Given
+    path = tmp_path / "input.png"
+    path.write_bytes(b"abc")
+    private = tmp_path / "tmp"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "comfy_cli.deploy_assets.request_json",
+        _JsonTransport(events, _http_error(404, "blob_not_found")),
+    )
+    monkeypatch.setattr("comfy_cli.deploy_assets.no_redirect_urlopen", _MultipartTransport(events))
+
+    def unreadable(_folder: str) -> SimpleNamespace:
+        raise OSError(errno.ENOSYS, "Function not implemented")
+
+    monkeypatch.setattr("comfy_cli.deploy_assets.shutil.disk_usage", unreadable)
+
+    # When
+    result = DeployAssetClient(_BASE_URL, "jwt-token").resolve_asset(_request(path, allowed_hashes=frozenset({_HASH})))
+
+    # Then
+    assert events[-1] == ("POST", f"{_BASE_URL}/api/v2/assets")
+    assert (result.uploaded, result.bytes) == (1, 3)
+    assert list(private.iterdir()) == []
 
 
 def test_an_approved_path_now_holding_other_bytes_is_refused_with_their_hash(tmp_path, monkeypatch):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import mimetypes
 import os
@@ -341,14 +342,31 @@ def _snapshot_error(request: AssetResolveRequest, error: OSError) -> DeployAPIEr
     )
 
 
+def _require_free_space(snapshot: str, size: int) -> None:
+    """Refuse before copying when the temp folder cannot hold the whole file.
+
+    The copy is as large as the file. Checking first fails a large file at once,
+    rather than after it has filled the disk. A folder that fills up during the
+    copy still fails the write, which reports the same way. A folder whose free
+    space cannot be read is not checked.
+    """
+    try:
+        free = shutil.disk_usage(os.path.dirname(snapshot)).free
+    except OSError:
+        return
+    if free < size:
+        raise OSError(errno.ENOSPC, f"the copy needs {size:,} bytes and {free:,} are free", snapshot)
+
+
 @contextmanager
 def _snapshot(request: AssetResolveRequest) -> Iterator[Path]:
     """A private copy of the request's file in the system temp folder, removed on every exit.
 
     ``mkstemp`` creates it readable by this user only. The ``comfy-cli-`` prefix
-    names the tool that left it, should a crash skip the ``finally``. A failure
-    to make the copy is reported as such, naming the file; an error raised while
-    the copy is in use passes through unchanged.
+    names the tool that left it, should a crash skip the ``finally``. A folder
+    without room for the whole file is refused before any byte is copied. A
+    failure to make the copy is reported as such, naming the file; an error
+    raised while the copy is in use passes through unchanged.
     """
     try:
         descriptor, name = tempfile.mkstemp(prefix=_SNAPSHOT_PREFIX)
@@ -358,6 +376,7 @@ def _snapshot(request: AssetResolveRequest) -> Iterator[Path]:
     try:
         try:
             with os.fdopen(descriptor, "wb") as copy, request.local_path.open("rb") as original:
+                _require_free_space(name, os.fstat(original.fileno()).st_size)
                 shutil.copyfileobj(original, copy, UPLOAD_CHUNK_BYTES)
         except OSError as error:
             raise _snapshot_error(request, error) from error

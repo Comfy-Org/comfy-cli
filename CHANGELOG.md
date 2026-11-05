@@ -22,8 +22,10 @@ history.
   `deploy_asset_missing` and is not sent. A file Cloud already holds is reused
   by hash with no copy. A file it must upload is copied once to a private
   temporary file, checked against the approved hash and sent from that copy,
-  so a file rewritten in between cannot send bytes nobody approved. That
-  refusal, and the one from
+  so a file rewritten in between cannot send bytes nobody approved. A temp
+  folder without room for the whole file is refused before any byte is
+  copied, with `deploy_asset_upload_failed`, and nothing is uploaded. The
+  `--allow-upload` refusal, and the one from
   `--no-upload`, now lists every such file in `details.missing[]` (absolute
   `local_path`, `bytes`, `hash`) rather than stopping at the first, so a person
   can approve the exact files the scanner picked. When two asset folders hold
