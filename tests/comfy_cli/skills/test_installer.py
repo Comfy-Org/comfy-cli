@@ -464,6 +464,21 @@ def test_comfy_deploy_skill_covers_the_deploy_group():
         assert needle in text, f"comfy-deploy skill should mention {needle}"
 
 
+def test_deploy_skills_describe_approved_uploads():
+    """`deploy run --allow-upload` is in the usage block an agent copies from,
+    and the failure table names the other cause of `deploy_asset_upload_failed`:
+    the private temporary copy of an approved file could not be made."""
+    usage = skill_content("comfy-deploy").split("## `comfy deploy run`", 1)[1].split("```", 2)[1]
+    assert "[--allow-upload <hash> ...]" in usage
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_asset_upload_failed` |")
+    )
+    assert "temporary copy" in row
+    assert "details.temp_dir" in row
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 

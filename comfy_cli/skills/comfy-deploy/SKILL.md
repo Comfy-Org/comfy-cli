@@ -329,6 +329,7 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
 comfy deploy run [PATH] --workflow <api-workflow>.json
                         [--output-dir outputs] [--timeout <s>]
                         [--no-wait] [--no-upload] [--asset-root <dir>]
+                        [--allow-upload <hash> ...]
 ```
 
 - **API format only.** A UI-format export (the one with `nodes` and `links`) is
