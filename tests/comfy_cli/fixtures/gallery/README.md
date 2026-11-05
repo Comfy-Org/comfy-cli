@@ -35,6 +35,8 @@ cloud catalog entries (tooltips stripped, structure verbatim).
 `TextGenerate` widget and a `ComfySwitchNode` `on_false` socket) backs the
 socket-target tests in `tests/comfy_cli/test_workflow_to_api_promoted.py`; its
 node classes were added to `../object_info_subgraph_promoted.json` the same way.
+Its "Note: Model links" MarkdownNote text is blanked (a UI-only node) because
+the public-repo hygiene check reads its model links as repository references.
 
 `templates_graphic_design_recomposer.json` (two `PrimitiveNode` fan-outs and a
 labelled value widget promoted only through legacy `proxyWidgets`),
