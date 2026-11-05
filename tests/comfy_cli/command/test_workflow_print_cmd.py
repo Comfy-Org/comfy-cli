@@ -119,6 +119,15 @@ def test_print_pretty_prints_source_verbatim(capsys):
     assert "ksampler = KSampler(" in result.output and "  # 3" in result.output
 
 
+def test_print_format_json_in_pretty_mode_prints_the_records():
+    _force_pretty_renderer()
+    result = CliRunner().invoke(workflow_cmd.app, ["print", str(SD15), "--input", str(SD15_OI), "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert "ksampler = KSampler(" in result.output
+    records = json.loads(result.output[result.output.index("\n[") + 1 :])
+    assert {r["id"] for r in records} == {"3", "4", "5", "6", "7", "8", "9"}
+
+
 def test_print_select_in_pretty_mode_prints_only_the_selection():
     _force_pretty_renderer()
     result = CliRunner().invoke(workflow_cmd.app, ["print", str(SD15), "--input", str(SD15_OI), "--select", "bindings"])

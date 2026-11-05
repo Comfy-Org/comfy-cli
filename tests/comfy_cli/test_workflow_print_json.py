@@ -13,6 +13,7 @@ import copy
 import json
 import re
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -243,3 +244,25 @@ def test_gallery_records_match_printed_lines(wf_path):
     except PrintUnsupported:
         pytest.skip("fixture is refused by print")
     assert_records_match_source(res)
+
+
+def test_unreadable_saved_layout_records_positional_values(sd15_graph):
+    """A known class whose saved layout cannot be read prints ``widgets=[...]``;
+    its record carries the same values, so a consumer does not drop the node."""
+    from comfy_cli.cql.engine import SavedWidgetLayoutError
+
+    wf = json.loads((FIXTURES / "sd15_ui_workflow.json").read_text())
+    ksampler = next(n for n in wf["nodes"] if n["id"] == 3)
+
+    def order(node, graph, class_type):
+        if node.get("id") == 3:
+            raise SavedWidgetLayoutError("saved widget is absent from the current catalog")
+        return None
+
+    with mock.patch("comfy_cli.workflow_print.saved_widget_order", side_effect=order):
+        res = render_py(wf, sd15_graph)
+    rec = _by_id(res)["3"]
+    assert rec["widgets"] == {}
+    assert rec["widgets_positional"] == ksampler["widgets_values"]
+    assert "class_unknown" not in rec
+    assert any("widgets printed positionally" in w for w in res.warnings)

@@ -1265,6 +1265,11 @@ def _build_args(
         if positional:
             args.append(f"widgets={py_literal(positional)}")
         if unreadable_layout is not None:
+            # A known class reaches no class_unknown branch, so record the raw
+            # values here: the record must carry what the line prints.
+            rec = _RECORDER.get()
+            if rec is not None and positional:
+                rec.record["widgets_positional"] = positional
             warnings.append(f"node {ctx.qualify(nid)}: {unreadable_layout}; widgets printed positionally")
         else:
             warnings.append(

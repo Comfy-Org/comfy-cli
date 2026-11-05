@@ -790,6 +790,9 @@ def print_cmd(
         return emit_selected(renderer, select_payload, select, command="workflow print")
     if renderer.is_pretty():
         typer.echo(_strip_terminal_controls(res.source), nl=False)
+        if fmt == "json":
+            # json.dumps escapes control characters, so no stripping is needed.
+            typer.echo(json.dumps(res.nodes, indent=2))
         for w in warnings:
             typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
     renderer.emit(payload, command="workflow print")
