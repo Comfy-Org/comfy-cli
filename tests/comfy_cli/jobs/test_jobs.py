@@ -2676,17 +2676,79 @@ class TestFinishedRunWithNothingToDownload:
         # what the listing counted.
         assert "2 output entries" in note
         assert "key: tags" in note
-        assert "`jobs ls` counts these entries" in note
+        # The listing's ACTUAL number, by the cloud rule, not a vague "it
+        # counts these": a reconciliation that quotes the wrong number is worse
+        # than none.
+        assert "`jobs ls` reports 2 for this run" in note
         assert "not a file this tool failed to fetch" in note
+
+    def test_the_reconciliation_uses_the_listing_rule_of_the_source_it_read(self, monkeypatch):
+        """The two listings do not count alike: cloud's `outputs_count` takes
+        every non-null item under every key bar `animated`/`result`, while the
+        local listing takes `len()` of the five media keys with nulls included
+        and ignores `tags` entirely. This note is emitted from both snapshots,
+        so quoting cloud's rule on a local record would state a number the
+        local `jobs ls` does not show — the same class of mismatch the note
+        exists to remove."""
+        tags = {"9": {"tags": ["1girl", "solo"]}}
+        nulls = {"9": {"images": [None]}}
+
+        # Local: `tags` is not counted there, so there is no count to reconcile
+        # and the sentence stays off …
+        note = jobs_mod._nothing_to_show_note("completed", tags, where="local")
+        assert note is not None and "jobs ls" not in note
+        # … while a null media item IS counted locally, so it is reconciled.
+        note = jobs_mod._nothing_to_show_note("completed", nulls, where="local")
+        assert "`jobs ls` reports 1 for this run" in note
+
+        # Cloud is the mirror image of both.
+        assert "`jobs ls` reports 2 for this run" in jobs_mod._nothing_to_show_note("completed", tags)
+        assert "jobs ls" not in jobs_mod._nothing_to_show_note("completed", nulls)
+
+    def test_a_legacy_result_path_string_is_a_report_not_an_empty_completion(self):
+        """`extract_output_entries` resolves a `result` item that is a dict with
+        a `filename`, so what is left under that key is a bare PreviewUI3D path
+        string: unreadable here, and still a report. Counting it toward the
+        entry total is what keeps the rule that a run which reported something
+        is never told it reported nothing.
+
+        Neither listing counts `result`, so there is no count to reconcile; and
+        `None` there means "no background image was supplied", which is not a
+        dropped output and must not be counted as one."""
+        note = jobs_mod._nothing_to_show_note("completed", {"5": {"result": ["mesh.glb", "bg.png"]}})
+        assert note is not None
+        assert "2 output entries" in note
+        assert "key: result" in note
+        assert "jobs ls" not in note
+        assert "null entry" not in note
+        assert note != jobs_mod._EMPTY_COMPLETION_NOTE
+
+        # `None` alone under `result` is an absent background, not a report.
+        assert jobs_mod._nothing_to_show_note("completed", {"5": {"result": [None]}}) == (
+            jobs_mod._EMPTY_COMPLETION_NOTE
+        )
+
+    def test_a_present_but_falsy_payload_is_a_report(self):
+        """`{"text": ""}` is a node that reported, badly. Testing truthiness
+        instead of absence would send it to "reported no outputs … change the
+        seed", which is advice for a run that produced nothing."""
+        note = jobs_mod._nothing_to_show_note("completed", {"7": {"text": ""}})
+        assert note is not None
+        assert "1 output entry" in note
+        assert note != jobs_mod._EMPTY_COMPLETION_NOTE
 
     def test_a_null_output_entry_is_named_as_a_dropped_upload(self, monkeypatch):
         """The one shape where silence is worst: a hosted deployment persists
         `null` in a node's array for an output it recorded and then could not
-        upload.
-        Both counts then read zero — so there is no numeric disagreement to
-        notice — and the run still arrives as a bare `completed` with
-        `outputs: []` and no error anywhere. Named as a possible cause, not an
-        established one: a null item is the shape, not the proof.
+        upload. By cloud's rule both counts then read zero — so there is no
+        numeric disagreement to notice — and the run still arrives as a bare
+        `completed` with `outputs: []` and no error anywhere.
+
+        It gets its OWN note, because this is the one case where something went
+        wrong rather than merely being unreadable here. So it does not say
+        flatly that this is not a service outage (an output that never stored
+        IS a failure of the run), and it does not claim another read cannot
+        help, since this payload cannot prove the record had settled.
 
         Driven through the LOCAL snapshot because that path runs the real
         extractors (the cloud fake in this file indexes `item["filename"]`)."""
@@ -2710,14 +2772,20 @@ class TestFinishedRunWithNothingToDownload:
         assert snap["outputs"] == []
         note = snap["note"]
         assert "no file reference at all (a null entry)" in note
-        assert "upload did not land" in note
-        assert "a possible cause here, not an established one" in note
-        assert "not a service outage" in note
-        # Zero on both sides here, so there is no count to reconcile and the
-        # sentence that would reconcile one must stay off.
-        assert "jobs ls" not in note
-        # And it must not claim the run reported nothing: it reported an entry.
+        assert "Nothing in this record can be downloaded" in note
+        assert "Re-read the job once in case its record had not settled" in note
+        assert "a failure of this run rather than a service outage" in note
+        # It must not claim the run reported nothing: it reported an entry.
         assert "reported no outputs" not in note
+        # Nor that waiting or another read is pointless, which the unresolved
+        # note does say and this one must not.
+        assert "waiting will not change that" not in note
+        # The upload explanation is hosted behaviour. On a local record it
+        # would be inventing a cause for a shape local ComfyUI does not write.
+        assert "upload did not land" not in note
+        assert "upload did not land" in jobs_mod._nothing_to_show_note(
+            "completed", {"9": {"images": [None]}}, where="cloud"
+        )
 
     def test_an_output_this_tool_can_show_gets_no_note(self, monkeypatch):
         """The gate is "is there anything to show", so a resolvable file or
@@ -2759,7 +2827,35 @@ class TestFinishedRunWithNothingToDownload:
         # Four keys at most, each bounded, and the truncation is visible.
         assert ", …)" in note
         assert "b" * 500 not in note
-        assert len(note) < 700
+        assert len(note) < 800
+
+    def test_key_collection_sanitizes_then_dedupes_then_caps_in_that_order(self):
+        """Order matters three ways, and getting any of them wrong is visible
+        in the output:
+
+        * a key that sanitizes to nothing must not occupy one of the four
+          slots, and must not be what triggers the overflow marker;
+        * two keys differing only in stripped bytes must not render as
+          `a, a` — dedupe runs on the sanitized name;
+        * collection must stay bounded, so a record with very many distinct
+          unresolvable keys cannot make note generation quadratic. Capping
+          after an unbounded linear-scan dedupe did exactly that."""
+        # One printable key plus one that is pure control bytes: one key named,
+        # and no spurious ellipsis for the one that vanished.
+        note = jobs_mod._nothing_to_show_note("completed", {"1": {"\x1b[31m": ["x"], "ok": ["y"]}})
+        assert "(key: ok)" in note
+        assert "…" not in note
+
+        # Same sanitized name twice: named once.
+        note = jobs_mod._nothing_to_show_note("completed", {"1": {"tags": ["x"], "tags\x07": ["y"]}})
+        assert "(key: tags)" in note
+
+        # Many distinct keys: four named, the rest marked, and the note stays
+        # small regardless of how many there were.
+        note = jobs_mod._nothing_to_show_note("completed", {"1": {f"k{i:04d}": ["x"] for i in range(2000)}})
+        named = note.split("(keys: ", 1)[1].split(")", 1)[0]
+        assert named == "k0000, k0001, k0002, k0003, …"
+        assert len(note) < 800
 
     def test_a_non_dict_node_entry_is_reported_rather_than_dropped(self):
         """A node entry that is not a map at all is unusable and is still a

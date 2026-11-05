@@ -547,6 +547,30 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
     return sorted(by_id.values(), key=sort_key, reverse=False)
 
 
+# The five keys the LOCAL listing counts, and the only ones it counts.
+_LOCAL_LISTING_MEDIA_KEYS = ("images", "gifs", "videos", "audio", "files")
+
+
+def _media_item_count(outputs: Any) -> int:
+    """The local `jobs ls` output count for a `/history` record's outputs map.
+
+    `len()` of the five media keys, nulls included, every other key ignored.
+    Shared with `_nothing_to_show_note` rather than inlined at the one call
+    site, so the note that reconciles this number and the row that reports it
+    cannot drift onto two different rules.
+    """
+    if not isinstance(outputs, dict):
+        return 0
+    return sum(
+        len(items)
+        for v in outputs.values()
+        if isinstance(v, dict)
+        for key in _LOCAL_LISTING_MEDIA_KEYS
+        for items in [v.get(key) or []]
+        if isinstance(items, list)
+    )
+
+
 def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
     """Pull running + pending + recent history; merge into a single ordered list."""
     rows: list[JobRow] = []
@@ -603,15 +627,7 @@ def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
             if isinstance(msg, list) and msg and msg[0] == "execution_error":
                 status_str = "error"
                 break
-        outputs = body.get("outputs") or {}
-        output_count = sum(
-            len(items)
-            for v in outputs.values()
-            if isinstance(v, dict)
-            for key in ("images", "gifs", "videos", "audio", "files")
-            for items in [v.get(key) or []]
-            if isinstance(items, list)
-        )
+        output_count = _media_item_count(body.get("outputs") or {})
         wf = body.get("prompt") or [None, None, None, None]
         wf_dict = wf[2] if isinstance(wf, list) and len(wf) > 2 else None
         rows.append(
@@ -968,14 +984,16 @@ _EMPTY_COMPLETION_NOTE = (
 # resolves to a file this tool can fetch or to text it can read.
 #
 # It is also the half of "the listing and the status must agree on the output
-# count" that is fixable in this tool, and the reason they can disagree. `jobs ls`
-# reports cloud's `/api/jobs` `outputs_count`, which counts every non-null item
-# under every node-output key (bar `animated`/`result`), while `jobs status`
-# reports what the extractors can turn into a `/view` URL or a text string —
-# dicts carrying a `filename`, and a `text` list of `str`. The two vocabularies
-# are not the same, so one job legitimately reads as `outputs: 1` in the
-# listing and `outputs: []` in the status, with nothing said about why. That
-# contradiction is what the reported session read as a dead generation service.
+# count" that is fixable in this tool, and the reason they can disagree.
+# `jobs ls` counts raw record items — cloud's `/api/jobs` `outputs_count` takes
+# every non-null item under every node-output key bar `animated`/`result`, and
+# the local listing takes `len()` of the five media keys, nulls included — while
+# `jobs status` reports what the extractors can turn into a `/view` URL or a
+# text string: dicts carrying a `filename`, and a `text` list of `str`. The
+# vocabularies are not the same, so one job legitimately reads as `outputs: 1`
+# in the listing and `outputs: []` in the status, with nothing said about why.
+# That contradiction is what the reported session read as a dead generation
+# service.
 #
 # Same discipline as the note above: it states what the record carries and
 # names a possible cause as possible.
@@ -983,22 +1001,30 @@ _EMPTY_COMPLETION_NOTE = (
 # * "cannot resolve", not "produced nothing" — the entry IS a report, in a
 #   shape this tool does not consume (a tagger's `{"tags": [...]}`, a
 #   bare-string `text`, a dict with no `filename`).
-# * a null item is called out separately because a hosted deployment writes
-#   one into the node's array for an output it recorded and then could not
-#   upload, and that is the one case where silence is worst. Named as a
-#   possible cause, since the null is the shape and not the proof.
-# * it reconciles the count explicitly, because an agent that sees 1 in the
-#   listing and 0 here will otherwise go looking for a lost file.
+# * a null item gets its own note, because it is the one case where something
+#   went wrong rather than merely being unreadable here: a hosted deployment
+#   writes `null` into the array for an output it recorded and could not
+#   upload. That note does NOT end in "this is not a service outage" — a run
+#   whose own output never stored is a failure of that run, just not a general
+#   outage — and does not claim re-reading cannot help, since this payload
+#   cannot prove the record had settled.
+# * it reconciles the listing's count explicitly, with THAT listing's own rule
+#   and its actual number, because an agent that sees 1 there and 0 here will
+#   otherwise go looking for a lost file.
 _UNRESOLVED_OUTPUTS_NOTE = (
-    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}.{dropped} "
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}. "
     "There is nothing to download, and waiting will not change that.{listed} This is not a service outage."
 )
-_UNRESOLVED_DROPPED_CLAUSE = (
-    " {subject} no file reference at all (a null entry), which is what a recorded output whose upload did "
-    "not land leaves behind — a possible cause here, not an established one."
+_DROPPED_OUTPUTS_NOTE = (
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}. "
+    "{subject} no file reference at all (a null entry){cause}. Nothing in this record can be "
+    "downloaded.{listed} Re-read the job once in case its record had not settled; past that, an output "
+    "was recorded and no file came with it, which is a failure of this run rather than a service outage."
 )
+_DROPPED_CAUSE_CLOUD = ", which is what a hosted output whose upload did not land leaves behind"
 _UNRESOLVED_LISTED_CLAUSE = (
-    " `jobs ls` counts these entries, so an output count above zero there is not a file this tool failed to fetch."
+    " `jobs ls` reports {count} for this run, counting entries this payload cannot resolve, so that "
+    "count is not a file this tool failed to fetch."
 )
 
 # Keys are server-supplied. Bounded and sanitized before they enter the note:
@@ -1008,20 +1034,53 @@ _MAX_NOTE_KEYS = 4
 _MAX_NOTE_KEY_CHARS = 24
 
 
-def _nothing_to_show_note(status: Any, record_outputs: Any) -> str | None:
+def _listing_output_count(record_outputs: dict, where: str) -> int:
+    """What `jobs ls` would report for this record, by THAT listing's own rule.
+
+    The two listings do not count alike, so a note that reconciles one number
+    has to know which one it is reconciling:
+
+    * cloud — `/api/jobs` `outputs_count`, written by the server from
+      `common.CountOutputs`: every NON-NULL item under every node-output key
+      except `animated`/`result`.
+    * local — `_local_jobs_rows`' own sum: `len()` of the five media keys,
+      NULLS INCLUDED, and no other key counted.
+
+    Stating the wrong one is worse than saying nothing: locally a
+    `{"tags": [...]}` run would be told the listing counts entries it shows as
+    0, and a `{"images": [None]}` run shows 1 there while the cloud rule says 0.
+    """
+    if where == "local":
+        return _media_item_count(record_outputs)
+    count = 0
+    for node_output in record_outputs.values():
+        if not isinstance(node_output, dict):
+            continue
+        for key, items in node_output.items():
+            if key in ("animated", "result") or not isinstance(items, list):
+                continue
+            count += sum(1 for item in items if item is not None)
+    return count
+
+
+def _nothing_to_show_note(status: Any, record_outputs: Any, *, where: str = "cloud") -> str | None:
     """What a completed run with nothing to show means, or ``None``.
 
-    Two notes, because there are two observations and they are not the same
-    claim: the record reported no output items at all
-    (``_EMPTY_COMPLETION_NOTE``), or it reported items none of which this tool
-    can resolve (``_UNRESOLVED_OUTPUTS_NOTE``). Both end in "this is not a
-    service outage", which is the sentence the reported session needed.
+    Three notes, because there are three observations and they are not the same
+    claim:
 
-    The item census uses the SAME vocabulary as cloud's ``/api/jobs``
-    ``outputs_count`` (``common.CountOutputs``): per node, per list-valued key
-    other than ``animated``/``result``, every non-null item. That is deliberate
-    — it is what lets this note explain the listing's count instead of adding a
-    third number.
+    * the record reported no output items at all — ``_EMPTY_COMPLETION_NOTE``;
+    * it reported items none of which this tool can resolve —
+      ``_UNRESOLVED_OUTPUTS_NOTE``;
+    * at least one of those items is ``null``, i.e. an output the producer
+      recorded with no file reference — ``_DROPPED_OUTPUTS_NOTE``, which is the
+      only one of the three where something went wrong rather than merely being
+      unreadable here, and is correspondingly the only one that does not end
+      "this is not a service outage" flatly or claim another read cannot help.
+
+    ``where`` selects the listing whose count is reconciled, and is why it is a
+    parameter rather than a constant: this is called from the local snapshot as
+    well as the cloud one. See ``_listing_output_count``.
 
     Decided on the RAW record outputs rather than on this module's extracted
     `outputs` / `text_outputs` alone, for two reasons, both of which are ways
@@ -1061,46 +1120,75 @@ def _nothing_to_show_note(status: Any, record_outputs: Any) -> str | None:
     if extract_output_entries(record) or extract_text_outputs(record):
         return None
 
-    # Three counts, because they answer three different questions and
-    # collapsing them is how a note starts asserting more than it saw:
+    # Two counts, because they answer two different questions and collapsing
+    # them is how a note starts asserting more than it saw:
     #
     # * `total` — everything the record reported that this tool cannot use. It
     #   is what the note's "N output entries" states, so a payload in a shape
-    #   nothing here reads (a bare-string `text`, a non-dict node entry) has to
-    #   count: it IS a report.
-    # * `listed` — the subset cloud's `/api/jobs` `outputs_count` also counts
-    #   (a non-null item inside a list). The `jobs ls` reconciliation sentence
-    #   is appended only when this is nonzero, since otherwise the listing
-    #   reports 0 as well and there is no count to reconcile.
-    # * `dropped` — null items, the shape a recorded-but-unuploaded output
-    #   leaves behind.
+    #   nothing here reads has to count: it IS a report. That includes a
+    #   bare-string `text`, a non-dict node entry, a legacy `result` path
+    #   string, and a present-but-falsy value like `{"text": ""}`.
+    # * `dropped` — null items, an output recorded with no file reference.
+    #
+    # The listing's own count is NOT derived from these; it is computed by that
+    # listing's rule in `_listing_output_count`, so the reconciliation sentence
+    # quotes the number the caller would actually see.
     total = 0
-    listed = 0
     dropped = 0
     keys: list[str] = []
+    seen_keys: set[str] = set()
+    extra_keys = False
 
     def note_key(key: Any) -> None:
-        text = str(key)
-        if text not in keys:
-            keys.append(text)
+        # Sanitize and bound FIRST, then dedupe, then cap — in that order, so a
+        # key that sanitizes to nothing cannot occupy a slot or trigger the
+        # overflow marker, two keys that differ only in stripped bytes cannot
+        # render as `a, a`, and collection stays O(1) per item however many
+        # distinct keys a hostile or broken record carries.
+        nonlocal extra_keys
+        name = sanitize(str(key))[:_MAX_NOTE_KEY_CHARS]
+        if not name or name in seen_keys:
+            return
+        if len(keys) >= _MAX_NOTE_KEYS:
+            extra_keys = True
+            return
+        seen_keys.add(name)
+        keys.append(name)
 
     for node_output in record_outputs.values():
         if not isinstance(node_output, dict):
             # A node entry that is not a map at all. Unusable, and still a
-            # report — there is no key to name for it.
-            if node_output:
+            # report — there is no key to name for it. An empty container is
+            # not a report, the same way an empty array under a key is not.
+            if node_output is not None and node_output != [] and node_output != ():
                 total += 1
             continue
         for key, items in node_output.items():
-            # `animated` holds `(True,)` flags and `result` holds the legacy
-            # PreviewUI3D strings; cloud's count skips both, so this does too.
-            if key in ("animated", "result"):
+            # `animated` holds `(True,)` boolean flags, which neither listing
+            # counts and which are not outputs in any reading.
+            if key == "animated":
+                continue
+            if key == "result":
+                # Legacy PreviewUI3D: a dict with a `filename` here IS resolved
+                # by the extractor (so this function already returned), and
+                # what is left is bare path strings — a report, in a shape
+                # nothing here reads. `None` under this key means "no
+                # background supplied", not a dropped output, so it is skipped
+                # rather than counted as either. Neither listing counts
+                # `result` at all, which is why these never reach `dropped` or
+                # the reconciliation.
+                if isinstance(items, list):
+                    present = [item for item in items if item is not None]
+                    if present:
+                        total += len(present)
+                        note_key(key)
                 continue
             if not isinstance(items, list):
                 # A non-list payload under an output key: `{"text": "a
-                # description"}` is the shape the text extractor misses. Cloud
-                # does not count it either, so it is not `listed`.
-                if items:
+                # description"}` is the shape the text extractor misses.
+                # Tested for absence, not for truthiness — `{"text": ""}` is a
+                # node that reported, badly, and must not be called empty.
+                if items is not None:
                     total += 1
                     note_key(key)
                 continue
@@ -1108,8 +1196,6 @@ def _nothing_to_show_note(status: Any, record_outputs: Any) -> str | None:
                 total += 1
                 if item is None:
                     dropped += 1
-                else:
-                    listed += 1
                 note_key(key)
 
     if total == 0:
@@ -1118,23 +1204,26 @@ def _nothing_to_show_note(status: Any, record_outputs: Any) -> str | None:
         return _EMPTY_COMPLETION_NOTE
 
     entries = "1 output entry" if total == 1 else f"{total} output entries"
-    shown = [sanitize(k)[:_MAX_NOTE_KEY_CHARS] for k in keys[:_MAX_NOTE_KEYS]]
-    shown = [k for k in shown if k]
     keys_clause = ""
-    if shown:
-        label = "key" if len(shown) == 1 else "keys"
-        more = ", …" if len(keys) > len(shown) else ""
-        keys_clause = f" ({label}: {', '.join(shown)}{more})"
-    dropped_clause = ""
-    if dropped:
-        if dropped == total:
-            subject = "It carries" if total == 1 else "All of them carry"
-        else:
-            subject = "1 of them carries" if dropped == 1 else f"{dropped} of them carry"
-        dropped_clause = _UNRESOLVED_DROPPED_CLAUSE.format(subject=subject)
-    listed_clause = _UNRESOLVED_LISTED_CLAUSE if listed else ""
-    return _UNRESOLVED_OUTPUTS_NOTE.format(
-        entries=entries, keys=keys_clause, dropped=dropped_clause, listed=listed_clause
+    if keys:
+        label = "key" if len(keys) == 1 else "keys"
+        more = ", …" if extra_keys else ""
+        keys_clause = f" ({label}: {', '.join(keys)}{more})"
+    listing = _listing_output_count(record_outputs, where)
+    listed_clause = _UNRESOLVED_LISTED_CLAUSE.format(count=listing) if listing else ""
+
+    if not dropped:
+        return _UNRESOLVED_OUTPUTS_NOTE.format(entries=entries, keys=keys_clause, listed=listed_clause)
+    if dropped == total:
+        subject = "It carries" if total == 1 else "All of them carry"
+    else:
+        subject = "1 of them carries" if dropped == 1 else f"{dropped} of them carry"
+    # The upload explanation is a hosted-deployment behaviour; naming it on a
+    # local record would be inventing a cause for a shape local ComfyUI does
+    # not produce.
+    cause = _DROPPED_CAUSE_CLOUD if where != "local" else ""
+    return _DROPPED_OUTPUTS_NOTE.format(
+        entries=entries, keys=keys_clause, subject=subject, cause=cause, listed=listed_clause
     )
 
 
@@ -1538,7 +1627,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
         "host": host,
         "port": port,
     }
-    if note := _nothing_to_show_note(status, body.get("outputs")):
+    if note := _nothing_to_show_note(status, body.get("outputs"), where="local"):
         snap["note"] = note
     return snap
 
@@ -3163,7 +3252,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
-    if note := _nothing_to_show_note(state, record_outputs):
+    if note := _nothing_to_show_note(state, record_outputs, where="cloud"):
         snap["note"] = note
     return snap
 
