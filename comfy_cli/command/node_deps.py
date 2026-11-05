@@ -168,8 +168,8 @@ def _probe_env() -> dict[str, str]:
     return env
 
 
-def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None, bool]:
-    """Run one installed-packages probe; return ``(versions, error, exited_nonzero)``.
+def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None]:
+    """Run one installed-packages probe; return ``(versions, error)``.
 
     The probe inherits the caller's directory and environment, except that
     ``PYTHONPATH`` entries naming that directory are left out (see
@@ -188,16 +188,16 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
         )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip().splitlines()
-        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else ""), True
+        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else "")
     except (subprocess.SubprocessError, OSError) as e:
-        return None, f"could not run {label}: {e}", False
+        return None, f"could not run {label}: {e}"
 
     try:
         rows = json.loads(proc.stdout)
     except ValueError as e:
-        return None, f"could not parse {label} output: {e}", False
+        return None, f"could not parse {label} output: {e}"
     if not isinstance(rows, list):
-        return None, f"{label} did not return a list", False
+        return None, f"{label} did not return a list"
 
     versions: dict[str, str] = {}
     for row in rows:
@@ -206,7 +206,7 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
         name, version = row.get("name"), row.get("version")
         if isinstance(name, str) and name:
             versions[canonicalize_name(name)] = str(version) if version is not None else ""
-    return versions, None, False
+    return versions, None
 
 
 def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
@@ -218,8 +218,7 @@ def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
     probe is not retried; the map is ``None`` with a human-readable reason so
     the report can retain requirements with unknown installed versions.
     """
-    versions, error, _ = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
-    return versions, error
+    return _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
 
 
 # ---------------------------------------------------------------------------

@@ -509,11 +509,18 @@ def test_probe_env_drops_only_pythonpath_entries_naming_the_caller_directory(tmp
     caller, other = tmp_path / "caller", tmp_path / "other"
     (caller / "overlay").mkdir(parents=True)
     other.mkdir()
+    # Creating a symlink needs a privilege Windows does not always grant; without
+    # it, the symlink entry is left out and every other entry is still checked.
     link = tmp_path / "caller-link"
-    link.symlink_to(caller, target_is_directory=True)
+    try:
+        link.symlink_to(caller, target_is_directory=True)
+    except OSError:
+        link_entries = []
+    else:
+        link_entries = [str(link)]
     monkeypatch.chdir(caller)
     monkeypatch.setenv(
-        "PYTHONPATH", os.pathsep.join([".", "", str(caller), str(link), "overlay", str(other), "absent"])
+        "PYTHONPATH", os.pathsep.join([".", "", str(caller), *link_entries, "overlay", str(other), "absent"])
     )
     monkeypatch.setenv("COMFY_PROBE_ENV_MARKER", "kept")
 
