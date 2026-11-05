@@ -1,4 +1,4 @@
-# ADR-BUILD-0008: Let a Dry Run Check Public Pins with the Builder
+# ADR-BUILD-VALIDATION-0008: Let a Dry Run Check Public Pins with the Builder
 
 Date: 2026-11-04
 
