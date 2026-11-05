@@ -7,9 +7,9 @@ Date: 2026-11-05
 Proposed
 
 Relation: Builds on ADR-AUTOMATION-0003. `comfy workflow check` emits one
-`envelope/1` envelope with its own `workflow_check` data schema. Follows
-ADR-CONVERSION-0004: a save is read through the save-to-API converter, and no
-node type gets a rule of its own.
+`envelope/1` envelope with its own `workflow_check` data schema. Builds on
+ADR-CONVERSION-0004: a save is still read only through the save-to-API
+converter, and no node type gets a rule of its own.
 
 ## Context
 
