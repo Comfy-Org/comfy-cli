@@ -271,6 +271,10 @@ def test_non_pep440_installed_version_is_unknown_not_a_crash(tmp_path, monkeypat
         ("===1.0", "1.0.0", "mismatch"),
         ("===1.0", "1.0+local", "mismatch"),
         ("===1.0.*", "1.0.1", "mismatch"),
+        # Two literals that normalize alike are still two exact-text tests.
+        ("===v1.0,===1.0", "v1.0", "mismatch"),
+        ("===1.0,===v1.0", "v1.0", "mismatch"),
+        ("===v1.0,===V1.0", "v1.0", "satisfied"),
     ],
 )
 def test_arbitrary_equality_compares_raw_installed_values(specifier, installed, expected):
@@ -304,6 +308,7 @@ def test_non_pep440_installed_version_stays_unknown_with_nonliteral_constraints(
         ("===1.0rc1,<1.0", "1.0rc1", "mismatch"),
         ("===other,>=1", "foobar", "unknown"),
         (">=1,===other", "foobar", "unknown"),
+        ("===v1.0,>=1,===1.0", "v1.0", "mismatch"),
     ],
 )
 def test_mixed_constraints_preserve_raw_literals_and_semantic_clauses(specifier, installed, expected):
@@ -375,6 +380,7 @@ def test_report_uses_one_raw_metadata_probe_with_or_without_pip(
     assert calls[0][0] == [python, "-c", node_deps_cmd._METADATA_LIST_SCRIPT]
     assert calls[0][1]["timeout"] == 60
     assert calls[0][1]["check"] is True
+    assert calls[0][1]["cwd"] != os.getcwd()
 
 
 def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(tmp_path, monkeypatch, isolated_probe_python):
@@ -402,6 +408,29 @@ def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(tmp_path, mo
     assert reqs["foo-pack===v1.0"]["status"] == "satisfied"
     assert reqs["foo-pack>=1"]["status"] == "satisfied"
     assert reqs["absent"]["status"] == "missing"
+
+
+def test_legacy_editable_is_found_when_run_from_its_source_directory(tmp_path, monkeypatch, isolated_probe_python):
+    """An install listed in a ``.pth`` file stays visible even when it is the caller's directory."""
+    python, site = isolated_probe_python
+    source = tmp_path / "editable-source"
+    (source / "foo").mkdir(parents=True)
+    (source / "foo" / "__init__.py").write_text("")
+    (source / "foo.egg-info").mkdir()
+    (source / "foo.egg-info" / "PKG-INFO").write_text("Metadata-Version: 1.2\nName: foo\nVersion: 1.5\n")
+    (site / "easy-install.pth").write_text(f"{source}\n")
+    (site / "foo.egg-link").write_text(f"{source}\n.\n")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo>=1\n")
+    monkeypatch.chdir(source)
+    monkeypatch.setenv("PYTHONPATH", "")
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo>=1"]["installed"] == "1.5"
+    assert reqs["foo>=1"]["status"] == "satisfied"
 
 
 def test_pip_list_runs_once_for_the_whole_report(workspace, fake_pip):

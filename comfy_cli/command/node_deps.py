@@ -105,11 +105,15 @@ MAX_REGISTRY_ERROR_CHARS = 300
 # `pip list` normalizes valid versions, losing spellings needed by `===`.
 # The JSON shape stays [{"name", "version"}], with no pip dependency.
 #
-# - Before anything that could be shadowed is imported, every ``sys.path`` entry
-#   naming the caller's directory is dropped (the ``-c`` ``''`` entry and e.g.
-#   ``PYTHONPATH=.``), so a stray ``json.py`` or ``*.dist-info`` there can't leak
-#   in. ``sys`` is built in and ``os`` is already loaded at startup, so neither
-#   import reads the path.
+# - The probe runs from a fresh empty directory, not the caller's, so the
+#   ``-c`` ``''`` entry and relative entries such as ``PYTHONPATH=.`` name an
+#   empty folder: a stray ``json.py`` or ``*.dist-info`` where the command was
+#   run can't leak in. Before anything that could be shadowed is imported, those
+#   entries are dropped as well. ``sys`` is built in and ``os`` is already
+#   loaded at startup, so neither import reads the path.
+# - Absolute entries an installation put on ``sys.path`` stay, even when one is
+#   the caller's directory: a legacy editable install lists its source folder in
+#   ``easy-install.pth``, and running from that folder must still find it.
 # - A dist whose metadata can't be read is skipped, as ``pip list`` skips it,
 #   rather than failing the whole listing.
 # - ``~``-prefixed dist-info dirs (pip's leftovers from an interrupted
@@ -139,17 +143,25 @@ print(json.dumps(rows))
 
 
 def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None, bool]:
-    """Run one installed-packages probe; return ``(versions, error, exited_nonzero)``."""
+    """Run one installed-packages probe; return ``(versions, error, exited_nonzero)``.
+
+    The probe runs from an empty temporary directory so the caller's directory
+    never reaches its ``sys.path`` through ``''`` or a relative entry.
+    """
+    import tempfile
+
     from packaging.utils import canonicalize_name
 
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=PIP_LIST_TIMEOUT_SECONDS,
-            check=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="comfy-cli-node-deps-", ignore_cleanup_errors=True) as probe_cwd:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=PIP_LIST_TIMEOUT_SECONDS,
+                check=True,
+                cwd=probe_cwd,
+            )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip().splitlines()
         return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else ""), True
@@ -220,6 +232,22 @@ def _pyproject_lines(path: Path) -> list[str]:
     return [d.strip() for d in deps if isinstance(d, str) and d.strip()]
 
 
+# One ``===`` clause and its literal. The literal stops at whitespace, ``,``,
+# ``;`` or ``)``, as packaging splits and parses it.
+_ARBITRARY_EQUALITY_RE = re.compile(r"===\s*([^\s,;)]*)")
+
+
+def _arbitrary_equality_literals(raw: str) -> list[str]:
+    """Return every ``===`` literal in a requirement line, as written.
+
+    ``SpecifierSet`` keeps only one of two clauses whose versions normalize
+    alike: ``foo===v1.0,===1.0`` holds just ``===v1.0``. Each literal is its
+    own exact-text test, so they are read from the line itself. The marker
+    after ``;`` is left out, since a marker can use ``===`` too.
+    """
+    return _ARBITRARY_EQUALITY_RE.findall(raw.split(";", 1)[0])
+
+
 def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, Any]:
     """Turn one declared requirement line into a report row."""
     from packaging.requirements import InvalidRequirement, Requirement
@@ -267,15 +295,14 @@ def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, 
     else:
         from packaging.version import InvalidVersion, Version
 
+        semantic = [spec for spec in req.specifier if spec.operator != "==="]
+        literals = _arbitrary_equality_literals(raw)
         try:
             # Validate before any clause can short-circuit a mixed constraint.
-            if any(spec.operator != "===" for spec in req.specifier):
+            if semantic:
                 Version(installed)
-            contains = all(
-                installed.lower() == spec.version.lower()
-                if spec.operator == "==="
-                else spec.contains(installed, prereleases=True)
-                for spec in req.specifier
+            contains = all(installed.lower() == literal.lower() for literal in literals) and all(
+                spec.contains(installed, prereleases=True) for spec in semantic
             )
         except InvalidVersion:
             # A dist whose recorded version isn't PEP 440 (rare, but a broken
