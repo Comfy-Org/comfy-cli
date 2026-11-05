@@ -9,6 +9,7 @@ verified manually.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -765,6 +766,9 @@ class TestSave:
 
 _FLAG_OFF = {"cli_cloud_save_enabled": False}
 _FLAG_ON = {"cli_cloud_save_enabled": True}
+# An editor-format workflow: the only kind the sidebar can open.
+_UI_DATA = {"nodes": [{"id": 1, "type": "KSampler", "widgets_values": [20]}], "links": [], "version": 0.4}
+# An API-format workflow: saved the record-only way even with the flag on.
 _WF_DATA = {"1": {"class_type": "KSampler", "inputs": {"steps": 20}}}
 _RECORD_CREATED = {"id": "new-uuid", "name": "flux", "latest_version": 1}
 _WORKSPACE = {"id": "ws_123", "name": "Personal", "type": "personal", "role": "owner"}
@@ -794,29 +798,64 @@ def _patch_cloud(monkeypatch: pytest.MonkeyPatch, handler):
     return calls
 
 
-def _sidebar(features=_FLAG_ON, *, taken=(), conflict=(), workspace=_WORKSPACE):
-    """A fake Cloud: ``taken`` folders list files, a POST into a ``conflict`` folder gets 409."""
+def _sidebar(
+    features=_FLAG_ON,
+    *,
+    taken=(),
+    nested=(),
+    conflict=(),
+    records=(),
+    workspace=_WORKSPACE,
+    lookup_after_write=None,
+):
+    """A fake Cloud.
+
+    ``taken`` folders list a file, ``nested`` folders hold only a file in a
+    subfolder (listed only with ``recurse=true``), a POST into a ``conflict``
+    folder gets 409, and ``records`` are the names of live workflow records.
+    A written file is mirrored into a record named after its path, as Cloud
+    does. ``lookup_after_write``, when set, answers the record search once a
+    file has been written.
+    """
     import urllib.parse
+
+    state = {"records": list(records), "written": False}
 
     def handler(method, url, body):
         parsed = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parsed.query)
         if parsed.path == "/api/features":
             return features
         if parsed.path == "/api/workspaces/current":
             return workspace
         if parsed.path == "/api/userdata" and method == "GET":
-            folder = urllib.parse.parse_qs(parsed.query)["dir"][0].removeprefix("workflows/")
+            assert query.get("recurse") == ["true"]
+            folder = query["dir"][0].removeprefix("workflows/")
             if folder in taken:
-                return [f"{folder}/old.json"]
+                return [{"path": "old.json"}]
+            if folder in nested:
+                return [{"path": "nested/old.json"}]
             return _http_error(404)
         if parsed.path.startswith("/api/userdata/") and method == "POST":
             key = urllib.parse.unquote(parsed.path.removeprefix("/api/userdata/"))
-            assert urllib.parse.parse_qs(parsed.query) == {"overwrite": ["false"]}
+            assert query == {"overwrite": ["false"]}
             folder = key.split("/")[1]
             if folder in conflict:
                 return _http_error(409)
+            state["written"] = True
+            state["records"].append(key.removeprefix("workflows/").removesuffix(".json"))
             return {"path": key, "size": len(body), "modified": 1700000000000}
-        if parsed.path == "/api/workflows":
+        if parsed.path == "/api/workflows" and method == "GET":
+            if state["written"] and lookup_after_write is not None:
+                return lookup_after_write
+            needle = query["name"][0].lower()
+            rows = [
+                {"id": f"rec-{n}", "name": n, "latest_version": 1}
+                for n in state["records"]
+                if needle in n.lower()
+            ]
+            return {"data": rows, "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
+        if parsed.path == "/api/workflows" and method == "POST":
             return _RECORD_CREATED
         raise AssertionError(f"unexpected {method} {url}")
 
@@ -831,7 +870,7 @@ class TestSaveToSidebarFolder:
     @pytest.fixture
     def wf_path(self, tmp_path):
         p = tmp_path / "wf.json"
-        p.write_text(json.dumps(_WF_DATA, indent=2))
+        p.write_text(json.dumps(_UI_DATA, indent=2))
         return p
 
     def test_writes_the_file_into_a_new_folder_and_prints_its_link(self, cloud_target, wf_path, monkeypatch, capsys):
@@ -850,7 +889,33 @@ class TestSaveToSidebarFolder:
         assert post["url"] == "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json?overwrite=false"
         # The file's bytes go up as they are on disk; no record-only POST is made.
         assert post["body"] == wf_path.read_bytes()
-        assert not any("/api/workflows" in c["url"] for c in calls)
+
+    def test_output_keeps_the_record_id_and_version(self, cloud_target, wf_path, monkeypatch, capsys):
+        # The record-only save returned workflow_id and latest_version, and
+        # `workflow get` / `workflow delete` take that id. The sidebar save
+        # still returns them: the id of the record Cloud mirrored the file into.
+        _patch_cloud(monkeypatch, _sidebar(records={"flux/flux-old"}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["workflow_id"] == "rec-flux/flux"
+        assert env["data"]["latest_version"] == 1
+        assert env["data"]["source"] == str(wf_path)
+
+    @pytest.mark.parametrize(
+        "lookup",
+        [
+            pytest.param(_http_error(500), id="http-500"),
+            pytest.param(http.client.IncompleteRead(b"{"), id="truncated"),
+            pytest.param({"data": []}, id="not-found"),
+        ],
+    )
+    def test_an_unknown_record_still_saves_with_a_warning(self, cloud_target, wf_path, monkeypatch, capsys, lookup):
+        _patch_cloud(monkeypatch, _sidebar(lookup_after_write=lookup))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["filename"] == "workflows/flux/flux.json"
+        assert env["data"]["workflow_id"] is None
+        assert env["data"]["latest_version"] is None
+        assert [w["code"] for w in env["data"]["warnings"]] == ["workflow_record_unknown"]
 
     def test_deployment_option_goes_into_the_link(self, cloud_target, wf_path, monkeypatch, capsys):
         _patch_cloud(monkeypatch, _sidebar())
@@ -872,6 +937,54 @@ class TestSaveToSidebarFolder:
         # Spaces are %20 in the link: the editor reads a '+' as a literal plus.
         assert "workflows=flux%20%283%29" in env["data"]["url"]
         assert len(_posts(calls)) == 1
+
+    def test_a_folder_with_only_nested_files_is_taken(self, cloud_target, wf_path, monkeypatch, capsys):
+        # Without recurse=true Cloud leaves out workflows/flux/nested/old.json
+        # and answers 404, which read as an empty folder.
+        _patch_cloud(monkeypatch, _sidebar(nested={"flux"}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+
+    def test_an_existing_record_of_the_mirror_name_is_never_added_to(self, cloud_target, wf_path, monkeypatch, capsys):
+        # A record named flux/flux with no file behind it: writing
+        # workflows/flux/flux.json would add a version to it. A record whose
+        # name only contains it does not count.
+        calls = _patch_cloud(monkeypatch, _sidebar(records={"flux/flux", "Flux/Flux", "old flux/flux"}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+        assert env["data"]["workflow_id"] == "rec-flux (2)/flux"
+        (post,) = _posts(calls)
+        assert "flux%20%282%29%2Fflux.json" in post["url"]
+
+    def test_a_record_search_past_the_page_cap_counts_as_taken(self, cloud_target, wf_path, monkeypatch, capsys):
+        import urllib.parse
+
+        base = _sidebar()
+        full_page = {"data": [{"id": f"r{i}", "name": f"x flux/flux {i}"} for i in range(100)]}
+
+        def handler(method, url, body):
+            parsed = urllib.parse.urlsplit(url)
+            name = urllib.parse.parse_qs(parsed.query).get("name", [""])[0]
+            if parsed.path == "/api/workflows" and method == "GET" and name == "flux/flux":
+                return full_page
+            return base(method, url, body)
+
+        _patch_cloud(monkeypatch, handler)
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+
+    def test_a_failed_record_search_saves_nothing(self, cloud_target, wf_path, monkeypatch, capsys):
+        base = _sidebar()
+
+        def handler(method, url, body):
+            if method == "GET" and "/api/workflows?" in url:
+                return _http_error(500)
+            return base(method, url, body)
+
+        calls = _patch_cloud(monkeypatch, handler)
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert _posts(calls) == []
 
     def test_a_409_moves_on_and_nothing_is_overwritten(self, cloud_target, wf_path, monkeypatch, capsys):
         calls = _patch_cloud(monkeypatch, _sidebar(conflict={"flux"}))
@@ -911,7 +1024,15 @@ class TestSaveToSidebarFolder:
         assert env["ok"] is True
         assert [w["code"] for w in env["data"]["warnings"]] == ["description_ignored"]
 
-    @pytest.mark.parametrize("workspace", [_http_error(500), {"id": "bad id"}, {}])
+    @pytest.mark.parametrize(
+        "workspace",
+        [
+            pytest.param(_http_error(500), id="http-500"),
+            pytest.param(http.client.IncompleteRead(b"{"), id="truncated"),
+            pytest.param({"id": "bad id"}, id="bad-id"),
+            pytest.param({}, id="no-id"),
+        ],
+    )
     def test_unknown_workspace_still_saves_and_links_the_folder(
         self, cloud_target, wf_path, monkeypatch, capsys, workspace
     ):
@@ -935,6 +1056,22 @@ class TestSaveToSidebarFolder:
         assert env["ok"] is False
         assert len(_posts(calls)) == 1
 
+    def test_api_format_keeps_the_record_save_with_a_warning(self, cloud_target, tmp_path, monkeypatch, capsys):
+        # The sidebar opens a file as an editor graph, which builds nodes only
+        # from nodes[]: an API-format file there would open empty.
+        wf_path = tmp_path / "api.json"
+        wf_path.write_text(json.dumps(_WF_DATA))
+        calls = _patch_cloud(monkeypatch, _sidebar())
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["workflow_id"] == "new-uuid"
+        assert "url" not in env["data"]
+        assert [w["code"] for w in env["data"]["warnings"]] == ["api_format_saved_as_record"]
+        (post,) = _posts(calls)
+        assert post["url"] == "https://cloud.example.com/api/workflows"
+        assert json.loads(post["body"]) == {"name": "flux", "workflow_json": _WF_DATA}
+        assert not any("/api/userdata" in c["url"] for c in calls)
+
 
 class TestSaveFlagOffKeepsTheRecordSave:
     """Flag off, missing, or unreadable: the save is the record-only POST, as before the flag."""
@@ -951,11 +1088,13 @@ class TestSaveFlagOffKeepsTheRecordSave:
             pytest.param(urllib.error.URLError("down"), id="unreachable"),
             pytest.param(TimeoutError("slow"), id="timeout"),
             pytest.param((b"<html>", 200), id="unparseable"),
+            pytest.param(http.client.IncompleteRead(b'{"cli_'), id="truncated"),
+            pytest.param(http.client.RemoteDisconnected("closed"), id="disconnected"),
         ],
     )
     def test_record_save_unchanged(self, cloud_target, tmp_path, monkeypatch, capsys, features):
         wf_path = tmp_path / "wf.json"
-        wf_path.write_text(json.dumps(_WF_DATA))
+        wf_path.write_text(json.dumps(_UI_DATA))
         calls = _patch_cloud(monkeypatch, _sidebar(features=features))
         env = _run(["save", str(wf_path), "--name", "flux", "--description", "d", "--where", "cloud"], capsys)
         assert env["ok"] is True
@@ -970,11 +1109,11 @@ class TestSaveFlagOffKeepsTheRecordSave:
             "https://cloud.example.com/api/workflows",
         ]
         assert calls[0]["method"] == "GET"
-        assert json.loads(calls[1]["body"]) == {"name": "flux", "workflow_json": _WF_DATA, "description": "d"}
+        assert json.loads(calls[1]["body"]) == {"name": "flux", "workflow_json": _UI_DATA, "description": "d"}
 
     def test_features_read_sends_the_users_auth(self, cloud_target, tmp_path, monkeypatch, capsys):
         wf_path = tmp_path / "wf.json"
-        wf_path.write_text(json.dumps(_WF_DATA))
+        wf_path.write_text(json.dumps(_UI_DATA))
         calls = _patch_cloud(monkeypatch, _sidebar(features=_FLAG_OFF))
         _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
         # urllib stores header names capitalized: X-API-Key -> X-api-key.
@@ -989,18 +1128,114 @@ class TestSaveFlagOffKeepsTheRecordSave:
 
 class TestDelete:
     def test_sends_delete_request(self, cloud_target, monkeypatch, capsys):
-        calls = _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid": (b"", 204)})
+        calls = _patch_urlopen(monkeypatch, {"/api/features": _FLAG_OFF, "/api/workflows/wf-uuid": (b"", 204)})
         env = _run(["delete", "wf-uuid", "--where", "cloud"], capsys)
         assert env["ok"] is True
         assert env["data"]["deleted"] is True
-        assert calls[0]["method"] == "DELETE"
+        assert calls[-1]["method"] == "DELETE"
 
     def test_404_surfaces_workflow_not_found(self, cloud_target, monkeypatch, capsys):
         err = urllib.error.HTTPError("https://x/workflows/g", 404, "Not Found", {}, io.BytesIO(b"{}"))
-        _patch_urlopen(monkeypatch, {"/api/workflows/ghost": err})
+        _patch_urlopen(monkeypatch, {"/api/features": _FLAG_OFF, "/api/workflows/ghost": err})
         env = _run(["delete", "ghost", "--where", "cloud"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_not_found"
+
+
+def _sidebar_delete(
+    features=_FLAG_ON,
+    *,
+    record=None,
+    file=None,
+    content=None,
+    file_delete=(b"", 204),
+):
+    """A fake Cloud for delete: record ``rec-1``, its sidebar ``file`` bytes, its latest ``content``."""
+    import urllib.parse
+
+    record = {"id": "rec-1", "name": "flux/flux", "latest_version": 1} if record is None else record
+
+    def handler(method, url, body):
+        path = urllib.parse.urlsplit(url).path
+        if path == "/api/features":
+            return features
+        if path == "/api/workflows/rec-1" and method == "GET":
+            return record
+        if path == "/api/workflows/rec-1/content":
+            return {"id": "v1", "version": 1, "workflow_json": _UI_DATA if content is None else content}
+        if path.startswith("/api/userdata/") and method == "GET":
+            return _http_error(404) if file is None else (file, 200)
+        if path.startswith("/api/userdata/") and method == "DELETE":
+            return file_delete
+        if path == "/api/workflows/rec-1" and method == "DELETE":
+            return (b"", 204)
+        raise AssertionError(f"unexpected {method} {url}")
+
+    return handler
+
+
+class TestDeleteSidebarFile:
+    """Flag on: a record a sidebar file mirrors is deleted through that file, so the file goes too."""
+
+    def _deletes(self, calls):
+        return [c["url"] for c in calls if c["method"] == "DELETE"]
+
+    def test_a_matching_file_is_deleted_with_the_record(self, cloud_target, monkeypatch, capsys):
+        # Cloud's DELETE /api/workflows/<id> leaves the file, which stays in
+        # the sidebar. DELETE /api/userdata/<file> removes the file and
+        # retires the record that mirrors it.
+        file = json.dumps(_UI_DATA, indent=2).encode()
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True, "filename": "workflows/flux/flux.json"}
+        assert self._deletes(calls) == ["https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json"]
+
+    def test_a_file_with_other_content_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=json.dumps({"nodes": []}).encode()))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == ["https://cloud.example.com/api/workflows/rec-1"]
+
+    def test_no_file_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=None))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls) == ["https://cloud.example.com/api/workflows/rec-1"]
+
+    @pytest.mark.parametrize("name", ["../x", "a//b", "", None])
+    def test_a_name_that_is_no_file_path_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys, name):
+        record = {"id": "rec-1", "name": name}
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(record=record, file=b"{}"))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert not any("/api/userdata/" in c["url"] for c in calls)
+
+    def test_flag_off_never_looks_for_a_file(self, cloud_target, monkeypatch, capsys):
+        file = json.dumps(_UI_DATA).encode()
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(features=_FLAG_OFF, file=file))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert [c["url"] for c in calls] == [
+            "https://cloud.example.com/api/features",
+            "https://cloud.example.com/api/workflows/rec-1",
+        ]
+
+    def test_a_file_gone_before_the_delete_keeps_the_record_only_delete(self, cloud_target, monkeypatch, capsys):
+        file = json.dumps(_UI_DATA).encode()
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file, file_delete=_http_error(404)))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["data"] == {"workflow_id": "rec-1", "deleted": True}
+        assert self._deletes(calls)[-1] == "https://cloud.example.com/api/workflows/rec-1"
+
+    def test_a_refused_file_delete_is_an_error_and_keeps_the_record(self, cloud_target, monkeypatch, capsys):
+        # Cloud refuses with 500 when it cannot prove the record mirrors the
+        # file; nothing is deleted, so the record must not go either.
+        file = json.dumps(_UI_DATA).encode()
+        calls = _patch_cloud(monkeypatch, _sidebar_delete(file=file, file_delete=_http_error(500)))
+        env = _run(["delete", "rec-1", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert len(self._deletes(calls)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1058,7 +1293,7 @@ class TestUnparseableResponse:
 
     @pytest.mark.parametrize("raw", _UNPARSEABLE_BODIES)
     def test_delete_surfaces_error_not_success(self, cloud_target, monkeypatch, capsys, raw):
-        _patch_urlopen(monkeypatch, {"/api/workflows/wf-uuid": (raw, 200)})
+        _patch_urlopen(monkeypatch, {"/api/features": _FLAG_OFF, "/api/workflows/wf-uuid": (raw, 200)})
         env = _run(["delete", "wf-uuid", "--where", "cloud"], capsys)
         # Must NOT claim a successful delete off an unparseable body.
         assert env["ok"] is False

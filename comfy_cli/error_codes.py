@@ -127,8 +127,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "workflow_folder_unavailable",
         "`comfy workflow save` on Comfy Cloud makes a new Workflows-sidebar folder per save, named after "
-        "`--name`, then `<name> (2)` and so on. Every candidate already held files, so nothing was saved and "
-        "nothing was replaced. `details.folder` is the base name and `details.tries` how many were tried.",
+        "`--name`, then `<name> (2)` and so on. Every candidate already held files (at any depth) or matched "
+        "the name of an existing workflow record the file would have been merged into, so nothing was saved "
+        "and nothing was replaced. `details.folder` is the base name and `details.tries` how many were tried.",
         "pass a different `--name`",
     ),
     ErrorCode(
@@ -976,6 +977,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "whatever workspace the browser is on. Surfaced in `data.warnings[]` (not as an error envelope) "
         "because the save itself succeeded.",
         "switch the browser to the workspace `comfy cloud whoami` shows before opening the link",
+    ),
+    ErrorCode(
+        "workflow_record_unknown",
+        "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not show the "
+        "workflow record it makes from that file, so `data.workflow_id` and `data.latest_version` are null. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) because the file itself was saved.",
+        "find the record with `comfy --json workflow list --name <data.name>`",
+    ),
+    ErrorCode(
+        "api_format_saved_as_record",
+        "`comfy workflow save` on a Comfy Cloud workspace that saves into Workflows-sidebar folders was given "
+        "an API-format workflow. The sidebar opens files as editor graphs and would show it empty, so it was "
+        "saved the record-only way, with no folder and no `data.url`. Surfaced in `data.warnings[]` (not as an "
+        "error envelope) because the record save succeeded.",
+        "save the editor format (ComfyUI `File > Save`) to get a sidebar folder and a link",
     ),
     ErrorCode(
         "cql_query_invalid",
