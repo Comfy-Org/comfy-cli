@@ -1371,7 +1371,9 @@ def test_qwen_image_2_1_edit_prompt_reaches_the_switch_socket(object_info):
     prompt = _api_node(api, "TextGenerate", "459:500")["inputs"]["prompt"]
     switch = _api_node(api, "ComfySwitchNode", "459:484")["inputs"]
     assert prompt == "Replace costumes for the character"
-    assert switch["on_false"] == prompt
+    assert switch["on_false"] == prompt, (
+        "the frontend inlines the prompt into the switch socket; without it the encoder gets 'None'"
+    )
     assert switch["on_true"] == ["459:500", 0]
 
 
@@ -1459,7 +1461,7 @@ def test_socket_only_input_gets_no_host_value():
 
     workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: sg})
 
-    assert "on_false" not in api["9:switch"]["inputs"]
+    assert "on_false" not in api["9:switch"]["inputs"], "a socket-only input has no host widget in the frontend"
 
 
 def test_external_link_into_the_input_leaves_the_socket_to_expansion(object_info):
@@ -1517,7 +1519,9 @@ def test_unset_host_value_feeds_every_target_the_source_value():
 
     assert api["9:text"]["inputs"]["value"] == "interior default"
     assert api["9:switch"]["inputs"]["on_false"] == "interior default"
-    assert api["9:other"]["inputs"]["value"] == "interior default"
+    assert api["9:other"]["inputs"]["value"] == "interior default", (
+        "the frontend inlines one seeded value into every target"
+    )
 
 
 def test_unset_host_value_reaches_a_socket_through_a_nested_instance():
@@ -1539,7 +1543,7 @@ def test_known_divergence_unemitted_source_leaves_the_socket_empty():
 
     workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
 
-    assert "on_false" not in api["9:switch"]["inputs"]
+    assert "on_false" not in api["9:switch"]["inputs"], "known divergence: the frontend still seeds from a muted source"
 
 
 def test_unset_outer_value_seeds_from_the_concrete_widget_not_the_inner_host():
@@ -1551,7 +1555,9 @@ def test_unset_outer_value_seeds_from_the_concrete_widget_not_the_inner_host():
         api, workflow, {outer_id: outer, _SOCKET_SG: _prompt_to_widget_and_socket()}
     )
 
-    assert api["9:inner:text"]["inputs"]["value"] == "interior default"
+    assert api["9:inner:text"]["inputs"]["value"] == "interior default", (
+        "seeded from the deepest concrete widget, not the inner host"
+    )
     assert api["9:inner:switch"]["inputs"]["on_false"] == "interior default"
 
 
