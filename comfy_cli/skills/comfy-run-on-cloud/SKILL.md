@@ -188,7 +188,9 @@ comfy --json model upload <file> --type <folder> --workspace <workspace id> --wh
 ```
 
 Set the loader on the copy to the returned `loader_path`, then run the check on
-the copy again. When it fails, nothing ran on Comfy Cloud yet:
+the copy again. A null `loader_path` (after an upload or on `already_present`)
+means Comfy Cloud gave no loader value for that name: do not put the file name
+in its place; report the model as what blocks the run. When it fails, nothing ran on Comfy Cloud yet:
 
 | error | what to do |
 |---|---|
