@@ -855,3 +855,32 @@ def test_allow_upload_sends_only_the_approved_bytes(tmp_path: Path, monkeypatch:
     assert isinstance(files, list)
     assert [entry["local_path"] for entry in files if isinstance(entry, dict)] == [str(portrait), str(customers)]
     assert len(job_client.requests) == 1
+
+
+def test_a_refused_file_fails_the_run_before_an_approved_one_is_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given a person approved only the second of two missing files, When the
+    first is refused, Then the run fails before anything is uploaded, so the
+    deployment is not left holding an approved file no job uses."""
+    # Given
+    build, _workspace, workflow = two_portraits(tmp_path, monkeypatch)
+    job_client = FakeJobClient(job())
+    uploaded = deployment_holds_nothing(monkeypatch, job_client)
+    portrait = (build / "input" / "portrait.png").resolve()
+    customers = (build / "input" / "customer.csv").resolve()
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id", "--no-wait", "--allow-upload", blake3_file(customers))
+
+    # Then
+    assert result.exit_code == 1, result.stdout
+    error = envelope_error(result)
+    assert error["code"] == "deploy_asset_missing"
+    details = error["details"]
+    assert isinstance(details, dict)
+    missing = details["missing"]
+    assert isinstance(missing, list)
+    assert [entry["local_path"] for entry in missing if isinstance(entry, dict)] == [str(portrait)]
+    assert uploaded == []
+    assert job_client.requests == []
