@@ -1516,10 +1516,13 @@ def _cloud_records_named(target, name: str) -> list[dict] | None:
     ran past ``_MAX_RECORD_PAGES`` pages without an answer, or Cloud said
     more rows follow and sent none.
 
-    ``pagination.has_more`` decides whether another page follows, as in
-    ``list_cmd``: Cloud honors ``limit`` up to 100 today, but a short page with
-    ``has_more`` true would otherwise end the search before a record of this
-    name. Only when Cloud leaves ``has_more`` out does a short page end it.
+    The search reads the next page when ``pagination.has_more`` is true or
+    the page was full, and stops only on a short or empty page that Cloud
+    does not say is followed by more. A short page with ``has_more`` true
+    keeps going: Cloud honors ``limit`` up to 100 today, but could send fewer.
+    A full page with ``has_more`` false keeps going too: Cloud counts the
+    rows before it reads the page, so a record added in between can sit on
+    the next page while ``has_more`` says none follow.
     The next offset moves by the rows Cloud sent, not by the limit asked for.
     """
     import urllib.parse
@@ -1543,9 +1546,7 @@ def _cloud_records_named(target, name: str) -> list[dict] | None:
         matches.extend(r for r in rows if isinstance(r, dict) and r.get("name") == name)
         pagination = body.get("pagination")
         has_more = pagination.get("has_more") if isinstance(pagination, dict) else None
-        if not isinstance(has_more, bool):
-            has_more = len(rows) >= _RECORD_PAGE_SIZE
-        if not has_more:
+        if has_more is not True and len(rows) < _RECORD_PAGE_SIZE:
             return matches
         if not rows:
             return None

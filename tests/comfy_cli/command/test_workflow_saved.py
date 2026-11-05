@@ -1023,16 +1023,39 @@ class TestSaveToSidebarFolder:
         assert env["data"]["folder"] == "flux (2)"
         assert self._search_offsets(calls) == ["0", "2"]
 
-    def test_a_full_page_with_nothing_more_ends_the_search(self, cloud_target, wf_path, monkeypatch, capsys):
+    def test_a_full_page_with_nothing_more_still_reads_the_next_page(self, cloud_target, wf_path, monkeypatch, capsys):
+        # A full page does not end the search even with has_more false; the
+        # empty page after it does, and flux is free.
         full_page = {
             "data": [{"id": f"r{i}", "name": f"x flux/flux {i}"} for i in range(100)],
             "pagination": {"total": 100, "limit": 100, "offset": 0, "has_more": False},
         }
-        calls = _patch_cloud(monkeypatch, self._paged_search({0: full_page}))
+        empty = {"data": [], "pagination": {"total": 100, "limit": 100, "offset": 100, "has_more": False}}
+        calls = _patch_cloud(monkeypatch, self._paged_search({0: full_page, 100: empty}))
         env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
         assert env["data"]["folder"] == "flux"
-        # The search before the write and the one after it each read one page.
-        assert set(self._search_offsets(calls)) == {"0"}
+        # The search before the write and the one after it each read both pages.
+        assert self._search_offsets(calls) == ["0", "100", "0", "100"]
+
+    def test_a_record_added_after_the_count_is_still_found(self, cloud_target, wf_path, monkeypatch, capsys):
+        # Cloud counts the rows before it reads the page. A record named
+        # flux/flux added in between lands on the next page while the full
+        # first page says has_more false. The search must still find it, so
+        # flux is taken and nothing is written into it.
+        full_page = {
+            "data": [{"id": f"r{i}", "name": f"x flux/flux {i}"} for i in range(100)],
+            "pagination": {"total": 100, "limit": 100, "offset": 0, "has_more": False},
+        }
+        late = {
+            "data": [{"id": "r-late", "name": "flux/flux"}],
+            "pagination": {"total": 101, "limit": 100, "offset": 100, "has_more": False},
+        }
+        calls = _patch_cloud(monkeypatch, self._paged_search({0: full_page, 100: late}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["folder"] == "flux (2)"
+        assert self._search_offsets(calls) == ["0", "100"]
+        (post,) = _posts(calls)
+        assert "flux%20%282%29%2Fflux.json" in post["url"]
 
     def test_more_to_come_with_no_rows_counts_as_taken(self, cloud_target, wf_path, monkeypatch, capsys):
         # has_more true on an empty page cannot move the offset; asking again
