@@ -546,6 +546,20 @@ class TestTrackCommandRedaction:
         assert "private" not in str(properties)
         assert "a-secret-sha" not in str(properties)
 
+    def test_deploy_run_allowed_upload_hashes_are_redacted(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("deploy")
+        def run(allow_upload=None, no_upload=False):
+            return None
+
+        run(allow_upload=["a-private-hash", "https://example.com/?token=private"], no_upload=True)
+
+        _, _, properties = _first_track_call(tracking_module.provider)
+        assert properties["allow_upload"] == "<redacted>"
+        assert properties["no_upload"] is True
+        assert "private" not in str(properties)
+
     def test_add_node_text_is_redacted(self, tracking_module):
         # `comfy workflow add-node <file> Note --text "..."` carries a note body
         # the user wrote: free-form prose that can hold anything (paths, prompts,
