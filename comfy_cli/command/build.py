@@ -1879,6 +1879,97 @@ def _write_spec(renderer, path: Path, spec: dict) -> None:
         raise typer.Exit(code=1) from error
 
 
+def _repository_is_sendable(repository: str) -> bool:
+    """Whether the pin check may send this ``repository``: only a public GitHub
+    form that ``_canonical_github_repository`` recognizes (``https://github.com/org/repo``,
+    ``git@github.com:org/repo.git`` or ``ssh://git@github.com/org/repo``), with no
+    user name other than ssh's ``git`` and no password, query or fragment.
+
+    Anything else is refused before the request, because the builder fetches
+    public GitHub repositories only and refuses the rest after receipt, by which
+    point a token in the string has left the machine. That includes a URL that
+    does not parse (``https://TOKEN@[github.com/org/repo``) and a scp-style
+    address with a token for its user (``TOKEN@github.com:org/repo.git``): a
+    string that cannot be recognized as safe is not sent."""
+    return _canonical_github_repository(repository) is not None
+
+
+def _refuse_unsendable_repositories(renderer, public_nodes: list[dict], spec_file: Path) -> None:
+    """Refuse with ``build_spec_invalid`` a public pack whose ``repository`` is not a
+    recognized public GitHub address. It reads the spec only, so a dry run runs it
+    before it asks for sign-in: a bad address gets the same answer signed in or out."""
+    unsendable = sorted(
+        str(node.get("name") or node.get("id") or "-")
+        for node in public_nodes
+        if node.get("repository") is not None
+        and not (isinstance(node["repository"], str) and _repository_is_sendable(node["repository"]))
+    )
+    if unsendable:
+        renderer.error(
+            code="build_spec_invalid",
+            message="these custom nodes name a repository that is not a public GitHub address without credentials, "
+            "so it is never sent: " + ", ".join(unsendable),
+            hint="write the repository as https://github.com/<org>/<repo> or git@github.com:<org>/<repo>.git, "
+            "with no user name or token; the builder fetches public GitHub repositories only",
+            details={"path": str(spec_file)},
+        )
+        raise typer.Exit(code=1)
+
+
+def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
+    """Ask the builder's importer to place every public pack, and refuse with
+    ``build_registry_pin_missing`` naming each identity it could not place: a
+    registry version it does not publish (a Flagged one among them), or a
+    repository it cannot normalize. A pack the registry never answered about
+    (``report.unverifiedPins``) is refused the same way: unchecked is not placed.
+
+    The importer reads the snapshot and writes nothing, which is what lets
+    ``push --dry-run`` make the same call and refuse the same way. A lookup that
+    itself fails exits through ``_builder_call`` rather than passing the pins.
+    A ``repository`` that is not a recognized public GitHub address is refused
+    before anything is sent; that covers one that does not parse and one that
+    carries a user name or token."""
+    _refuse_unsendable_repositories(renderer, public_nodes, spec_file)
+    imported = _builder_call(
+        renderer,
+        lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
+    )
+    checked = (imported.get("definition") or {}).get("customNodes") or []
+    try:
+        missing = public_node_identities(public_nodes) - public_node_identities(
+            public_node_projection({"customNodes": checked})
+        )
+    except BuildSpecInvalidError as error:
+        renderer.error(code=error.code, message=str(error), details={"path": str(spec_file)})
+        raise typer.Exit(code=1) from error
+    if missing:
+        labels = sorted(f"{identity.kind}:{identity.value}@{identity.version or '-'}" for identity in missing)
+        renderer.error(
+            code="build_registry_pin_missing",
+            message="the builder could not resolve these custom node identities: " + ", ".join(labels),
+            hint="edit the spec to name a published registry version or normalized repository, or remove the node",
+        )
+        raise typer.Exit(code=1)
+    # The importer keeps a pack the registry did not answer for in the definition,
+    # so the identity check above passes it; the report is the only place that says
+    # nothing confirmed it.
+    report = imported.get("report") if isinstance(imported, dict) else None
+    unverified = report.get("unverifiedPins") if isinstance(report, dict) else None
+    if unverified:
+        names = (
+            sorted(_from_server(name) for name in unverified)
+            if isinstance(unverified, list)
+            else [_unrenderable("unverifiedPins", unverified)]
+        )
+        renderer.error(
+            code="build_registry_pin_missing",
+            message="the registry did not answer for these custom nodes, so their pins were not checked: "
+            + ", ".join(names),
+            hint="retry when the Comfy Registry is reachable; nothing was uploaded or saved",
+        )
+        raise typer.Exit(code=1)
+
+
 @app.command("push", help="Push the local comfy-build spec to the builder.")
 @tracking.track_command("build")
 def push_cmd(
@@ -1912,7 +2003,13 @@ def push_cmd(
             help="With --release, cut the release even though the save warned about a model link.",
         ),
     ] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Compute uploads locally; send no HTTP requests.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Compute uploads locally and check public custom node pins with the builder; upload and save nothing.",
+        ),
+    ] = False,
     models_dir: Annotated[
         str | None,
         typer.Option("--models-dir", help="Models folder used to resolve model localPath values."),
@@ -1927,7 +2024,7 @@ def push_cmd(
     if release and dry_run:
         renderer.error(
             code="build_missing_input",
-            message="--release cuts a release from a real push, and --dry-run sends nothing.",
+            message="--release cuts a release from a real push, and --dry-run saves nothing.",
             hint="drop --dry-run to cut the release, or drop --release to preview the push",
             details={"conflict": ["--release", "--dry-run"]},
         )
@@ -2008,15 +2105,32 @@ def push_cmd(
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The pin check is the one question a dry run asks the builder: it is a
+            # read, it costs nothing, and it is the refusal a push otherwise meets
+            # only after the plan was disclosed. A spec without a public pin asks
+            # nothing, so it needs no sign-in.
+            public_nodes = public_node_projection(preparation.definition)
+            if public_nodes:
+                _refuse_unsendable_repositories(renderer, public_nodes, paths.spec_file)
+                _require_public_pins(renderer, _builder_client(renderer, builder_url), public_nodes, paths.spec_file)
+            payload["public_pins_checked"] = len(public_nodes)
             # The envelope is the whole answer and prints nothing in pretty mode, so a
             # person gets the real push's opening line and word that nothing moved.
             # "Already held" is what the spec records; the builder, never asked,
             # may hold more.
             if renderer.is_pretty():
                 renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
-                renderer.info(
-                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
-                )
+                if public_nodes:
+                    count = len(public_nodes)
+                    renderer.info(f"The builder resolved {count} public custom node pin{'' if count == 1 else 's'}.")
+                    renderer.info(
+                        "--dry-run: nothing was uploaded or saved; the builder may already hold more of these "
+                        "than the spec records."
+                    )
+                else:
+                    renderer.info(
+                        "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                    )
                 if _has_models(spec):
                     renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
@@ -2033,26 +2147,8 @@ def push_cmd(
 
         public_nodes = public_node_projection(preparation.definition)
         if public_nodes:
-            imported = _builder_call(
-                renderer,
-                lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
-            )
-            checked = (imported.get("definition") or {}).get("customNodes") or []
-            try:
-                missing = public_node_identities(public_nodes) - public_node_identities(
-                    public_node_projection({"customNodes": checked})
-                )
-            except BuildSpecInvalidError as error:
-                renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-                raise typer.Exit(code=1) from error
-            if missing:
-                labels = sorted(f"{identity.kind}:{identity.value}@{identity.version or '-'}" for identity in missing)
-                renderer.error(
-                    code="build_registry_pin_missing",
-                    message="the builder could not resolve these custom node identities: " + ", ".join(labels),
-                    hint="edit the spec to name a published registry version or normalized repository, or remove the node",
-                )
-                raise typer.Exit(code=1)
+            _require_public_pins(renderer, client, public_nodes, paths.spec_file)
+        payload["public_pins_checked"] = len(public_nodes)
 
         # Said before the first byte moves, and said even when nothing will: a
         # multi-GB upload is otherwise silent until it ends, and "0 files" is
@@ -2798,6 +2894,12 @@ def _builder_call(
     # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         _report_builder_error(renderer, e, subject, hint, models)
+        raise typer.Exit(code=1) from e
+    # A response body that stalls past the timeout or drops mid-read is raised by
+    # ``resp.read`` (``http.read_capped``), outside urllib's ``URLError`` wrapping of
+    # the request itself. Report it as the same transport failure, not a traceback.
+    except (TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
+        _report_builder_error(renderer, urllib.error.URLError(e), subject, hint, models)
         raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
