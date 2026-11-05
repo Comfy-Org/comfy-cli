@@ -159,6 +159,18 @@ cause completely, in one cut. Do not split its edits across cuts, and do not gue
 at a second cause in the same cut. Before each new cut, tell the user the cause,
 the exact edit, and which build this is, and wait.
 
+**A missing import needs an installation mechanism before another cut.** Read
+the selected pack's verified source and declared requirements, or establish a
+supported builder installation path. A `pipDependencies` constraint only pins a
+package installed by another mechanism; adding `PyYAML==<version>` does not by
+itself install a missing `yaml` import. First verify what will install the
+package, then select a compatible constraint if needed. A changed local source
+bundle also needs approval for its changed contents and bytes before upload.
+When no verified installation mechanism exists, report that blocker and ask for
+the missing source or supported installation choice. Do not propose or create a
+fresh paid cut merely to try an otherwise unsupported pin, even if the previous
+repair plan was approved.
+
 **Read in this order.**
 
 1. `comfy build release show` — **`failureReason` is per target, at

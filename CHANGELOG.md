@@ -17,6 +17,28 @@ history.
 
 ### Added
 
+- The `comfy-run-on-cloud` agent skill, installed with the other bundled
+  skills and read with `comfy skills show comfy-run-on-cloud`. It takes one
+  workflow from a running local ComfyUI (read through the server's
+  `/api/userdata`, so no folder path is needed) to Comfy Cloud: it checks the
+  workflow with `comfy workflow check --where cloud --models-dir` (the
+  install's model folders, so a local model that differs from Cloud's copy
+  blocks), then runs it on Comfy Cloud as is, on an existing build in the workspace, with a lossless node swap
+  made on a copy, with a lossy swap the person agreed to, or on a custom build.
+  A model the check cannot prove the same runs on Cloud's copy and is named in
+  the report. Every local file upload is asked by name, models go through
+  `comfy model upload` after a dry run, a deployment run holds its automatic
+  uploads with `--no-upload` and then uploads only the approved files with
+  `--allow-upload`, and the agent runs
+  one real job before it saves with `comfy workflow save --where cloud` and
+  hands back the folder link (or says there is none for a record-only save).
+  `comfy_cli/skills/comfy-run-on-cloud/PROMPT-TEMPLATE.md` is the prompt local
+  ComfyUI's Copy prompt button gives the agent. `comfy-build` points a
+  single-workflow request at the new skill, `comfy-build-failures` says a
+  missing import needs a way to install it before another cut, and
+  `comfy-deploy` and `comfy-deploy-failures` read a deployment with
+  `deploy show` outside a Build folder, since `deploy status` needs one.
+  Builds on #1008.
 - `comfy deploy run --allow-upload <hash>` (repeatable) uploads a local file
   the deployment lacks only if its hash is listed; any other file fails with
   `deploy_asset_missing` and is not sent. A file Cloud already holds is reused
