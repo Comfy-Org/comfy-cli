@@ -752,20 +752,24 @@ unconvertible UI export) emit an [error object](#error-object) instead.
 Cloud run this workflow with no custom build? It needs a sign-in, reads Cloud's
 node list and, for a model Cloud's dropdowns do not list, your uploaded models.
 The file is a ComfyUI save (with `nodes[]`, subgraphs included) or an API
-export. Muted and bypassed nodes load nothing and are listed in `skipped`.
+export. Muted and bypassed nodes load nothing and are listed in `skipped`. A save is read the way ComfyUI submits it,
+through the same converter as `comfy workflow decompose`: each subgraph instance's own value for a promoted widget is
+the one checked. Whether an input holds a model file comes from its input spec in Cloud's node list: a dropdown does, a
+text input does not, so a prompt that ends in `.safetensors` is not a model.
 
 | Field            | Type          | Description                                                                                         |
 | ---------------- | ------------- | --------------------------------------------------------------------------------------------------- |
 | `workflow`       | str           | Absolute path of the checked file. The check never changes it                                       |
 | `format`         | str           | `ui` (a ComfyUI save) or `api` (an API export)                                                      |
 | `verdict`        | str           | `covered`, `covered_with_remaps`, `covered_needs_check` or `needs_build` (below)                     |
+| `stale`          | bool          | `true` when Cloud's node list could not be refreshed and a cached copy answered (see `warnings`)     |
 | `blocking`       | array of dict | What stops the workflow running on Cloud; empty unless `needs_build`                                 |
 | `models`         | array of dict | Every model file the active nodes load, one row each                                                 |
 | `nodes`          | array of dict | `{class_type, node_ids, on_cloud}` for each node type used                                           |
 | `skipped`        | array of dict | `{node_id, class_type, why}` for each muted or bypassed node; `why` is `muted` or `bypassed`         |
 | `out`            | str or null   | Where `--apply-remaps --out` wrote the remapped copy                                                 |
 | `remaps_applied` | number        | Values changed in that copy; `0` without `--out`                                                     |
-| `warnings`       | array of dict | `{code, message}`: `models_dir_not_found`, `cloud_model_lookup_failed`                               |
+| `warnings`       | array of dict | `{code, message, details?}`: `object_info_stale` (`details` has `source` and `reason`), `models_dir_not_found`, `local_model_unreadable`, `cloud_model_lookup_failed` |
 
 `verdict`, checked in this order:
 
@@ -778,7 +782,13 @@ export. Muted and bypassed nodes load nothing and are listed in `skipped`.
 - `covered`: every node type and model is on Cloud, and each model is proven the same file.
 
 A model is proven the same file only when a local copy under `--models-dir` has the blake3 hash Cloud reports for
-its copy. The same name is not the same bytes. Without `--models-dir`, a model Cloud has is `unverified`.
+its copy. The same name is not the same bytes. Without `--models-dir`, a model Cloud has is `unverified`. A local
+copy that cannot be read stays `unverified` and adds a `local_model_unreadable` warning.
+
+Your uploads are matched the way Cloud matches them when it runs the workflow: the upload named exactly the saved
+value, else the one upload whose name ends in `/<saved value>` (such as `Wan22_FunReward/model.safetensors` for a
+saved `model.safetensors`). Both run the saved value unchanged, so both are `present`. Several uploads ending that
+way are `missing` with `candidates` (blocking, `ambiguous`). Every page of your model list is read.
 
 Only your own uploads carry a content hash. Cloud's library models (`source: "cloud"`) report their folder and file
 name where the hash would be, so for them a local copy is compared by size alone: a different size is
@@ -790,15 +800,15 @@ Each `models[]` row:
 
 | Field         | Type          | Description                                                                                       |
 | ------------- | ------------- | ------------------------------------------------------------------------------------------------- |
-| `node_id`     | str           | Node id; inside a subgraph, `<instance id>/<inner id>`                                            |
+| `node_id`     | str           | Node id; inside a subgraph, `<instance id>:<inner id>`, one row per instance                      |
 | `class_type`  | str           | The node type                                                                                     |
-| `widget`      | str or null   | The input name, when known (always in an API export)                                              |
+| `widget`      | str or null   | The input name; null only for a node type Cloud does not have                                     |
 | `value`       | str           | The value saved in the workflow                                                                   |
 | `status`      | str           | `present`, `remap`, `missing`, or `not_checked` when the node type itself is not on Cloud           |
 | `source`      | str or null   | `cloud` for Cloud's own models, `yours` for your uploads                                          |
 | `cloud_value` | str or null   | The value Cloud runs; differs from `value` on a remap                                             |
 | `identity`    | str or null   | `same`, `different` or `unverified` for a model Cloud has; null otherwise                         |
-| `candidates`  | array of str  | Present when several Cloud files share the name, so no remap is picked                            |
+| `candidates`  | array of str  | Present when several Cloud files or uploads fit the name, so none is picked                       |
 | `filename`    | str           | The file name, without folders                                                                    |
 | `folder`      | str or null   | The ComfyUI models folder it belongs in (`checkpoints`, `loras`, ...), from the workflow's own download notes or the stock loader; null when unknown |
 | `url`         | str or null   | The download link from the workflow's own download notes, if it has one                           |
@@ -814,8 +824,9 @@ Each `blocking[]` item has a `kind`:
 Every verdict exits `0`: the check is a report. `changed` is `true` only when `--out` wrote a file.
 Refusals emit an [error object](#error-object): `missing_argument` (`--apply-remaps` without `--out`, or the
 reverse), `workflow_out_is_input`, `workflow_not_found`, `workflow_read_error`, `workflow_invalid_json`,
-`workflow_format_unknown`, `cloud_only_command`, `auth_not_signed_in`, `cql_no_graph` (Cloud's node list could not
-be read), `cloud_unauthorized` / `cloud_http_error` (the model list could not be read) and `workflow_write_error`.
+`workflow_format_unknown`, `workflow_conversion_failed` (the save could not be converted the way ComfyUI submits
+it), `cloud_only_command`, `auth_not_signed_in`, `cql_no_graph` (Cloud's node list could not be read),
+`cloud_unauthorized` / `cloud_http_error` (the model list could not be read) and `workflow_write_error`.
 
 ## Error object
 

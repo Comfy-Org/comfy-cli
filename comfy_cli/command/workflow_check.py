@@ -18,6 +18,7 @@ from comfy_cli import tracking
 from comfy_cli.output import get_renderer
 
 _ASSET_PAGE = 200
+_ASSET_PAGES = 50  # 10,000 rows: a server that never says it is done cannot loop forever
 
 _SUMMARY = {
     "covered": "Runs on Comfy Cloud as it is.",
@@ -81,24 +82,38 @@ def _load(renderer, workflow: str) -> tuple[Path, Any]:
 
 
 def _fetch_model_assets(target, name: str, *, include_public: bool) -> list[dict[str, Any]]:
-    """Model assets whose name contains ``name``. Raises on any failure; callers decide what it means."""
+    """Every model asset whose name contains ``name``, all pages of it.
+
+    ``name_contains`` is a substring match, so the exact file can sit past the
+    first page; an answer from part of the list could call a model missing.
+    Raises on any failure, a list that never ends included; callers decide what
+    it means.
+    """
     import urllib.parse
 
     from comfy_cli.command.cloud_http import http_request
 
-    query = urllib.parse.urlencode(
-        {
-            "include_tags": "models",
-            "include_public": "true" if include_public else "false",
-            "name_contains": name,
-            "limit": _ASSET_PAGE,
-        }
-    )
-    _, body = http_request(target.url("assets") + "?" + query, target, strict_json=True)
-    rows = body.get("assets") if isinstance(body, dict) else None
-    if not isinstance(rows, list):
-        raise ValueError("unexpected response shape from /api/assets (expected an object with assets[])")
-    return [row for row in rows if isinstance(row, dict) and "models" in (row.get("tags") or [])]
+    found: list[dict[str, Any]] = []
+    offset = 0
+    for _ in range(_ASSET_PAGES):
+        query = urllib.parse.urlencode(
+            {
+                "include_tags": "models",
+                "include_public": "true" if include_public else "false",
+                "name_contains": name,
+                "limit": _ASSET_PAGE,
+                "offset": offset,
+            }
+        )
+        _, body = http_request(target.url("assets") + "?" + query, target, strict_json=True)
+        rows = body.get("assets") if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("unexpected response shape from /api/assets (expected an object with assets[])")
+        found.extend(row for row in rows if isinstance(row, dict) and "models" in (row.get("tags") or []))
+        if not rows or not body.get("has_more"):
+            return found
+        offset += len(rows)
+    raise ValueError(f"/api/assets kept paging past {_ASSET_PAGES * _ASSET_PAGE} models named like {name!r}")
 
 
 def _own_models(renderer, target):
@@ -236,6 +251,7 @@ def check_cmd(
     from comfy_cli.cql.loader import resilient_load_object_info
     from comfy_cli.file_utils import atomic_write_text
     from comfy_cli.hashing import blake3_file
+    from comfy_cli.workflow_to_api import WorkflowConversionError
 
     renderer = get_renderer()
     if apply_remaps != (out is not None):
@@ -266,8 +282,11 @@ def check_cmd(
             hint="run `comfy cloud login`",
         )
         raise typer.Exit(code=1)
+    stale: dict[str, str] = {}
     try:
-        object_info = resilient_load_object_info(mode="cloud")
+        object_info = resilient_load_object_info(
+            mode="cloud", on_stale=lambda source, reason: stale.update(source=source, reason=reason)
+        )
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -276,20 +295,46 @@ def check_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    uses = cov.find_uses(data)
+    try:
+        uses = cov.find_uses(data, object_info)
+    except WorkflowConversionError as e:
+        renderer.error(
+            code="workflow_conversion_failed",
+            message=f"Could not read the workflow the way ComfyUI submits it: {e}",
+            hint="open it in ComfyUI and save it again, or check its API export (Workflow > Export (API))",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from e
     models = cov.resolve_models(uses, object_info, _own_models(renderer, target))
-    warnings: list[dict[str, str]] = []
+    warnings: list[dict[str, Any]] = []
+    if stale:
+        # Cloud's node list could not be refreshed: an older copy answered, and a
+        # node removed since may still read as available.
+        warnings.append(
+            {
+                "code": "object_info_stale",
+                "message": "Cloud's node list could not be refreshed; a cached copy answered "
+                f"({stale['source']}): {stale['reason']}",
+                "details": dict(stale),
+            }
+        )
     roots = list(models_dir or [])
     for root in roots:
         if not Path(root).expanduser().is_dir():
             warnings.append({"code": "models_dir_not_found", "message": f"--models-dir is not a folder: {root}"})
     index = cov.local_index(roots) if roots else None
     cloud_files: dict[str, tuple[int | None, str | None]] = {}
-    digests: dict[str, str] = {}
+    digests: dict[str, str | None] = {}
 
-    def hash_file(file: str) -> str:
+    def hash_file(file: str) -> str | None:
         if file not in digests:
-            digests[file] = blake3_file(Path(file))
+            try:
+                digests[file] = blake3_file(Path(file))
+            except OSError as e:  # unreadable, or gone since the folder was listed
+                digests[file] = None
+                warnings.append(
+                    {"code": "local_model_unreadable", "message": f"could not read {file} to compare it: {e}"}
+                )
         return digests[file]
 
     cov.add_sources(models, data, index)
@@ -322,12 +367,13 @@ def check_cmd(
             raise typer.Exit(code=1) from e
 
     for model in models:
-        for key in ("loc", "cloud_size", "cloud_hash"):
+        for key in ("cloud_size", "cloud_hash"):
             model.pop(key, None)
     payload: dict[str, Any] = {
         "workflow": str(path),
         "format": uses["format"],
         "verdict": cov.verdict(blocked, models),
+        "stale": bool(stale),
         "blocking": blocked,
         "models": models,
         "nodes": [

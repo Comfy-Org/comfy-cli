@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
 from comfy_cli import workflow_coverage as cov
+from comfy_cli.workflow_to_api import WorkflowConversionError
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 H1 = "blake3:" + "1" * 64
 H2 = "blake3:" + "2" * 64
@@ -20,6 +25,9 @@ OBJECT_INFO = {
     "VAELoader": {"input": {"required": {"vae_name": [["a/vae.safetensors", "b/vae.safetensors"], {}]}}},
     "KSampler": {"input": {"required": {"seed": ["INT", {}]}}},
     "CLIPTextEncode": {"input": {"required": {"text": ["STRING", {}]}}},
+    # Not stock nodes: what makes an input a file is its spec, not the node type.
+    "CaptionWriter": {"input": {"required": {"caption": ["STRING", {"multiline": True}]}}},
+    "OddLoader": {"input": {"required": {"weights": [["odd/w.pkl"], {}]}}},
 }
 
 
@@ -29,6 +37,14 @@ def _no_uploads(_name):
 
 def _ui(*nodes, **extra):
     return {"nodes": list(nodes), "links": [], **extra}
+
+
+def _subgraph(sg_id, *nodes):
+    return {"subgraphs": [{"id": sg_id, "nodes": list(nodes), "links": [], "inputs": [], "outputs": []}]}
+
+
+def _uses(wf, object_info=None):
+    return cov.find_uses(wf, OBJECT_INFO if object_info is None else object_info)
 
 
 def _node(node_id, type_, values=None, mode=0, **extra):
@@ -54,7 +70,7 @@ def test_find_uses_ui_skips_muted_bypassed_notes_and_prompts():
         _node(4, "Note", ["read me.safetensors"]),
         _node(5, "CLIPTextEncode", ["a photo.safetensors"]),
     )
-    uses = cov.find_uses(wf)
+    uses = _uses(wf)
     assert uses["format"] == "ui"
     assert uses["nodes"] == {"CheckpointLoaderSimple": ["1"], "CLIPTextEncode": ["5"]}
     assert [m["value"] for m in uses["models"]] == ["sd15.safetensors"]
@@ -66,7 +82,7 @@ def test_find_uses_ui_skips_muted_bypassed_notes_and_prompts():
 
 def test_find_uses_ui_reads_lora_stack_rows():
     wf = _ui(_node(1, "Power Lora Loader", [{}, {"on": True, "lora": "x.safetensors", "strength": 1}]))
-    assert [m["value"] for m in cov.find_uses(wf)["models"]] == ["x.safetensors"]
+    assert [m["value"] for m in _uses(wf)["models"]] == ["x.safetensors"]
 
 
 def test_find_uses_walks_subgraphs_with_scoped_ids_and_skips_muted_instances():
@@ -75,13 +91,69 @@ def test_find_uses_walks_subgraphs_with_scoped_ids_and_skips_muted_instances():
         _node(10, sg_id),
         _node(11, sg_id),
         _node(12, sg_id, mode=2),
-        definitions={"subgraphs": [{"id": sg_id, "nodes": [_node(1, "LoraLoader", ["ink.safetensors", 1, 1])]}]},
+        definitions=_subgraph(sg_id, _node(1, "LoraLoader", ["ink.safetensors", 1, 1])),
     )
-    uses = cov.find_uses(wf)
-    assert uses["nodes"] == {"LoraLoader": ["10/1", "11/1"]}
-    # Two instances of one definition share one place in the file: one model row.
-    assert [(m["node_id"], m["value"]) for m in uses["models"]] == [("10/1", "ink.safetensors")]
+    uses = _uses(wf)
+    # The converter's and the frontend's ids, so a row names the node that runs.
+    assert uses["nodes"] == {"LoraLoader": ["10:1", "11:1"]}
+    # Each instance can hold its own promoted value, so each gets its own row.
+    assert [(m["node_id"], m["value"], m["widget"]) for m in uses["models"]] == [
+        ("10:1", "ink.safetensors", "lora_name"),
+        ("11:1", "ink.safetensors", "lora_name"),
+    ]
     assert uses["skipped"] == [{"node_id": "12", "class_type": sg_id, "why": "muted"}]
+
+
+def _promoted_music_workflow():
+    """A shipped template whose subgraph instance (node 37) promotes the interior
+    UNETLoader's ``unet_name``; the instance's own value is ``widgets_values[4]``."""
+    wf = json.loads((_FIXTURES / "gallery" / "audio_minimax_music_3.json").read_text(encoding="utf-8"))
+    object_info = json.loads((_FIXTURES / "object_info_subgraph_promoted.json").read_text(encoding="utf-8"))
+    host = next(n for n in wf["nodes"] if n["id"] == 37)
+    host["widgets_values"][4] = "mine.safetensors"
+    return wf, host, object_info
+
+
+def _unet_rows(wf, object_info):
+    return [m for m in cov.find_uses(wf, object_info)["models"] if m["class_type"] == "UNETLoader"]
+
+
+def test_find_uses_checks_the_instances_promoted_value_not_the_interior_default():
+    wf, _host, object_info = _promoted_music_workflow()
+    assert [(m["node_id"], m["value"], m["widget"]) for m in _unet_rows(wf, object_info)] == [
+        ("37:6", "mine.safetensors", "unet_name")
+    ]
+
+
+def test_apply_remaps_rewrites_the_promoted_value_on_the_instance():
+    wf, host, object_info = _promoted_music_workflow()
+    [row] = _unet_rows(wf, object_info)
+    row.update(status="remap", cloud_value="music/mine.safetensors")
+    out, changed = cov.apply_remaps(wf, [row])
+    assert changed == 1
+    assert next(n for n in out["nodes"] if n["id"] == 37)["widgets_values"][4] == "music/mine.safetensors"
+    assert host["widgets_values"][4] == "mine.safetensors"  # the original is untouched
+    # The interior default is not what runs, and it is left as saved.
+    interior = [n for sg in out["definitions"]["subgraphs"] for n in sg["nodes"] if n["type"] == "UNETLoader"]
+    assert interior[0]["widgets_values"][0] == "minimax_music3_dit_fp16.safetensors"
+    # The copy now submits the remapped value.
+    assert [m["value"] for m in _unet_rows(out, object_info)] == ["music/mine.safetensors"]
+
+
+def test_apply_remaps_rewrites_a_quarantined_host_value():
+    sg_id = "aaaaaaaa-0000-0000-0000-000000000003"
+    quarantine = [{"originalEntry": ["-1", "lora_name"], "hostValue": "ink.safetensors"}]
+    wf = _ui(
+        _node(10, sg_id, properties={"proxyWidgetErrorQuarantine": quarantine}),
+        definitions=_subgraph(sg_id, _node(1, "LoraLoader", ["other.safetensors", 1, 1])),
+    )
+    row = {"status": "remap", "class_type": "LoraLoader", "value": "ink.safetensors"}
+    out, changed = cov.apply_remaps(wf, [{**row, "cloud_value": "styles/ink.safetensors"}])
+    assert changed == 1
+    entry = out["nodes"][0]["properties"]["proxyWidgetErrorQuarantine"][0]
+    assert entry["hostValue"] == "styles/ink.safetensors"
+    assert out["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "other.safetensors"
+    assert quarantine[0]["hostValue"] == "ink.safetensors"
 
 
 def test_find_uses_api_reads_inputs_and_ignores_urls():
@@ -89,7 +161,7 @@ def test_find_uses_api_reads_inputs_and_ignores_urls():
         "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sd15.safetensors"}},
         "2": {"class_type": "LoadFromUrl", "inputs": {"url": "https://example.com/m.safetensors"}},
     }
-    uses = cov.find_uses(wf)
+    uses = _uses(wf)
     assert uses["format"] == "api"
     assert uses["models"] == [
         {
@@ -97,21 +169,67 @@ def test_find_uses_api_reads_inputs_and_ignores_urls():
             "class_type": "CheckpointLoaderSimple",
             "value": "sd15.safetensors",
             "widget": "ckpt_name",
-            "loc": ("api", "1"),
         }
     ]
 
 
+def test_find_uses_api_does_not_read_prompt_text_as_a_model():
+    wf = {
+        "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "a photo.safetensors", "clip": ["2", 1]}},
+        "2": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sd15.safetensors"}},
+    }
+    assert [m["value"] for m in _uses(wf)["models"]] == ["sd15.safetensors"]
+
+
+@pytest.mark.parametrize("fmt", ["ui", "api"])
+def test_whether_an_input_names_a_file_comes_from_its_spec_not_the_node_type(fmt):
+    """No list of prompt node types: a STRING input is text, a dropdown names a file."""
+    if fmt == "ui":
+        wf = _ui(_node(1, "CaptionWriter", ["a cat.ckpt"]), _node(2, "OddLoader", ["w.pkl"]))
+    else:
+        wf = {
+            "1": {"class_type": "CaptionWriter", "inputs": {"caption": "a cat.ckpt"}},
+            "2": {"class_type": "OddLoader", "inputs": {"weights": "w.pkl"}},
+        }
+    assert [(m["node_id"], m["value"], m["widget"]) for m in _uses(wf)["models"]] == [("2", "w.pkl", "weights")]
+
+
+def test_names_a_file_reads_the_input_spec():
+    assert cov.names_a_file(OBJECT_INFO["CheckpointLoaderSimple"], "ckpt_name")
+    assert cov.names_a_file(OBJECT_INFO["LoraLoader"], "lora_name")  # the COMBO form
+    assert not cov.names_a_file(OBJECT_INFO["CLIPTextEncode"], "text")
+    assert not cov.names_a_file(OBJECT_INFO["KSampler"], "seed")
+    assert cov.names_a_file(OBJECT_INFO["CLIPTextEncode"], "lora_1")  # undeclared: judged by its value
+    assert cov.names_a_file(None, "anything")  # a node type not on Cloud
+
+
+@pytest.mark.parametrize("name", ["m.pkl", "m.pt2", "m.torchscript", "M.SAFETENSORS"])
+def test_every_model_format_comfyui_loads_is_found(name, tmp_path):
+    uses = _uses(_ui(_node(1, "SomeCustomLoader", [name])))
+    assert [m["value"] for m in uses["models"]] == [name]
+    (tmp_path / name).write_bytes(b"x")
+    assert list(cov.local_index([str(tmp_path)])) == [name]
+
+
+def test_find_uses_passes_on_a_converter_refusal(monkeypatch):
+    def refuse(_workflow, _object_info):
+        raise WorkflowConversionError("subgraph expansion exceeded its safe limit")
+
+    monkeypatch.setattr("comfy_cli.workflow_to_api.convert_ui_to_api", refuse)
+    with pytest.raises(WorkflowConversionError):
+        _uses(_ui(_node(1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
+
+
 def test_find_uses_rejects_non_workflows():
     with pytest.raises(ValueError):
-        cov.find_uses({"hello": "world"})
+        _uses({"hello": "world"})
 
 
 # --- placing models on Cloud -----------------------------------------------
 
 
 def _resolve(wf, own=_no_uploads):
-    return cov.resolve_models(cov.find_uses(wf), OBJECT_INFO, own)
+    return cov.resolve_models(_uses(wf), OBJECT_INFO, own)
 
 
 def test_combo_choices_reads_both_forms():
@@ -149,7 +267,7 @@ def test_resolve_finds_the_persons_uploads_and_asks_once_per_name():
         _node(1, "CheckpointLoaderSimple", ["mine.safetensors"]),
         _node(2, "CheckpointLoaderSimple", ["sub/mine.safetensors"]),
     )
-    rows = cov.resolve_models(cov.find_uses(wf), OBJECT_INFO, own)
+    rows = cov.resolve_models(_uses(wf), OBJECT_INFO, own)
     assert asked == ["mine.safetensors"]
     assert rows[0]["status"] == "present" and rows[0]["source"] == "yours"
     assert rows[0]["cloud_hash"] == H1 and rows[0]["cloud_size"] == 5
@@ -160,9 +278,40 @@ def test_resolve_two_uploads_with_one_name_leave_the_hash_unknown():
     def own(_name):
         return [{"name": "m.safetensors", "hash": H1}, {"name": "m.safetensors", "hash": H2}]
 
-    uses = cov.find_uses(_ui(_node(1, "CheckpointLoaderSimple", ["m.safetensors"])))
+    uses = _uses(_ui(_node(1, "CheckpointLoaderSimple", ["m.safetensors"])))
     rows = cov.resolve_models(uses, OBJECT_INFO, own)
     assert rows[0]["status"] == "present" and rows[0]["cloud_hash"] is None
+
+
+def test_resolve_finds_an_upload_kept_under_a_folder_as_cloud_does():
+    """Cloud runs a saved bare name against the one upload whose name ends in ``/<name>``."""
+
+    def own(_name):
+        return [{"name": "Wan22_FunReward/model.safetensors", "hash": H1, "size": 5}]
+
+    rows = _resolve(_ui(_node(1, "CheckpointLoaderSimple", ["model.safetensors"])), own)
+    assert rows[0]["status"] == "present" and rows[0]["source"] == "yours"
+    assert rows[0]["cloud_value"] == "Wan22_FunReward/model.safetensors"
+    assert rows[0]["cloud_hash"] == H1
+
+
+def test_resolve_two_uploads_under_folders_are_ambiguous():
+    def own(_name):
+        return [{"name": "a/model.safetensors"}, {"name": "b/model.safetensors"}]
+
+    uses = _uses(_ui(_node(1, "CheckpointLoaderSimple", ["model.safetensors"])))
+    rows = cov.resolve_models(uses, OBJECT_INFO, own)
+    assert rows[0]["status"] == "missing"
+    assert rows[0]["candidates"] == ["a/model.safetensors", "b/model.safetensors"]
+    assert [b["reason"] for b in cov.blocking(uses, OBJECT_INFO, rows)] == ["ambiguous"]
+
+
+def test_pick_upload_prefers_the_exact_name_then_the_folder_suffix_then_a_remap():
+    exact = [{"name": "model.safetensors"}, {"name": "a/model.safetensors"}]
+    assert cov._pick_upload("model.safetensors", exact) == ("present", "model.safetensors", [])
+    other_path = [{"name": "x/model.safetensors"}]
+    assert cov._pick_upload("y/model.safetensors", other_path) == ("remap", "x/model.safetensors", [])
+    assert cov._pick_upload("model.safetensors", []) == ("missing", None, [])
 
 
 def test_content_hash_normalizes_both_spellings():
@@ -189,6 +338,10 @@ def test_identity_needs_a_hash_match_to_say_same():
     assert cov.identity([("/a", 5)], 5, None, hashes) == ("unverified", "/a")
     assert cov.identity([("/a", 5), ("/b", 6)], 5, H1, hashes) == ("unverified", None)
     assert cov.identity([("/a", 5), ("/b", 5)], 5, H1, hashes) == ("unverified", None)
+
+
+def test_identity_is_unverified_when_the_local_file_cannot_be_read():
+    assert cov.identity([("/a", 5)], 5, H1, lambda _path: None) == ("unverified", None)
 
 
 def test_identity_without_a_cloud_hash_uses_size_and_never_hashes():
@@ -221,7 +374,7 @@ def test_add_sources_prefers_the_workflows_download_notes(tmp_path):
         _node(2, "LoraLoader", ["sub/ink.safetensors", 1, 1]),
         _node(3, "SomeCustomLoader", ["odd.safetensors"]),
     )
-    rows = cov.resolve_models(cov.find_uses(wf), OBJECT_INFO, _no_uploads)
+    rows = cov.resolve_models(_uses(wf), OBJECT_INFO, _no_uploads)
     cov.add_sources(rows, wf, {"ink.safetensors": [("/m/loras/ink.safetensors", 3)]})
     by_id = {r["node_id"]: r for r in rows}
     assert by_id["1"]["folder"] == "unet" and by_id["1"]["url"] == "https://x/flux"
@@ -232,7 +385,7 @@ def test_add_sources_prefers_the_workflows_download_notes(tmp_path):
 
 def test_add_sources_uses_the_api_input_name():
     wf = {"1": {"class_type": "Anything", "inputs": {"vae_name": "v.safetensors"}}}
-    rows = cov.resolve_models(cov.find_uses(wf), {}, _no_uploads)
+    rows = cov.resolve_models(_uses(wf, {}), {}, _no_uploads)
     cov.add_sources(rows, wf, None)
     assert rows[0]["folder"] == "vae" and rows[0]["local_paths"] == []
 
@@ -246,7 +399,7 @@ def test_blocking_lists_missing_nodes_then_models_with_where_to_find_them():
         _node(2, "VAELoader", ["vae.safetensors"]),
         _node(3, "CheckpointLoaderSimple", ["gone.safetensors"]),
     )
-    uses = cov.find_uses(wf)
+    uses = _uses(wf)
     rows = cov.resolve_models(uses, OBJECT_INFO, _no_uploads)
     cov.add_sources(rows, wf, None)
     blocked = cov.blocking(uses, OBJECT_INFO, rows)
@@ -259,7 +412,7 @@ def test_blocking_lists_missing_nodes_then_models_with_where_to_find_them():
 
 
 def test_blocking_flags_a_proven_different_file():
-    uses = cov.find_uses(_ui(_node(1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
+    uses = _uses(_ui(_node(1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
     rows = cov.resolve_models(uses, OBJECT_INFO, _no_uploads)
     rows[0]["identity"] = "different"
     assert [b["reason"] for b in cov.blocking(uses, OBJECT_INFO, rows)] == ["different_file"]
@@ -289,7 +442,7 @@ def test_apply_remaps_ui_changes_only_the_copy():
     wf = _ui(
         _node(1, "LoraLoader", ["ink.safetensors", 1, 1]),
         _node(2, sg_id),
-        definitions={"subgraphs": [{"id": sg_id, "nodes": [_node(7, "LoraLoader", ["ink.safetensors", 1, 1])]}]},
+        definitions=_subgraph(sg_id, _node(7, "LoraLoader", ["ink.safetensors", 1, 1])),
     )
     before = copy.deepcopy(wf)
     rows = _resolve(wf)

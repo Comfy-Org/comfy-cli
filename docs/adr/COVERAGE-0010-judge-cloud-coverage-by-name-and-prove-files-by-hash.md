@@ -1,4 +1,4 @@
-# ADR-CHECK-0010: Judge Cloud Coverage by Name and Prove Files by Hash
+# ADR-COVERAGE-0010: Judge Cloud Coverage by Name and Prove Files by Hash
 
 Date: 2026-11-05
 
@@ -7,7 +7,9 @@ Date: 2026-11-05
 Proposed
 
 Relation: Builds on ADR-AUTOMATION-0003. `comfy workflow check` emits one
-`envelope/1` envelope with its own `workflow_check` data schema.
+`envelope/1` envelope with its own `workflow_check` data schema. Follows
+ADR-CONVERSION-0004: a save is read through the save-to-API converter, and no
+node type gets a rule of its own.
 
 ## Context
 
@@ -45,10 +47,29 @@ list. It answers with one of four verdicts, checked in this order:
 A remap outranks an unproven model: the unchanged file does not run while a
 remap is due.
 
+The check reads what Cloud would run. A ComfyUI save goes through the
+save-to-API converter (`convert_ui_to_api`), so subgraphs are expanded and each
+instance's own value for a promoted widget is the one checked, with one row per
+instance (`<instance id>:<inner id>`). Whether an input holds a file comes from
+the node type's input spec in Cloud's node list: a dropdown (`COMBO` or a
+choice list) can, a typed input such as `STRING` cannot. A node type Cloud does
+not have is read from its saved values by file extension. The converter fills
+an input the save left out with Cloud's first choice; only values the save
+itself names are reported.
+
+The person's uploads are matched by Cloud's own rule when it runs a workflow:
+the upload named exactly the saved value, else the one upload whose name ends
+in `/<saved value>`. Both run unchanged and are `present`; several such
+uploads are ambiguous. Every page of the model list is read.
+
+When Cloud's node list cannot be refreshed and a cached copy answers, the
+output says so in a `stale` field and an `object_info_stale` warning.
+
 Presence is judged by name. Identity is judged by bytes: a model is `same`
 only when a local copy under `--models-dir` has the blake3 hash Cloud reports.
 A size mismatch alone proves `different`. Without a local copy, or when
-several local copies disagree, the model is `unverified`.
+several local copies disagree, or a local copy cannot be read, the model is
+`unverified`.
 
 Cloud's library models carry no content hash. Measured on 2026-11-05,
 `/api/assets` returns their folder and file name as `hash`
@@ -113,10 +134,12 @@ it, a model the person uploaded would be reported missing.
 ## Validation
 
 `tests/comfy_cli/test_workflow_coverage.py` covers the offline rules: muted and
-bypassed nodes, subgraphs, both dropdown forms, remaps, shared names, uploads,
-identity and the verdict order. `tests/comfy_cli/command/test_workflow_check.py`
-covers each verdict end to end against a mocked Cloud, that `--apply-remaps`
-leaves the input unchanged, and each refusal. Each output validates against
+bypassed nodes, subgraphs and promoted values (on a shipped template), the
+input-spec rule for what names a file, both dropdown forms, remaps, shared
+names, uploads under a folder, identity and the verdict order. `tests/comfy_cli/command/test_workflow_check.py`
+covers each verdict end to end against a mocked Cloud, paging, a stale node
+list, an unreadable local copy, that `--apply-remaps` leaves the input
+unchanged, and each refusal. Each output validates against
 `comfy_cli/schemas/workflow_check.json`.
 
 ## Revisit triggers

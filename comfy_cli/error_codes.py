@@ -925,8 +925,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_conversion_failed",
-        "`comfy workflow decompose` could not flatten a frontend-format workflow to "
-        "API format (malformed graph, or object_info that doesn't match the nodes).",
+        "`comfy workflow decompose` or `comfy workflow check` could not flatten a frontend-format workflow "
+        "to API format (malformed graph, or object_info that doesn't match the nodes).",
         "re-export from ComfyUI, or pass a matching --input object_info.json",
     ),
     ErrorCode(

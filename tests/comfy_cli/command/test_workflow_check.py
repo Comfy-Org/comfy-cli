@@ -77,7 +77,8 @@ def cloud(monkeypatch: pytest.MonkeyPatch):
         public = query["include_public"] == ["true"]
         needle = query["name_contains"][0]
         rows = [a for a in state["assets"] if needle in a["name"] and (public or not a.get("public"))]
-        return 200, {"assets": rows, "has_more": False}
+        offset, limit = int(query.get("offset", ["0"])[0]), int(query["limit"][0])
+        return 200, {"assets": rows[offset : offset + limit], "has_more": offset + limit < len(rows)}
 
     monkeypatch.setattr("comfy_cli.command.cloud_http.http_request", fake_http)
     return state
@@ -222,6 +223,64 @@ def test_the_persons_upload_counts_and_only_private_assets_are_asked(cloud, tmp_
     assert [q["include_public"] for q in cloud["requests"]] == [["false"]]
 
 
+def test_a_model_past_the_first_page_of_the_lookup_is_found(cloud, tmp_path, capsys):
+    """`name_contains` is a substring match: the exact file can sit on a later page."""
+    lookalikes = [
+        {"name": f"v{i}-mine.safetensors", "hash": "b" * 64, "size": 1, "tags": ["models"]} for i in range(250)
+    ]
+    cloud["assets"] = [*lookalikes, {"name": "mine.safetensors", "hash": "a" * 64, "size": 1, "tags": ["models"]}]
+    wf = _write(tmp_path, {"1": {"class_type": "LoraLoader", "inputs": {"lora_name": "mine.safetensors"}}})
+    data = _ok(_run([str(wf), "--where", "cloud"], capsys))
+    assert (data["models"][0]["status"], data["models"][0]["source"]) == ("present", "yours")
+    assert [q["offset"] for q in cloud["requests"]] == [["0"], ["200"]]
+
+
+def test_a_lookup_that_never_ends_is_an_error(cloud, monkeypatch, tmp_path, capsys):
+    def endless(url, target, **kw):
+        return 200, {"assets": [{"name": "x-mine.safetensors", "tags": ["models"]}], "has_more": True}
+
+    monkeypatch.setattr("comfy_cli.command.cloud_http.http_request", endless)
+    wf = _write(tmp_path, _ui((1, "LoraLoader", ["mine.safetensors", 1, 1])))
+    env = _run([str(wf), "--where", "cloud"], capsys)
+    assert env["ok"] is False
+    assert env["error"]["details"]["operation"] == "model lookup"
+
+
+def test_a_cached_node_list_is_flagged_stale(cloud, monkeypatch, tmp_path, capsys):
+    def cached(**kw):
+        kw["on_stale"]("https://cloud.example.com", "timed out")
+        return OBJECT_INFO
+
+    monkeypatch.setattr("comfy_cli.cql.loader.resilient_load_object_info", cached)
+    wf = _write(tmp_path, _ui((1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
+    data = _ok(_run([str(wf), "--where", "cloud"], capsys))
+    assert data["stale"] is True
+    [warning] = data["warnings"]
+    assert warning["code"] == "object_info_stale"
+    assert warning["details"] == {"source": "https://cloud.example.com", "reason": "timed out"}
+
+
+def test_a_fresh_node_list_is_not_stale(cloud, tmp_path, capsys):
+    data = _ok(_run([str(_write(tmp_path, _ui())), "--where", "cloud"], capsys))
+    assert data["stale"] is False and data["warnings"] == []
+
+
+def test_an_unreadable_local_copy_leaves_the_model_unverified(cloud, monkeypatch, tmp_path, capsys):
+    def unreadable(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("comfy_cli.hashing.blake3_file", unreadable)
+    (tmp_path / "sd15.safetensors").write_bytes(SD15)
+    cloud["assets"] = [
+        {"name": "sd15.safetensors", "hash": "f" * 64, "size": len(SD15), "tags": ["models"], "public": True}
+    ]
+    wf = _write(tmp_path, _ui((1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
+    data = _ok(_run([str(wf), "--where", "cloud", "--models-dir", str(tmp_path)], capsys))
+    assert data["models"][0]["identity"] == "unverified"
+    assert data["verdict"] == "covered_needs_check"
+    assert [w["code"] for w in data["warnings"]] == ["local_model_unreadable"]
+
+
 def test_muted_nodes_are_skipped(cloud, tmp_path, capsys):
     wf = _write(tmp_path, {"nodes": [{"id": 1, "type": "MyCustomNode", "mode": 4, "widgets_values": []}]})
     data = _ok(_run([str(wf), "--where", "cloud"], capsys))
@@ -259,6 +318,18 @@ def test_bad_files(cloud, tmp_path, capsys, content, code):
     wf = tmp_path / "wf.json"
     wf.write_text(content)
     _err(_run([str(wf), "--where", "cloud"], capsys), code)
+
+
+def test_a_workflow_the_converter_refuses(cloud, monkeypatch, tmp_path, capsys):
+    from comfy_cli.workflow_to_api import WorkflowConversionError
+
+    def refuse(_workflow, _object_info):
+        raise WorkflowConversionError("subgraph expansion exceeded its safe limit")
+
+    monkeypatch.setattr("comfy_cli.workflow_to_api.convert_ui_to_api", refuse)
+    wf = _write(tmp_path, _ui((1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
+    error = _err(_run([str(wf), "--where", "cloud"], capsys), "workflow_conversion_failed")
+    assert error["details"]["path"] == str(wf.resolve())
 
 
 def test_missing_file(cloud, tmp_path, capsys):

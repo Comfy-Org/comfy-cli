@@ -8,6 +8,7 @@
     "workflow",
     "format",
     "verdict",
+    "stale",
     "blocking",
     "models",
     "nodes",
@@ -34,6 +35,10 @@
     "workflow": {"type": "string", "description": "Absolute path of the checked file; never changed."},
     "format": {"enum": ["ui", "api"]},
     "verdict": {"enum": ["covered", "covered_with_remaps", "covered_needs_check", "needs_build"]},
+    "stale": {
+      "type": "boolean",
+      "description": "true when Cloud's node list could not be refreshed and a cached copy answered (warning object_info_stale): a node type removed since may read as on Cloud."
+    },
     "blocking": {
       "type": "array",
       "items": {
@@ -85,15 +90,19 @@
           "local_paths"
         ],
         "properties": {
-          "node_id": {"type": "string", "description": "Node id; inside a subgraph, <instance id>/<inner id>."},
+          "node_id": {"type": "string", "description": "Node id; inside a subgraph, <instance id>:<inner id>, one row per instance."},
           "class_type": {"type": "string"},
-          "widget": {"type": ["string", "null"], "description": "Input name, when known."},
+          "widget": {"type": ["string", "null"], "description": "Input name; null when the node type is not on Cloud and its saved values carry no names."},
           "value": {"type": "string", "description": "The value saved in the workflow."},
           "status": {"enum": ["present", "remap", "missing", "not_checked"]},
           "source": {"enum": ["cloud", "yours", null]},
           "cloud_value": {"type": ["string", "null"], "description": "The value Cloud runs; differs from value on a remap."},
           "identity": {"enum": ["same", "different", "unverified", null]},
-          "candidates": {"type": "array", "items": {"type": "string"}},
+          "candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "The names that fit when several do; the model is then missing and blocking says ambiguous."
+          },
           "filename": {"$ref": "#/$defs/filename"},
           "folder": {"$ref": "#/$defs/folder"},
           "url": {"$ref": "#/$defs/url"},
@@ -132,7 +141,14 @@
       "items": {
         "type": "object",
         "required": ["code", "message"],
-        "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "object_info_stale, models_dir_not_found, local_model_unreadable or cloud_model_lookup_failed."
+          },
+          "message": {"type": "string"},
+          "details": {"type": "object"}
+        }
       }
     }
   }
