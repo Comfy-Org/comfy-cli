@@ -552,6 +552,22 @@ class TestWatchExecution:
 
 
 class TestExecuteErrorHandling:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Keep execute() off a live server: an empty catalog skips preflight."""
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return {}
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
     def _run_execute_expect_exit(self, workflow_file, **overrides):
         kwargs = dict(host="127.0.0.1", port=8188, wait=True, verbose=False, timeout=30)
         kwargs.update(overrides)
