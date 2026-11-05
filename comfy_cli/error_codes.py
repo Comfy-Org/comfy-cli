@@ -2035,7 +2035,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A v2 multipart asset upload failed or the server rejected its `expected_hash`. A hash mismatch "
         "mints no asset and reports `hash_mismatch` in `details.server_code`. With `--allow-upload`, it also "
         "covers a private temporary copy of the file that could not be made (a full disk, say): "
-        "`details.local_path` names the file, `details.temp_dir` the folder, and nothing was uploaded.",
+        "`details.local_path` names the file and `details.temp_dir` the folder. That file was not uploaded; "
+        "approved files before it may already be, and a retry reuses them.",
         "verify the local file is stable and readable, then retry the upload",
     ),
     # --- knowledge -----------------------------------------------------------

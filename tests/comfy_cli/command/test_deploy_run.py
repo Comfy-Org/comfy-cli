@@ -886,6 +886,53 @@ def test_a_refused_later_file_fails_the_run_before_an_earlier_approved_one_is_se
     assert job_client.requests == []
 
 
+def test_a_failed_copy_of_a_later_file_does_not_claim_nothing_was_uploaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given two approved files, When the first uploads and the temp folder has
+    no room left to copy the second, Then the run fails naming the second file,
+    and the hint does not tell the person nothing was uploaded."""
+    # Given
+    build, _workspace, workflow = two_portraits(tmp_path, monkeypatch)
+    job_client = FakeJobClient(job())
+    uploaded = deployment_holds_nothing(monkeypatch, job_client)
+    portrait = (build / "input" / "portrait.png").resolve()
+    customers = (build / "input" / "customer.csv").resolve()
+    room = iter([100, 0])
+
+    def room_for_the_first_copy_only(_folder: str) -> SimpleNamespace:
+        free = next(room)
+        return SimpleNamespace(total=100, used=100 - free, free=free)
+
+    monkeypatch.setattr("comfy_cli.deploy_assets.shutil.disk_usage", room_for_the_first_copy_only)
+
+    # When
+    result = invoke(
+        workflow,
+        "--deployment",
+        "dep-id",
+        "--no-wait",
+        "--allow-upload",
+        blake3_file(portrait),
+        "--allow-upload",
+        blake3_file(customers),
+    )
+
+    # Then
+    assert result.exit_code == 1, result.stdout
+    error = envelope_error(result)
+    assert error["code"] == "deploy_asset_upload_failed"
+    details = error["details"]
+    assert isinstance(details, dict)
+    assert details["local_path"] == str(customers)
+    assert uploaded == ["portrait.png"]
+    hint = error["hint"]
+    assert isinstance(hint, str)
+    assert "nothing was uploaded" not in hint
+    assert "before it may already be on Comfy Cloud" in hint
+    assert job_client.requests == []
+
+
 def test_an_approved_upload_reports_the_bytes_it_sent(tmp_path: Path) -> None:
     """Given an approved file that is replaced by other approved bytes after the
     probe, When it uploads, Then `assets.files[].bytes` is what was sent, not

@@ -338,7 +338,10 @@ def _snapshot_error(request: AssetResolveRequest, error: OSError) -> DeployAPIEr
             "temp_dir": temp_dir,
             "reason": reason,
         },
-        hint="nothing was uploaded; free space in `details.temp_dir` or set TMPDIR to a folder with room, then retry",
+        hint=(
+            "this file was not uploaded, but approved files before it may already be on Comfy Cloud, and a "
+            "retry reuses them; free space in `details.temp_dir` or set TMPDIR to a folder with room, then retry"
+        ),
     )
 
 

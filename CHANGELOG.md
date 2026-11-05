@@ -24,7 +24,8 @@ history.
   temporary file, checked against the approved hash and sent from that copy,
   so a file rewritten in between cannot send bytes nobody approved. A temp
   folder without room for the whole file is refused before any byte is
-  copied, with `deploy_asset_upload_failed`, and nothing is uploaded. The
+  copied, with `deploy_asset_upload_failed`. That file is not uploaded;
+  approved files before it may already be, and a retry reuses them. The
   `--allow-upload` refusal, and the one from
   `--no-upload`, now lists every such file in `details.missing[]` (absolute
   `local_path`, `bytes`, `hash`) rather than stopping at the first, so a person
