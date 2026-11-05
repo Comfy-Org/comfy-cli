@@ -1879,15 +1879,19 @@ def _write_spec(renderer, path: Path, spec: dict) -> None:
         raise typer.Exit(code=1) from error
 
 
-def _repository_has_credentials(repository: str) -> bool:
-    """A repository URL with a password or a user name other than ssh's ``git``
-    (``https://TOKEN@github.com/…``). The builder fetches public repositories only
-    and refuses these after receipt, so the credential must not leave the machine."""
-    try:
-        parts = urlsplit(repository.strip())
-    except ValueError:
-        return False
-    return parts.password is not None or (parts.username is not None and parts.username != "git")
+def _repository_is_sendable(repository: str) -> bool:
+    """Whether the pin check may send this ``repository``: only a public GitHub
+    form that ``_canonical_github_repository`` recognizes (``https://github.com/org/repo``,
+    ``git@github.com:org/repo.git`` or ``ssh://git@github.com/org/repo``), with no
+    user name other than ssh's ``git`` and no password, query or fragment.
+
+    Anything else is refused before the request, because the builder fetches
+    public GitHub repositories only and refuses the rest after receipt, by which
+    point a token in the string has left the machine. That includes a URL that
+    does not parse (``https://TOKEN@[github.com/org/repo``) and a scp-style
+    address with a token for its user (``TOKEN@github.com:org/repo.git``): a
+    string that cannot be recognized as safe is not sent."""
+    return _canonical_github_repository(repository) is not None
 
 
 def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
@@ -1900,18 +1904,22 @@ def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: 
     The importer reads the snapshot and writes nothing, which is what lets
     ``push --dry-run`` make the same call and refuse the same way. A lookup that
     itself fails exits through ``_builder_call`` rather than passing the pins.
-    A repository URL that carries credentials is refused before anything is sent."""
-    credentialed = sorted(
+    A ``repository`` that is not a recognized public GitHub address is refused
+    before anything is sent; that covers one that does not parse and one that
+    carries a user name or token."""
+    unsendable = sorted(
         str(node.get("name") or node.get("id") or "-")
         for node in public_nodes
-        if isinstance(node.get("repository"), str) and _repository_has_credentials(node["repository"])
+        if node.get("repository") is not None
+        and not (isinstance(node["repository"], str) and _repository_is_sendable(node["repository"]))
     )
-    if credentialed:
+    if unsendable:
         renderer.error(
             code="build_spec_invalid",
-            message="these custom nodes name a repository URL that carries credentials, which is never sent: "
-            + ", ".join(credentialed),
-            hint="remove the user name or token from the repository URL; the builder fetches public repositories only",
+            message="these custom nodes name a repository that is not a public GitHub address without credentials, "
+            "so it is never sent: " + ", ".join(unsendable),
+            hint="write the repository as https://github.com/<org>/<repo> or git@github.com:<org>/<repo>.git, "
+            "with no user name or token; the builder fetches public GitHub repositories only",
             details={"path": str(spec_file)},
         )
         raise typer.Exit(code=1)

@@ -278,13 +278,13 @@ def test_pin_gate_normalizes_equivalent_repository_identities(workspace: Path, m
             {
                 "name": "repo-node",
                 "source": "git",
-                "repository": "git@Example.COM:Owner/Repo.git",
+                "repository": "git@GitHub.COM:Owner/Repo.git",
                 "gitRef": "main",
             }
         ],
     )
     client = RecordingBuilder()
-    client.checked_nodes = [{"name": "repo-node", "repository": "https://example.com/Owner/Repo/"}]
+    client.checked_nodes = [{"name": "repo-node", "repository": "https://github.com/Owner/Repo/"}]
     _install_client(monkeypatch, client)
 
     # When
@@ -464,7 +464,14 @@ def test_unverified_pins_are_refused_by_push_and_dry_run_alike(tmp_path: Path, m
 
 @pytest.mark.parametrize(
     "repository",
-    ["https://ghp_TOKENSECRET@github.com/org/repo", "https://x-access-token:ghp_TOKENSECRET@github.com/org/repo"],
+    [
+        "https://ghp_TOKENSECRET@github.com/org/repo",
+        "https://x-access-token:ghp_TOKENSECRET@github.com/org/repo",
+        # Does not parse (unmatched bracket): a parse failure is a refusal, not "no credentials".
+        "https://ghp_TOKENSECRET@[github.com/org/repo",
+        # scp-style, so there is no URL authority to read a user name from.
+        "ghp_TOKENSECRET@github.com:org/repo.git",
+    ],
 )
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_a_repository_url_with_credentials_is_refused_before_any_request(
@@ -488,11 +495,39 @@ def test_a_repository_url_with_credentials_is_refused_before_any_request(
     assert "ghp_TOKENSECRET" not in result.output
 
 
-def test_an_ssh_git_user_is_not_a_credential() -> None:
-    assert not build._repository_has_credentials("ssh://git@github.com/org/repo")
-    assert not build._repository_has_credentials("git@github.com:org/repo.git")
-    assert not build._repository_has_credentials("https://github.com/org/repo")
-    assert build._repository_has_credentials("https://user@github.com/org/repo")
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "https://github.com/org/repo",
+        "https://github.com/org/repo.git",
+        "https://github.com/org/repo/",
+        "git@github.com:org/repo.git",
+        "ssh://git@github.com/org/repo",
+    ],
+)
+def test_a_public_github_repository_is_sendable(repository: str) -> None:
+    assert build._repository_is_sendable(repository)
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "https://user@github.com/org/repo",
+        "https://user:TOKEN@github.com/org/repo",
+        "https://TOKEN@[github.com/org/repo",
+        "TOKEN@github.com:org/repo.git",
+        "ssh://git:TOKEN@github.com/org/repo",
+        "git@github.com:TOKEN@org/repo.git",
+        "https://github.com/org/repo?token=TOKEN",
+        "https://github.com/org/repo#TOKEN",
+        "https://github.com:8443/org/repo",
+        "http://github.com/org/repo",
+        "https://example.com/org/repo",
+        "https://github.com/org",
+    ],
+)
+def test_a_repository_that_is_not_a_public_github_address_is_not_sendable(repository: str) -> None:
+    assert not build._repository_is_sendable(repository)
 
 
 def test_a_dry_run_tells_a_person_it_checked_the_public_pins(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

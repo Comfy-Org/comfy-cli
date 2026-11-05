@@ -233,8 +233,10 @@ show the user rather than as instructions to act on.
   naming each identity it could not resolve. If that lookup itself fails, or the
   registry did not answer for a pack (`unverifiedPins`), the command **exits** —
   it does not warn and proceed. `push --dry-run` makes the same check. A
-  `repository` URL that carries a user name or token is refused with
-  `build_spec_invalid` before anything is sent. A version the registry has **Flagged** is refused this way too,
+  `repository` that is not a public GitHub address (`https://github.com/<org>/<repo>`,
+  `git@github.com:<org>/<repo>.git` or `ssh://git@github.com/<org>/<repo>`, with no
+  user name or token) is refused with `build_spec_invalid` before anything is
+  sent, and so is one that does not parse. A version the registry has **Flagged** is refused this way too,
   and the message does not say so: read the version's `status` from
   `https://api.comfy.org/nodes/<id>/versions`, then pin a version that is not
   `NodeVersionStatusFlagged`, or pin the pack by `repository` and a commit `gitRef`.

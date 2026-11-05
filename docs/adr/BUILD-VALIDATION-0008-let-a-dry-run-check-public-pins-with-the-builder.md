@@ -37,9 +37,16 @@ for the pin check:
   sends no request and needs no sign-in, as before.
 - **What is sent.** Only the public-node projection, wrapped as a snapshot.
   Local packs, models, files, workflow content and upload plans are never sent.
-  A `repository` URL that carries a user name or token is refused locally
-  with `build_spec_invalid` and never sent; the builder fetches public
-  repositories only and would refuse it after receipt.
+  Each `repository` must be a public GitHub address the CLI recognizes
+  (`https://github.com/<org>/<repo>`, `git@github.com:<org>/<repo>.git` or
+  `ssh://git@github.com/<org>/<repo>`), with no user name other than ssh's
+  `git`, no password, query or fragment. Any other `repository` is refused
+  locally with `build_spec_invalid` and never sent: one that carries a token,
+  one that does not parse (`https://TOKEN@[github.com/org/repo`), and a
+  scp-style one with a token for its user (`TOKEN@github.com:org/repo.git`).
+  The builder fetches public GitHub repositories only and would refuse the
+  rest after receipt, when a token in the string has already left the
+  machine.
 - **Which call.** `resolve_snapshot`, the snapshot importer. It is a read: it
   returns a definition and a report, and writes nothing on the builder. The dry
   run makes no other builder call. It creates no blobs, uploads nothing, saves
@@ -125,8 +132,9 @@ save nothing", and the `--release` / `--dry-run` conflict says the dry run
 - `tests/comfy_cli/command/test_build_push.py`: a dry run refuses a Flagged pin
   with the push's own error; it sends only the public pins to the importer and
   makes no other call; a failed lookup, a stalled response body, or a report
-  with `unverifiedPins` exits instead of passing; a credential-bearing
-  repository is refused before any request; the pretty
+  with `unverifiedPins` exits instead of passing; a repository that carries a
+  token, does not parse, or is scp-style with a token user is refused before
+  any request; the pretty
   output says the pins were checked and nothing was uploaded or saved.
 - `tests/comfy_cli/command/test_build_auth_matrix.py` and
   `build_auth_support.py`: a dry run with public pins needs a credential, and
