@@ -1,4 +1,4 @@
-# ADR-AUTH-0007: Recover a Rejected Sign-In Once, and Keep Watches Alive
+# ADR-AUTHENTICATION-0007: Recover a Rejected Sign-In Once, and Keep Watches Alive
 
 Date: 2026-11-04
 
