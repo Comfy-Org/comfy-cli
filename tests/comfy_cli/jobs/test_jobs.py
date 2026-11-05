@@ -4174,6 +4174,44 @@ def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
     assert env["data"]["attached"] is True and env["data"]["client_id"] == "cid-sub"
 
 
+def test_watch_live_completion_copies_snapshot_note_without_replacing_stream_payload(monkeypatch, capsys):
+    """A live completion carries the classifier note from /history while its
+    output URLs and attachment metadata remain sourced from the live watch."""
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    note = jobs_mod._nothing_to_show_note("completed", {"7": {"tags": ["1girl"]}}, where="local")
+    snapshots = iter(
+        [
+            {"prompt_id": "pid-w", "status": "running", "outputs": []},
+            {"prompt_id": "pid-w", "status": "completed", "outputs": [], "note": note},
+        ]
+    )
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots))
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"7"})
+    messages = [
+        {
+            "type": "executed",
+            "data": {
+                "prompt_id": "pid-w",
+                "node": "7",
+                "output": {"images": [{"filename": "preview.png", "subfolder": "", "type": "output"}]},
+            },
+        },
+        {"type": "execution_success", "data": {"prompt_id": "pid-w"}},
+    ]
+
+    result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
+
+    assert result.exit_code == 0, result.output
+    payload = lines[-1]["data"]
+    assert payload["note"] == note
+    assert payload["outputs"] == ["http://127.0.0.1:8188/view?filename=preview.png&subfolder=&type=output"]
+    assert payload["completed_nodes"] == ["7"]
+    assert payload["attached"] is True and payload["client_id"] == "cid-sub"
+    assert "clientId=cid-sub" in ws.url
+
+
 def test_watch_live_execution_error_is_promoted_to_execution_error(monkeypatch, capsys):
     """An attached watch that ends on the WS `execution_error` event publishes
     the failure under `execution_error`, the same key the poll exits use — the

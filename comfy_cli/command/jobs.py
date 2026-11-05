@@ -2966,6 +2966,16 @@ def watch_cmd(
         # `borrowed` means drop --client-id, `indeterminate` means retry.
         "poll_reason": poll_reason,
     }
+    if final_status == "completed":
+        # A live WebSocket completion does not carry the raw /history outputs
+        # that `_snapshot` classifies.  Copy only its explanatory note into the
+        # live envelope; the stream remains authoritative for output URLs and
+        # all of the watch metadata above.
+        terminal_snapshot = state.end_details if isinstance(state.end_details, dict) else None
+        if not isinstance((terminal_snapshot or {}).get("note"), str):
+            terminal_snapshot = _snapshot(h, p, prompt_id)
+        if isinstance(terminal_snapshot, dict) and isinstance(terminal_snapshot.get("note"), str):
+            payload["note"] = terminal_snapshot["note"]
     if state.end_details is not None:
         details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}
         if final_status == "error" and isinstance(details.get("error"), dict):
