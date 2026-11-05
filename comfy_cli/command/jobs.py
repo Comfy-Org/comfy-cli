@@ -1547,10 +1547,20 @@ def status_cmd(
     renderer.emit(snapshot, command="jobs status")
 
 
-def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
+def _snapshot(host: str, port: int, prompt_id: str, *, deadline: float | None = None) -> dict | None:
+    def get_json(url: str) -> Any:
+        if deadline is None:
+            return _http_get_json(url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("snapshot deadline expired")
+        # urllib applies this timeout to the connected socket too, so the
+        # capped response-body read cannot outlive the same remaining budget.
+        return _http_get_json(url, timeout=remaining)
+
     # First: is it in the queue?
     try:
-        q = _http_get_json(f"http://{host}:{port}/queue")
+        q = get_json(f"http://{host}:{port}/queue")
     except RuntimeError:
         q = {}
     for state, key in (("running", "queue_running"), ("pending", "queue_pending")):
@@ -1571,7 +1581,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     # Then: history.
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
+        h = get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return None
     if not isinstance(h, dict) or prompt_id not in h:
@@ -1604,7 +1614,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     # file, written at submit time by `comfy run`.
     try:
         job = jobs_state.read(prompt_id)
-    except ValueError:  # unsafe prompt_id — no state file to join against
+    except (ValueError, OSError):  # unsafe id or unavailable state dir — no local record
         job = None
     item_map = job.item_map if job is not None else None
     outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
@@ -2306,7 +2316,7 @@ def _settled_terminal_snapshot(host: str, port: int, prompt_id: str) -> dict | N
     deadline = time.monotonic() + _WATCH_HISTORY_SETTLE_S
     snapshot = None
     while True:
-        snapshot = _snapshot(host, port, prompt_id)
+        snapshot = _snapshot(host, port, prompt_id, deadline=deadline)
         if snapshot and snapshot.get("status") in {"completed", "error", "cancelled"}:
             return snapshot
         remaining = deadline - time.monotonic()

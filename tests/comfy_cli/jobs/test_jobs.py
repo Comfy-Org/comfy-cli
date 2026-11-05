@@ -4138,7 +4138,15 @@ def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
     from comfy_cli import jobs_state
 
     jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
-    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid, *, deadline=None: {
+            "prompt_id": pid,
+            "status": "completed" if deadline is not None else "running",
+            "outputs": [],
+        },
+    )
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
 
     messages = [
@@ -4189,7 +4197,7 @@ def test_watch_live_completion_copies_snapshot_note_without_replacing_stream_pay
             {"prompt_id": "pid-w", "status": "completed", "outputs": [], "note": note},
         ]
     )
-    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid, **kw: next(snapshots))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"7"})
     messages = [
         {
@@ -4226,7 +4234,7 @@ def test_watch_live_completion_note_is_visible_in_pretty_mode(monkeypatch, capsy
             {"prompt_id": "pid-w", "status": "completed", "outputs": [], "note": note},
         ]
     )
-    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots))
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid, **kw: next(snapshots))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
 
     result, _ws, _lines = _run_local_watch(
@@ -4245,7 +4253,7 @@ def test_watch_live_completion_history_retry_is_bounded(monkeypatch):
     monkeypatch.setattr(
         jobs_mod,
         "_snapshot",
-        lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []},
+        lambda h, p, pid, **kw: {"prompt_id": pid, "status": "running", "outputs": []},
     )
     clock = iter([0.0, jobs_mod._WATCH_HISTORY_SETTLE_S + 1.0])
     monkeypatch.setattr(jobs_mod.time, "monotonic", lambda: next(clock))
@@ -4253,6 +4261,38 @@ def test_watch_live_completion_history_retry_is_bounded(monkeypatch):
     snapshot = jobs_mod._settled_terminal_snapshot("127.0.0.1", 8188, "pid-w")
 
     assert snapshot == {"prompt_id": "pid-w", "status": "running", "outputs": []}
+
+
+def test_snapshot_deadline_bounds_each_http_leg(monkeypatch):
+    """Queue and history reads each receive only the deadline budget left."""
+    calls = []
+
+    def get_json(url, *, timeout):
+        calls.append((url, timeout))
+        if url.endswith("/queue"):
+            return {}
+        return {"pid-w": {"status": {"completed": True}, "outputs": {}}}
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", get_json)
+    monkeypatch.setattr(jobs_mod.jobs_state, "read", lambda pid: None)
+    clock = iter([10.0, 11.25])
+    monkeypatch.setattr(jobs_mod.time, "monotonic", lambda: next(clock))
+
+    snapshot = jobs_mod._snapshot("127.0.0.1", 8188, "pid-w", deadline=12.0)
+
+    assert snapshot["status"] == "completed"
+    assert [timeout for _url, timeout in calls] == [2.0, 0.75]
+
+
+def test_snapshot_ignores_unavailable_state_directory(monkeypatch):
+    """A state-directory failure cannot suppress a server-backed terminal result."""
+    responses = iter([{}, {"pid-w": {"status": {"completed": True}, "outputs": {}}}])
+    monkeypatch.setattr(jobs_mod, "_http_get_json", lambda url: next(responses))
+    monkeypatch.setattr(jobs_mod.jobs_state, "read", lambda pid: (_ for _ in ()).throw(OSError("read-only")))
+
+    snapshot = jobs_mod._snapshot("127.0.0.1", 8188, "pid-w")
+
+    assert snapshot["status"] == "completed"
 
 
 def test_watch_live_execution_error_is_promoted_to_execution_error(monkeypatch, capsys):
@@ -4340,7 +4380,15 @@ def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, cap
 
 
 def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):
-    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid, *, deadline=None: {
+            "prompt_id": pid,
+            "status": "completed" if deadline is not None else "running",
+            "outputs": [],
+        },
+    )
     monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (req or "resolved", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
@@ -4356,7 +4404,15 @@ def test_watch_terminal_envelope_validates_against_the_jobs_schema(monkeypatch, 
     """The additive `client_id`/`attached` keys are a published contract."""
     import jsonschema
 
-    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid, *, deadline=None: {
+            "prompt_id": pid,
+            "status": "completed" if deadline is not None else "running",
+            "outputs": [],
+        },
+    )
     monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: ("cid", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
