@@ -67,6 +67,23 @@ history.
 
 - Parallel build and deploy requests rejected on an old access token now adopt a peer's refreshed token under the shared refresh lock instead of rotating it again. Each rejected request retries at most once. If session recovery still fails while a refreshable sign-in remains stored, the watch reports that the remote work may continue instead of telling you to sign in again. `comfy build release create --watch`, `comfy deploy up`, `promote`, `rollback` and `comfy deploy status --watch` now end with the new code `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint names the command that reads the release or deployment again. A 401 before anything was accepted, on a workspace API key, or when no refreshable sign-in remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
 
+- `comfy update` no longer dies with a `FileNotFoundError` traceback when the
+  configured workspace directory does not exist (never installed, or deleted).
+  It now fails with a `not_in_workspace` error that points at `comfy install`,
+  including when `--recent` cannot resolve a workspace, keeping the resolver's
+  exit status.
+
+- `comfy update cli` works for a `uv tool install` of comfy-cli. Those envs ship
+  without pip, so the old `python -m pip install -U` always failed; it now runs
+  `uv tool upgrade comfy-cli`, and any installer failure is reported as an
+  `update_cli_failed` error rather than a traceback. The upgrade targets the
+  running installation's tool directory even when `UV_TOOL_DIR` is absent or
+  selects a different directory in the current shell; when `uv` is not on PATH,
+  the hint names that directory too. The installer still runs without a time
+  limit, since stopping it partway can leave comfy-cli half-replaced. An exact uv version pin
+  is preserved and reported with manual reinstall guidance. Installer diagnostics
+  stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
+
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
