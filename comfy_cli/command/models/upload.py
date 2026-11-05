@@ -78,4 +78,5 @@ def upload_command(
         expected_sha256=expected_sha256,
         yes=yes,
         ctx=ctx,
+        refuse_name_reuse=True,
     )

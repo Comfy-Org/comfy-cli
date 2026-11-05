@@ -55,8 +55,11 @@ keeps its approval idea and builds on the presigned upload already in
   of the workspace's model library (`workspace_library=true`): every member's
   models, and no public ones. A run on Comfy Cloud loads from that same set.
   The same blake3 there means nothing is sent, and the output says
-  `already_present`. Any other hash, or no hash, refuses with `name_in_use`. A
-  listing that may be cut short refuses with `name_unverified`.
+  `already_present`. For `comfy model upload`, any other hash, or no hash,
+  refuses with `name_in_use`. `comfy assets library upload` uploads the file
+  anyway, as before this decision, so a script that replaces a model by
+  uploading a new version under its name keeps working. A listing that may be
+  cut short refuses with `name_unverified`.
 - The upload sends only bytes that were hashed. It reads the file again one
   block at a time and checks each block against its blake3 from the first read
   before any of that block is sent. A changed block stops the upload, so none
@@ -87,7 +90,8 @@ keeps its approval idea and builds on the presigned upload already in
 ## What we reject
 
 - Any upload of a file the caller did not name on the command line.
-- A second file under a folder and name already in use in the library.
+- A second file under a folder and name already in use in the library, from
+  `comfy model upload`.
 - Reporting success before Comfy Cloud's stored hash equals the local hash.
 
 ## Consequences

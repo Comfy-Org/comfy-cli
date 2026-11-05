@@ -72,9 +72,11 @@ history.
   the workspace's model library: every member's models, the ones a run on Comfy
   Cloud loads, and no public ones.
   The same bytes under that name are reported as `already_present` and not sent
-  again. Other bytes under that name are refused (`asset_upload_invalid`,
-  `details.reason` `name_in_use`), because a second file would change what that
-  name loads for every workflow in the workspace. The upload sends only bytes
+  again. `comfy model upload` refuses other bytes under that name
+  (`asset_upload_invalid`, `details.reason` `name_in_use`), because a second
+  file would change what that name loads for every workflow in the workspace.
+  `comfy assets library upload` still uploads them, as a new version of the
+  name, so a script that replaces a model that way keeps working. The upload sends only bytes
   that were hashed: each 1 MiB block is checked against its hash before any of
   it is sent. A file that changed after it was hashed stops the upload before
   the changed bytes are sent, and is never completed (`asset_upload_failed`,

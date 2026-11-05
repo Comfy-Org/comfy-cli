@@ -1955,7 +1955,8 @@ class TestUploadVerifies:
         routes = dict(_UPLOAD_ROUTES)
         other = "blake3:" + "ab" * 32
         routes[("GET", "/api/assets")] = {"assets": [_row(hash_=other), _row()], "has_more": False}
-        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+        args = [str(model_file), "--type", "loras", "--yes"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
 
         assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
         assert env["error"]["details"]["reason"] == "name_in_use"
@@ -1966,9 +1967,25 @@ class TestUploadVerifies:
     def test_a_row_with_no_hash_counts_as_other_bytes(self, cloud_target, monkeypatch, capsys, model_file):
         routes = dict(_UPLOAD_ROUTES)
         routes[("GET", "/api/assets")] = {"assets": [_row(hash_=None)], "has_more": False}
-        env, rc, _, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+        args = [str(model_file), "--type", "loras", "--yes"]
+        env, rc, _, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
 
         assert rc == 1 and env["error"]["details"]["reason"] == "name_in_use" and storage.puts == []
+
+    def test_assets_library_upload_still_uploads_a_new_version_of_a_name(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        # A script that replaces a model by uploading new bytes under its name keeps working.
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": [_row(hash_="blake3:" + "ab" * 32)], "has_more": False}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["ok"] is True and env["changed"] is True
+        assert env["data"]["id"] == "asset-9" and env["data"]["uploaded"] is True
+        assert env["data"]["already_present"] is False
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
+        assert "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete" in cloud.paths()
 
     def test_a_lookup_too_long_to_settle_the_name_is_refused(self, cloud_target, monkeypatch, capsys, model_file):
         routes = dict(_UPLOAD_ROUTES)

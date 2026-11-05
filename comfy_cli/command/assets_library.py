@@ -888,6 +888,7 @@ def run_upload(
     expected_sha256: str | None = None,
     yes: bool = True,
     ctx: typer.Context | None = None,
+    refuse_name_reuse: bool = False,
 ) -> None:
     """Upload ``file``, and only ``file``, into ``folder`` of the Comfy Cloud model library.
 
@@ -896,6 +897,10 @@ def run_upload(
     own. ``workspace`` and ``expected_sha256`` pin an approval: when given, a
     sign-in to another workspace, or a file whose bytes are not the ones
     approved, uploads nothing. ``yes=False`` asks before the upload starts.
+    The same bytes already under the name are never sent again.
+    ``refuse_name_reuse`` refuses a name that already holds other bytes in
+    the folder; without it the file is uploaded under that name, as a new
+    version of it.
     """
     import urllib.parse
 
@@ -990,12 +995,14 @@ def run_upload(
         )
 
     # A run loads the newest model of a name in a folder, so a second file
-    # under a name already in use would change what that name loads for every
-    # workflow in the workspace. The same bytes under the name are already
-    # there and need no upload.
+    # under a name already in use changes what that name loads for every
+    # workflow in the workspace: `comfy model upload` refuses it, while
+    # `comfy assets library upload` keeps uploading it as a new version. The
+    # same bytes under the name are already there and need no upload.
     named = _models_named(renderer, target, file.name, folder, sign_in)
+    same = [r for r in named if _content_hash(r.get("hash")) == local_hash]
     others = [r for r in named if _content_hash(r.get("hash")) != local_hash]
-    if others:
+    if others and refuse_name_reuse:
         raise refuse(
             "name_in_use",
             f"{folder}/{file.name} is already in your Comfy Cloud library with different bytes; "
@@ -1003,7 +1010,7 @@ def run_upload(
             hash=local_hash,
             existing=[{"id": r.get("id"), "hash": r.get("hash")} for r in others],
         )
-    present = named[0] if named else None
+    present = same[0] if same else None
 
     def report(asset_id, *, task_id=None, uploaded=False, name=file.name, asset=None) -> dict:
         return {
