@@ -1,8 +1,9 @@
 """Tests for ``comfy node deps`` — per-pack declared-vs-installed dependencies.
 
 Builds a fixture workspace with fake ``custom_nodes/<pack>/requirements.txt`` +
-``pyproject.toml`` under tmp_path and mocks the single ``pip list --format=json``
-subprocess to a fixed payload, so nothing touches a real venv or the network.
+``pyproject.toml`` under tmp_path. Most cases mock the single installed-metadata
+probe; integration cases use an isolated interpreter and hand-written metadata.
+No package installer or network setup is needed.
 """
 
 from __future__ import annotations
@@ -231,7 +232,7 @@ def test_environment_marker_is_surfaced_not_evaluated(tmp_path, fake_pip):
 
 
 # ---------------------------------------------------------------------------
-# pip list behavior
+# installed-metadata probe behavior
 # ---------------------------------------------------------------------------
 
 
@@ -255,15 +256,294 @@ def test_non_pep440_installed_version_is_unknown_not_a_crash(tmp_path, monkeypat
     assert reqs["weirdpkg"]["status"] == "satisfied"
 
 
+@pytest.mark.parametrize(
+    "specifier, installed, expected",
+    [
+        ("===foobar", "foobar", "satisfied"),
+        ("===FOOBAR", "foobar", "satisfied"),
+        ("===foobar", "FOOBAR", "satisfied"),
+        ("===foobar", "other", "mismatch"),
+        ("===foo", "foobar", "mismatch"),
+        ("===foobar,===FOOBAR", "foobar", "satisfied"),
+        ("===foobar,===other", "foobar", "mismatch"),
+        ("===v1.0", "v1.0", "satisfied"),
+        ("===1.0", "v1.0", "mismatch"),
+        ("===1.0", "1.0.0", "mismatch"),
+        ("===1.0", "1.0+local", "mismatch"),
+        ("===1.0.*", "1.0.1", "mismatch"),
+        # Two literals that normalize alike are still two exact-text tests.
+        ("===v1.0,===1.0", "v1.0", "mismatch"),
+        ("===1.0,===v1.0", "v1.0", "mismatch"),
+        ("===v1.0,===V1.0", "v1.0", "satisfied"),
+    ],
+)
+def test_arbitrary_equality_compares_raw_installed_values(specifier, installed, expected):
+    """Literal pins compare strings, including legacy values, without normalization."""
+    row = node_deps_cmd._classify("weirdpkg" + specifier, {"weirdpkg": installed})
+
+    assert row["status"] == expected
+    assert row["installed"] == installed
+
+
+@pytest.mark.parametrize("specifier", [">=1", "===foobar,>=1", ">=1,===foobar"])
+def test_non_pep440_installed_version_stays_unknown_with_nonliteral_constraints(specifier):
+    """A literal clause must not bypass validation required by another operator."""
+    row = node_deps_cmd._classify("weirdpkg" + specifier, {"weirdpkg": "foobar"})
+
+    assert row["status"] == "unknown"
+    assert row["installed"] == "foobar"
+
+
+@pytest.mark.parametrize(
+    "specifier, installed, expected",
+    [
+        ("===v1.0,>=1", "v1.0", "satisfied"),
+        (">=1,===v1.0", "v1.0", "satisfied"),
+        ("===1.0,>=1", "v1.0", "mismatch"),
+        (">=1,===1.0", "v1.0", "mismatch"),
+        ("===v1.0,!=2", "v1.0", "satisfied"),
+        ("===v1.0,==1.0", "v1.0", "satisfied"),
+        ("===v1.0,<1", "v1.0", "mismatch"),
+        ("===1.0rc1,>=0", "1.0rc1", "satisfied"),
+        ("===1.0rc1,<1.0", "1.0rc1", "mismatch"),
+        ("===other,>=1", "foobar", "unknown"),
+        (">=1,===other", "foobar", "unknown"),
+        ("===v1.0,>=1,===1.0", "v1.0", "mismatch"),
+    ],
+)
+def test_mixed_constraints_preserve_raw_literals_and_semantic_clauses(specifier, installed, expected):
+    """Adding an ordinary clause must neither normalize a literal nor skip validation."""
+    row = node_deps_cmd._classify("weirdpkg" + specifier, {"weirdpkg": installed})
+
+    assert row["status"] == expected
+    assert row["installed"] == installed
+
+
+@pytest.fixture
+def isolated_probe_python(tmp_path):
+    """A real interpreter with no package installers or network setup."""
+    import venv
+
+    root = tmp_path / "probe-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(root)
+    python = str(root / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
+    site = subprocess.run(
+        [python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return python, Path(site)
+
+
+def _write_dist_info(site: Path, directory: str, name: str, version: str) -> None:
+    dist = site / directory
+    dist.mkdir(parents=True)
+    (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+
+
+@pytest.mark.parametrize("pip_present", [False, True])
+def test_report_uses_one_raw_metadata_probe_with_or_without_pip(
+    tmp_path, monkeypatch, isolated_probe_python, pip_present
+):
+    python, site = isolated_probe_python
+    _write_dist_info(site, "Foo-1.0.dist-info", "Foo", "v1.0")
+    if pip_present:
+        # Pip is importable, but must never be the source of raw version data.
+        # Its output is deliberately not faked: only the real metadata is read.
+        pip = site / "pip"
+        pip.mkdir()
+        (pip / "__init__.py").write_text("")
+        (pip / "__main__.py").write_text('raise AssertionError("pip must not be invoked")\n')
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo===v1.0\nfoo===1.0\nfoo>=1\nfoo\nabsent\n")
+    monkeypatch.setenv("PYTHONPATH", "")
+    calls = []
+    real_run = subprocess.run
+
+    def record(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(node_deps_cmd.subprocess, "run", record)
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo===v1.0"]["installed"] == "v1.0"
+    assert reqs["foo===v1.0"]["status"] == "satisfied"
+    assert reqs["foo===1.0"]["status"] == "mismatch"
+    assert reqs["foo>=1"]["status"] == "satisfied"
+    assert reqs["foo"]["status"] == "satisfied"
+    assert reqs["absent"]["status"] == "missing"
+    assert len(calls) == 1
+    assert calls[0][0] == [python, "-c", node_deps_cmd._METADATA_LIST_SCRIPT]
+    assert calls[0][1]["timeout"] == 60
+    assert calls[0][1]["check"] is True
+    # The probe runs where the command ran, so relative paths keep their meaning.
+    assert "cwd" not in calls[0][1]
+    assert "PYTHONPATH" not in calls[0][1]["env"]
+
+
+@pytest.mark.parametrize("caller_entry", [".", "", "absolute"])
+def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(
+    tmp_path, monkeypatch, isolated_probe_python, caller_entry
+):
+    python, site = isolated_probe_python
+    first, second, leftovers, cwd = [tmp_path / name for name in ("first", "second", "leftovers", "caller")]
+    _write_dist_info(first, "foo_pack-1.0.dist-info", "Foo.Pack", "v1.0")
+    _write_dist_info(second, "foo_pack-2.0.dist-info", "foo-pack", "v2.0")
+    _write_dist_info(site, "foo_pack-3.0.dist-info", "foo_pack", "v3.0")
+    _write_dist_info(leftovers, "~oo_pack-0.1.dist-info", "foo-pack", "v0.1")
+    _write_dist_info(cwd, "foo_pack-9.0.dist-info", "foo-pack", "v9.0")
+    (cwd / "json.py").write_text('raise AssertionError("caller json.py imported")\n')
+    broken = first / "broken-1.0.dist-info"
+    broken.mkdir()
+    (broken / "METADATA").write_bytes(b"Name: broken\nVersion: 1.0\nSummary: \xff\xfe\n")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo-pack===v1.0\nfoo-pack>=1\nabsent\n")
+    monkeypatch.chdir(cwd)
+    caller_entry = str(cwd) if caller_entry == "absolute" else caller_entry
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([caller_entry, str(leftovers), str(first), str(second)]))
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo-pack===v1.0"]["installed"] == "v1.0"
+    assert reqs["foo-pack===v1.0"]["status"] == "satisfied"
+    assert reqs["foo-pack>=1"]["status"] == "satisfied"
+    assert reqs["absent"]["status"] == "missing"
+
+
+@pytest.mark.parametrize("pythonpath", ["", ".", "absolute"])
+def test_legacy_editable_is_found_when_run_from_its_source_directory(
+    tmp_path, monkeypatch, isolated_probe_python, pythonpath
+):
+    """An install listed in a ``.pth`` file stays visible even when it is the caller's directory.
+
+    That holds when ``PYTHONPATH`` also names the directory: the ``PYTHONPATH``
+    entry is dropped, and the ``.pth`` file still adds the path.
+    """
+    python, site = isolated_probe_python
+    source = tmp_path / "editable-source"
+    (source / "foo").mkdir(parents=True)
+    (source / "foo" / "__init__.py").write_text("")
+    (source / "foo.egg-info").mkdir()
+    (source / "foo.egg-info" / "PKG-INFO").write_text("Metadata-Version: 1.2\nName: foo\nVersion: 1.5\n")
+    (site / "easy-install.pth").write_text(f"{source}\n")
+    (site / "foo.egg-link").write_text(f"{source}\n.\n")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo>=1\n")
+    monkeypatch.chdir(source)
+    monkeypatch.setenv("PYTHONPATH", str(source) if pythonpath == "absolute" else pythonpath)
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo>=1"]["installed"] == "1.5"
+    assert reqs["foo>=1"]["status"] == "satisfied"
+
+
+def test_relative_virtual_env_interpreter_still_runs(tmp_path, monkeypatch, isolated_probe_python):
+    """``VIRTUAL_ENV=probe-venv`` resolves to a relative interpreter path, which must still start."""
+    python, site = isolated_probe_python
+    _write_dist_info(site, "foo-1.0.dist-info", "foo", "1.0")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo>=1\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VIRTUAL_ENV", os.path.relpath(Path(python).parent.parent, tmp_path))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "")
+
+    report, warnings = node_deps_cmd.build_report(str(workspace))
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert not os.path.isabs(report["python"])
+    assert warnings == []
+    assert reqs["foo>=1"]["installed"] == "1.0"
+    assert reqs["foo>=1"]["status"] == "satisfied"
+
+
+def test_relative_pythonpath_keeps_its_target_under_the_caller_directory(tmp_path, monkeypatch, isolated_probe_python):
+    """``PYTHONPATH=overlay`` names ``<caller>/overlay``; only the caller's directory itself is left out."""
+    python, _ = isolated_probe_python
+    caller = tmp_path / "caller"
+    _write_dist_info(caller / "overlay", "foo-1.0.dist-info", "foo", "1.0")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo>=1\n")
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PYTHONPATH", "overlay")
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo>=1"]["installed"] == "1.0"
+    assert reqs["foo>=1"]["status"] == "satisfied"
+
+
+def test_absolute_pythonpath_naming_the_caller_does_not_override_installed_metadata(
+    tmp_path, monkeypatch, isolated_probe_python
+):
+    """Stray metadata in the caller's directory loses to the installed copy, however the entry is spelled."""
+    python, site = isolated_probe_python
+    _write_dist_info(site, "foo-1.0.dist-info", "foo", "1.0")
+    caller = tmp_path / "caller"
+    _write_dist_info(caller, "foo-9.0.dist-info", "foo", "9.0")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo<2\n")
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PYTHONPATH", str(caller))
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo<2"]["installed"] == "1.0"
+    assert reqs["foo<2"]["status"] == "satisfied"
+
+
+def test_probe_env_drops_only_pythonpath_entries_naming_the_caller_directory(tmp_path, monkeypatch):
+    caller, other = tmp_path / "caller", tmp_path / "other"
+    (caller / "overlay").mkdir(parents=True)
+    other.mkdir()
+    # Creating a symlink needs a privilege Windows does not always grant; without
+    # it, the symlink entry is left out and every other entry is still checked.
+    link = tmp_path / "caller-link"
+    try:
+        link.symlink_to(caller, target_is_directory=True)
+    except OSError:
+        link_entries = []
+    else:
+        link_entries = [str(link)]
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join([".", "", str(caller), *link_entries, "overlay", str(other), "absent"])
+    )
+    monkeypatch.setenv("COMFY_PROBE_ENV_MARKER", "kept")
+
+    env = node_deps_cmd._probe_env()
+
+    assert env["PYTHONPATH"] == os.pathsep.join(["overlay", str(other), "absent"])
+    assert env["COMFY_PROBE_ENV_MARKER"] == "kept"
+    assert os.environ["PYTHONPATH"].startswith(".")
+
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([".", str(caller)]))
+    assert "PYTHONPATH" not in node_deps_cmd._probe_env()
+
+
 def test_pip_list_runs_once_for_the_whole_report(workspace, fake_pip):
     node_deps_cmd.build_report(str(workspace), python="/fake/python")
 
-    assert len(fake_pip.calls) == 1, f"pip list ran {len(fake_pip.calls)}x — must be once per report"
-    assert fake_pip.calls[0] == ["/fake/python", "-m", "pip", "list", "--format=json"]
+    assert len(fake_pip.calls) == 1, f"installed probe ran {len(fake_pip.calls)}x — must be once per report"
+    assert fake_pip.calls[0] == ["/fake/python", "-c", node_deps_cmd._METADATA_LIST_SCRIPT]
 
 
 def test_pip_list_failure_degrades_to_unknown_with_a_warning(workspace, monkeypatch):
-    monkeypatch.setattr(node_deps_cmd.subprocess, "run", _FakePipList(returncode=2))
+    probe = _FakePipList(returncode=2)
+    monkeypatch.setattr(node_deps_cmd.subprocess, "run", probe)
 
     report, warnings = node_deps_cmd.build_report(str(workspace), python="/fake/python")
 
@@ -272,14 +552,16 @@ def test_pip_list_failure_degrades_to_unknown_with_a_warning(workspace, monkeypa
     reqs = _reqs_by_raw(pack)
     assert reqs["opencv-python>=4.7"]["status"] == "unknown"
     assert reqs["opencv-python>=4.7"]["installed"] is None
-    # unparseable lines stay unparseable — the pip probe can't change that
+    # unparseable lines stay unparseable — the installed probe can't change that
     assert reqs["-r other-requirements.txt"]["status"] == "unparseable"
     assert pack["summary"]["unknown"] == 4
     assert pack["summary"]["unparseable"] == 3
+    assert len(probe.calls) == 1
 
 
-def test_pip_list_unparseable_output_degrades_to_unknown(workspace, monkeypatch):
-    monkeypatch.setattr(node_deps_cmd.subprocess, "run", _FakePipList(stdout="not json at all"))
+@pytest.mark.parametrize("stdout", ["not json at all", "{}"])
+def test_pip_list_unparseable_output_degrades_to_unknown(workspace, monkeypatch, stdout):
+    monkeypatch.setattr(node_deps_cmd.subprocess, "run", _FakePipList(stdout=stdout))
 
     report, warnings = node_deps_cmd.build_report(str(workspace), python="/fake/python")
 
@@ -336,7 +618,7 @@ def test_interpreter_without_pip_still_reports_installed_versions(tmp_path, monk
 
 
 def test_pip_list_timeout_is_not_retried(workspace, monkeypatch):
-    """A hung interpreter would hang the fallback too; don't double the wait."""
+    """A hung interpreter must not be retried; do not double the wait."""
     calls = []
 
     def _hang(cmd, **kwargs):
@@ -473,7 +755,7 @@ def test_registry_candidate_is_diffed_against_the_same_pip_list(workspace, fake_
     assert all(r["source"] == "registry" for r in row["requirements"])
     assert row["summary"] == {"satisfied": 1, "mismatch": 1, "missing": 1, "unparseable": 1, "unknown": 0}
 
-    # A single `pip list`, shared with the installed packs — not one per entry.
+    # One installed-version probe, shared with installed packs — not one per entry.
     assert len(fake_pip.calls) == 1
 
 

@@ -84,6 +84,12 @@ history.
   is preserved and reported with manual reinstall guidance. Installer diagnostics
   stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
 
+- `comfy node deps` reports malformed installed package versions as `unknown`
+  consistently across supported `packaging` versions. One metadata probe
+  preserves raw installed versions with or without pip. Every `===` clause
+  compares raw strings case-insensitively, including in mixed constraints;
+  ordinary clauses still require valid versions and use semantic comparison.
+
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
