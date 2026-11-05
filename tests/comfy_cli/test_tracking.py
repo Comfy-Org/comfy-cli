@@ -696,6 +696,17 @@ class TestTrackCommandRedaction:
         assert "from_workflow" not in filter_command_kwargs({"name": "demo"})
         assert filter_command_kwargs({"from_workflow": "/Users/someone/wf.json"})["from_workflow"] == "<redacted>"
 
+    def test_local_model_folders_and_out_paths_are_redacted(self, tracking_module):
+        """`workflow check --models-dir` is a repeatable `str` option (a list) and
+        `--out` a `str` path: both are JSON-serializable, so both would ship verbatim."""
+        from comfy_cli.tracking import filter_command_kwargs
+
+        props = filter_command_kwargs(
+            {"models_dir": ["/Users/someone/Private Clients/models"], "out": "/Users/someone/acme/wf.json"}
+        )
+        assert props == {"models_dir": "<redacted>", "out": "<redacted>"}
+        assert filter_command_kwargs({"models_dir": None, "out": None}) == {"models_dir": None, "out": None}
+
     def test_underscore_ctx_is_excluded(self, tracking_module):
         import click
 

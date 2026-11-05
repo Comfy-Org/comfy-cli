@@ -131,6 +131,10 @@ _SENSITIVE_EXACT = frozenset(
         # (a bool) stays measurable.
         "workspace_id",
         "expected_sha256",
+        # `--models-dir` (repeatable, so a list: the whole list is redacted) and
+        # `--out` are local paths, typed `str` like `--workflow`.
+        "models_dir",
+        "out",
     }
 )
 

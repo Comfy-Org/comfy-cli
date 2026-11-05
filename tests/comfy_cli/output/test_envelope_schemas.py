@@ -66,6 +66,8 @@ def _validator_for(name: str) -> jsonschema.Validator:
         # The progress object is the deploy service's own and may grow fields,
         # so the event stays open where the envelopes around it are closed.
         "deploy_progress_event.json",
+        # Enums on verdict / status / identity and a oneOf for blocking rows.
+        "workflow_check.json",
     ],
 )
 def test_schemas_are_well_formed(schema_name):

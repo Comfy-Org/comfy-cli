@@ -129,6 +129,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow fragment ls": "workflow",
     "comfy workflow fragment show": "workflow",
     "comfy workflow fragment validate": "workflow",
+    # Comfy Cloud coverage: its own payload (verdict, blocking[], models[]).
+    "comfy workflow check": "workflow_check",
     # the local comfy agent's approvals
     "comfy agent permissions": "agent",
     "comfy agent allow": "agent",

@@ -153,9 +153,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_write_error",
-        "`workflow get --out` could not write the fetched workflow to disk (OSError: permissions, "
-        "missing parent dir, full disk, invalid path).",
+        "`workflow get --out` could not write the fetched workflow to disk, or `workflow check --apply-remaps "
+        "--out` could not write the remapped copy (OSError: permissions, missing parent dir, full disk, "
+        "invalid path).",
         "check the --out path is writable and the disk has space",
+    ),
+    ErrorCode(
+        "workflow_format_unknown",
+        "`workflow check` read valid JSON that is neither a ComfyUI save (an object with `nodes[]`) nor an "
+        "API export (an object of nodes, each with a `class_type`). `details.path` carries the file.",
+        "pass a workflow saved from ComfyUI or its API export",
+    ),
+    ErrorCode(
+        "workflow_out_is_input",
+        "`workflow check --apply-remaps --out` named the workflow being checked; the check never changes "
+        "its input, so nothing was written. `details.path` carries the file.",
+        "pass a new file name to --out",
     ),
     ErrorCode(
         "workflow_too_large",
@@ -948,8 +961,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_conversion_failed",
-        "`comfy workflow decompose` could not flatten a frontend-format workflow to "
-        "API format (malformed graph, or object_info that doesn't match the nodes).",
+        "`comfy workflow decompose` or `comfy workflow check` could not flatten a frontend-format workflow "
+        "to API format (malformed graph, or object_info that doesn't match the nodes).",
         "re-export from ComfyUI, or pass a matching --input object_info.json",
     ),
     ErrorCode(
