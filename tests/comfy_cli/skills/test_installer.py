@@ -1409,3 +1409,15 @@ def test_agent_permissions_skill_names_every_permanently_refused_host():
     assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
     for host in _REFUSED_HOSTS:
         assert host in rows[0], f"the row should name the refused host {host}"
+
+
+def test_run_on_cloud_skill_fetches_files_with_any_name():
+    """A workflow or input whose name has a space, `#` or `&` still downloads
+    into a folder that exists: the query is URL-encoded, the working folder
+    name is made safe and created with its `inputs` folder, and paths are quoted."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert 'mkdir -p "<work>/inputs"' in text
+    assert '--data-urlencode "filename=<file>"' in text
+    assert '--data-urlencode "subfolder=<subfolder>"' in text
+    assert "a space as `%20`" in text
+    assert "run-on-cloud/<name>" not in text

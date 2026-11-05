@@ -44,17 +44,23 @@ report "prepared, not run" and say what is missing.
 
 The prompt gives `Workflow: workflows/<name>.json` and the server URL, plus a
 `ComfyUI user:` line when the server runs with `--multi-user`. Fetch the file
-from the server; you do not need its folder on disk. Encode each `/` in the path
-as `%2F`:
+from the server; you do not need its folder on disk. In the URL, percent-encode
+the path after `workflows/`: each `/` as `%2F`, a space as `%20`, and every
+other character outside letters, digits, `-`, `_` and `.` the same way.
+
+Do all work in one folder, written `<work>` below: `run-on-cloud/` plus the
+workflow's name with every character other than a letter, digit, `-` or `_`
+turned into `-` (`My flow (2)` gives `run-on-cloud/My-flow--2-`). Quote every
+path in the commands.
 
 ```shell
-mkdir -p run-on-cloud/<name>
-curl -sf "<server>/api/userdata/workflows%2F<name>.json" \
-  -H "comfy-user: <user>" -o run-on-cloud/<name>/original.json
+mkdir -p "<work>/inputs"
+curl -sf "<server>/api/userdata/workflows%2F<encoded name>.json" \
+  -H "comfy-user: <user>" -o "<work>/original.json"
 ```
 
-Leave out the `comfy-user` header when there is no user line. Do all work in
-`run-on-cloud/<name>/`. If the prompt names no workflow, ask which one.
+Leave out the `comfy-user` header when there is no user line. If the prompt
+names no workflow, ask which one.
 
 Every later comfy command that reads the local server (a `--where local` run)
 must reach this same server, not comfy-cli's default of `127.0.0.1:8188`.
@@ -69,8 +75,8 @@ Pass each folder that exists as its own `--models-dir`:
 
 ```shell
 comfy --json which
-comfy --json workflow check run-on-cloud/<name>/original.json --where cloud \
-  --models-dir <models folder> [--models-dir <another>]
+comfy --json workflow check "<work>/original.json" --where cloud \
+  --models-dir "<models folder>" [--models-dir "<another>"]
 ```
 
 Without `--models-dir` the check cannot see a local file, so a model the person
@@ -98,8 +104,8 @@ A remap is lossless. Write it without asking, with the same `--models-dir`
 folders:
 
 ```shell
-comfy --json workflow check run-on-cloud/<name>/original.json --where cloud \
-  --models-dir <models folder> --apply-remaps --out run-on-cloud/<name>/cloud.json
+comfy --json workflow check "<work>/original.json" --where cloud \
+  --models-dir "<models folder>" --apply-remaps --out "<work>/cloud.json"
 ```
 
 Run `cloud.json` from here on. If any of its `models[]` rows is still
@@ -199,7 +205,7 @@ in its place; report the model as what blocks the run. When it fails, nothing ra
 | `model_upload_needs_confirm` | `--yes` was missing. Ask, if you have not, then run it with `--yes --expected-sha256` |
 | `asset_upload_wrong_workspace` | This sign-in uploads into another workspace (`details.current_workspace`). Nothing was sent. Tell the person; upload only after they sign in to the approved one (`comfy cloud login`) or approve the current one |
 | `asset_upload_invalid`, `file_changed` | The file changed since the approved dry run. Run the dry run again and ask again with the new `sha256` |
-| `asset_upload_invalid`, `name_in_use` or `name_unverified` | The folder already has (or may have) another file of this name, and uploading would change what the name loads for the whole workspace. Copy the file under a new name into `run-on-cloud/<name>/`, then dry run and ask again with that name |
+| `asset_upload_invalid`, `name_in_use` or `name_unverified` | The folder already has (or may have) another file of this name, and uploading would change what the name loads for the whole workspace. Copy the file under a new name into `<work>/`, then dry run and ask again with that name |
 | `asset_upload_invalid`, `bad_expected_sha256` | Pass the 64-hex `sha256` from the dry run |
 | `asset_upload_invalid`, other reasons | The message names the file or `--type` problem; fix it, or report it as what blocks the run |
 | `asset_upload_unverified` | The file is stored, but Cloud's hash of it does not match or could not be read. Do not run a workflow that loads it; report it, with `details.asset_id` |
@@ -208,9 +214,10 @@ in its place; report the model as what blocks the run. When it fails, nothing ra
 server, then upload it after the yes:
 
 ```shell
-curl -sf "<server>/api/view?filename=<file>&subfolder=<subfolder>&type=input" \
-  -H "comfy-user: <user>" -o run-on-cloud/<name>/inputs/<file>
-comfy --json upload run-on-cloud/<name>/inputs/<file> --where cloud
+curl -sfG "<server>/api/view" --data-urlencode "filename=<file>" \
+  --data-urlencode "subfolder=<subfolder>" --data-urlencode "type=input" \
+  -H "comfy-user: <user>" -o "<work>/inputs/<file>"
+comfy --json upload "<work>/inputs/<file>" --where cloud
 ```
 
 Set the loader on the copy to the returned `uploads[].cloud_name`.
@@ -221,7 +228,7 @@ Never call it working before a real job succeeds.
 
 - **Comfy Cloud:**
   `comfy --json run --workflow <file> --where cloud --wait`, then
-  `comfy --json download <prompt_id> --where cloud --out-dir run-on-cloud/<name>/outputs`.
+  `comfy --json download <prompt_id> --where cloud --out-dir "<work>/outputs"`.
 - **A deployment** (existing or custom build): first read
   `comfy --json deploy logs --deployment <id>`; `data.comfyuiLog` must show no
   `IMPORT FAILED` for a pack the workflow uses. Make the API file against the
@@ -238,7 +245,7 @@ Never call it working before a real job succeeds.
 
   ```shell
   comfy --json deploy run --deployment <id> --workflow api.json --no-upload \
-    --wait --output-dir run-on-cloud/<name>/outputs
+    --wait --output-dir "<work>/outputs"
   ```
 
   If the deployment has every file, it runs and nothing was sent. Otherwise it
@@ -253,7 +260,7 @@ Never call it working before a real job succeeds.
   ```shell
   comfy --json deploy run --deployment <id> --workflow api.json \
     --allow-upload <hash> --allow-upload <hash> \
-    --wait --output-dir run-on-cloud/<name>/outputs
+    --wait --output-dir "<work>/outputs"
   ```
 
   It uploads only files with those hashes. It hashes a private copy of each
@@ -281,8 +288,8 @@ to recover a download. Run comfy commands one at a time.
 Save the file that ran (the copy, if you changed one):
 
 ```shell
-comfy --json workflow save <file> --name <name> --where cloud
-comfy --json workflow save <file> --name <name> --where cloud --deployment <id>   # ran on a deployment
+comfy --json workflow save <file> --name "<name>" --where cloud
+comfy --json workflow save <file> --name "<name>" --where cloud --deployment <id>   # ran on a deployment
 ```
 
 It saves into a new folder in the Cloud Workflows sidebar and never replaces a
