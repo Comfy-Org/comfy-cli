@@ -253,7 +253,9 @@ def which_panel(
         ("Python", python_value),
         ("Server", server_value),
     ]
-    if desktop:
+    # A registry with no usable install leaves the Desktop fields null; show
+    # the rows only for a selected install, as ``fill_print_table`` does.
+    if desktop and desktop.get("code_dir"):
         rows.extend(
             [
                 ("Desktop code", Text(sanitize_value(desktop["code_dir"]))),

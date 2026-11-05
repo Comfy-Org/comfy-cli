@@ -198,6 +198,23 @@ def test_pretty_which_shows_the_desktop_data_dir(comfy_desktop, fallback_workspa
     assert "specified" in result.output
 
 
+def test_pretty_which_skips_desktop_rows_when_no_install_is_usable(comfy_desktop, fallback_workspace):
+    """A registry whose only install has no checkout leaves the Desktop fields null;
+    pretty ``which`` must not print them as ``None``."""
+    (comfy_desktop["code"] / "main.py").unlink()
+
+    _, envelope = _invoke("--json", "which")
+    assert envelope["data"]["desktop"]["code_dir"] is None
+
+    result = CliRunner().invoke(app, ["which"], env={"COMFY_OUTPUT": "pretty", "COLUMNS": "400"})
+
+    assert result.exit_code == 0, result.output
+    assert "Desktop code" not in result.output
+    assert "Desktop data" not in result.output
+    assert "None" not in result.output
+    assert f"Workspace directory does not exist: {fallback_workspace}" in result.output
+
+
 def test_env_reports_the_desktop_install(comfy_desktop, fallback_workspace):
     result, envelope = _invoke("--json", "env")
 

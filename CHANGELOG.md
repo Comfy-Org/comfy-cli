@@ -65,7 +65,7 @@ history.
 
 ### Fixed
 
-- Desktop discovery reads both modern and legacy registries. Callers with running-server launch metadata select that exact instance, resolve its model YAML (the `extra_model_paths.yaml` beside the `main.py` the process runs first, then `--extra-model-paths-config`), `--models-directory` and effective data/input/output paths, and keep ambiguous or relative runtime identities unresolved. The optional discovery fields are documented in the which/env schemas; unrelated launch arguments are excluded.
+- Desktop discovery reads both modern and legacy registries and keeps each registry's shared model roots with its own installs. The selected Desktop install is a registry-derived candidate (the only usable install, or the most recently launched); it is not matched to a running server.
 - `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. On Linux, shared model roots are read from `settings.json` under `XDG_CONFIG_HOME`, where Desktop keeps it. A nonexistent selected workspace still exits 0 but reports `exists: false` and a `workspace_not_found` warning; discovery reports malformed or unreadable Desktop configuration, and Desktop paths that cannot be checked (permission denied, a symlink loop, no home directory), as `desktop_config_unreadable` warnings and marks inferred data roots as unverified. Both codes appear only in `data.warnings[]`; they are not error codes and `comfy discover` does not list them under `data.error_codes`.
 
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
