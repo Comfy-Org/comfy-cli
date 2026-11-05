@@ -1446,6 +1446,11 @@ class _LazyNodes(Mapping[str, Morphism]):
     object skipped. Annotations are recorded and replayed in order on every
     class parsed later, so a lazily parsed class ends up exactly as it would
     have had it been parsed before ``annotate`` ran.
+
+    ``values()`` and ``items()`` parse every class, so ``nodes widget-catalog``
+    (via ``build_types``) still fails on a malformed class as the eager parse
+    did. Callers rely on that to refuse a bad catalog at startup: a catalog
+    builder must not stop iterating early or read only some keys.
     """
 
     __slots__ = ("_raw", "_parsed", "_annotations")

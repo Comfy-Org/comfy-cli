@@ -20,6 +20,7 @@ from comfy_cli.caller import Caller
 from comfy_cli.command import workflow as workflow_cmd
 from comfy_cli.cql import engine as cql_engine
 from comfy_cli.cql.engine import Graph
+from comfy_cli.cql.widget_catalog import build_types
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -147,6 +148,13 @@ class TestLookupParsesOnlyWhatItTouches:
         info = _padded_sd15_object_info(20)
         g = Graph.from_object_info(info)
         g.upstream("VAEDecode")
+        assert sorted(parse_calls) == sorted(info)
+
+    def test_widget_catalog_parses_everything(self, parse_calls):
+        # The agent refuses to start on a catalog `nodes widget-catalog` cannot
+        # build, which holds only while building it parses every class.
+        info = _padded_sd15_object_info(20)
+        build_types(Graph.from_object_info(info))
         assert sorted(parse_calls) == sorted(info)
 
 
