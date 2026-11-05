@@ -2,8 +2,9 @@
 
 The default workspace comfy-cli falls back to (``~/Documents/comfy/ComfyUI``)
 does not exist on a Desktop-only machine. These commands used to report it with
-``ok: true``; now a missing path is an error (`which`) or a flagged warning
-(`env`), and a Desktop 2 install is reported with its real split layout.
+``ok: true`` and nothing else; they still succeed (exit 0, envelope/1 unchanged)
+but now say ``exists: false`` with a ``workspace_not_found`` warning, and a
+Desktop 2 install is reported with its real split layout.
 """
 
 from __future__ import annotations
@@ -51,14 +52,16 @@ def _invoke(*args: str):
 def test_which_keeps_missing_selected_workspace_separate_from_desktop_candidate(comfy_desktop, fallback_workspace):
     result, envelope = _invoke("--json", "which")
 
-    assert result.exit_code == 1, result.output
-    assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "workspace_not_found"
-    details = envelope["error"]["details"]
-    assert details["workspace_type"] == workspace_manager.workspace_type.value == "default"
-    assert details["path"] == workspace_manager.workspace_path == str(fallback_workspace)
+    assert result.exit_code == 0, result.output
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    jsonschema.validate(data, _schema("which.json"))
+    assert data["workspace_type"] == workspace_manager.workspace_type.value == "default"
+    assert data["workspace_path"] == workspace_manager.workspace_path == str(fallback_workspace)
+    assert data["exists"] is False
+    assert [w["code"] for w in data["warnings"]] == ["workspace_not_found"]
     assert not Path(workspace_manager.workspace_path).is_dir()
-    desktop = details["desktop"]
+    desktop = data["desktop"]
     assert desktop["code_dir"] == str(comfy_desktop["code"])
     assert desktop["data_dir"] == str(comfy_desktop["data"])
     assert desktop["python"] == str(comfy_desktop["python"])
@@ -83,7 +86,7 @@ def test_which_lists_every_desktop_install_and_says_which_it_picked(comfy_deskto
 
     _, envelope = _invoke("--json", "which")
 
-    desktop = envelope["error"]["details"]["desktop"]
+    desktop = envelope["data"]["desktop"]
     assert desktop["install_id"] == "inst-adopted"
     assert "most recently launched of 2" in desktop["selected_reason"]
     assert {row["install_id"]: row["selected"] for row in desktop["installs"]} == {
@@ -92,28 +95,41 @@ def test_which_lists_every_desktop_install_and_says_which_it_picked(comfy_deskto
     }
 
 
-def test_which_errors_when_the_default_workspace_does_not_exist(fallback_workspace):
+def test_which_still_succeeds_but_flags_a_missing_default_workspace(fallback_workspace):
+    """envelope/1 contract: same exit code and data keys as before, plus additive fields."""
     result, envelope = _invoke("--json", "which")
 
-    assert result.exit_code == 1
-    assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "workspace_not_found"
-    assert envelope["error"]["details"]["path"] == str(fallback_workspace)
-    assert envelope["error"]["details"]["workspace_type"] == "default"
-    assert envelope["error"]["hint"]
+    assert result.exit_code == 0, result.output
+    assert envelope["ok"] is True
+    data = envelope["data"]
+    assert data["workspace_path"] == str(fallback_workspace)
+    assert data["workspace_type"] == "default"
+    assert data["exists"] is False
+    assert [w["code"] for w in data["warnings"]] == ["workspace_not_found"]
+    assert str(fallback_workspace) in data["warnings"][0]["message"]
+    assert "desktop" not in data
 
 
-def test_which_errors_for_a_missing_specified_workspace_even_with_desktop_installed(
+def test_which_flags_a_missing_specified_workspace_even_with_desktop_installed(
     comfy_desktop, fallback_workspace, tmp_path
 ):
     missing = tmp_path / "typo" / "ComfyUI"
 
     result, envelope = _invoke("--json", "--workspace", str(missing), "which")
 
-    assert result.exit_code == 1
-    assert envelope["error"]["code"] == "workspace_not_found"
-    assert envelope["error"]["details"]["path"] == str(missing)
-    assert envelope["error"]["details"]["workspace_type"] == "specified"
+    assert result.exit_code == 0, result.output
+    data = envelope["data"]
+    assert data["workspace_path"] == str(missing)
+    assert data["workspace_type"] == "specified"
+    assert data["exists"] is False
+    assert data["warnings"][0]["code"] == "workspace_not_found"
+
+
+def test_pretty_which_prints_the_missing_workspace_warning(fallback_workspace):
+    result = CliRunner().invoke(app, ["which"], env={"COMFY_OUTPUT": "pretty", "COLUMNS": "400"})
+
+    assert result.exit_code == 0, result.output
+    assert f"Workspace directory does not exist: {fallback_workspace}" in result.output
 
 
 def test_which_keeps_an_installed_default_workspace_over_desktop(comfy_desktop, fallback_workspace):
@@ -128,14 +144,14 @@ def test_which_keeps_an_installed_default_workspace_over_desktop(comfy_desktop, 
     assert "desktop" not in envelope["data"]
 
 
-def test_which_names_unreadable_desktop_records_in_the_error(comfy_desktop, fallback_workspace):
+def test_which_names_unreadable_desktop_records_in_the_output(comfy_desktop, fallback_workspace):
     (comfy_desktop["app"] / "installations.json").write_text("{not json")
 
     result, envelope = _invoke("--json", "which")
 
-    assert result.exit_code == 1
-    assert envelope["error"]["code"] == "workspace_not_found"
-    problems = envelope["error"]["details"]["desktop"]["problems"]
+    assert result.exit_code == 0, result.output
+    assert [w["code"] for w in envelope["data"]["warnings"]] == ["workspace_not_found", "desktop_config_unreadable"]
+    problems = envelope["data"]["desktop"]["problems"]
     assert len(problems) == 1
     assert "installations.json" in problems[0]
 
@@ -145,9 +161,8 @@ def test_which_warns_when_desktop_settings_are_unreadable(comfy_desktop, fallbac
 
     result, envelope = _invoke("--json", "which")
 
-    assert result.exit_code == 1, result.output
-    assert envelope["error"]["code"] == "workspace_not_found"
-    desktop = envelope["error"]["details"]["desktop"]
+    assert result.exit_code == 0, result.output
+    desktop = envelope["data"]["desktop"]
     assert any("settings.json" in problem for problem in desktop["problems"])
 
 
@@ -302,3 +317,23 @@ def test_which_renders_hostile_desktop_fields_literally_without_changing_json(
     assert "\x07" not in result.output and "\r" not in result.output
     assert "osc-title" not in result.output
     assert "\u202e世界" in result.output
+
+
+def test_which_reports_an_existing_workspace_when_the_desktop_registry_is_denied(
+    comfy_desktop, fallback_workspace, monkeypatch
+):
+    fallback_workspace.mkdir(parents=True)
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == "installations.json":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    result, envelope = _invoke("--json", "which")
+
+    assert result.exit_code == 0, result.output
+    assert envelope["data"]["workspace_path"] == str(fallback_workspace)
+    assert envelope["data"]["exists"] is True

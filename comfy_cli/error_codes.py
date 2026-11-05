@@ -67,12 +67,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workspace_not_found",
-        "The workspace reported by `comfy which` does not exist on disk; details.path names the missing directory.",
+        "The workspace `comfy which` / `comfy env` report does not exist on disk (`exists: false`); the message "
+        "names the missing directory. Surfaced in `data.warnings[]` (not as an error envelope) so the command "
+        "still succeeds.",
         "run `comfy install`, or pass `--workspace /path/to/ComfyUI`",
     ),
     ErrorCode(
         "desktop_config_unreadable",
-        "Comfy Desktop installation records or settings could not be read; discovery may be incomplete.",
+        "Comfy Desktop installation records or settings could not be read; discovery may be incomplete. Surfaced "
+        "in `data.warnings[]` (not as an error envelope) so the command still succeeds.",
         "check the Desktop configuration file named in the warning",
     ),
     # --- launch / stop lifecycle ---------------------------------------------

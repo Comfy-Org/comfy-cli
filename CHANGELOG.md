@@ -65,8 +65,8 @@ history.
 
 ### Fixed
 
-- Desktop discovery reads both modern and legacy registries. Callers with running-server launch metadata select that exact instance, resolve its model YAML and effective data/input/output paths, and keep ambiguous or relative runtime identities unresolved. The optional discovery fields are documented in the which/env schemas; unrelated launch arguments are excluded.
-- `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. A nonexistent selected workspace no longer succeeds in `which`; discovery reports malformed Desktop configuration and marks inferred data roots as unverified.
+- Desktop discovery reads both modern and legacy registries. Callers with running-server launch metadata select that exact instance, resolve its model YAML (the checkout's own `extra_model_paths.yaml` first, then `--extra-model-paths-config`), `--models-directory` and effective data/input/output paths, and keep ambiguous or relative runtime identities unresolved. The optional discovery fields are documented in the which/env schemas; unrelated launch arguments are excluded.
+- `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. On Linux, shared model roots are read from `settings.json` under `XDG_CONFIG_HOME`, where Desktop keeps it. A nonexistent selected workspace still exits 0 but reports `exists: false` and a `workspace_not_found` warning; discovery reports malformed or unreadable Desktop configuration as `desktop_config_unreadable` warnings and marks inferred data roots as unverified.
 
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,

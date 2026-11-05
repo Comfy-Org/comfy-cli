@@ -23,7 +23,9 @@ files while reporting the wrong version.
 
 - Discover modern `comfyui-desktop-2`, `Comfy Desktop`, and supported legacy
   records. Keep each registry's model-root provenance with its installation;
-  explicit caller/test registry overrides remain isolated.
+  explicit caller/test registry overrides remain isolated. On Linux, read
+  `settings.json` from the `XDG_CONFIG_HOME` folder of the same name as the
+  `XDG_DATA_HOME` registry, where Desktop writes it.
 - Without running-server evidence, describe selection as a registry-derived
   candidate and expose its selection reason. Do not claim it identifies the
   running process.
@@ -48,16 +50,23 @@ files while reporting the wrong version.
   output fields. Zero or conflicting matches leave selection unresolved instead of combining
   unrelated installations.
 - Derive effective code/data/model/input/output roots from that selected process.
-  Resolve its model-path configuration and retain external paths explicitly.
+  Resolve its model-path configuration the way ComfyUI loads it: the checkout's
+  own `extra_model_paths.yaml` first, then each `--extra-model-paths-config`;
+  `--models-directory` replaces the data dir's `models/`. Retain external paths
+  explicitly.
   Report the running version when supplied. The output root is the explicit
   launch path or that process's data/output default, with its source recorded.
-- Relative data/input/output paths cannot be resolved without the process's cwd:
+- Relative data/models/input/output paths cannot be resolved without the process's cwd:
   retain uncertainty rather than anchoring them to the agent's cwd. Relative or
   unreadable model config paths remain diagnostic evidence, never a claim that
   all required model folders were found.
-- Surface missing directories with existence flags and warnings. Discovery is
-  read-only: it creates no default workspace, installs nothing and grants no
-  permission to inspect/upload every file under a shared root.
+- Surface missing directories with existence flags and warnings. A missing
+  selected workspace leaves `which`'s exit code and `ok: true` envelope as they
+  were under envelope/1; `exists: false` and a `workspace_not_found` warning
+  report it. A Desktop path that cannot be checked (for example, permission
+  denied) is a warning, never a failed command. Discovery is read-only: it
+  creates no default workspace, installs nothing and grants no permission to
+  inspect/upload every file under a shared root.
 - Optional which/env discovery fields remain additive. Runtime launch reporting
   contains known path flags only, not arbitrary argv values or credentials.
   File-upload scope and approvals belong to the calling operation; discovering

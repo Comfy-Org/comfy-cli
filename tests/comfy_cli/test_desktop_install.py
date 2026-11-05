@@ -8,6 +8,8 @@ points detection at an empty dir unless a test passes its own).
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -613,3 +615,159 @@ def test_generated_config_identity_accepts_verified_file_alias(tmp_path):
         server_filesystem_verified=True,
     )
     assert found.selected.install_id == "live"
+
+
+def test_linux_settings_are_read_from_xdg_config_beside_xdg_data_registry(tmp_path, monkeypatch):
+    """Desktop on Linux: installations.json under XDG_DATA_HOME, settings.json under XDG_CONFIG_HOME."""
+    monkeypatch.setattr(desktop_install, "get_os", lambda: OS.LINUX)
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", _real_app_data_dir)
+    data_home, config_home = tmp_path / "xdg-data", tmp_path / "xdg-config"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    registry = data_home / "comfyui-desktop-2"
+    registry.mkdir(parents=True)
+    (registry / "installations.json").write_text(json.dumps([{"id": "linux", "installPath": str(code.parent)}]))
+    shared = tmp_path / "shared-models"
+    (config_home / "comfyui-desktop-2").mkdir(parents=True)
+    (config_home / "comfyui-desktop-2" / "settings.json").write_text(json.dumps({"modelsDirs": [str(shared)]}))
+
+    found = desktop_install.detect()
+
+    assert found.selected.install_id == "linux"
+    assert [(root.path, root.source) for root in found.selected.model_roots] == [
+        (str(code / "models"), "data"),
+        (str(shared), "shared"),
+    ]
+    assert not found.problems
+
+
+def test_settings_dir_is_the_registry_dir_off_linux_and_outside_xdg_data(tmp_path, monkeypatch):
+    registry = tmp_path / "comfyui-desktop-2"
+    monkeypatch.setattr(desktop_install, "get_os", lambda: OS.MACOS)
+    assert desktop_install.desktop_settings_dirs(registry) == (registry,)
+    monkeypatch.setattr(desktop_install, "get_os", lambda: OS.LINUX)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "elsewhere"))
+    assert desktop_install.desktop_settings_dirs(registry) == (registry,)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert desktop_install.desktop_settings_dirs(registry) == (tmp_path / "config" / "comfyui-desktop-2", registry)
+
+
+def test_denied_registry_file_is_a_problem_not_a_crash(tmp_path, monkeypatch):
+    app = _write_desktop(tmp_path / "Comfy Desktop", [])
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == "installations.json":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    found = desktop_install.detect(app, tmp_path / "legacy")
+
+    assert found is not None
+    assert found.selected is None
+    assert len(found.problems) == 1
+    assert "installations.json" in found.problems[0] and "Permission denied" in found.problems[0]
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions as non-root")
+def test_untraversable_desktop_paths_are_contained(tmp_path):
+    """EACCES from a stat must not escape discovery (pathlib's is_file raises it on 3.10)."""
+    good = _checkout(tmp_path / "good" / "ComfyUI")
+    locked = tmp_path / "locked"
+    _checkout(locked / "install" / "ComfyUI")
+    settings_dir = tmp_path / "locked-settings"
+    settings_dir.mkdir()
+    (settings_dir / "settings.json").write_text("{}")
+    app = _write_desktop(
+        tmp_path / "Comfy Desktop",
+        [
+            {
+                "id": "locked",
+                "installPath": str(locked / "install"),
+                "adopted": True,
+                "adoptedBaseDir": str(locked / "data"),
+                "adoptedPythonPath": str(locked / "python"),
+            },
+            {"id": "good", "installPath": str(good.parent)},
+        ],
+    )
+    locked.chmod(0)
+    settings_dir.chmod(0)
+    try:
+        found = desktop_install.detect(app, tmp_path / "legacy", settings_dir=settings_dir)
+        server = desktop_install.detect(
+            app,
+            tmp_path / "legacy",
+            server_stats={"system": {"argv": [str(good / "main.py"), "--models-directory", str(locked / "models")]}},
+            server_filesystem_verified=True,
+        )
+    finally:
+        locked.chmod(0o755)
+        settings_dir.chmod(0o755)
+
+    assert found.selected.install_id == "good"
+    assert {install.install_id: install.exists for install in found.installs} == {"locked": False, "good": True}
+    assert any("settings.json" in problem for problem in found.problems)
+    assert server.selected.install_id == "good"
+    assert server.selected.model_roots[0].exists is False
+
+
+def test_running_server_reads_the_checkout_extra_model_paths_yaml_first(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "live", "installPath": str(code.parent)}])
+    local_root = tmp_path / "local-models"
+    (code / "extra_model_paths.yaml").write_text(f"local:\n  base_path: {local_root}\n  checkpoints: checkpoints\n")
+    explicit = tmp_path / "explicit.yaml"
+    explicit.write_text(f"explicit:\n  base_path: {tmp_path / 'explicit-models'}\n  loras: loras\n")
+
+    only_local = desktop_install.detect(
+        app, server_stats={"system": {"argv": [str(code / "main.py")]}}, server_filesystem_verified=True
+    )
+    both = desktop_install.detect(
+        app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--extra-model-paths-config", str(explicit)]}},
+        server_filesystem_verified=True,
+    )
+
+    assert (str(local_root), "install") in [(root.path, root.source) for root in only_local.selected.model_roots]
+    assert [root.path for root in both.selected.model_roots] == [
+        str(code / "models"),
+        str(local_root),
+        str(tmp_path / "explicit-models"),
+    ]
+    assert not both.problems
+
+
+def test_running_server_models_directory_replaces_the_data_models_root(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "live", "installPath": str(code.parent)}])
+    external = tmp_path / "external" / "models"
+    external.mkdir(parents=True)
+    argv = [str(code / "main.py"), "--models-directory", str(external)]
+
+    found = desktop_install.detect(app, server_stats={"system": {"argv": argv}}, server_filesystem_verified=True)
+
+    roots = [(root.path, root.source, root.exists) for root in found.selected.model_roots]
+    assert roots[0] == (str(external), "data", True)
+    assert str(code / "models") not in [path for path, _, _ in roots]
+    assert desktop_install.server_launch_paths({"system": {"argv": [*argv, "--api-key", "secret"]}}) == {
+        "models_directory": [str(external)]
+    }
+
+
+def test_relative_models_directory_is_unverified(tmp_path):
+    code = _checkout(tmp_path / "install" / "ComfyUI")
+    app = _write_desktop(tmp_path / "Comfy Desktop", [{"id": "live", "installPath": str(code.parent)}])
+
+    found = desktop_install.detect(
+        app,
+        server_stats={"system": {"argv": [str(code / "main.py"), "--models-directory", "models"]}},
+        server_filesystem_verified=True,
+    )
+
+    assert found.selected is None
+    assert any("relative" in problem for problem in found.problems)

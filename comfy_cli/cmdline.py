@@ -2786,17 +2786,8 @@ def which():
         raise typer.Exit(code=1)
 
     workspace_type_value = workspace["type"]
-    if not workspace["exists"]:
-        details = {"path": comfy_path, "workspace_type": workspace_type_value}
-        if "desktop" in workspace:
-            details["desktop"] = workspace["desktop"]
-        renderer.error(
-            code="workspace_not_found",
-            message=f"Workspace directory does not exist: {comfy_path}",
-            hint="run: comfy install   (or pass --workspace /path/to/ComfyUI)",
-            details=details,
-        )
-        raise typer.Exit(code=1)
+    # A missing directory stays a success (exit 0, as in envelope/1 before):
+    # ``exists: false`` and a ``workspace_not_found`` warning say so.
     if renderer.is_pretty():
         import sys as _sys
 

@@ -12,8 +12,11 @@ where comfy-cli's own default workspace lives:
   ``useSharedModels: false``) plus the install's own ``modelDirs``.
 
 Everything is read from files Desktop maintains in its app-data dir
-(``installations.json``, ``settings.json``). Nothing here starts Desktop,
-talks to a server, or writes a file.
+(``installations.json``, ``settings.json``). On Linux Desktop splits that dir
+per XDG: ``installations.json`` under ``XDG_DATA_HOME`` and ``settings.json``
+under ``XDG_CONFIG_HOME``. Nothing here starts Desktop, talks to a server, or
+writes a file, and a path that cannot be checked is reported as a problem
+rather than raised.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +53,22 @@ def desktop_app_data_dir() -> Path | None:
         return Path(appdata) / APP_DIR_NAME if appdata else None
     base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     return Path(base) / APP_DIR_NAME
+
+
+def desktop_settings_dirs(registry_dir: Path) -> tuple[Path, ...]:
+    """Where ``settings.json`` for the registry at ``registry_dir`` may live, in order.
+
+    On Linux Desktop keeps ``installations.json`` under ``XDG_DATA_HOME`` and
+    ``settings.json`` under ``XDG_CONFIG_HOME``, in a folder of the same name.
+    Everywhere else, and for a registry outside the XDG data dir, both files
+    share one folder.
+    """
+    if get_os() not in (OS.MACOS, OS.WINDOWS):
+        data_base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        if _same_path(str(registry_dir.parent), data_base):
+            config_base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+            return (Path(config_base) / registry_dir.name, registry_dir)
+    return (registry_dir,)
 
 
 def legacy_config_dir() -> Path | None:
@@ -162,8 +182,33 @@ class DesktopDetection:
 def _same_path(a: str, b: str) -> bool:
     try:
         return os.path.samefile(a, b)
-    except OSError:
+    except (OSError, ValueError):
+        pass
+    try:
         return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+# ``Path.is_file()`` / ``is_dir()`` raise on a permission error (EACCES) on
+# Python 3.10; ``os.path`` returns False. Every probe of a path taken from
+# Desktop's records or a server's argv goes through these.
+def _is_file(path: str | os.PathLike[str]) -> bool:
+    return os.path.isfile(path)
+
+
+def _is_dir(path: str | os.PathLike[str]) -> bool:
+    return os.path.isdir(path)
+
+
+def _regular_file(path: Path) -> bool | OSError:
+    """True for a regular file, False when absent, or the error when it cannot be checked."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as error:
+        return error
 
 
 def _read_json(path: Path) -> Any:
@@ -173,7 +218,7 @@ def _read_json(path: Path) -> Any:
 
 def _venv_python(venv: Path) -> Path | None:
     for candidate in (venv / "bin" / "python3", venv / "bin" / "python", venv / "Scripts" / "python.exe"):
-        if candidate.is_file():
+        if _is_file(candidate):
             return candidate
     return None
 
@@ -182,7 +227,7 @@ def _code_dir(install_path: Path) -> Path:
     """Mirror Desktop's ``resolveComfyDir``: ``<installPath>/ComfyUI``, or the
     install path itself when the checkout sits there directly."""
     nested = install_path / "ComfyUI"
-    if not nested.is_dir() and (install_path / "main.py").is_file():
+    if not _is_dir(nested) and _is_file(install_path / "main.py"):
         return install_path
     return nested
 
@@ -219,7 +264,7 @@ def _model_roots(data_dir: Path, record: dict, shared_dirs: list[str]) -> tuple[
     for path, source in candidates:
         if any(_same_path(path, root.path) for root in roots):
             continue
-        roots.append(ModelRoot(path=path, source=source, exists=os.path.isdir(path)))
+        roots.append(ModelRoot(path=path, source=source, exists=_is_dir(path)))
     return tuple(roots)
 
 
@@ -239,7 +284,7 @@ def _install_from_record(
 
     python: Path | None = None
     adopted_python = record.get("adoptedPythonPath") if adopted else None
-    if isinstance(adopted_python, str) and Path(adopted_python).is_file():
+    if isinstance(adopted_python, str) and _is_file(adopted_python):
         python = Path(adopted_python)
     if python is None:
         python = _venv_python(data_dir / ".venv")
@@ -262,7 +307,7 @@ def _install_from_record(
         adopted=adopted,
         status=record.get("status") if isinstance(record.get("status"), str) else None,
         last_launched_ms=last_launched if isinstance(last_launched, (int, float)) and last_launched > 0 else None,
-        exists=(code_dir / "main.py").is_file(),
+        exists=_is_file(code_dir / "main.py"),
         registry_dir=str(registry_dir) if registry_dir is not None else None,
     )
 
@@ -320,7 +365,13 @@ def server_launch_paths(stats: dict[str, Any]) -> dict[str, list[str]]:
         return {}
     return {
         name: values
-        for name in ("base_directory", "input_directory", "output_directory", "extra_model_paths_config")
+        for name in (
+            "base_directory",
+            "models_directory",
+            "input_directory",
+            "output_directory",
+            "extra_model_paths_config",
+        )
         if (values := _argv_values(argv, "--" + name.replace("_", "-")))
     }
 
@@ -339,6 +390,48 @@ def _config_identifies_install(config: str, install: DesktopInstall) -> bool:
         return False
     expected = Path(install.registry_dir) / "instance-model-paths" / f"{install_id}.yaml"
     return _same_path(str(path), str(expected))
+
+
+def _add_config_roots(config_path: Path, roots: list[ModelRoot], problems: list[str]) -> None:
+    """Append the model roots an ``extra_model_paths.yaml`` adds, the way ComfyUI reads it."""
+    try:
+        import yaml
+
+        contents = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if not isinstance(contents, dict):
+            raise ValueError("expected a mapping")
+        for row in contents.values():
+            if not isinstance(row, dict):
+                continue
+            base = row.get("base_path")
+            base_path = None
+            if isinstance(base, str) and base:
+                base_path = Path(os.path.expandvars(base)).expanduser()
+                if not base_path.is_absolute():
+                    base_path = config_path.parent / base_path
+                base_path = base_path.resolve()
+            paths = [base_path] if base_path is not None else []
+            for kind, value in row.items():
+                if kind in ("base_path", "is_default"):
+                    continue
+                if not isinstance(value, str):
+                    raise ValueError(f"{kind}: expected newline-separated model paths")
+                for entry in value.splitlines():
+                    if not entry:
+                        continue
+                    path = Path(entry)
+                    if not path.is_absolute():
+                        path = (base_path or config_path.parent) / path
+                    path = path.resolve()
+                    # A base covers its descendant type folders. Keep a
+                    # separate root for absolute paths outside that base.
+                    if base_path is None or not path.is_relative_to(base_path):
+                        paths.append(path)
+            for path in paths:
+                if not any(_same_path(str(path), root.path) for root in roots):
+                    roots.append(ModelRoot(str(path), "install", _is_dir(path)))
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        problems.append(f"{config_path}: {error}")
 
 
 def _for_server(
@@ -384,9 +477,10 @@ def _for_server(
         )
     chosen = matches[0]
     outputs = _argv_values(argv, "--output-directory")
+    models_dirs = _argv_values(argv, "--models-directory")
     if any(
         not Path(path).expanduser().is_absolute()
-        for path in (*bases, *_argv_values(argv, "--input-directory"), *outputs)
+        for path in (*bases, *models_dirs, *_argv_values(argv, "--input-directory"), *outputs)
     ):
         return replace(
             found,
@@ -394,56 +488,29 @@ def _for_server(
             selected_reason=None,
             problems=(
                 *found.problems,
-                "running server uses relative data/input/output paths; verify its working directory",
+                "running server uses relative data/models/input/output paths; verify its working directory",
             ),
         )
     data_dir = str(Path(bases[-1]).expanduser()) if bases else chosen.data_dir
+    # ComfyUI's own models dir: ``--models-directory`` replaces ``<base>/models``.
+    models_dir = str(Path(models_dirs[-1]).expanduser()) if models_dirs else str(Path(data_dir) / "models")
     roots = [root for root in chosen.model_roots if root.source != "data"] if not configs else []
-    roots.insert(0, ModelRoot(str(Path(data_dir) / "models"), "data", (Path(data_dir) / "models").is_dir()))
+    roots.insert(0, ModelRoot(models_dir, "data", _is_dir(models_dir)))
     problems = list(found.problems)
+    # ComfyUI loads ``extra_model_paths.yaml`` beside its main.py before any
+    # ``--extra-model-paths-config`` file.
+    local_config = Path(os.path.realpath(chosen.code_dir)) / "extra_model_paths.yaml"
+    local_state = _regular_file(local_config)
+    if isinstance(local_state, OSError):
+        problems.append(f"{local_config}: {local_state}")
+    elif local_state:
+        _add_config_roots(local_config, roots, problems)
     for config in configs:
         config_path = Path(config).expanduser()
         if not config_path.is_absolute():
             problems.append(f"running server model config is relative: {config}; verify its working directory")
             continue
-        try:
-            import yaml
-
-            contents = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if not isinstance(contents, dict):
-                raise ValueError("expected a mapping")
-            for row in contents.values():
-                if not isinstance(row, dict):
-                    continue
-                base = row.get("base_path")
-                base_path = None
-                if isinstance(base, str) and base:
-                    base_path = Path(os.path.expandvars(base)).expanduser()
-                    if not base_path.is_absolute():
-                        base_path = config_path.parent / base_path
-                    base_path = base_path.resolve()
-                paths = [base_path] if base_path is not None else []
-                for kind, value in row.items():
-                    if kind in ("base_path", "is_default"):
-                        continue
-                    if not isinstance(value, str):
-                        raise ValueError(f"{kind}: expected newline-separated model paths")
-                    for entry in value.splitlines():
-                        if not entry:
-                            continue
-                        path = Path(entry)
-                        if not path.is_absolute():
-                            path = (base_path or config_path.parent) / path
-                        path = path.resolve()
-                        # A base covers its descendant type folders. Keep a
-                        # separate root for absolute paths outside that base.
-                        if base_path is None or not path.is_relative_to(base_path):
-                            paths.append(path)
-                for path in paths:
-                    if not any(_same_path(str(path), root.path) for root in roots):
-                        roots.append(ModelRoot(str(path), "install", path.is_dir()))
-        except (OSError, ValueError, yaml.YAMLError) as error:
-            problems.append(f"{config}: {error}")
+        _add_config_roots(config_path, roots, problems)
     python = system.get("python")
     version = system.get("comfyui_version")
     chosen = replace(
@@ -451,7 +518,7 @@ def _for_server(
         comfyui_version=_as_tag(version) if isinstance(version, str) and version else chosen.comfyui_version,
         data_dir=data_dir,
         model_roots=tuple(roots),
-        python=python if isinstance(python, str) and Path(python).is_file() else None,
+        python=python if isinstance(python, str) and _is_file(python) else None,
     )
     inputs = _argv_values(argv, "--input-directory")
     input_dir = str(Path(inputs[-1]).expanduser()) if inputs else str(Path(data_dir) / "input")
@@ -467,21 +534,41 @@ def _for_server(
     )
 
 
+def _with_server(found: DesktopDetection, stats: dict[str, Any], *, filesystem_verified: bool) -> DesktopDetection:
+    try:
+        return _for_server(found, stats, filesystem_verified=filesystem_verified)
+    except (OSError, ValueError) as error:
+        return replace(
+            found,
+            selected=None,
+            selected_reason=None,
+            input_dir=None,
+            output_dir=None,
+            output_dir_source=None,
+            problems=(*found.problems, f"running server paths could not be checked: {error}"),
+        )
+
+
 def detect(
     app_data_dir: Path | None = None,
     legacy_dir: Path | None = None,
     *,
+    settings_dir: Path | None = None,
     server_stats: dict[str, Any] | None = None,
     server_filesystem_verified: bool = False,
 ) -> DesktopDetection | None:
     """Read Desktop 2's install records. ``None`` means Desktop 2 is not installed.
 
     The app-data dirs default to this OS's; tests pass fixture dirs instead.
+    ``settings_dir`` is where ``settings.json`` lives; by default it is found
+    from ``app_data_dir`` (see :func:`desktop_settings_dirs`).
     Server paths require caller-established local process/filesystem provenance;
     matching strings or a loopback URL alone are insufficient.
     """
     if app_data_dir is None:
-        detections = [found for directory in app_data_dirs() if (found := detect(directory, legacy_dir)) is not None]
+        detections = [
+            found for directory in app_data_dirs() if (found := _detect_dir(directory, legacy_dir)) is not None
+        ]
         if not detections:
             return None
         installs = tuple(install for found in detections for install in found.installs)
@@ -492,16 +579,29 @@ def detect(
         found = DesktopDetection(
             origin, installs, selected, reason, tuple(problem for item in detections for problem in item.problems)
         )
-        return (
-            _for_server(found, server_stats, filesystem_verified=server_filesystem_verified)
-            if server_stats is not None
-            else found
-        )
-    app_dir = app_data_dir
-    if app_dir is None:
-        return None
+    else:
+        found = _detect_dir(app_data_dir, legacy_dir, settings_dir)
+        if found is None:
+            return None
+    if server_stats is None:
+        return found
+    return _with_server(found, server_stats, filesystem_verified=server_filesystem_verified)
+
+
+def _detect_dir(app_dir: Path, legacy_dir: Path | None, settings_dir: Path | None = None) -> DesktopDetection | None:
+    """One registry folder. A filesystem error becomes a problem, never an exception."""
+    try:
+        return _read_registry(app_dir, legacy_dir, settings_dir)
+    except (OSError, ValueError) as error:
+        return DesktopDetection(app_data_dir=str(app_dir), problems=(f"{app_dir}: {error}",))
+
+
+def _read_registry(app_dir: Path, legacy_dir: Path | None, settings_dir: Path | None) -> DesktopDetection | None:
     installations_file = app_dir / "installations.json"
-    if not installations_file.is_file():
+    state = _regular_file(installations_file)
+    if isinstance(state, OSError):
+        return DesktopDetection(app_data_dir=str(app_dir), problems=(f"{installations_file}: {state}",))
+    if not state:
         return None
 
     problems: list[str] = []
@@ -515,24 +615,34 @@ def detect(
         )
 
     shared_dirs: list[str] = []
-    settings_file = app_dir / "settings.json"
-    if settings_file.is_file():
+    for directory in (settings_dir,) if settings_dir is not None else desktop_settings_dirs(app_dir):
+        settings_file = directory / "settings.json"
+        state = _regular_file(settings_file)
+        if state is False:
+            continue
         try:
+            if isinstance(state, OSError):
+                raise state
             settings = _read_json(settings_file)
             shared_dirs = _str_list(settings.get("modelsDirs")) if isinstance(settings, dict) else []
         except (OSError, UnicodeDecodeError, ValueError) as error:
             problems.append(f"{settings_file}: {error} (shared model roots are missing from model_roots)")
+        break
 
     legacy_base_path: str | None = None
     legacy = legacy_dir if legacy_dir is not None else legacy_config_dir()
-    if legacy is not None and (legacy / "config.json").is_file():
+    legacy_file = legacy / "config.json" if legacy is not None else None
+    state = _regular_file(legacy_file) if legacy_file is not None else False
+    if state is not False:
         try:
-            config = _read_json(legacy / "config.json")
+            if isinstance(state, OSError):
+                raise state
+            config = _read_json(legacy_file)
             base = config.get("basePath") if isinstance(config, dict) else None
             legacy_base_path = base if isinstance(base, str) and base else None
         except (OSError, UnicodeDecodeError, ValueError) as error:
             legacy_base_path = None
-            problems.append(f"{legacy / 'config.json'}: {error}")
+            problems.append(f"{legacy_file}: {error}")
 
     if legacy_base_path is None and any(
         isinstance(record, dict)
@@ -555,17 +665,12 @@ def detect(
         if install is not None
     )
     selected, reason = _select(installs)
-    found = DesktopDetection(
+    return DesktopDetection(
         app_data_dir=str(app_dir),
         installs=installs,
         selected=selected,
         selected_reason=reason,
         problems=tuple(problems),
-    )
-    return (
-        _for_server(found, server_stats, filesystem_verified=server_filesystem_verified)
-        if server_stats is not None
-        else found
     )
 
 
