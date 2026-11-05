@@ -1406,7 +1406,7 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # the record, as before, and warns when a sidebar file shown to be that
 # record's stays. The Cloud behavior this rests on, and these rules, are
 # recorded in
-# docs/adr/WORKFLOW-CLOUD-0009-save-into-a-new-sidebar-folder-and-delete-only-the-record.md.
+# docs/adr/SIDEBAR-0009-save-into-a-new-sidebar-folder-and-delete-only-the-record.md.
 # ---------------------------------------------------------------------------
 
 _CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"

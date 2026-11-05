@@ -1,4 +1,4 @@
-# ADR-WORKFLOW-CLOUD-0009: Save Into a New Sidebar Folder and Delete Only the Record
+# ADR-SIDEBAR-0009: Save Into a New Sidebar Folder and Delete Only the Record
 
 Date: 2026-11-05
 
