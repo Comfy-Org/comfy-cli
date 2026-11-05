@@ -364,9 +364,10 @@ def detect(
         origin = next(
             (found.app_data_dir for found in detections if selected in found.installs), detections[0].app_data_dir
         )
-        return DesktopDetection(
-            origin, installs, selected, reason, tuple(problem for item in detections for problem in item.problems)
-        )
+        # Every registry folder reads the same legacy config.json, so one problem
+        # there would otherwise be listed once per folder.
+        problems = tuple(dict.fromkeys(problem for item in detections for problem in item.problems))
+        return DesktopDetection(origin, installs, selected, reason, problems)
     return _detect_dir(app_data_dir, legacy_dir, settings_dir)
 
 

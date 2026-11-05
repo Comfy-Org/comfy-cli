@@ -317,6 +317,26 @@ def test_detect_scans_modern_userdata_and_keeps_each_registry_roots(tmp_path, mo
     assert str(tmp_path / "old" / "shared") not in [root.path for root in modern_install.model_roots]
 
 
+def test_registries_sharing_a_broken_legacy_config_list_each_problem_once(tmp_path, monkeypatch):
+    old = tmp_path / "Comfy Desktop"
+    modern = tmp_path / "comfyui-desktop-2"
+    for app, name in ((old, "old"), (modern, "modern")):
+        code = _checkout(tmp_path / name / "ComfyUI")
+        _write_desktop(app, [{"id": name, "installPath": str(code), "adopted": True}])
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "config.json").write_text("{broken")
+    monkeypatch.setattr(desktop_install, "desktop_app_data_dir", lambda: old)
+
+    found = desktop_install.detect(legacy_dir=legacy)
+
+    assert {install.install_id for install in found.installs} == {"old", "modern"}
+    assert len(found.problems) == 2
+    assert len(set(found.problems)) == 2
+    assert sum("config.json" in problem for problem in found.problems) == 1
+    assert sum("unverified" in problem for problem in found.problems) == 1
+
+
 def test_linux_settings_are_read_from_xdg_config_beside_xdg_data_registry(tmp_path, monkeypatch):
     """Desktop on Linux: installations.json under XDG_DATA_HOME, settings.json under XDG_CONFIG_HOME."""
     monkeypatch.setattr(desktop_install, "get_os", lambda: OS.LINUX)
