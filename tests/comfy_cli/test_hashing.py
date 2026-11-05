@@ -32,7 +32,7 @@ def test_blake3_file_matches_one_shot_hashing_across_multiple_chunks(tmp_path: P
     assert digest == expected
 
 
-def test_blake3_and_sha256_file_reads_once_for_both_hashes(tmp_path: Path) -> None:
+def test_file_digests_reads_once_for_both_hashes_and_each_block(tmp_path: Path) -> None:
     # Given
     import hashlib
 
@@ -41,8 +41,25 @@ def test_blake3_and_sha256_file_reads_once_for_both_hashes(tmp_path: Path) -> No
     path.write_bytes(data)
 
     # When
-    b3, sha256 = hashing.blake3_and_sha256_file(path)
+    digests = hashing.file_digests(path)
 
     # Then
-    assert b3 == hashing.blake3_file(path) == f"blake3:{blake3(data).hexdigest()}"
-    assert sha256 == hashlib.sha256(data).hexdigest()
+    assert digests.blake3 == hashing.blake3_file(path) == f"blake3:{blake3(data).hexdigest()}"
+    assert digests.sha256 == hashlib.sha256(data).hexdigest()
+    assert digests.size == len(data) and digests.block_size == _CHUNK_SIZE
+    blocks = [data[i : i + _CHUNK_SIZE] for i in range(0, len(data), _CHUNK_SIZE)]
+    assert len(blocks) == 3
+    assert digests.blocks == tuple(blake3(b).digest() for b in blocks)
+
+
+def test_file_digests_takes_a_block_size(tmp_path: Path) -> None:
+    # Given
+    path = tmp_path / "small.bin"
+    path.write_bytes(b"0123456789")
+
+    # When
+    digests = hashing.file_digests(path, block_size=4)
+
+    # Then
+    assert digests.block_size == 4 and digests.size == 10
+    assert digests.blocks == tuple(blake3(b).digest() for b in (b"0123", b"4567", b"89"))

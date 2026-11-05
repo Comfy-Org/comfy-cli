@@ -68,12 +68,17 @@ history.
   workflow's loader node takes to load the file on Comfy Cloud. Builds on #1008.
 - `comfy model upload` and `comfy assets library upload` upload only the file
   named, and succeed only once Comfy Cloud's hash of the stored file equals the
-  local file's. Before anything is sent they look the name up in the folder.
+  local file's. Before anything is sent they look the name up in that folder of
+  the workspace's model library: every member's models, the ones a run on Comfy
+  Cloud loads, and no public ones.
   The same bytes under that name are reported as `already_present` and not sent
   again. Other bytes under that name are refused (`asset_upload_invalid`,
   `details.reason` `name_in_use`), because a second file would change what that
-  name loads for every workflow in the workspace. A file that changes while it
-  streams is never completed (`asset_upload_failed`, `file_changed`). A stored
+  name loads for every workflow in the workspace. The upload sends only bytes
+  that were hashed: each 1 MiB block is checked against its hash before any of
+  it is sent. A file that changed after it was hashed stops the upload before
+  the changed bytes are sent, and is never completed (`asset_upload_failed`,
+  `file_changed`). A stored
   hash that differs, or that Comfy Cloud does not report, ends as
   `asset_upload_unverified`. `comfy assets library upload` gains `--dry-run`,
   and its `--json` output gains `loader_path`, `sha256`, `workspace_id`,

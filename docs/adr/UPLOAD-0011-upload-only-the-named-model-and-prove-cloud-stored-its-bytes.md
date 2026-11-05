@@ -41,8 +41,9 @@ keeps its approval idea and builds on the presigned upload already in
 - The command uploads exactly one file, the path given as its argument. It never
   expands a folder, a glob or a search into more files.
 - The CLI reads the file once before anything is sent and computes its blake3
-  (Comfy Cloud's hash) and its sha256 (what `shasum -a 256` prints on any
-  machine). A dry run reports both and uploads nothing.
+  (Comfy Cloud's hash), its sha256 (what `shasum -a 256` prints on any
+  machine) and the blake3 of each 1 MiB block. A dry run reports the two file
+  hashes and uploads nothing.
 - An approval is pinned to bytes and a workspace. `--expected-sha256` uploads
   nothing unless the file still has that sha256. `--workspace` uploads nothing
   unless `GET /api/workspaces/current` says this sign-in uploads into that
@@ -50,12 +51,17 @@ keeps its approval idea and builds on the presigned upload already in
 - `comfy model upload` asks before it starts. A machine caller must pass
   `--yes`, through the shared `confirm` helper, or it is refused with
   `model_upload_needs_confirm`.
-- Before sending, the CLI lists the folder's models with that exact name. The
-  same blake3 there means nothing is sent, and the output says
+- Before sending, the CLI lists the models with that exact name in that folder
+  of the workspace's model library (`workspace_library=true`): every member's
+  models, and no public ones. A run on Comfy Cloud loads from that same set.
+  The same blake3 there means nothing is sent, and the output says
   `already_present`. Any other hash, or no hash, refuses with `name_in_use`. A
   listing that may be cut short refuses with `name_unverified`.
-- The CLI hashes the bytes as it streams them. If they differ from the hash it
-  read first, it never calls complete, so Comfy Cloud never files them.
+- The upload sends only bytes that were hashed. It reads the file again one
+  block at a time and checks each block against its blake3 from the first read
+  before any of that block is sent. A changed block stops the upload, so none
+  of the changed bytes reach storage, and complete is never called, so Comfy
+  Cloud never files the earlier blocks. Reading stops at the hashed size.
 - The upload succeeds only when the hash Comfy Cloud reports for the stored
   asset equals the local blake3. The task result is read first, then the asset.
   A different hash, or none, ends as `asset_upload_unverified`.
@@ -69,8 +75,10 @@ keeps its approval idea and builds on the presigned upload already in
   Rejected because the presigned upload sends bytes straight to storage and
   already has retries, progress and token refresh.
 - Copy the file to a temporary snapshot before uploading, as #1008 does.
-  Rejected because a model can be several GB. Hashing while streaming catches
-  the same change with no second copy.
+  Rejected because a model can be several GB. The block check sends only
+  hashed bytes with no second copy.
+- Hash the bytes as they stream and compare once the PUT ends. Rejected
+  because the changed bytes are already in storage by then.
 - Take `--name` to upload under another name. Left out because a workflow
   names the file it loads, and a different name would not match it.
 - Trust the upload once storage accepts it. Rejected because only Comfy
@@ -92,20 +100,23 @@ keeps its approval idea and builds on the presigned upload already in
 
 ### Negative
 
-- Every upload reads the file twice: once to hash it and once to send it.
+- Every upload reads the file twice: once to hash it and once to send it. The
+  second read hashes each block again.
 - A Comfy Cloud server without `/api/workspaces/current` refuses every
   `--workspace` upload.
 
 ### Known limits
 
-- The name check sees the models the listing returns for this sign-in. A model
-  in the workspace that the listing does not show is not checked.
+- Two uploads of different bytes under one name can both pass the name check
+  if each lists the folder before the other completes. Only a Comfy Cloud write
+  that refuses a name already in use can stop that.
 
 ## Validation
 
 `tests/comfy_cli/command/test_assets_library.py` covers each refusal above, the
-skip for bytes already present, a file changed mid-stream with no complete
-call, a stored hash that differs or is missing, and the `--yes` refusal for an
+lookup's workspace-library query, the skip for bytes already present, a file
+changed after it was hashed sending none of the changed bytes and never
+completing, a stored hash that differs or is missing, and the `--yes` refusal for an
 agent caller.
 
 ## Revisit triggers

@@ -445,11 +445,11 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
   `comfy model upload <FILE> --type <FOLDER> --where cloud ?[--dry-run] ?[--workspace <ID>] ?[--expected-sha256 <SHA256>] ?[--yes]`
 
   - Puts one local `.safetensors` file (up to 2 GB) into your Comfy Cloud model library, so a workflow run on Comfy Cloud can load it. `--type` is the model folder, e.g. `loras` or `checkpoints`; `comfy model list-folders --where cloud` lists them.
-  - Only the file you name is uploaded. The upload succeeds only once Comfy Cloud's hash of the stored file matches your file's.
+  - Only the file you name is uploaded, and only the bytes hashed before the upload: each block is checked against its hash before it is sent. The upload succeeds only once Comfy Cloud's hash of the stored file matches your file's.
   - `--dry-run` uploads nothing. It reports the file's `sha256` and `loader_path` (the value a loader node takes for the model on Comfy Cloud), and whether Comfy Cloud already has the file.
   - `--workspace` and `--expected-sha256` tie an approval to one workspace and one set of bytes. If you are signed in to another workspace, or the file changed since the dry run, nothing is uploaded.
   - It asks before uploading, unless you pass `--yes`.
-  - It refuses a name that the folder already holds with different bytes, since a second file under that name would change what the name loads in every workflow.
+  - It refuses a name that the folder already holds with different bytes in your workspace's model library (any member's upload), since a second file under that name would change what the name loads in every workflow.
 
 ### Running on Comfy Cloud (`--where cloud`)
 

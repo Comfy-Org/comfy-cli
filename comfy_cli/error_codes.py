@@ -489,8 +489,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "unsupported_model_type (`details.valid_types` lists the folders the workspace takes), "
         "bad_expected_sha256 (`--expected-sha256` is not 64 hex), file_changed (the file's sha256, "
         "`details.sha256`, is not `details.expected_sha256`: it changed since the dry run that was approved), "
-        "name_in_use (the folder already holds a model of this name with other bytes, `details.existing`; "
-        "a second one would change what the name loads for every workflow in the workspace) or "
+        "name_in_use (the folder of the workspace's model library, every member's models, already holds a "
+        "model of this name with other bytes, `details.existing`; a second one would change what the name "
+        "loads for every workflow in the workspace) or "
         "name_unverified (too many models with similar names to check that none holds other bytes).",
         "fix the file or `--type` named in the message; for file_changed run the dry run again and get the "
         "new sha256 approved; for name_in_use or name_unverified rename the file; nothing was sent",
@@ -524,10 +525,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "retry (`details.status`, null when no answer came), the local file could not be read while it "
         "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
         "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
-        "file; not retried), the bytes sent were not the ones hashed before sending (`details.reason` "
-        "file_changed: something wrote the file meanwhile; the upload was not completed, so no asset was "
-        "added), or Comfy Cloud's storing task failed or was cancelled (the message carries the task's "
-        "error, e.g. not a valid .safetensors file).",
+        "file; not retried), a block of the file read for sending was not the block hashed before it "
+        "(`details.reason` file_changed: something wrote the file meanwhile; the blocks before it were sent, "
+        "none of the changed bytes were, and the upload was not completed, so no asset was added), or "
+        "Comfy Cloud's storing task failed or was cancelled (the message carries the task's error, e.g. not a "
+        "valid .safetensors file).",
         "retry for a storage failure; for an unreadable file or a task failure fix the file the message names; "
         "for tls_setup fix the certificate setting the message names; for file_changed wait until nothing "
         "writes the file, then run the dry run again",
@@ -535,7 +537,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "asset_upload_timeout",
         "The model file was uploaded, but Comfy Cloud had not finished storing it when "
-        "`model upload` or `assets library upload` stopped waiting. `details.task_id` is the storing task, which goes on.",
+        "`model upload` or `assets library upload` stopped waiting. `details.task_id` is the storing task, "
+        "which goes on.",
         "check `comfy assets library ls --tags models` later instead of uploading again",
     ),
     ErrorCode(

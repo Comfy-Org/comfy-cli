@@ -9,7 +9,6 @@ emitting a JSON envelope via the renderer. Cloud-only — there is no local
 
 from __future__ import annotations
 
-import os
 import re
 import time
 from dataclasses import dataclass, replace
@@ -399,11 +398,62 @@ class _PutFailed(Exception):
 
 
 class _FileUnreadable(Exception):
-    """The file could not be opened, sized or read while it was being sent; ``args[0]`` is the ``OSError``."""
+    """The file could not be opened or read while it was being sent; ``args[0]`` is the ``OSError``."""
 
 
 class _TlsSetupFailed(Exception):
     """This machine's TLS settings stopped the PUT before it connected; ``args[0]`` is the message to show."""
+
+
+class _FileChanged(Exception):
+    """A block of the file read for the PUT is not the block hashed before it; ``args[0]`` is the block's index."""
+
+
+class _BlockChanged(OSError):
+    """Raised from inside the PUT's body read, which Requests and urllib3 let through only as an ``OSError``."""
+
+
+class _HashedBytes:
+    """The file, read for the PUT, giving out only the bytes that were hashed.
+
+    Each block is read whole and checked against its digest from the hash
+    taken before the upload (``FileDigests.blocks``) before any of it is
+    handed on, so a byte that was not hashed, and approved by its hash, never
+    reaches storage. Reading stops at the hashed size: bytes added to the end
+    since are not sent.
+    """
+
+    def __init__(self, raw, digests) -> None:
+        self._raw, self._digests = raw, digests
+        self._pending = b""
+        self._next_block = 0
+        self._given = 0
+
+    def read(self, size: int = -1) -> bytes:
+        from blake3 import blake3
+
+        if not self._pending:
+            d = self._digests
+            if self._next_block >= len(d.blocks):
+                return b""
+            block = self._raw.read(min(d.block_size, d.size - self._next_block * d.block_size))
+            if blake3(block).digest() != d.blocks[self._next_block]:
+                raise _BlockChanged(f"block {self._next_block} of the file is not the one hashed")
+            self._pending, self._next_block = block, self._next_block + 1
+        n = len(self._pending) if size is None or size < 0 else size
+        out, self._pending = self._pending[:n], self._pending[n:]
+        self._given += len(out)
+        return out
+
+    @property
+    def mode(self) -> str:
+        return self._raw.mode
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def tell(self) -> int:
+        return self._given
 
 
 def _file_problem(path: Path, e: OSError) -> tuple[str, str]:
@@ -590,17 +640,16 @@ def _call(
     return parsed
 
 
-def _put(upload_url: str, headers: dict, path: Path, progress) -> str | None:
-    """Stream the file to its signed URL, or raise ``_PutFailed``.
+def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
+    """Stream the bytes ``digests`` was taken from to the signed URL, or raise ``_PutFailed``.
 
-    Returns the ``blake3:<hex>`` hash of the bytes it read and sent, so the
-    caller can tell whether they are the bytes it hashed beforehand. ``None``
-    when storage answered before the whole file was read (a 412 can): there is
-    then nothing whole to compare, and the hash Comfy Cloud reports decides.
+    Each block is checked against ``digests`` before any of it is sent
+    (``_HashedBytes``); a block that changed since raises ``_FileChanged``,
+    with only the earlier, unchanged blocks sent.
 
     A transport exception is dropped, never shown: its text quotes the signed
-    URL, whose query string is a live credential. A file that cannot be opened,
-    sized or read raises ``_FileUnreadable`` instead: a fresh upload would fail
+    URL, whose query string is a live credential. A file that cannot be opened
+    or read raises ``_FileUnreadable`` instead: a fresh upload would fail
     the same way, so it is not a transport failure to retry. Any other
     ``OSError`` comes from setting up TLS (a CA bundle path that no longer
     exists) and raises ``_TlsSetupFailed`` with its message; a retry would
@@ -609,7 +658,6 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> str | None:
     import urllib.parse
 
     import requests
-    from blake3 import blake3
 
     from comfy_cli.builder_api import _CountingReader
 
@@ -621,37 +669,28 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> str | None:
         def __init__(self, raw, progress, size: int) -> None:
             super().__init__(raw, progress)
             self._size = size
-            # What was actually sent, hashed as it goes: a file edited after
-            # it was hashed, or while it streams, shows up here.
-            self.sent = blake3()
-            self.sent_bytes = 0
 
         def __len__(self) -> int:
-            # Requests takes the length from here rather than its own
-            # `os.fstat`, so the file is sized only below, where an error is
-            # known to be the file's. Same Content-Length either way.
+            # Requests takes the length from here: the hashed size, the only
+            # bytes `_HashedBytes` gives out.
             return self._size
 
         def read(self, size: int = -1) -> bytes:
             try:
-                block = super().read(size)
+                return super().read(size)
             except OSError as e:
                 self.failed = e
                 raise
-            self.sent.update(block)
-            self.sent_bytes += len(block)
-            return block
 
     try:
         f = path.open("rb")
     except OSError as e:
         raise _FileUnreadable(e) from None
     with f:
-        try:
-            size = os.fstat(f.fileno()).st_size
-        except OSError as e:  # e.g. a stale handle on a network filesystem
-            raise _FileUnreadable(e) from None
-        reader = _Reader(f, progress, size)
+        # The size hashed, not the file's size now: only the hashed bytes are
+        # sent, and a file cut short since fails its last block's check.
+        size = digests.size
+        reader = _Reader(_HashedBytes(f, digests), progress, size)
         try:
             resp = requests.put(
                 upload_url,
@@ -661,6 +700,8 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> str | None:
                 allow_redirects=False,  # the URL names one object; never divert the file
             )
         except OSError as e:  # `requests.RequestException` is an OSError too
+            if isinstance(reader.failed, _BlockChanged):
+                raise _FileChanged(str(reader.failed)) from None
             if reader.failed is not None:
                 raise _FileUnreadable(reader.failed) from None
             if isinstance(e, requests.RequestException):
@@ -675,9 +716,6 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> str | None:
             raise _TlsSetupFailed(text) from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
-    # More bytes than the size the request declared is a file that grew while
-    # it streamed: its hash differs from the one taken before, as it should.
-    return f"blake3:{reader.sent.hexdigest()}" if reader.sent_bytes >= size else None
 
 
 def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
@@ -738,12 +776,16 @@ def _content_hash(value: Any) -> str | None:
 
 
 def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dict]:
-    """The models in ``folder`` named exactly ``name`` that this workspace can
-    load: its own, its members' and public ones.
+    """The models in ``folder`` named exactly ``name`` in this workspace's model
+    library: every member's, and never the public catalog.
 
-    A run loads a model by folder and name, so these are the rows the name
-    already stands for. A listing that does not fit on one page cannot show
-    that none of them holds other bytes, so it refuses rather than guess.
+    These are the rows a run on Comfy Cloud loads a model from, by folder and
+    name (the cloud's ``runtimemodels.Lookup`` reads the workspace without a
+    user and without public models), so they are the rows the name already
+    stands for. ``workspace_library=true`` asks for exactly that set; without
+    it Comfy Cloud lists only the caller's own models plus public ones. A
+    listing that does not fit on one page cannot show that none of them holds
+    other bytes, so it refuses rather than guess.
     """
     body = _call(
         renderer,
@@ -755,7 +797,11 @@ def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dic
             # Comma-separated: Comfy Cloud refuses a repeated include_tags with a 400.
             ("include_tags", f"models,{folder}"),
             ("name_contains", name),
-            ("include_public", "true"),
+            ("workspace_library", "true"),
+            # Comfy Cloud drops public models for a workspace library anyway;
+            # said here too, so a server that ignores workspace_library never
+            # answers with public models the run does not load.
+            ("include_public", "false"),
             ("limit", _LOOKUP_LIMIT),
         ],
     )
@@ -855,7 +901,7 @@ def run_upload(
 
     from comfy_cli.command.build_upload_progress import UploadProgressReporter
     from comfy_cli.credentials import DataPlaneToken
-    from comfy_cli.hashing import blake3_and_sha256_file
+    from comfy_cli.hashing import file_digests
     from comfy_cli.interaction import confirm
 
     def refuse(reason: str, message: str, **details: Any) -> typer.Exit:
@@ -927,12 +973,14 @@ def run_upload(
             raise typer.Exit(code=1)
 
     try:
-        size = file.stat().st_size
         if renderer.is_pretty():
             renderer.info(f"Hashing {file.name}...")
-        local_hash, sha256 = blake3_and_sha256_file(file)
+        # One read gives the hashes, the size and each block's digest; the PUT
+        # sends only bytes that match these blocks (`_HashedBytes`).
+        digests = file_digests(file)
     except OSError as e:  # removed or locked since it was checked; nothing is sent yet
         raise refuse(*_file_problem(file, e)) from None
+    local_hash, sha256, size = digests.blake3, digests.sha256, digests.size
     if approved is not None and approved != sha256:
         raise refuse(
             "file_changed",
@@ -1001,7 +1049,6 @@ def run_upload(
     tags = ["models", folder]
     reporter = UploadProgressReporter(renderer)
     reporter.plan([item], already_held=0)
-    sent_hash: str | None = None
     for attempt in range(1, _UPLOAD_STARTS + 1):
         start = _call(
             renderer,
@@ -1025,7 +1072,7 @@ def run_upload(
             raise _unexpected(renderer, "/api/assets/uploads", "expected upload_id, upload_url, method PUT and headers")
         try:
             with reporter.uploading(item, 1, 1) as progress:
-                sent_hash = _put(upload_url, headers, file, progress)
+                _put(upload_url, headers, file, progress, digests)
             break
         except _FileUnreadable as e:
             renderer.error(
@@ -1034,6 +1081,16 @@ def run_upload(
                 hint="check that the file is still there and readable, then upload it again; "
                 "nothing was added to the library",
                 details={"reason": "file_unreadable", "upload_id": upload_id, "attempts": attempt},
+            )
+            raise typer.Exit(code=1) from None
+        except _FileChanged:
+            # Only the blocks before the changed one were sent, and the
+            # upload is never completed, so the staged bytes never become an asset.
+            renderer.error(
+                code="asset_upload_failed",
+                message=f"{file.name} changed after it was hashed; none of the changed bytes were sent",
+                hint="wait until nothing is writing the file, then upload it again; nothing was added to the library",
+                details={"reason": "file_changed", "upload_id": upload_id, "hash": local_hash, "attempts": attempt},
             )
             raise typer.Exit(code=1) from None
         except _TlsSetupFailed as e:
@@ -1058,16 +1115,6 @@ def run_upload(
                 details={"status": status, "upload_id": upload_id, "attempts": attempt},
             )
             raise typer.Exit(code=1) from None
-
-    if sent_hash is not None and sent_hash != local_hash:
-        # Not completed, so the staged bytes never become an asset.
-        renderer.error(
-            code="asset_upload_failed",
-            message=f"{file.name} changed while it was being sent; the bytes sent are not the ones hashed",
-            hint="wait until nothing is writing the file, then upload it again; nothing was added to the library",
-            details={"reason": "file_changed", "upload_id": upload_id, "hash": local_hash, "sent_hash": sent_hash},
-        )
-        raise typer.Exit(code=1)
 
     complete = ("assets", "uploads", urllib.parse.quote(upload_id, safe=""), "complete")
     task_id = _call(

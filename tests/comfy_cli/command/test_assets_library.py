@@ -847,6 +847,25 @@ class _Storage:
         return _Resp()
 
 
+class _SentSoFar(_Storage):
+    """A ``_Storage`` that records each block as it reads it, so a PUT whose body read
+    raises still shows the bytes a socket would already have sent."""
+
+    def __call__(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
+        put = {"url": url, "headers": headers, "body": b"", "allow_redirects": allow_redirects}
+        self.puts.append(put)
+        while block := data.read(4):
+            put["body"] += block
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+        class _Resp:
+            status_code = outcome
+
+        return _Resp()
+
+
 def _cloud_error(code: int, server_code: str, message: str):
     body = json.dumps({"code": server_code, "message": message}).encode()
     return urllib.error.HTTPError("https://cloud.example.com/api/x", code, "err", {}, io.BytesIO(body))
@@ -1691,33 +1710,6 @@ class TestUploadFileErrors:
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert "SECRETSIG" not in everything
 
-    def test_a_file_error_while_sizing_the_body_fails_without_a_retry(
-        self, cloud_target, monkeypatch, capsys, model_file, no_wait
-    ):
-        # The body is sized from the open handle before Requests sees it; on a
-        # network filesystem that can raise a stale handle before any read.
-        import errno
-
-        class _Os:
-            def __getattr__(self, name):
-                return getattr(os, name)
-
-            def fstat(self, fd):
-                raise OSError(errno.ESTALE, "Stale NFS file handle")
-
-        monkeypatch.setattr(assets_library, "os", _Os())
-        env, rc, cloud, storage, everything = _upload(
-            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200, 200]
-        )
-
-        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
-        assert env["error"]["details"]["reason"] == "file_unreadable"
-        assert env["error"]["details"]["attempts"] == 1
-        assert "Stale NFS file handle" in env["error"]["message"]
-        assert storage.puts == []
-        assert cloud.paths("POST").count("/api/assets/uploads") == 1
-        assert "SECRETSIG" not in everything
-
     def test_requests_sends_the_body_with_its_content_length_not_chunked(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait
     ):
@@ -1932,7 +1924,10 @@ class TestUploadVerifies:
         assert query == {
             "include_tags": ["models,loras"],
             "name_contains": ["style.safetensors"],
-            "include_public": ["true"],
+            # The workspace's library, every member's models, is what a run
+            # loads from; the public catalog is not.
+            "workspace_library": ["true"],
+            "include_public": ["false"],
             "limit": ["500"],
         }
 
@@ -1991,21 +1986,71 @@ class TestUploadVerifies:
 
         assert rc == 1 and env["error"]["code"] == "cloud_http_error" and storage.puts == []
 
-    def test_a_file_changed_while_it_is_sent_is_never_completed(
+    def test_a_file_changed_after_it_was_hashed_sends_none_of_the_change(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait
     ):
         routes = dict(_UPLOAD_ROUTES)
         # Same size, other bytes: written after the hash and before the PUT reads it.
         rewrite = _then(lambda: model_file.write_bytes(b"fedcba9876543210"), _started(1))
         routes[("POST", "/api/assets/uploads")] = [rewrite, _started(2)]
-        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+        storage = _SentSoFar([200, 200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=storage
+        )
 
         assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
         details = env["error"]["details"]
         assert details["reason"] == "file_changed" and details["hash"] == _MODEL_HASH
-        assert details["sent_hash"] == "blake3:" + blake3(b"fedcba9876543210").hexdigest()
-        assert len(storage.puts) == 1
+        assert details["attempts"] == 1
+        # The one block is checked before any of it is sent.
+        assert [p["body"] for p in storage.puts] == [b""]
+        assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_only_the_blocks_before_a_changed_one_are_sent(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        from comfy_cli import hashing
+
+        monkeypatch.setattr(hashing, "_CHUNK_SIZE", 4)  # blocks 0123 4567 89ab cdef
+        routes = dict(_UPLOAD_ROUTES)
+        rewrite = _then(lambda: model_file.write_bytes(b"01234567XXXXcdef"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [rewrite, _started(2)]
+        storage = _SentSoFar([200, 200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "file_changed"
+        assert [p["body"] for p in storage.puts] == [b"01234567"]
+        assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_a_file_cut_short_after_it_was_hashed_is_not_completed(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        from comfy_cli import hashing
+
+        monkeypatch.setattr(hashing, "_CHUNK_SIZE", 4)
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [_then(lambda: model_file.write_bytes(b"0123456789"), _started(1))]
+        storage = _SentSoFar([200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "file_changed"
+        assert [p["body"] for p in storage.puts] == [b"01234567"]
+        assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_bytes_added_after_the_hash_are_not_sent(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        grow = _then(lambda: model_file.write_bytes(_MODEL_BYTES + b"tail"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [grow, _started(2)]
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        # The hashed bytes are whole, so they are the upload; the added tail stays here.
+        assert rc == 0 and env["data"]["hash"] == _MODEL_HASH and env["data"]["size"] == len(_MODEL_BYTES)
+        assert [p["body"] for p in storage.puts] == [_MODEL_BYTES]
 
     def test_a_stored_hash_that_is_not_the_files_fails_the_upload(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait
@@ -2163,6 +2208,23 @@ class TestModelUpload:
         assert env["error"]["details"]["sha256"] == _MODEL_SHA256
         assert env["error"]["details"]["expected_sha256"] == "0" * 64
         assert cloud.paths() == ["/api/features"] and storage.puts == []
+
+    def test_a_file_replaced_after_its_approval_was_checked_sends_none_of_the_new_bytes(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, agent_caller
+    ):
+        # The sha256 matches when it is checked; another process then replaces
+        # the file with same-sized bytes nobody approved, before the PUT.
+        routes = dict(_UPLOAD_ROUTES)
+        swap = _then(lambda: model_file.write_bytes(b"fedcba9876543210"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [swap, _started(2)]
+        storage = _SentSoFar([200, 200])
+        args = [str(model_file), "--type", "loras", "--yes", "--expected-sha256", _MODEL_SHA256]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [], storage=storage)
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["reason"] == "file_changed"
+        assert [p["body"] for p in storage.puts] == [b""]
+        assert not any(p.endswith("/complete") for p in cloud.paths())
 
     def test_a_malformed_sha256_is_refused_before_any_request(
         self, cloud_target, monkeypatch, capsys, model_file, agent_caller
