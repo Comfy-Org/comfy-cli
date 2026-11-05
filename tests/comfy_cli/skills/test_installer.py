@@ -1436,6 +1436,9 @@ def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
     assert "`system.comfyui_version`" in text
     assert '"<server>/api/models/<folder>"' in text
     assert "Name slots in `connect`, never their numbers" in text
+    assert "lists a node's inputs and outputs by name" in text
+    assert "the server's answer proves nothing" in text
+    assert '`"<work>/original.json"` otherwise' in text
     assert '> "<work>/preview.json"' in text
     assert '--workflow "<work>/api.json"' in text
     assert "> preview.json" not in text
@@ -1448,7 +1451,8 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
     `spend_consent_required` is asked about before `--allow-spend`."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "fetch it from the local server before you ask" in text
-    assert "shasum -a 256 '<work>/inputs/<file>'" in text
+    assert "shasum -a 256 '<work>/inputs/<subfolder>/<file>'" in text
+    assert "--create-dirs -o '<work>/inputs/<subfolder>/<file>'" in text
     assert "Do not fetch it again" in text
     assert "`spend_consent_required`" in text
     assert "`--allow-spend`" in text

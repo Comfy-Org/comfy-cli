@@ -97,7 +97,8 @@ file: `curl -sf "<server>/api/models/<folder>"` lists the file names it loads
 from that folder. Listed there: the `--models-dir` folders are the wrong ones;
 ask the person where that server keeps its models and check again with that
 folder. Not listed: the file is not on this machine either, so there is nothing
-to ask; go on with the verdict.
+to ask; go on with the verdict. When the item's `folder` is null or the lookup
+fails, the server's answer proves nothing: ask the person where the model is.
 
 `data.verdict` decides the next step:
 
@@ -153,7 +154,9 @@ at the first that works:
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
    show comfy-deploy`, and follow them. Build only what this workflow loads:
-   `comfy --json build init <dir> --name '<name>' --from-workflow "<work>/cloud.json"`. Before
+   `comfy --json build init <dir> --name '<name>' --from-workflow <file>`, where
+   `<file>` is `"<work>/cloud.json"` when you made a copy and
+   `"<work>/original.json"` otherwise. Before
    building, show the plan and get a yes: what it uploads, the GPU and region
    (cheapest that fits first, from `comfy --json deploy refs compute`), the
    costs, and `--min 0 --max 1` workers.
@@ -170,8 +173,8 @@ at the first that works:
 each link, `workflow set-widget` for each value, and `workflow delete-nodes` for
 the nodes it replaces. Name slots in `connect`, never their numbers
 (`<id>.INT`, not `<id>.0`): the core node may list its outputs in another
-order, so a number can wire a FLOAT where an INT went. `comfy workflow slots
-"<work>/cloud.json"` prints each node's slot names.
+order, so a number can wire a FLOAT where an INT went. `comfy --json nodes show
+<class> --where cloud` lists a node's inputs and outputs by name.
 
 **Asking about a lossy swap.** One message: each swap as `original -> replacement`
 and how the output may change; then two choices. **Swap**: runs on Comfy Cloud,
@@ -240,15 +243,20 @@ server before you ask, then ask with the fetched file's size and its
 ```shell
 curl -sfG "<server>/api/view" --data-urlencode 'filename=<file>' \
   --data-urlencode 'subfolder=<subfolder>' --data-urlencode "type=input" \
-  -H "comfy-user: <user>" -o '<work>/inputs/<file>'
-shasum -a 256 '<work>/inputs/<file>'
+  -H "comfy-user: <user>" --create-dirs -o '<work>/inputs/<subfolder>/<file>'
+shasum -a 256 '<work>/inputs/<subfolder>/<file>'
 ```
+
+Keep the subfolder in the path, so two inputs of the same name in different
+subfolders stay two files. A subfolder or file name with `..` or a leading `/`
+would write outside `<work>`: do not fetch it; report that input as what blocks
+the run.
 
 After the yes, upload that same file. Do not fetch it again: if the server's
 file has to be read again, ask again with the new hash.
 
 ```shell
-comfy --json upload '<work>/inputs/<file>' --where cloud
+comfy --json upload '<work>/inputs/<subfolder>/<file>' --where cloud
 ```
 
 Set the loader on the copy to the returned `uploads[].cloud_name`.
