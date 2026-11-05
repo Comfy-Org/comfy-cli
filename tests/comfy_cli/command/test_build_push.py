@@ -398,6 +398,103 @@ def test_a_dry_run_whose_pin_lookup_fails_exits_rather_than_passing(
     assert envelope(result)["error"]["code"] == "build_builder_error"
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("The read operation timed out"), ConnectionResetError(54, "reset"), http.client.IncompleteRead(b"{")],
+    ids=["timeout", "reset", "incomplete"],
+)
+def test_a_pin_lookup_whose_response_body_fails_is_a_transport_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """``read_capped`` raises these from ``resp.read``, past urllib's URLError
+    wrapping, so they reach ``_builder_call`` bare."""
+    # Given
+    write_spec(workspace, models=[], nodes=[_REGISTRY_PIN])
+    client = RecordingBuilder()
+
+    def stalled(snapshot: JsonObject) -> JsonObject:
+        raise failure
+
+    monkeypatch.setattr(client, "resolve_snapshot", stalled)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["code"] == "build_builder_error"
+
+
+class _UnansweredImporter(RecordingBuilder):
+    """The registry did not answer: the importer keeps the pin in the definition
+    unchanged and names it in ``report.unverifiedPins``, with HTTP 200."""
+
+    def resolve_snapshot(self, snapshot: JsonObject) -> JsonObject:
+        answer = super().resolve_snapshot(snapshot)
+        return {**answer, "report": {"unverifiedPins": [_REGISTRY_PIN["id"]]}}
+
+
+def test_unverified_pins_are_refused_by_push_and_dry_run_alike(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    pushed_root = make_workspace(tmp_path / "push")
+    write_spec(pushed_root, models=[], nodes=[_REGISTRY_PIN])
+    pushed = _UnansweredImporter()
+    _install_client(monkeypatch, pushed)
+    push = invoke_push(pushed_root)
+
+    dry_root = make_workspace(tmp_path / "dry-run")
+    write_spec(dry_root, models=[], nodes=[_REGISTRY_PIN])
+    dry = _UnansweredImporter()
+    _install_client(monkeypatch, dry)
+
+    # When
+    result = invoke_push(dry_root, "--dry-run", agentic=False)
+    dry_json = invoke_push(dry_root, "--dry-run")
+
+    # Then
+    assert (push.exit_code, result.exit_code, dry_json.exit_code) == (1, 1, 1)
+    error = envelope(dry_json)["error"]
+    assert error == envelope(push)["error"]
+    assert error["code"] == "build_registry_pin_missing"
+    assert "registry-node" in error["message"] and "not checked" in error["message"]
+    assert _calls(pushed, "create_build") == []
+    assert "The builder resolved" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "repository",
+    ["https://ghp_TOKENSECRET@github.com/org/repo", "https://x-access-token:ghp_TOKENSECRET@github.com/org/repo"],
+)
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_repository_url_with_credentials_is_refused_before_any_request(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, repository: str, dry_run: bool
+) -> None:
+    # Given
+    node = {"name": "private-node", "source": "git", "repository": repository, "gitRef": "main"}
+    write_spec(workspace, models=[], nodes=[node])
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, *(["--dry-run"] if dry_run else []))
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "private-node" in error["message"]
+    assert client.calls == []
+    assert "ghp_TOKENSECRET" not in result.output
+
+
+def test_an_ssh_git_user_is_not_a_credential() -> None:
+    assert not build._repository_has_credentials("ssh://git@github.com/org/repo")
+    assert not build._repository_has_credentials("git@github.com:org/repo.git")
+    assert not build._repository_has_credentials("https://github.com/org/repo")
+    assert build._repository_has_credentials("https://user@github.com/org/repo")
+
+
 def test_a_dry_run_tells_a_person_it_checked_the_public_pins(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
     write_spec(workspace, nodes=[local_node(), _REGISTRY_PIN])

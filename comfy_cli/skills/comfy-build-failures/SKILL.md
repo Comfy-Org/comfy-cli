@@ -101,7 +101,8 @@ can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), fi
 - `must set exactly one of sourceUri or blobId` — an entry has both or neither.
 - `resolves to a duplicate node directory` — two entries claim one folder, so one
   of them goes.
-- `build_registry_pin_missing` — the builder could not place a public pack.
+- `build_registry_pin_missing` — the builder could not place a public pack, or
+  the registry never answered for it (its `unverifiedPins`; retry later).
   `push --dry-run` refuses the same way, before anything is uploaded or saved.
   The message names each identity but not why. A version the registry has
   Flagged lands here: check its `status` at

@@ -1444,7 +1444,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
         "reconstruct every requested public node. `push --dry-run` makes the same read-only check and "
         "refuses the same way, uploading and saving nothing. A version the registry has Flagged "
-        "is refused here too, though the message does not say so.",
+        "is refused here too, though the message does not say so. A pack the registry never answered for "
+        "(the importer's `report.unverifiedPins`) is refused with this code as well: unchecked is not placed, "
+        "and a retry once the registry answers can pass.",
         "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(

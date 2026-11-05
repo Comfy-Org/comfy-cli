@@ -1879,15 +1879,42 @@ def _write_spec(renderer, path: Path, spec: dict) -> None:
         raise typer.Exit(code=1) from error
 
 
+def _repository_has_credentials(repository: str) -> bool:
+    """A repository URL with a password or a user name other than ssh's ``git``
+    (``https://TOKEN@github.com/…``). The builder fetches public repositories only
+    and refuses these after receipt, so the credential must not leave the machine."""
+    try:
+        parts = urlsplit(repository.strip())
+    except ValueError:
+        return False
+    return parts.password is not None or (parts.username is not None and parts.username != "git")
+
+
 def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
     """Ask the builder's importer to place every public pack, and refuse with
     ``build_registry_pin_missing`` naming each identity it could not place: a
     registry version it does not publish (a Flagged one among them), or a
-    repository it cannot normalize.
+    repository it cannot normalize. A pack the registry never answered about
+    (``report.unverifiedPins``) is refused the same way: unchecked is not placed.
 
     The importer reads the snapshot and writes nothing, which is what lets
     ``push --dry-run`` make the same call and refuse the same way. A lookup that
-    itself fails exits through ``_builder_call`` rather than passing the pins."""
+    itself fails exits through ``_builder_call`` rather than passing the pins.
+    A repository URL that carries credentials is refused before anything is sent."""
+    credentialed = sorted(
+        str(node.get("name") or node.get("id") or "-")
+        for node in public_nodes
+        if isinstance(node.get("repository"), str) and _repository_has_credentials(node["repository"])
+    )
+    if credentialed:
+        renderer.error(
+            code="build_spec_invalid",
+            message="these custom nodes name a repository URL that carries credentials, which is never sent: "
+            + ", ".join(credentialed),
+            hint="remove the user name or token from the repository URL; the builder fetches public repositories only",
+            details={"path": str(spec_file)},
+        )
+        raise typer.Exit(code=1)
     imported = _builder_call(
         renderer,
         lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
@@ -1906,6 +1933,24 @@ def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: 
             code="build_registry_pin_missing",
             message="the builder could not resolve these custom node identities: " + ", ".join(labels),
             hint="edit the spec to name a published registry version or normalized repository, or remove the node",
+        )
+        raise typer.Exit(code=1)
+    # The importer keeps a pack the registry did not answer for in the definition,
+    # so the identity check above passes it; the report is the only place that says
+    # nothing confirmed it.
+    report = imported.get("report") if isinstance(imported, dict) else None
+    unverified = report.get("unverifiedPins") if isinstance(report, dict) else None
+    if unverified:
+        names = (
+            sorted(_from_server(name) for name in unverified)
+            if isinstance(unverified, list)
+            else [_unrenderable("unverifiedPins", unverified)]
+        )
+        renderer.error(
+            code="build_registry_pin_missing",
+            message="the registry did not answer for these custom nodes, so their pins were not checked: "
+            + ", ".join(names),
+            hint="retry when the Comfy Registry is reachable; nothing was uploaded or saved",
         )
         raise typer.Exit(code=1)
 
@@ -2831,6 +2876,12 @@ def _builder_call(
     # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         _report_builder_error(renderer, e, subject, hint, models)
+        raise typer.Exit(code=1) from e
+    # A response body that stalls past the timeout or drops mid-read is raised by
+    # ``resp.read`` (``http.read_capped``), outside urllib's ``URLError`` wrapping of
+    # the request itself. Report it as the same transport failure, not a traceback.
+    except (TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
+        _report_builder_error(renderer, urllib.error.URLError(e), subject, hint, models)
         raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
