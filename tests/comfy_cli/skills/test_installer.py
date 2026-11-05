@@ -1417,8 +1417,11 @@ def test_run_on_cloud_skill_fetches_files_with_any_name():
     name is made safe and created with its `inputs` folder, and paths are quoted."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert 'mkdir -p "<work>/inputs"' in text
-    assert '--data-urlencode "filename=<file>"' in text
-    assert '--data-urlencode "subfolder=<subfolder>"' in text
+    assert "--data-urlencode 'filename=<file>'" in text
+    assert "--data-urlencode 'subfolder=<subfolder>'" in text
+    assert "inside double quotes the shell still runs `$(...)`" in text
+    assert '"filename=<file>"' not in text
+    assert '--name "<name>"' not in text
     assert "a space as `%20`" in text
     assert "run-on-cloud/<name>" not in text
 
@@ -1437,3 +1440,15 @@ def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
     assert '--workflow "<work>/api.json"' in text
     assert "> preview.json" not in text
     assert "--workflow api.json" not in text
+
+
+def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
+    """The input is fetched and hashed before the ask, so the yes covers the
+    bytes that are uploaded; partner-API nodes spend credits beyond the run, so
+    `spend_consent_required` is asked about before `--allow-spend`."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "fetch it from the local server before you ask" in text
+    assert "shasum -a 256 '<work>/inputs/<file>'" in text
+    assert "Do not fetch it again" in text
+    assert "`spend_consent_required`" in text
+    assert "`--allow-spend`" in text

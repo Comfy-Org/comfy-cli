@@ -24,6 +24,7 @@ Each of these needs its own yes in chat, asked before you do it:
   path, size, what it is for, where it goes. A yes covers the files you named; a
   new or changed file needs a new yes;
 - a **lossy** change (step 4);
+- running **partner-API nodes**, which spend credits on top of the run (step 6);
 - a **new build or deployment** (it costs money to build and to keep running);
 - stopping, deleting or replacing any existing build, release or deployment.
 
@@ -51,7 +52,10 @@ other character outside letters, digits, `-`, `_` and `.` the same way.
 Do all work in one folder, written `<work>` below: `run-on-cloud/` plus the
 workflow's name with every character other than a letter, digit, `-` or `_`
 turned into `-` (`My flow (2)` gives `run-on-cloud/My-flow--2-`). Quote every
-path in the commands.
+path in the commands. Put each name that comes from the workflow, the server or
+the disk (a file, subfolder, folder or workflow name) in single quotes, writing
+a `'` inside it as `'\''`: inside double quotes the shell still runs `$(...)`
+and backticks.
 
 First make sure the address is ComfyUI: `curl -sf "<server>/api/system_stats"`
 must answer JSON with `system.comfyui_version`. Anything else (no answer, a web
@@ -82,7 +86,7 @@ Pass each folder that exists as its own `--models-dir`:
 ```shell
 comfy --json which
 comfy --json workflow check "<work>/original.json" --where cloud \
-  --models-dir "<models folder>" [--models-dir "<another>"]
+  --models-dir '<models folder>' [--models-dir '<another>']
 ```
 
 Without `--models-dir` the check cannot see a local file, so a model the person
@@ -115,7 +119,7 @@ folders:
 
 ```shell
 comfy --json workflow check "<work>/original.json" --where cloud \
-  --models-dir "<models folder>" --apply-remaps --out "<work>/cloud.json"
+  --models-dir '<models folder>' --apply-remaps --out "<work>/cloud.json"
 ```
 
 Run `cloud.json` from here on. If any of its `models[]` rows is still
@@ -149,7 +153,7 @@ at the first that works:
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
    show comfy-deploy`, and follow them. Build only what this workflow loads:
-   `comfy --json build init <dir> --name <name> --from-workflow <file>`. Before
+   `comfy --json build init <dir> --name '<name>' --from-workflow "<work>/cloud.json"`. Before
    building, show the plan and get a yes: what it uploads, the GPU and region
    (cheapest that fits first, from `comfy --json deploy refs compute`), the
    costs, and `--min 0 --max 1` workers.
@@ -200,7 +204,7 @@ The dry run sends no file; it hashes the file here and reads the library:
 
 ```shell
 comfy --json model list-folders --where cloud
-comfy --json model upload <file> --type <folder> --workspace <workspace id> --where cloud --dry-run
+comfy --json model upload '<file>' --type <folder> --workspace <workspace id> --where cloud --dry-run
 ```
 
 `<folder>` is the item's `folder` when `model list-folders` lists it; otherwise
@@ -210,7 +214,7 @@ needs uploading or asking; use its `loader_path`. Otherwise ask by `filename`,
 with the dry run's path, `size`, `sha256` and destination folder. After the yes:
 
 ```shell
-comfy --json model upload <file> --type <folder> --workspace <workspace id> --where cloud \
+comfy --json model upload '<file>' --type <folder> --workspace <workspace id> --where cloud \
   --yes --expected-sha256 <approved sha256>
 ```
 
@@ -230,13 +234,21 @@ in its place; report the model as what blocks the run. When it fails, nothing ra
 | `asset_upload_unverified` | The file is stored, but Cloud's hash of it does not match or could not be read. Do not run a workflow that loads it; report it, with `details.asset_id` |
 
 **An input file** (image, video, audio) a loader names: fetch it from the local
-server, then upload it after the yes:
+server before you ask, then ask with the fetched file's size and its
+`shasum -a 256` hash:
 
 ```shell
-curl -sfG "<server>/api/view" --data-urlencode "filename=<file>" \
-  --data-urlencode "subfolder=<subfolder>" --data-urlencode "type=input" \
-  -H "comfy-user: <user>" -o "<work>/inputs/<file>"
-comfy --json upload "<work>/inputs/<file>" --where cloud
+curl -sfG "<server>/api/view" --data-urlencode 'filename=<file>' \
+  --data-urlencode 'subfolder=<subfolder>' --data-urlencode "type=input" \
+  -H "comfy-user: <user>" -o '<work>/inputs/<file>'
+shasum -a 256 '<work>/inputs/<file>'
+```
+
+After the yes, upload that same file. Do not fetch it again: if the server's
+file has to be read again, ask again with the new hash.
+
+```shell
+comfy --json upload '<work>/inputs/<file>' --where cloud
 ```
 
 Set the loader on the copy to the returned `uploads[].cloud_name`.
@@ -248,6 +260,10 @@ Never call it working before a real job succeeds.
 - **Comfy Cloud:**
   `comfy --json run --workflow <file> --where cloud --wait`, then
   `comfy --json download <prompt_id> --where cloud --out-dir "<work>/outputs"`.
+  `spend_consent_required` means nothing was submitted: the workflow has
+  partner-API nodes (`details.partner_nodes`) that spend credits beyond the run.
+  Ask, naming those nodes; after a yes, run the same command with
+  `--allow-spend`. On a no, report "prepared, not run".
 - **A deployment** (existing or custom build): first read
   `comfy --json deploy logs --deployment <id>`; `data.comfyuiLog` must show no
   `IMPORT FAILED` for a pack the workflow uses. Make the API file against the
@@ -307,8 +323,8 @@ to recover a download. Run comfy commands one at a time.
 Save the file that ran (the copy, if you changed one):
 
 ```shell
-comfy --json workflow save <file> --name "<name>" --where cloud
-comfy --json workflow save <file> --name "<name>" --where cloud --deployment <id>   # ran on a deployment
+comfy --json workflow save <file> --name '<name>' --where cloud
+comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id>   # ran on a deployment
 ```
 
 It saves into a new folder in the Cloud Workflows sidebar and never replaces a
