@@ -105,12 +105,14 @@ MAX_REGISTRY_ERROR_CHARS = 300
 # `pip list` normalizes valid versions, losing spellings needed by `===`.
 # The JSON shape stays [{"name", "version"}], with no pip dependency.
 #
-# - The probe runs from a fresh empty directory, not the caller's, so the
-#   ``-c`` ``''`` entry and relative entries such as ``PYTHONPATH=.`` name an
-#   empty folder: a stray ``json.py`` or ``*.dist-info`` where the command was
-#   run can't leak in. Before anything that could be shadowed is imported, those
-#   entries are dropped as well. ``sys`` is built in and ``os`` is already
-#   loaded at startup, so neither import reads the path.
+# - The probe runs from the caller's directory, so a relative interpreter path
+#   and relative ``PYTHONPATH`` entries keep the meaning they had there. The
+#   caller's directory itself never reaches ``sys.path``: ``_probe_env`` drops
+#   every ``PYTHONPATH`` entry naming it (``.``, an empty entry, its absolute
+#   path or a symlink to it), and the script's first line drops the ``-c``
+#   ``''`` entry, before anything that could be shadowed is imported. So a
+#   stray ``json.py``, ``sitecustomize.py`` or ``*.dist-info`` where the command
+#   was run can't leak in. ``sys`` is built in, so importing it reads no path.
 # - Absolute entries an installation put on ``sys.path`` stay, even when one is
 #   the caller's directory: a legacy editable install lists its source folder in
 #   ``easy-install.pth``, and running from that folder must still find it.
@@ -120,9 +122,8 @@ MAX_REGISTRY_ERROR_CHARS = 300
 #   uninstall) are skipped, and the first copy of a name in ``sys.path`` order
 #   wins, as it does for ``import``.
 _METADATA_LIST_SCRIPT = """\
-import os, sys
-cwd = os.path.realpath(os.getcwd())
-sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) != cwd]
+import sys
+sys.path[:] = [p for p in sys.path if p]
 import json, re
 from importlib import metadata
 seen, rows = set(), []
@@ -142,26 +143,49 @@ print(json.dumps(rows))
 """
 
 
+def _names_caller_directory(entry: str) -> bool:
+    """True when a ``PYTHONPATH`` entry is the current directory.
+
+    Python reads an empty entry as the current directory. ``samefile`` sees
+    through relative spellings, symlinks and case; an entry that can't be
+    stat'ed names nothing and is kept, as Python keeps it.
+    """
+    if not entry:
+        return True
+    try:
+        return os.path.samefile(entry, os.curdir)
+    except OSError:
+        return False
+
+
+def _probe_env() -> dict[str, str]:
+    """The caller's environment, minus ``PYTHONPATH`` entries naming the caller's directory."""
+    env = dict(os.environ)
+    entries = env.pop("PYTHONPATH", "").split(os.pathsep)
+    kept = [entry for entry in entries if not _names_caller_directory(entry)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    return env
+
+
 def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None, bool]:
     """Run one installed-packages probe; return ``(versions, error, exited_nonzero)``.
 
-    The probe runs from an empty temporary directory so the caller's directory
-    never reaches its ``sys.path`` through ``''`` or a relative entry.
+    The probe inherits the caller's directory and environment, except that
+    ``PYTHONPATH`` entries naming that directory are left out (see
+    ``_probe_env``).
     """
-    import tempfile
-
     from packaging.utils import canonicalize_name
 
     try:
-        with tempfile.TemporaryDirectory(prefix="comfy-cli-node-deps-", ignore_cleanup_errors=True) as probe_cwd:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=PIP_LIST_TIMEOUT_SECONDS,
-                check=True,
-                cwd=probe_cwd,
-            )
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=PIP_LIST_TIMEOUT_SECONDS,
+            check=True,
+            env=_probe_env(),
+        )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip().splitlines()
         return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else ""), True

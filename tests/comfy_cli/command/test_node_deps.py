@@ -380,10 +380,15 @@ def test_report_uses_one_raw_metadata_probe_with_or_without_pip(
     assert calls[0][0] == [python, "-c", node_deps_cmd._METADATA_LIST_SCRIPT]
     assert calls[0][1]["timeout"] == 60
     assert calls[0][1]["check"] is True
-    assert calls[0][1]["cwd"] != os.getcwd()
+    # The probe runs where the command ran, so relative paths keep their meaning.
+    assert "cwd" not in calls[0][1]
+    assert "PYTHONPATH" not in calls[0][1]["env"]
 
 
-def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(tmp_path, monkeypatch, isolated_probe_python):
+@pytest.mark.parametrize("caller_entry", [".", "", "absolute"])
+def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(
+    tmp_path, monkeypatch, isolated_probe_python, caller_entry
+):
     python, site = isolated_probe_python
     first, second, leftovers, cwd = [tmp_path / name for name in ("first", "second", "leftovers", "caller")]
     _write_dist_info(first, "foo_pack-1.0.dist-info", "Foo.Pack", "v1.0")
@@ -398,7 +403,8 @@ def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(tmp_path, mo
     workspace = tmp_path / "ComfyUI"
     _make_pack(workspace, "pack", requirements="foo-pack===v1.0\nfoo-pack>=1\nabsent\n")
     monkeypatch.chdir(cwd)
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([".", str(leftovers), str(first), str(second)]))
+    caller_entry = str(cwd) if caller_entry == "absolute" else caller_entry
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([caller_entry, str(leftovers), str(first), str(second)]))
 
     report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
     reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
@@ -410,8 +416,15 @@ def test_metadata_probe_excludes_cwd_and_keeps_first_canonical_copy(tmp_path, mo
     assert reqs["absent"]["status"] == "missing"
 
 
-def test_legacy_editable_is_found_when_run_from_its_source_directory(tmp_path, monkeypatch, isolated_probe_python):
-    """An install listed in a ``.pth`` file stays visible even when it is the caller's directory."""
+@pytest.mark.parametrize("pythonpath", ["", ".", "absolute"])
+def test_legacy_editable_is_found_when_run_from_its_source_directory(
+    tmp_path, monkeypatch, isolated_probe_python, pythonpath
+):
+    """An install listed in a ``.pth`` file stays visible even when it is the caller's directory.
+
+    That holds when ``PYTHONPATH`` also names the directory: the ``PYTHONPATH``
+    entry is dropped, and the ``.pth`` file still adds the path.
+    """
     python, site = isolated_probe_python
     source = tmp_path / "editable-source"
     (source / "foo").mkdir(parents=True)
@@ -423,7 +436,7 @@ def test_legacy_editable_is_found_when_run_from_its_source_directory(tmp_path, m
     workspace = tmp_path / "ComfyUI"
     _make_pack(workspace, "pack", requirements="foo>=1\n")
     monkeypatch.chdir(source)
-    monkeypatch.setenv("PYTHONPATH", "")
+    monkeypatch.setenv("PYTHONPATH", str(source) if pythonpath == "absolute" else pythonpath)
 
     report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
     reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
@@ -431,6 +444,87 @@ def test_legacy_editable_is_found_when_run_from_its_source_directory(tmp_path, m
     assert warnings == []
     assert reqs["foo>=1"]["installed"] == "1.5"
     assert reqs["foo>=1"]["status"] == "satisfied"
+
+
+def test_relative_virtual_env_interpreter_still_runs(tmp_path, monkeypatch, isolated_probe_python):
+    """``VIRTUAL_ENV=probe-venv`` resolves to a relative interpreter path, which must still start."""
+    python, site = isolated_probe_python
+    _write_dist_info(site, "foo-1.0.dist-info", "foo", "1.0")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo>=1\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VIRTUAL_ENV", os.path.relpath(Path(python).parent.parent, tmp_path))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "")
+
+    report, warnings = node_deps_cmd.build_report(str(workspace))
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert not os.path.isabs(report["python"])
+    assert warnings == []
+    assert reqs["foo>=1"]["installed"] == "1.0"
+    assert reqs["foo>=1"]["status"] == "satisfied"
+
+
+def test_relative_pythonpath_keeps_its_target_under_the_caller_directory(tmp_path, monkeypatch, isolated_probe_python):
+    """``PYTHONPATH=overlay`` names ``<caller>/overlay``; only the caller's directory itself is left out."""
+    python, _ = isolated_probe_python
+    caller = tmp_path / "caller"
+    _write_dist_info(caller / "overlay", "foo-1.0.dist-info", "foo", "1.0")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo>=1\n")
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PYTHONPATH", "overlay")
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo>=1"]["installed"] == "1.0"
+    assert reqs["foo>=1"]["status"] == "satisfied"
+
+
+def test_absolute_pythonpath_naming_the_caller_does_not_override_installed_metadata(
+    tmp_path, monkeypatch, isolated_probe_python
+):
+    """Stray metadata in the caller's directory loses to the installed copy, however the entry is spelled."""
+    python, site = isolated_probe_python
+    _write_dist_info(site, "foo-1.0.dist-info", "foo", "1.0")
+    caller = tmp_path / "caller"
+    _write_dist_info(caller, "foo-9.0.dist-info", "foo", "9.0")
+    workspace = tmp_path / "ComfyUI"
+    _make_pack(workspace, "pack", requirements="foo<2\n")
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PYTHONPATH", str(caller))
+
+    report, warnings = node_deps_cmd.build_report(str(workspace), python=python)
+    reqs = _reqs_by_raw(_packs_by_name(report)["pack"])
+
+    assert warnings == []
+    assert reqs["foo<2"]["installed"] == "1.0"
+    assert reqs["foo<2"]["status"] == "satisfied"
+
+
+def test_probe_env_drops_only_pythonpath_entries_naming_the_caller_directory(tmp_path, monkeypatch):
+    caller, other = tmp_path / "caller", tmp_path / "other"
+    (caller / "overlay").mkdir(parents=True)
+    other.mkdir()
+    link = tmp_path / "caller-link"
+    link.symlink_to(caller, target_is_directory=True)
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join([".", "", str(caller), str(link), "overlay", str(other), "absent"])
+    )
+    monkeypatch.setenv("COMFY_PROBE_ENV_MARKER", "kept")
+
+    env = node_deps_cmd._probe_env()
+
+    assert env["PYTHONPATH"] == os.pathsep.join(["overlay", str(other), "absent"])
+    assert env["COMFY_PROBE_ENV_MARKER"] == "kept"
+    assert os.environ["PYTHONPATH"].startswith(".")
+
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([".", str(caller)]))
+    assert "PYTHONPATH" not in node_deps_cmd._probe_env()
 
 
 def test_pip_list_runs_once_for_the_whole_report(workspace, fake_pip):
