@@ -858,11 +858,7 @@ def _sidebar(
             if state["written"] and lookup_after_write is not None:
                 return lookup_after_write
             needle = query["name"][0].lower()
-            rows = [
-                {"id": f"rec-{n}", "name": n, "latest_version": 1}
-                for n in state["records"]
-                if needle in n.lower()
-            ]
+            rows = [{"id": f"rec-{n}", "name": n, "latest_version": 1} for n in state["records"] if needle in n.lower()]
             return {"data": rows, "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
         if parsed.path == "/api/workflows" and method == "POST":
             return _RECORD_CREATED
