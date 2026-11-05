@@ -769,14 +769,17 @@ text input does not, so a prompt that ends in `.safetensors` is not a model.
 | `skipped`        | array of dict | `{node_id, class_type, why}` for each muted or bypassed node; `why` is `muted` or `bypassed`         |
 | `out`            | str or null   | Where `--apply-remaps --out` wrote the remapped copy                                                 |
 | `remaps_applied` | number        | Values changed in that copy; `0` without `--out`                                                     |
-| `warnings`       | array of dict | `{code, message, details?}`: `object_info_stale` (`details` has `source` and `reason`), `models_dir_not_found`, `local_model_unreadable`, `cloud_model_lookup_failed` |
+| `warnings`       | array of dict | `{code, message, details?}`: `object_info_stale` (`details` has `source` and `reason`), `models_dir_not_found`, `local_model_unreadable`, `cloud_model_lookup_failed`, `remap_not_applied` (`details` has `node_id`, `class_type`, `widget`, `value` and `cloud_value`) |
 
 `verdict`, checked in this order:
 
 - `needs_build`: a node type or model is not on Cloud, or a model is proven a different file. `blocking[]` lists each.
 - `covered_with_remaps`: everything is on Cloud, but a model sits in another folder there, so the saved value must
   change. Each such row has `status: "remap"` and the value Cloud runs in `cloud_value`; `--apply-remaps --out
-  <file>` writes a copy with those values changed.
+  <file>` writes a copy with those values changed. Each is changed only where that input's value is saved (the
+  node's own widget, or the subgraph instance slot that holds a promoted value), so the same file name in another
+  loader or in a text input stays as it is. A remap the copy does not carry (the place its value is saved is
+  unknown, or an input that needs another value reads the same place) adds a `remap_not_applied` warning.
 - `covered_needs_check`: nothing is missing, but a model is not proven the same file as Cloud's copy (`identity` is
   not `same`).
 - `covered`: every node type and model is on Cloud, and each model is proven the same file.

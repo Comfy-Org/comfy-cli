@@ -197,6 +197,60 @@ def test_remaps_and_apply_remaps_writes_a_copy(cloud, tmp_path, capsys):
     assert json.loads(out.read_text())["nodes"][0]["widgets_values"][0] == "styles/ink.safetensors"
 
 
+def test_apply_remaps_gives_each_loader_its_own_folder_for_one_file_name(cloud, monkeypatch, tmp_path, capsys):
+    object_info = {
+        **OBJECT_INFO,
+        "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["checkpoints/shared.safetensors"], {}]}}},
+        "LoraLoader": {"input": {"required": {"lora_name": [["loras/shared.safetensors"], {}]}}},
+    }
+    monkeypatch.setattr("comfy_cli.cql.loader.resilient_load_object_info", lambda **kw: object_info)
+    wf = _write(
+        tmp_path,
+        _ui((1, "CheckpointLoaderSimple", ["shared.safetensors"]), (2, "LoraLoader", ["shared.safetensors", 1.0, 1.0])),
+    )
+    out = tmp_path / "remapped.json"
+    data = _ok(_run([str(wf), "--where", "cloud", "--apply-remaps", "--out", str(out)], capsys))
+    assert [(m["node_id"], m["status"], m["cloud_value"]) for m in data["models"]] == [
+        ("1", "remap", "checkpoints/shared.safetensors"),
+        ("2", "remap", "loras/shared.safetensors"),
+    ]
+    assert all("loc" not in m for m in data["models"])
+    assert data["remaps_applied"] == 2 and data["warnings"] == []
+    written = json.loads(out.read_text())
+    assert [n["widgets_values"][0] for n in written["nodes"]] == [
+        "checkpoints/shared.safetensors",
+        "loras/shared.safetensors",
+    ]
+
+
+def test_a_remap_the_copy_does_not_carry_is_a_warning(cloud, monkeypatch, tmp_path, capsys):
+    from comfy_cli import workflow_coverage as cov
+
+    real = cov.find_uses
+
+    def unplaced(*args):
+        uses = real(*args)
+        for model in uses["models"]:
+            model["loc"] = None  # as when the conversion cannot say where a value is saved
+        return uses
+
+    monkeypatch.setattr(cov, "find_uses", unplaced)
+    wf = _write(tmp_path, _ui((1, "LoraLoader", ["ink.safetensors", 1.0, 1.0])))
+    out = tmp_path / "remapped.json"
+    data = _ok(_run([str(wf), "--where", "cloud", "--apply-remaps", "--out", str(out)], capsys))
+    assert data["remaps_applied"] == 0
+    [warning] = data["warnings"]
+    assert warning["code"] == "remap_not_applied"
+    assert warning["details"] == {
+        "node_id": "1",
+        "class_type": "LoraLoader",
+        "widget": "lora_name",
+        "value": "ink.safetensors",
+        "cloud_value": "styles/ink.safetensors",
+    }
+    assert json.loads(out.read_text())["nodes"][0]["widgets_values"][0] == "ink.safetensors"
+
+
 def test_needs_build_lists_missing_nodes_and_models_with_their_folder(cloud, tmp_path, capsys):
     (tmp_path / "local" / "loras").mkdir(parents=True)
     (tmp_path / "local" / "loras" / "mine.safetensors").write_bytes(b"x")

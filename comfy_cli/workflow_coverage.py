@@ -136,6 +136,52 @@ def _subgraphs(workflow: Mapping[str, Any]) -> list[Any]:
     return subgraphs if isinstance(subgraphs, list) else []
 
 
+def _places_in(path: tuple, value: Any) -> Iterator[tuple[tuple, str]]:
+    if is_model_value(value):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, inner in value.items():
+            if is_model_value(inner):
+                yield (*path, key), inner
+
+
+def _saved_places(workflow: Mapping[str, Any]) -> Iterator[tuple[tuple, str, int, bool]]:
+    """Every file name an editor save stores, as ``(path from the root, value, id of
+    its node, whether it is a host's quarantined value)``.
+
+    The places are each node's ``widgets_values`` (top level and in every subgraph
+    definition), a row's fields one level down, and a subgraph instance's legacy
+    quarantined host values.
+    """
+    owners: list[tuple[tuple, Any]] = [(("nodes",), workflow.get("nodes"))]
+    for index, sg in enumerate(_subgraphs(workflow)):
+        if isinstance(sg, dict):
+            owners.append((("definitions", "subgraphs", index, "nodes"), sg.get("nodes")))
+    for prefix, nodes in owners:
+        for i, node in enumerate(nodes if isinstance(nodes, list) else []):
+            if not isinstance(node, dict):
+                continue
+            values = node.get("widgets_values")
+            if not isinstance(values, (dict, list)):
+                values = []
+            for key, value in values.items() if isinstance(values, dict) else enumerate(values):
+                for path, found in _places_in((*prefix, i, "widgets_values", key), value):
+                    yield path, found, id(node), False
+            props = node.get("properties")
+            raw = props.get("proxyWidgetErrorQuarantine") if isinstance(props, dict) else None
+            for q, entry in enumerate(raw if isinstance(raw, list) else []):
+                if isinstance(entry, dict) and "hostValue" in entry:
+                    path = (*prefix, i, "properties", "proxyWidgetErrorQuarantine", q, "hostValue")
+                    for at, found in _places_in(path, entry["hostValue"]):
+                        yield at, found, id(node), True
+
+
+def _at(root: Any, path: tuple) -> Any:
+    for key in path:
+        root = root[key]
+    return root
+
+
 def _ui_nodes(workflow: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
     """Every node an instance reaches, with its scoped id.
 
@@ -164,6 +210,9 @@ def find_uses(workflow: Mapping[str, Any], object_info: Mapping[str, Any]) -> di
     Returns ``{"format", "nodes": {class_type: [node_id, ...]}, "models": [...],
     "skipped": [...]}``. Each model row carries ``node_id``, ``class_type``,
     ``value`` and ``widget`` (the input that holds it, or ``None`` when unknown).
+    A row from an editor save also carries ``loc``, the path from the workflow's
+    root to the one place its value is saved (``None`` when that cannot be told);
+    :func:`apply_remaps` writes there.
 
     An editor save is converted the way it is submitted (subgraphs expanded, each
     instance's promoted values applied), so every instance of a subgraph gets its
@@ -178,17 +227,36 @@ def find_uses(workflow: Mapping[str, Any], object_info: Mapping[str, Any]) -> di
     nodes: dict[str, list[str]] = {}
     models: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    markers: dict[str, tuple[tuple, str]] = {}
 
-    def add(node_id: str, class_type: str, inputs: Mapping[str, Any], saved: set[str] | None = None) -> None:
+    def add(
+        node_id: str,
+        class_type: str,
+        inputs: Mapping[str, Any],
+        saved: set[str] | None = None,
+        probed: Mapping[str, Any] | None = None,
+    ) -> None:
         class_info = object_info.get(class_type)
         for name, value in inputs.items():
             if not names_a_file(class_info, name):
                 continue
-            for found in _model_strings(value):
+            marked = probed.get(name) if probed is not None else None
+            if is_model_value(value):
+                pairs = [(value, marked)]
+            elif isinstance(value, dict):
+                pairs = [(v, marked.get(k) if isinstance(marked, dict) else None) for k, v in value.items()]
+            else:
+                pairs = []
+            for found, marker in pairs:
                 # The converter fills an input the save left out with Cloud's first
                 # choice; only a file the workflow itself names is reported.
-                if saved is None or found.lower() in saved:
-                    models.append({"node_id": node_id, "class_type": class_type, "value": found, "widget": name})
+                if not is_model_value(found) or (saved is not None and found.lower() not in saved):
+                    continue
+                row: dict[str, Any] = {"node_id": node_id, "class_type": class_type, "value": found, "widget": name}
+                if saved is not None:
+                    place = markers.get(marker) if isinstance(marker, str) else None
+                    row["loc"] = place[0] if place is not None and place[1] == found else None
+                models.append(row)
 
     if fmt == "api":
         for node_id, node in workflow.items():
@@ -197,13 +265,26 @@ def find_uses(workflow: Mapping[str, Any], object_info: Mapping[str, Any]) -> di
             add(str(node_id), class_type, node.get("inputs") if isinstance(node.get("inputs"), dict) else {})
         return {"format": fmt, "nodes": nodes, "models": models, "skipped": skipped}
 
-    from comfy_cli.workflow_to_api import convert_ui_to_api
+    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
     links = workflow.get("links")
-    prompt = convert_ui_to_api(
-        {**workflow, "links": links if isinstance(links, list) else []},
-        object_info if isinstance(object_info, dict) else dict(object_info),
-    )
+    catalog = object_info if isinstance(object_info, dict) else dict(object_info)
+    prompt = convert_ui_to_api({**workflow, "links": links if isinstance(links, list) else []}, catalog)
+    # Where each value is saved: the same conversion again, with every saved file
+    # name swapped for a marker. The marker an input ends up with names the one
+    # place its value came from (a node's own widget, the instance slot holding a
+    # promoted value, a quarantined host value), whatever precedence picked it, so
+    # a remap writes there and nowhere else.
+    places = list(_saved_places(workflow))
+    probe = copy.deepcopy({**workflow, "links": links if isinstance(links, list) else []})
+    for n, (path, value, _owner, _host) in enumerate(places):
+        marker = f"\x00saved-at-{n}\x00"
+        markers[marker] = (path, value)
+        _at(probe, path[:-1])[path[-1]] = marker
+    try:
+        probed = convert_ui_to_api(probe, catalog)
+    except WorkflowConversionError:
+        probed = {}
     walked = list(_ui_nodes(workflow))
     saved = {
         found.lower()
@@ -224,10 +305,16 @@ def find_uses(workflow: Mapping[str, Any], object_info: Mapping[str, Any]) -> di
         nodes.setdefault(class_type, []).append(node_id)
         entry = prompt.get(node_id) if class_type in object_info else None
         if isinstance(entry, dict) and isinstance(entry.get("inputs"), dict):
-            add(node_id, class_type, entry["inputs"], saved)
+            probed_entry = probed.get(node_id)
+            probed_inputs = probed_entry.get("inputs") if isinstance(probed_entry, dict) else None
+            add(node_id, class_type, entry["inputs"], saved, probed_inputs if isinstance(probed_inputs, dict) else {})
         else:
-            for found in _ui_model_strings(node):
-                models.append({"node_id": node_id, "class_type": class_type, "value": found, "widget": None})
+            # Read from the node's own widget values, in the order they are saved.
+            own = [(path, value) for path, value, owner, host in places if owner == id(node) and not host]
+            for found, (path, _value) in zip(_ui_model_strings(node), own):
+                models.append(
+                    {"node_id": node_id, "class_type": class_type, "value": found, "widget": None, "loc": path}
+                )
     return {"format": fmt, "nodes": nodes, "models": models, "skipped": skipped}
 
 
@@ -301,7 +388,8 @@ def resolve_models(
     Cloud file has the same name in another folder: the saved value must change to
     ``cloud_value``), ``missing``, or ``not_checked`` when the node type itself is
     not on Cloud. ``source`` is ``cloud`` for Cloud's own models and ``yours`` for
-    the person's uploads. ``candidates`` lists the names when several fit.
+    the person's uploads. ``candidates`` lists the names when several fit. A use's
+    ``loc`` is kept for :func:`apply_remaps`.
     """
     asked: dict[str, list[dict[str, Any]]] = {}
     rows: list[dict[str, Any]] = []
@@ -316,6 +404,8 @@ def resolve_models(
             "source": None,
             "cloud_value": None,
         }
+        if "loc" in use:
+            row["loc"] = use["loc"]
         rows.append(row)
         if class_type not in object_info:
             row["status"] = "not_checked"
@@ -514,64 +604,66 @@ def verdict(blocked: list[dict], models: list[dict[str, Any]]) -> str:
     return "covered"
 
 
-def _replace(values: Any, old: str, new: str) -> int:
-    """Replace ``old`` with ``new`` in one node's widget values, rows included."""
+def _write(root: Any, path: tuple, old: str, new: str) -> int:
+    """Set the value saved at ``path`` from ``old`` to ``new``: 0 when it does not hold
+    ``old``. A row there (an API input such as a LoRA stack's) changes each field
+    that holds ``old``."""
+    try:
+        parent = _at(root, path[:-1])
+        current = parent[path[-1]]
+    except (KeyError, IndexError, TypeError):
+        return 0
+    if current == old:
+        parent[path[-1]] = new
+        return 1
     changed = 0
-    items = list(values.items()) if isinstance(values, dict) else list(enumerate(values or []))
-    for key, value in items:
-        if value == old:
-            values[key] = new
-            changed += 1
-        elif isinstance(value, dict):
-            for inner, inner_value in list(value.items()):
-                if inner_value == old:
-                    value[inner] = new
-                    changed += 1
+    if isinstance(current, dict):
+        for key, value in list(current.items()):
+            if value == old:
+                current[key] = new
+                changed += 1
     return changed
 
 
-def apply_remaps(workflow: Mapping[str, Any], models: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
-    """A copy of ``workflow`` with each remap's value replaced; the original is not touched.
+def apply_remaps(
+    workflow: Mapping[str, Any], models: list[dict[str, Any]], not_applied: list[dict[str, Any]] | None = None
+) -> tuple[dict[str, Any], int]:
+    """A copy of ``workflow`` with each remap written where its value is saved; the original is not touched.
 
     An API export changes the remapped input of that node. An editor save changes
-    the value wherever it is stored: on the nodes of the remapped type (top level
-    and inside every subgraph definition) and on subgraph instances, which hold a
-    promoted widget's value, legacy ``proxyWidgetErrorQuarantine`` entries included.
+    the one place :func:`find_uses` read the value from (the row's ``loc``): the
+    node's own widget, the subgraph instance slot that holds a promoted value, or
+    its legacy quarantined host value. The same file name saved anywhere else
+    (another loader, a promoted caption) is left as it is.
+
+    Rows that read one place (a subgraph default several instances run) write it
+    once. A row with no known place, or whose place another row needs set to a
+    different value, is not written; it is appended to ``not_applied`` when given.
+    Returns the copy and the number of values changed.
     """
     out = copy.deepcopy(workflow)
     remaps = [m for m in models if m["status"] == "remap"]
-    changed = 0
-    if workflow_format(out) == "api":
-        for model in remaps:
-            node = out.get(model["node_id"])
-            inputs = node.get("inputs") if isinstance(node, dict) else None
-            if isinstance(inputs, dict):
-                changed += _replace(inputs, model["value"], model["cloud_value"])
-        return out, changed
+    api = workflow_format(out) == "api"
 
-    by_value: dict[str, set[str]] = {}
+    def place(model: Mapping[str, Any]) -> tuple | None:
+        if api:
+            return (model["node_id"], "inputs", model["widget"]) if model.get("widget") else None
+        loc = model.get("loc")
+        return tuple(loc) if loc else None
+
+    wanted: dict[tuple, set[str]] = {}
     for model in remaps:
-        by_value.setdefault(model["value"], set()).add(model["cloud_value"])
-    # One saved value remapped two ways (two loader types, two folders) has no
-    # single replacement: it is left alone rather than guessed.
-    targets: dict[str, tuple[str, set[str]]] = {}
-    for old, new in by_value.items():
-        if len(new) == 1:
-            targets[old] = (next(iter(new)), {m["class_type"] for m in remaps if m["value"] == old})
-    subgraph_ids = {sg["id"] for sg in _subgraphs(out) if isinstance(sg, dict) and isinstance(sg.get("id"), str)}
-    every_node = [n for n in out.get("nodes") or [] if isinstance(n, dict)]
-    for sg in _subgraphs(out):
-        if isinstance(sg, dict) and isinstance(sg.get("nodes"), list):
-            every_node.extend(n for n in sg["nodes"] if isinstance(n, dict))
-    for node in every_node:
-        instance = node.get("type") in subgraph_ids
-        for old, (new, class_types) in targets.items():
-            if not instance and node.get("type") not in class_types:
-                continue
-            changed += _replace(node.get("widgets_values"), old, new)
-            if instance:
-                for entry in _quarantined_host_values(node):
-                    if entry["hostValue"] == old:
-                        entry["hostValue"] = new
-                        changed += 1
+        at = place(model)
+        if at is not None:
+            wanted.setdefault(at, set()).add(model["cloud_value"])
+    written: dict[tuple, int] = {}
+    changed = 0
+    for model in remaps:
+        at = place(model)
+        # One place two rows need remapped two ways has no single right value: left as saved.
+        if at is not None and len(wanted[at]) == 1 and at not in written:
+            written[at] = _write(out, at, model["value"], model["cloud_value"])
+            changed += written[at]
+        if not written.get(at) and not_applied is not None:
+            not_applied.append(model)
     return out, changed

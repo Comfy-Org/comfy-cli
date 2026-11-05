@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from comfy_cli import workflow_coverage as cov
-from comfy_cli.workflow_to_api import WorkflowConversionError
+from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -141,19 +141,39 @@ def test_apply_remaps_rewrites_the_promoted_value_on_the_instance():
 
 
 def test_apply_remaps_rewrites_a_quarantined_host_value():
-    sg_id = "aaaaaaaa-0000-0000-0000-000000000003"
-    quarantine = [{"originalEntry": ["-1", "lora_name"], "hostValue": "ink.safetensors"}]
-    wf = _ui(
-        _node(10, sg_id, properties={"proxyWidgetErrorQuarantine": quarantine}),
-        definitions=_subgraph(sg_id, _node(1, "LoraLoader", ["other.safetensors", 1, 1])),
-    )
-    row = {"status": "remap", "class_type": "LoraLoader", "value": "ink.safetensors"}
-    out, changed = cov.apply_remaps(wf, [{**row, "cloud_value": "styles/ink.safetensors"}])
+    wf, host, object_info = _promoted_music_workflow()
+    # The frontend reads a quarantined legacy value before the positional slot.
+    host["widgets_values"][4] = "slot.safetensors"
+    quarantine = [{"originalEntry": ["-1", "unet_name"], "hostValue": "mine.safetensors"}]
+    host["properties"]["proxyWidgetErrorQuarantine"] = quarantine
+    [row] = _unet_rows(wf, object_info)
+    assert row["value"] == "mine.safetensors"
+    row.update(status="remap", cloud_value="music/mine.safetensors")
+    out, changed = cov.apply_remaps(wf, [row])
     assert changed == 1
-    entry = out["nodes"][0]["properties"]["proxyWidgetErrorQuarantine"][0]
-    assert entry["hostValue"] == "styles/ink.safetensors"
-    assert out["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "other.safetensors"
-    assert quarantine[0]["hostValue"] == "ink.safetensors"
+    out_host = next(n for n in out["nodes"] if n["id"] == 37)
+    assert out_host["properties"]["proxyWidgetErrorQuarantine"][0]["hostValue"] == "music/mine.safetensors"
+    assert out_host["widgets_values"][4] == "slot.safetensors"
+    interior = [n for sg in out["definitions"]["subgraphs"] for n in sg["nodes"] if n["type"] == "UNETLoader"]
+    assert interior[0]["widgets_values"][0] == "minimax_music3_dit_fp16.safetensors"
+    assert quarantine[0]["hostValue"] == "mine.safetensors"
+    assert [m["value"] for m in _unet_rows(out, object_info)] == ["music/mine.safetensors"]
+
+
+def test_remapping_a_top_level_loader_leaves_an_equal_promoted_caption_alone():
+    wf, host, object_info = _promoted_music_workflow()
+    host["widgets_values"][0] = "ink.safetensors"  # the promoted caption: text that runs, not a model
+    wf["nodes"].append(_node(999, "LoraLoader", ["ink.safetensors", 1, 1]))
+    object_info = {**object_info, "LoraLoader": OBJECT_INFO["LoraLoader"]}
+    assert convert_ui_to_api(wf, object_info)["37:13"]["inputs"]["caption"] == "ink.safetensors"
+    rows = cov.resolve_models(cov.find_uses(wf, object_info), object_info, _no_uploads)
+    rows = [r for r in rows if r["node_id"] == "999"]
+    assert [(r["status"], r["cloud_value"]) for r in rows] == [("remap", "styles/ink.safetensors")]
+    out, changed = cov.apply_remaps(wf, rows)
+    assert changed == 1
+    assert next(n for n in out["nodes"] if n["id"] == 999)["widgets_values"][0] == "styles/ink.safetensors"
+    assert next(n for n in out["nodes"] if n["id"] == 37)["widgets_values"][0] == "ink.safetensors"
+    assert convert_ui_to_api(out, object_info)["37:13"]["inputs"]["caption"] == "ink.safetensors"
 
 
 def test_find_uses_api_reads_inputs_and_ignores_urls():
@@ -451,6 +471,59 @@ def test_apply_remaps_ui_changes_only_the_copy():
     assert changed == 2
     assert out["nodes"][0]["widgets_values"][0] == "styles/ink.safetensors"
     assert out["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "styles/ink.safetensors"
+
+
+def test_apply_remaps_writes_each_loader_its_own_destination_for_one_file_name():
+    object_info = {
+        "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["checkpoints/shared.safetensors"], {}]}}},
+        "LoraLoader": {"input": {"required": {"lora_name": [["loras/shared.safetensors"], {}]}}},
+    }
+    wf = _ui(
+        _node(1, "CheckpointLoaderSimple", ["shared.safetensors"]),
+        _node(2, "LoraLoader", ["shared.safetensors", 1, 1]),
+    )
+    rows = cov.resolve_models(_uses(wf, object_info), object_info, _no_uploads)
+    assert [(r["status"], r["cloud_value"]) for r in rows] == [
+        ("remap", "checkpoints/shared.safetensors"),
+        ("remap", "loras/shared.safetensors"),
+    ]
+    not_applied: list = []
+    out, changed = cov.apply_remaps(wf, rows, not_applied)
+    assert changed == 2 and not_applied == []
+    assert out["nodes"][0]["widgets_values"] == ["checkpoints/shared.safetensors"]
+    assert out["nodes"][1]["widgets_values"] == ["loras/shared.safetensors", 1, 1]
+
+
+def test_apply_remaps_writes_a_default_two_instances_run_once():
+    sg_id = "aaaaaaaa-0000-0000-0000-000000000004"
+    wf = _ui(
+        _node(10, sg_id),
+        _node(11, sg_id),
+        definitions=_subgraph(sg_id, _node(1, "LoraLoader", ["ink.safetensors", 1, 1])),
+    )
+    rows = _resolve(wf)
+    assert [r["node_id"] for r in rows if r["status"] == "remap"] == ["10:1", "11:1"]
+    not_applied: list = []
+    out, changed = cov.apply_remaps(wf, rows, not_applied)
+    assert changed == 1 and not_applied == []
+    assert out["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "styles/ink.safetensors"
+
+
+def test_apply_remaps_leaves_a_place_it_cannot_settle_and_says_so():
+    wf = _ui(_node(1, "LoraLoader", ["shared.safetensors", 1, 1]))
+    at = ("nodes", 0, "widgets_values", 0)
+    row = {"node_id": "1", "class_type": "LoraLoader", "status": "remap", "value": "shared.safetensors"}
+    rows = [
+        # One saved value two rows need remapped two ways.
+        {**row, "cloud_value": "a/shared.safetensors", "loc": at},
+        {**row, "cloud_value": "b/shared.safetensors", "loc": at},
+        # A value whose saved place could not be told.
+        {**row, "node_id": "2", "value": "gone.safetensors", "cloud_value": "c/gone.safetensors", "loc": None},
+    ]
+    not_applied: list = []
+    out, changed = cov.apply_remaps(wf, rows, not_applied)
+    assert (out, changed) == (wf, 0)
+    assert not_applied == rows
 
 
 def test_apply_remaps_api_sets_the_input():

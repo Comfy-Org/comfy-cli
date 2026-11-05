@@ -144,7 +144,7 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "object_info_stale, models_dir_not_found, local_model_unreadable or cloud_model_lookup_failed."
+            "description": "object_info_stale, models_dir_not_found, local_model_unreadable, cloud_model_lookup_failed or remap_not_applied (the --out copy keeps that remap's saved value; details names the row)."
           },
           "message": {"type": "string"},
           "details": {"type": "object"}

@@ -353,7 +353,8 @@ def check_cmd(
     blocked = cov.blocking(uses, object_info, models)
     remaps_applied = 0
     if out_path is not None:
-        copy_, remaps_applied = cov.apply_remaps(data, models)
+        not_applied: list[dict[str, Any]] = []
+        copy_, remaps_applied = cov.apply_remaps(data, models, not_applied)
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(out_path, json.dumps(copy_, indent=2, ensure_ascii=False) + "\n")
@@ -365,9 +366,20 @@ def check_cmd(
                 details={"path": str(out_path)},
             )
             raise typer.Exit(code=1) from e
+        for model in not_applied:
+            # The copy keeps this value, so the row must not read as done.
+            warnings.append(
+                {
+                    "code": "remap_not_applied",
+                    "message": f"the copy keeps {model['value']} on node {model['node_id']}, not "
+                    f"{model['cloud_value']}: the place it is saved is unknown, or an input that needs "
+                    "another value reads the same place",
+                    "details": {key: model[key] for key in ("node_id", "class_type", "widget", "value", "cloud_value")},
+                }
+            )
 
     for model in models:
-        for key in ("cloud_size", "cloud_hash"):
+        for key in ("loc", "cloud_size", "cloud_hash"):
             model.pop(key, None)
     payload: dict[str, Any] = {
         "workflow": str(path),
