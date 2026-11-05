@@ -229,10 +229,12 @@ def _collect_codes() -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
 
 #: Warning-only codes registered before warnings were kept out of the error
 #: registry. They stay registered because registered codes are append-only;
-#: no code joins this list. A new warning keeps its code in ``warnings[]``
-#: and is not registered.
+#: the ``workflow save``/``delete`` sidebar warnings joined because they were
+#: registered just before the rule landed. No other code joins this list. A
+#: new warning keeps its code in ``warnings[]`` and is not registered.
 LEGACY_WARNING_REGISTRATIONS = frozenset(
     {
+        "api_format_saved_as_record",
         "description_ignored",
         "dynamic_group_unsupported",
         "installed_versions_unavailable",
@@ -244,9 +246,12 @@ LEGACY_WARNING_REGISTRATIONS = frozenset(
         "registry_no_dependency_metadata",
         "registry_partial_dependency_metadata",
         "select_no_match",
+        "sidebar_file_kept",
         "ui_only_link_dropped",
         "ui_only_node_skipped",
         "workflow_content_not_json",
+        "workflow_record_unknown",
+        "workspace_unknown",
     }
 )
 

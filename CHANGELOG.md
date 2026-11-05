@@ -84,6 +84,11 @@ history.
   accepted silently. A `COMBO` widget socket still accepts `COMBO`, `STRING`,
   `INT` and `FLOAT`, because that is how a computed file name or a numeric
   option reaches a combo; every other source type is refused.
+- Commands that load a node catalog but read only a few classes (`workflow
+  print`, `workflow validate`, `workflow slots`, `nodes show`) no longer parse
+  every class in it: a class is parsed when first looked up, and the type
+  indexes that discovery commands (`nodes upstream`, `downstream`, `path`,
+  `types`, `ls`) read are built on first use. Output is unchanged.
 
 ### Fixed
 
