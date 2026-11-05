@@ -188,7 +188,11 @@ def combo_choices(class_info: Any) -> dict[str, str]:
 
 
 def content_hash(value: Any) -> str | None:
-    """Cloud reports a hash as ``blake3:<hex>`` or as the stored ``<hex>.<ext>``; normalize to the first."""
+    """Cloud reports a hash as ``blake3:<hex>`` or as the stored ``<hex>.<ext>``; normalize to the first.
+
+    Anything else is no hash: for its own library models Cloud puts the folder and
+    file name there (``checkpoints/sd_xl_turbo_1.0_fp16.safetensors``).
+    """
     match = _HASH_RE.fullmatch(value) if isinstance(value, str) else None
     return f"blake3:{match[1]}" if match else None
 
@@ -277,7 +281,7 @@ def identity(
     path, size = local[0]
     if cloud_size is not None and cloud_size != size:
         return "different", path
-    if cloud_hash is None:
+    if cloud_hash is None:  # Cloud's library models report a path as `hash`: nothing to compare, so no hashing
         return "unverified", path
     digests = {hash_file(p) for p, _ in local}
     if len(digests) > 1:

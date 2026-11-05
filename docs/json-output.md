@@ -780,6 +780,12 @@ export. Muted and bypassed nodes load nothing and are listed in `skipped`.
 A model is proven the same file only when a local copy under `--models-dir` has the blake3 hash Cloud reports for
 its copy. The same name is not the same bytes. Without `--models-dir`, a model Cloud has is `unverified`.
 
+Only your own uploads carry a content hash. Cloud's library models (`source: "cloud"`) report their folder and file
+name where the hash would be, so for them a local copy is compared by size alone: a different size is
+`different` (blocking, `different_file`), the same size stays `unverified`, and the local file is not hashed. A
+workflow that uses a library model is therefore at best `covered_needs_check`; running one real job on Cloud is the
+proof.
+
 Each `models[]` row:
 
 | Field         | Type          | Description                                                                                       |

@@ -169,6 +169,9 @@ def test_content_hash_normalizes_both_spellings():
     assert cov.content_hash("1" * 64 + ".safetensors") == H1
     assert cov.content_hash(H1) == H1
     assert cov.content_hash("not-a-hash") is None
+    # Cloud's library models carry their folder and file name in `hash`.
+    assert cov.content_hash("checkpoints/x.safetensors") is None
+    assert cov.content_hash("checkpoints/" + "1" * 64 + ".safetensors") is None
     assert cov.content_hash(None) is None
 
 
@@ -186,6 +189,14 @@ def test_identity_needs_a_hash_match_to_say_same():
     assert cov.identity([("/a", 5)], 5, None, hashes) == ("unverified", "/a")
     assert cov.identity([("/a", 5), ("/b", 6)], 5, H1, hashes) == ("unverified", None)
     assert cov.identity([("/a", 5), ("/b", 5)], 5, H1, hashes) == ("unverified", None)
+
+
+def test_identity_without_a_cloud_hash_uses_size_and_never_hashes():
+    def never(path):
+        raise AssertionError(f"hashed {path} with nothing to compare it to")
+
+    assert cov.identity([("/a", 5)], 5, None, never) == ("unverified", "/a")
+    assert cov.identity([("/a", 5)], 6, None, never) == ("different", "/a")
 
 
 def test_local_index_finds_model_files_by_name(tmp_path):

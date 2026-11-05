@@ -50,6 +50,15 @@ only when a local copy under `--models-dir` has the blake3 hash Cloud reports.
 A size mismatch alone proves `different`. Without a local copy, or when
 several local copies disagree, the model is `unverified`.
 
+Cloud's library models carry no content hash. Measured on 2026-11-05,
+`/api/assets` returns their folder and file name as `hash`
+(`checkpoints/sd_xl_turbo_1.0_fp16.safetensors`) and the byte count as `size`.
+For them the check compares sizes only and never hashes the local file: a
+different size is `different_file`, the same size stays `unverified`. A
+workflow that uses a library model is at best `covered_needs_check`, and the
+proof is one real job on Cloud. The hash proof applies to the person's own
+uploads.
+
 A remap happens only when exactly one Cloud file has the name. The check never
 writes its input: `--apply-remaps --out <file>` writes a remapped copy, and an
 `--out` that names the input is refused.
@@ -90,6 +99,8 @@ it, a model the person uploaded would be reported missing.
 
 - Without `--models-dir`, a workflow that uses any model is at best
   `covered_needs_check`.
+- A workflow that uses any of Cloud's library models is at best
+  `covered_needs_check`, with or without `--models-dir`.
 - Folder names for custom loaders are unknown unless the workflow's download
   notes give them.
 
@@ -112,5 +123,7 @@ leaves the input unchanged, and each refusal. Each output validates against
 
 - Cloud's node list starts listing the person's uploads in loader dropdowns:
   the model-list read can go.
+- Cloud's `/api/assets` reports a content hash for its library models: the
+  hash proof then reaches them, and `covered` becomes reachable for them.
 - Cloud publishes a per-file hash in its node list: identity could be checked
   without the extra model-list read per model.

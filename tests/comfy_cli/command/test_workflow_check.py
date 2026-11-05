@@ -144,6 +144,40 @@ def test_a_different_local_file_blocks(cloud, tmp_path, capsys):
     assert [(b["kind"], b["reason"]) for b in data["blocking"]] == [("model", "different_file")]
 
 
+@pytest.mark.parametrize(
+    ("size", "identity", "verdict"),
+    [
+        (len(SD15), "unverified", "covered_needs_check"),
+        (len(SD15) + 1, "different", "needs_build"),
+    ],
+)
+def test_a_library_model_with_a_path_for_hash_is_judged_by_size(
+    cloud, monkeypatch, tmp_path, capsys, size, identity, verdict
+):
+    """Measured on Cloud 2026-11-05: its library models report `hash` as folder/filename."""
+
+    def never(path):
+        raise AssertionError(f"hashed {path} with nothing to compare it to")
+
+    monkeypatch.setattr("comfy_cli.hashing.blake3_file", never)
+    (tmp_path / "sd15.safetensors").write_bytes(SD15)
+    cloud["assets"] = [
+        {
+            "name": "sd15.safetensors",
+            "hash": "checkpoints/sd15.safetensors",
+            "size": size,
+            "tags": ["models", "checkpoints"],
+            "public": True,
+        }
+    ]
+    wf = _write(tmp_path, _ui((1, "CheckpointLoaderSimple", ["sd15.safetensors"])))
+    data = _ok(_run([str(wf), "--where", "cloud", "--models-dir", str(tmp_path)], capsys))
+    assert data["models"][0]["identity"] == identity
+    assert data["verdict"] == verdict
+    if identity == "different":
+        assert [b["reason"] for b in data["blocking"]] == ["different_file"]
+
+
 def test_remaps_and_apply_remaps_writes_a_copy(cloud, tmp_path, capsys):
     original = _ui((1, "LoraLoader", ["ink.safetensors", 1.0, 1.0]))
     wf = _write(tmp_path, original)
