@@ -1775,14 +1775,6 @@ def update(
                 details={"returncode": e.returncode},
             )
             raise typer.Exit(code=1) from e
-        except subprocess.TimeoutExpired as e:
-            get_renderer().error(
-                code="update_cli_failed",
-                message=f"The comfy-cli installer timed out after {e.timeout} seconds.",
-                hint="check the installer output, then re-run `comfy update cli`",
-                details={"timeout": e.timeout},
-            )
-            raise typer.Exit(code=1) from e
         except OSError as e:
             get_renderer().error(
                 code="update_cli_failed",

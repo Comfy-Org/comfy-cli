@@ -172,11 +172,10 @@ class TestUpdateCliFailures:
         [
             FileNotFoundError("installer disappeared"),
             PermissionError("installer is not executable"),
-            subprocess.TimeoutExpired(["uv", "tool", "upgrade", "comfy-cli"], 600),
         ],
-        ids=["missing-installer", "installer-permissions", "timeout"],
+        ids=["missing-installer", "installer-permissions"],
     )
-    def test_installer_start_and_timeout_failures_are_structured(self, installer_error, output_flag):
+    def test_installer_start_failures_are_structured(self, installer_error, output_flag):
         with patch("comfy_cli.update.upgrade_cli", side_effect=installer_error):
             result = runner.invoke(cmdline.app, [output_flag, "update", "cli"])
 
@@ -186,8 +185,6 @@ class TestUpdateCliFailures:
             envelope = json.loads(result.stdout.strip().splitlines()[-1])
             assert envelope["error"]["code"] == "update_cli_failed"
             assert envelope["error"]["hint"]
-            if isinstance(installer_error, subprocess.TimeoutExpired):
-                assert envelope["error"]["details"]["timeout"] == 600
         else:
             assert "update_cli_failed" in _strip_ansi(result.stdout)
 

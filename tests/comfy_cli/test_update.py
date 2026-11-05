@@ -111,7 +111,7 @@ class TestUpgradeCli:
         args = mock_run.call_args[0][0]
         assert args[1:] == ["-m", "pip", "install", "-U", "comfy-cli"]
         assert mock_run.call_args[1]["check"] is True
-        assert mock_run.call_args[1].get("timeout") == 600
+        assert "timeout" not in mock_run.call_args[1]
 
     @patch("comfy_cli.update.subprocess.run")
     def test_uv_tool_install_upgrades_through_uv(self, mock_run, tmp_path):
@@ -124,7 +124,7 @@ class TestUpgradeCli:
             upgrade_cli()
         assert mock_run.call_args[0][0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
         assert mock_run.call_args[1]["check"] is True
-        assert mock_run.call_args[1].get("timeout") == 600
+        assert "timeout" not in mock_run.call_args[1]
 
     @pytest.mark.parametrize("ambient_tool_dir", [None, "other", "current"])
     @patch("comfy_cli.update.subprocess.run")
@@ -155,18 +155,24 @@ class TestUpgradeCli:
         assert installer_env.get("UV_SELF_UPGRADE_TEST_SENTINEL") == "preserved"
         assert update.os.environ.get("UV_TOOL_DIR") == previous
         assert mock_run.call_args.args[0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
-        assert mock_run.call_args.kwargs["timeout"] == 600
+        assert "timeout" not in mock_run.call_args.kwargs
 
     @patch("comfy_cli.update.subprocess.run")
     def test_uv_tool_install_without_uv_on_path_is_unavailable(self, mock_run, tmp_path):
-        (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+        tool_root = tmp_path / "custom-tools"
+        prefix = tool_root / "comfy-cli"
+        prefix.mkdir(parents=True)
+        (prefix / "uv-receipt.toml").write_text("[tool]\n")
         with (
-            patch.object(update.sys, "prefix", str(tmp_path)),
+            patch.object(update.sys, "prefix", str(prefix)),
             patch("comfy_cli.update.resolve_binary", return_value=None),
             pytest.raises(update.UpgradeUnavailable) as excinfo,
         ):
             upgrade_cli()
         assert "uv tool upgrade comfy-cli" in excinfo.value.hint
+        # The next shell may select another tools directory; the hint names this one.
+        assert "UV_TOOL_DIR" in excinfo.value.hint
+        assert str(tool_root) in excinfo.value.hint
         mock_run.assert_not_called()
 
     @patch("comfy_cli.update.subprocess.run")
@@ -253,7 +259,7 @@ def test_uv_unpinned_or_ranged_receipt_keeps_existing_upgrade(tmp_path, monkeypa
     assert installer.call_args.args[0] == ["/opt/bin/uv", "tool", "upgrade", "comfy-cli"]
     assert installer.call_args.kwargs["env"]["UV_TOOL_DIR"] == str(prefix.parent)
     assert installer.call_args.kwargs["check"] is True
-    assert installer.call_args.kwargs["timeout"] == 600
+    assert "timeout" not in installer.call_args.kwargs
     assert path.read_text() == receipt
 
 

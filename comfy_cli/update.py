@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 UPDATE_CHECK_TTL_SECONDS = 24 * 60 * 60
 UPDATE_CHECK_DISABLE_ENV = "COMFY_NO_UPDATE_CHECK"
-CLI_UPGRADE_TIMEOUT_SECONDS = 600
 
 
 def check_for_newer_pypi_version(package_name, current_version):
@@ -113,28 +112,37 @@ def upgrade_cli():
     A ``uv tool install`` env ships without pip, so it is upgraded through
     ``uv tool upgrade``; anything else goes through pip against the running
     interpreter. Exact uv pins remain unchanged. Raises ``UpgradeUnavailable``
-    for unusable installers or receipts, and propagates installer exit, start,
-    or timeout failures to the command."""
+    for unusable installers or receipts, and propagates installer exit or start
+    failures to the command.
+
+    Neither installer gets a deadline. Both replace the running installation's
+    files in place: pip uninstalls the old version before installing the new
+    one and restores it only from its own exception handler, which a killed
+    process never reaches. Stopping it partway can leave ``comfy`` itself
+    missing, so a slow upgrade is left to finish."""
     from comfy_cli.output import get_renderer
 
     installer_stdout = sys.stderr if get_renderer().is_json() else None
     receipt = Path(sys.prefix) / "uv-receipt.toml"
     if receipt.is_file():
+        tool_root = Path(sys.prefix).parent
         uv = resolve_binary("uv")
         if uv is None:
             raise UpgradeUnavailable(
                 "comfy-cli was installed with `uv tool`, but `uv` is not on PATH.",
-                hint="run `uv tool upgrade comfy-cli` from a shell where uv is available",
+                hint=(
+                    "run `uv tool upgrade comfy-cli` from a shell where uv is available; "
+                    f"first set UV_TOOL_DIR to {tool_root} to target this installation"
+                ),
             )
         _check_uv_tool_pin(receipt)
         # Upgrade the running installation even if its original tool-dir override
         # is absent now, or the current shell selects another tools directory.
         installer_env = os.environ.copy()
-        installer_env["UV_TOOL_DIR"] = str(Path(sys.prefix).parent)
+        installer_env["UV_TOOL_DIR"] = str(tool_root)
         subprocess.run(
             [uv, "tool", "upgrade", "comfy-cli"],
             check=True,
-            timeout=CLI_UPGRADE_TIMEOUT_SECONDS,
             env=installer_env,
             stdout=installer_stdout,
         )
@@ -147,7 +155,6 @@ def upgrade_cli():
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-U", "comfy-cli"],
         check=True,
-        timeout=CLI_UPGRADE_TIMEOUT_SECONDS,
         stdout=installer_stdout,
     )
 
