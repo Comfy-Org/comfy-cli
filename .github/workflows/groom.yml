@@ -73,7 +73,69 @@ on:
 # group while its `uses:` job waits on the identical group.
 
 jobs:
+  # Fails the tick BEFORE the reusable starts, when the App credentials are in
+  # the half-configured state this file's header warns about: APP_ID present
+  # (often inherited from the org) with the private key missing or rotated out.
+  #
+  # The reusable gates token minting on `bot_app_id != ''` — the ID alone, not
+  # the key — so that combination does not degrade to github-actions[bot]. It
+  # mints in the `file` job, which runs AFTER the finder and verifier agents
+  # have already billed through ANTHROPIC_API_KEY, so the run pays for findings
+  # and then discards them at the token step. That is what has happened on every
+  # scheduled tick since 2026-10-27.
+  #
+  # This detects an ABSENT key only. A stale, revoked, or wrong-App PEM is
+  # non-empty, passes here, and still fails at token minting after the agents
+  # have billed -- validating that would mean minting a throwaway token in this
+  # job, which trades the cheap check for a dependency on the token action.
+  # Scoped deliberately to the state that is actually occurring.
+  #
+  # It does not fix the cause either: set the private key, or clear APP_ID so the
+  # reusable degrades to github-actions[bot]. Both are settings, not code.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Needs no token, and must not hold the App private key: the checks below
+    # take PRESENCE FLAGS, not the values.
+    permissions: {}
+    steps:
+      - name: Refuse a half-configured bot identity before anything bills
+        env:
+          # Evaluated by GitHub with the SAME `!= ''` comparison the reusable
+          # gates on, which is the point: testing a trimmed copy here would let a
+          # whitespace-only APP_ID read as unset while the reusable still reads it
+          # as set, mints in the `file` job, and fails after the agents have
+          # billed -- precisely the failure this job exists to prevent.
+          #
+          # Flags also keep the PEM out of this job's environment entirely.
+          APP_ID_SET: ${{ vars.APP_ID != '' }}
+          BOT_KEY_SET: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$APP_ID_SET" = "true" ] && [ "$BOT_KEY_SET" = "false" ]; then
+            echo "::error::vars.APP_ID is set but secrets.CLOUD_CODE_BOT_PRIVATE_KEY is empty."
+            echo "These are ALL-OR-NOTHING (see this file's header). The reusable gates App"
+            echo "token minting on the ID alone, so this combination does not degrade to"
+            echo "github-actions[bot] -- it mints in the 'file' job, after the finder and"
+            echo "verifier agents have billed, and discards that run's findings."
+            echo
+            echo "Two ways out, both repository or organization settings:"
+            echo "  - set secrets.CLOUD_CODE_BOT_PRIVATE_KEY, so issues file as the bot; or"
+            echo "  - clear APP_ID, so the reusable degrades to github-actions[bot]."
+            echo
+            echo "Check APP_ID's SCOPE before trying the second one. If it is inherited from"
+            echo "the organization, deleting a repository variable does not remove it, and"
+            echo "changing the organization variable needs an org admin and affects every"
+            echo "other repository that reads it. In that case prefer setting the key, or"
+            echo "shadow the inherited value with an empty repository variable if that is"
+            echo "acceptable for this repo alone."
+            echo
+            echo "Stopping here so the tick costs nothing instead of paying to be discarded."
+            exit 1
+          fi
+
   groom:
+    needs: preflight
     permissions:
       # REQUIRED UNION. A reusable's nested jobs cannot request more GITHUB_TOKEN
       # scope than the caller grants, and GitHub validates this at STARTUP, so a
