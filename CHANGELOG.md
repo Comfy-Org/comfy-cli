@@ -74,7 +74,8 @@ history.
   the workspace's model library: every member's models, the ones a run on Comfy
   Cloud loads, and no public ones.
   The same bytes under that name are reported as `already_present` and not sent
-  again. `comfy model upload` refuses other bytes under that name
+  again (for `comfy assets library upload`, only when they are the only model of
+  that name). `comfy model upload` refuses other bytes under that name
   (`asset_upload_invalid`, `details.reason` `name_in_use`), because a second
   file would change what that name loads for every workflow in the workspace.
   `comfy assets library upload` still uploads them, as a new version of the

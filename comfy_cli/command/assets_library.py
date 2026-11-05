@@ -775,7 +775,7 @@ def _content_hash(value: Any) -> str | None:
     return f"blake3:{m.group(1).lower()}" if m else None
 
 
-def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dict]:
+def _models_named(renderer, target, name: str, folder: str, sign_in, *, strict: bool) -> list[dict] | None:
     """The models in ``folder`` named exactly ``name`` in this workspace's model
     library: every member's, and never the public catalog.
 
@@ -785,7 +785,8 @@ def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dic
     stands for. ``workspace_library=true`` asks for exactly that set; without
     it Comfy Cloud lists only the caller's own models plus public ones. A
     listing that does not fit on one page cannot show that none of them holds
-    other bytes, so it refuses rather than guess.
+    other bytes: with ``strict`` it refuses rather than guess, and without it
+    the answer is ``None``, not known.
     """
     body = _call(
         renderer,
@@ -809,6 +810,8 @@ def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dic
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
         raise _unexpected(renderer, "/api/assets", "assets must be a list of objects", operation="lookup")
     if body.get("has_more") is True:
+        if not strict:
+            return None
         renderer.error(
             code="asset_upload_invalid",
             message=f"more than {_LOOKUP_LIMIT} models in {folder} have names containing {name!r}, "
@@ -1000,7 +1003,7 @@ def run_upload(
     # workflow in the workspace: `comfy model upload` refuses it, while
     # `comfy assets library upload` keeps uploading it as a new version. The
     # same bytes under the name are already there and need no upload.
-    named = _models_named(renderer, target, file.name, folder, sign_in)
+    named = _models_named(renderer, target, file.name, folder, sign_in, strict=refuse_name_reuse) or []
     same = [r for r in named if _content_hash(r.get("hash")) == local_hash]
     others = [r for r in named if _content_hash(r.get("hash")) != local_hash]
     if others and refuse_name_reuse:
@@ -1011,7 +1014,10 @@ def run_upload(
             hash=local_hash,
             existing=[{"id": r.get("id"), "hash": r.get("hash")} for r in others],
         )
-    present = same[0] if same else None
+    # Uploading again is what makes these bytes the newest under the name,
+    # so a name that also holds other bytes, or a lookup too long to read,
+    # is not "already present" for the older command.
+    present = same[0] if same and not others else None
 
     def report(asset_id, *, task_id=None, uploaded=False, name=file.name, asset=None) -> dict:
         return {

@@ -58,8 +58,10 @@ keeps its approval idea and builds on the presigned upload already in
   `already_present`. For `comfy model upload`, any other hash, or no hash,
   refuses with `name_in_use`. `comfy assets library upload` uploads the file
   anyway, as before this decision, so a script that replaces a model by
-  uploading a new version under its name keeps working. A listing that may be
-  cut short refuses with `name_unverified`.
+  uploading a new version under its name keeps working, and reports
+  `already_present` only when the same bytes are the only model of that name.
+  For `comfy model upload`, a listing that may be cut short refuses with
+  `name_unverified`; `comfy assets library upload` uploads.
 - The upload sends only bytes that were hashed. It reads the file again one
   block at a time and checks each block against its blake3 from the first read
   before any of that block is sent. A changed block stops the upload, so none

@@ -492,7 +492,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "name_in_use (`model upload` only: the folder of the workspace's model library, every member's models, "
         "already holds a model of this name with other bytes, `details.existing`; a second one would change "
         "what the name loads for every workflow in the workspace) or "
-        "name_unverified (too many models with similar names to check that none holds other bytes).",
+        "name_unverified (`model upload` only: too many models with similar names to check that none holds other bytes).",
         "fix the file or `--type` named in the message; for file_changed run the dry run again and get the "
         "new sha256 approved; for name_in_use or name_unverified rename the file; nothing was sent",
     ),

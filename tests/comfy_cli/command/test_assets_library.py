@@ -1991,14 +1991,42 @@ class TestUploadVerifies:
         assert put["body"] == model_file.read_bytes()
         assert "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete" in cloud.paths()
 
-    def test_a_lookup_too_long_to_settle_the_name_is_refused(self, cloud_target, monkeypatch, capsys, model_file):
+    def test_assets_library_upload_sends_the_same_bytes_again_over_a_newer_version(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        # The name also holds other bytes, so only a new upload makes this
+        # file the one the name loads; it is not "already present".
+        routes = dict(_UPLOAD_ROUTES)
+        other = "blake3:" + "ab" * 32
+        routes[("GET", "/api/assets")] = {"assets": [_row(hash_=other, asset_id="asset-4"), _row()], "has_more": False}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["already_present"] is False
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
+
+    def test_a_lookup_too_long_to_settle_the_name_is_refused_for_model_upload(
+        self, cloud_target, monkeypatch, capsys, model_file
+    ):
         routes = dict(_UPLOAD_ROUTES)
         routes[("GET", "/api/assets")] = {"assets": [], "has_more": True}
-        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+        args = [str(model_file), "--type", "loras", "--yes"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
 
         assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
         assert env["error"]["details"]["reason"] == "name_unverified"
         assert "/api/assets/uploads" not in cloud.paths() and storage.puts == []
+
+    def test_assets_library_upload_uploads_when_the_lookup_is_too_long_to_settle_the_name(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": [_row()], "has_more": True}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["already_present"] is False
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
 
     def test_an_unusable_lookup_is_an_error_not_a_go_ahead(self, cloud_target, monkeypatch, capsys, model_file):
         routes = dict(_UPLOAD_ROUTES)
