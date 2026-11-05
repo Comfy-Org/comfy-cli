@@ -781,6 +781,8 @@ _UI_DATA = {"nodes": [{"id": 1, "type": "KSampler", "widgets_values": [20]}], "l
 _WF_DATA = {"1": {"class_type": "KSampler", "inputs": {"steps": 20}}}
 _RECORD_CREATED = {"id": "new-uuid", "name": "flux", "latest_version": 1}
 _WORKSPACE = {"id": "ws_123", "name": "Personal", "type": "personal", "role": "owner"}
+_SAVED_FILE_ID = "2c2fd5e2-c367-48cf-936f-c561f2414c19"
+_SAVED_FILE_FLAGS = {**_FLAG_ON, "private_saved_file_links_enabled": True}
 
 
 def _patch_cloud(monkeypatch: pytest.MonkeyPatch, handler):
@@ -816,6 +818,7 @@ def _sidebar(
     records=(),
     workspace=_WORKSPACE,
     lookup_after_write=None,
+    save_reply=None,
 ):
     """A fake Cloud.
 
@@ -853,7 +856,7 @@ def _sidebar(
                 return _http_error(409)
             state["written"] = True
             state["records"].append(key.removeprefix("workflows/").removesuffix(".json"))
-            return {"path": key, "size": len(body), "modified": 1700000000000}
+            return save_reply if save_reply is not None else {"path": key, "size": len(body), "modified": 1700000000000}
         if parsed.path == "/api/workflows" and method == "GET":
             if state["written"] and lookup_after_write is not None:
                 return lookup_after_write
@@ -878,6 +881,76 @@ class TestSaveToSidebarFolder:
         p.write_text(json.dumps(_UI_DATA, indent=2))
         return p
 
+    @pytest.mark.parametrize("deployment", ["standard", "dep_9"])
+    @pytest.mark.parametrize("file_id", [_SAVED_FILE_ID, _SAVED_FILE_ID.upper()])
+    def test_saved_file_link_uses_the_file_id_from_the_save_reply(
+        self, cloud_target, wf_path, monkeypatch, capsys, deployment, file_id
+    ):
+        calls = _patch_cloud(
+            monkeypatch,
+            _sidebar(features=_SAVED_FILE_FLAGS, save_reply={"id": file_id, "size": 42}),
+        )
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud", "--deployment", deployment], capsys)
+        data = env["data"]
+        assert env["ok"] is True
+        assert data["url"] == (
+            f"https://cloud.example.com/?workspace=ws_123&savedFile={_SAVED_FILE_ID}&deployment={deployment}"
+        )
+        assert data["saved_file_id"] == _SAVED_FILE_ID
+        assert data["workflow_id"] == "rec-flux/flux"
+        assert data["latest_version"] == 1
+        assert data["folder"] == "flux"
+        assert data["filename"] == "workflows/flux/flux.json"
+        assert data["size"] == 42
+        assert data["workspace_id"] == "ws_123"
+        assert data["deployment"] == deployment
+        assert sum(c["url"].endswith("/api/features") for c in calls) == 1
+        (post,) = _posts(calls)
+        assert post["body"] == wf_path.read_bytes()
+        assert post["url"].endswith("?overwrite=false")
+
+    @pytest.mark.parametrize("flag", [False, None, "true", 1, [], {}])
+    def test_link_flag_requires_boolean_true(self, cloud_target, wf_path, monkeypatch, capsys, flag):
+        features = {**_FLAG_ON, "private_saved_file_links_enabled": flag}
+        _patch_cloud(monkeypatch, _sidebar(features=features, save_reply={"id": _SAVED_FILE_ID}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert env["data"]["saved_file_id"] is None
+
+    @pytest.mark.parametrize(
+        "reply",
+        [{}, {"id": None}, {"id": 42}, {"id": []}, {"id": "not-a-uuid"}, {"id": "bad&savedFile=x"}, [], (b"oops", 200)],
+    )
+    def test_missing_or_invalid_file_id_keeps_the_folder_link(self, cloud_target, wf_path, monkeypatch, capsys, reply):
+        _patch_cloud(monkeypatch, _sidebar(features=_SAVED_FILE_FLAGS, save_reply=reply))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert env["data"]["saved_file_id"] is None
+
+    def test_pretty_output_prints_the_json_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar(features=_SAVED_FILE_FLAGS, save_reply={"id": _SAVED_FILE_ID}))
+        args = ["save", str(wf_path), "--name", "flux", "--where", "cloud"]
+        env = _run(args, capsys)
+        _patch_cloud(monkeypatch, _sidebar(features=_SAVED_FILE_FLAGS, save_reply={"id": _SAVED_FILE_ID}))
+        renderer = _force_json_renderer()
+        renderer.mode = OutputMode.PRETTY
+        messages = []
+        monkeypatch.setattr(workflow_cmd, "rprint", messages.append)
+        result = CliRunner().invoke(workflow_cmd.app, args, standalone_mode=False)
+        assert result.exit_code == 0
+        assert f"open it: {env['data']['url']}" in messages
+
+    def test_file_link_without_workspace_names_the_saved_file_in_the_warning(
+        self, cloud_target, wf_path, monkeypatch, capsys
+    ):
+        _patch_cloud(monkeypatch, _sidebar(features=_SAVED_FILE_FLAGS, save_reply={"id": _SAVED_FILE_ID}, workspace={}))
+        env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+        assert env["data"]["url"] == f"https://cloud.example.com/?savedFile={_SAVED_FILE_ID}"
+        assert env["data"]["saved_file_id"] == _SAVED_FILE_ID
+        assert env["data"]["warnings"][0]["code"] == "workspace_unknown"
+        assert "saved file" in env["data"]["warnings"][0]["message"]
+
     def test_writes_the_file_into_a_new_folder_and_prints_its_link(self, cloud_target, wf_path, monkeypatch, capsys):
         calls = _patch_cloud(monkeypatch, _sidebar())
         env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
@@ -889,6 +962,7 @@ class TestSaveToSidebarFolder:
         assert data["workspace_id"] == "ws_123"
         assert data["deployment"] == "standard"
         assert data["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert data["saved_file_id"] is None
         assert "warnings" not in data
         (post,) = _posts(calls)
         assert post["url"] == "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json?overwrite=false"
@@ -1154,11 +1228,12 @@ class TestSaveToSidebarFolder:
         # from nodes[]: an API-format file there would open empty.
         wf_path = tmp_path / "api.json"
         wf_path.write_text(json.dumps(_WF_DATA))
-        calls = _patch_cloud(monkeypatch, _sidebar())
+        calls = _patch_cloud(monkeypatch, _sidebar(features=_SAVED_FILE_FLAGS, save_reply={"id": _SAVED_FILE_ID}))
         env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
         assert env["ok"] is True
         assert env["data"]["workflow_id"] == "new-uuid"
         assert "url" not in env["data"]
+        assert "saved_file_id" not in env["data"]
         assert [w["code"] for w in env["data"]["warnings"]] == ["api_format_saved_as_record"]
         (post,) = _posts(calls)
         assert post["url"] == "https://cloud.example.com/api/workflows"
@@ -1173,6 +1248,7 @@ class TestSaveFlagOffKeepsTheRecordSave:
         "features",
         [
             pytest.param(_FLAG_OFF, id="off"),
+            pytest.param({**_FLAG_OFF, "private_saved_file_links_enabled": True}, id="only-file-links-on"),
             pytest.param({}, id="missing"),
             pytest.param({"cli_cloud_save_enabled": "true"}, id="not-a-bool"),
             pytest.param([], id="not-an-object"),

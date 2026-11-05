@@ -1406,7 +1406,7 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # never shows there. When Cloud's ``/api/features`` says
 # ``cli_cloud_save_enabled`` is true, ``save`` writes the workflow as a
 # userdata file in a folder of its own instead (Cloud mirrors that file into
-# a workflow record by itself) and prints a link that opens the folder. Any
+# a workflow record by itself) and prints a link to the saved file or folder. Any
 # other answer, or no answer, keeps the record-only save exactly as before.
 # The file is written with ``overwrite=false``, so nothing that exists is
 # ever replaced: a name already taken moves on to ``<name> (2)``, ``(3)``, ...
@@ -1421,6 +1421,7 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 _CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"
+_SAVED_FILE_LINKS_FLAG = "private_saved_file_links_enabled"
 
 # How long the flag read may take before ``save`` keeps the record-only path.
 _FEATURES_TIMEOUT_S = 10.0
@@ -1465,18 +1466,18 @@ def _request_errors() -> tuple[type[BaseException], ...]:
     )
 
 
-def _cli_cloud_save_enabled(target) -> bool:
-    """True only when Cloud's ``/api/features`` answers ``cli_cloud_save_enabled: true``.
-
-    A missing key, any other value, or a request that fails in any way reads
-    as off, so ``save`` keeps its record-only path and ``delete`` its
-    record-only delete.
-    """
+def _cloud_save_features(target) -> dict[str, Any]:
+    """Read both save flags once; an unreadable reply leaves both off."""
     try:
         _, body = _http_request(target.url("features"), target, timeout=_FEATURES_TIMEOUT_S)
     except _request_errors():
-        return False
-    return isinstance(body, dict) and body.get(_CLI_CLOUD_SAVE_FLAG) is True
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _cli_cloud_save_enabled(target) -> bool:
+    """Only a JSON true enables sidebar saving or the sidebar-kept delete warning."""
+    return _cloud_save_features(target).get(_CLI_CLOUD_SAVE_FLAG) is True
 
 
 def _cloud_folder_name(name: str) -> str:
@@ -1587,11 +1588,26 @@ def _cloud_workspace_id(target) -> str | None:
     return _cloud_link_id(body.get("id")) if isinstance(body, dict) else None
 
 
-def _cloud_folder_link(target, *, workspace_id: str | None, folder: str, deployment: str) -> str | None:
-    """The Cloud editor link that opens ``folder``, or None for an unusable base URL.
+def _cloud_saved_file_id(value: Any) -> str | None:
+    """A saved-file UUID in the canonical form the editor reads, or None."""
+    from uuid import UUID
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return None
+
+
+def _cloud_folder_link(
+    target, *, workspace_id: str | None, folder: str, deployment: str, saved_file_id: str | None = None
+) -> str | None:
+    """Open the saved file when its id is supplied, otherwise its folder.
 
     ``deployment`` is a deployment id, or ``standard`` for Comfy Cloud itself.
     It goes in only with the workspace, since the editor reads it only then.
+    An unusable base URL returns None.
     """
     import urllib.parse
 
@@ -1601,7 +1617,10 @@ def _cloud_folder_link(target, *, workspace_id: str | None, folder: str, deploym
     query: dict[str, str] = {}
     if workspace_id:
         query["workspace"] = workspace_id
-    query[_WORKFLOWS_DIR] = folder
+    if saved_file_id:
+        query["savedFile"] = saved_file_id
+    else:
+        query[_WORKFLOWS_DIR] = folder
     if workspace_id:
         query["deployment"] = deployment
     encoded = urllib.parse.urlencode(query, quote_via=urllib.parse.quote)
@@ -1617,6 +1636,7 @@ def _cloud_folder_save(
     name: str,
     description: str | None,
     deployment: str | None,
+    saved_file_links_enabled: bool,
 ) -> None:
     """Write the workflow as ``workflows/<new folder>/<name>.json`` and print its link.
 
@@ -1674,8 +1694,15 @@ def _cloud_folder_save(
     workflow_id = record.get("id") if record and isinstance(record.get("id"), str) else None
     latest_version = record.get("latest_version") if record and workflow_id else None
     workspace_id = _cloud_workspace_id(target)
+    saved_file_id = (
+        _cloud_saved_file_id(info.get("id")) if saved_file_links_enabled and isinstance(info, dict) else None
+    )
     url = _cloud_folder_link(
-        target, workspace_id=workspace_id, folder=folder, deployment=deployment or _STANDARD_DEPLOYMENT
+        target,
+        workspace_id=workspace_id,
+        folder=folder,
+        deployment=deployment or _STANDARD_DEPLOYMENT,
+        saved_file_id=saved_file_id,
     )
     # ``workflow_id``, ``name``, ``latest_version`` and ``source`` keep their
     # record-save meaning: the id is the record Cloud mirrored the file into,
@@ -1687,6 +1714,7 @@ def _cloud_folder_save(
         "filename": f"{_WORKFLOWS_DIR}/{key}",
         "folder": folder,
         "url": url,
+        "saved_file_id": saved_file_id,
         "workspace_id": workspace_id,
         "deployment": deployment or _STANDARD_DEPLOYMENT,
         "source": str(path),
@@ -1706,7 +1734,8 @@ def _cloud_folder_save(
         warnings.append(
             {
                 "code": "workspace_unknown",
-                "message": "Cloud did not say which workspace the save went to, so the link opens the folder in "
+                "message": "Cloud did not say which workspace the save went to, so the link opens "
+                f"the {'saved file' if saved_file_id else 'folder'} in "
                 "the browser's current workspace",
             }
         )
@@ -2043,7 +2072,7 @@ def save_cmd(
             "--deployment",
             show_default=False,
             help="Cloud, when the save goes to a sidebar folder: the deployment id the printed link opens the "
-            "folder on. Default `standard`, Comfy Cloud itself.",
+            "workflow on. Default `standard`, Comfy Cloud itself.",
         ),
     ] = None,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
@@ -2092,10 +2121,18 @@ def save_cmd(
     # ``nodes[]``; an API-format file there would open empty. So only a
     # frontend-format workflow goes into a folder, and an API-format one keeps
     # the record-only save with a warning that says why it has no link.
-    sidebar = _cli_cloud_save_enabled(target)
+    features = _cloud_save_features(target)
+    sidebar = features.get(_CLI_CLOUD_SAVE_FLAG) is True
     if sidebar and _is_frontend_format(workflow_json):
         return _cloud_folder_save(
-            renderer, target, path=path, text=text, name=name, description=description, deployment=deployment
+            renderer,
+            target,
+            path=path,
+            text=text,
+            name=name,
+            description=description,
+            deployment=deployment,
+            saved_file_links_enabled=features.get(_SAVED_FILE_LINKS_FLAG) is True,
         )
 
     body: dict[str, Any] = {"name": name, "workflow_json": workflow_json}
