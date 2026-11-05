@@ -715,6 +715,24 @@ comfy --json workflow save my.json --name "X" --description "Y"
 comfy --json workflow delete <id>
 ```
 
+When the cloud workspace has `cli_cloud_save_enabled` on (`GET /api/features`),
+`workflow save` of an editor-format workflow (`nodes[]`) instead writes the
+file into a new folder in the Cloud Workflows sidebar, named after `--name`
+(`<name> (2)` and so on when the folder has files or a workflow of that name
+exists; nothing is ever replaced), and `data.url` is a link that opens that
+folder. `data.workflow_id` is still the saved workflow's id. The link opens
+Comfy Cloud itself unless `--deployment <id>` names a build. `data.warnings[]`
+may carry `description_ignored`, `workspace_unknown` or
+`workflow_record_unknown`. An API-format workflow keeps the record-only save,
+with an `api_format_saved_as_record` warning. `workflow delete <id>` only ever
+deletes the record; with the flag on, when the workflow's sidebar file still
+exists, `data.warnings[]` carries `sidebar_file_kept` with the file's path
+(`filename`). The file stays in the sidebar until the person removes it in
+Comfy Cloud. The file counts as the workflow's only when no other live
+workflow has the same name and the file matches the workflow's latest
+version; a same-named file that may be another workflow's gets no warning. With the flag off, or when the features read fails, save is the
+record-only `/api/workflows` call above.
+
 ## Cancel a running job
 
 ```bash

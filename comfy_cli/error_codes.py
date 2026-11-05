@@ -125,6 +125,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "use ComfyUI's `File > Export (API)`",
     ),
     ErrorCode(
+        "workflow_folder_unavailable",
+        "`comfy workflow save` on Comfy Cloud makes a new Workflows-sidebar folder per save, named after "
+        "`--name`, then `<name> (2)` and so on. Every candidate already held files (at any depth) or matched "
+        "the name of an existing workflow record the file would have been merged into, so nothing was saved "
+        "and nothing was replaced. `details.folder` is the base name and `details.tries` how many were tried.",
+        "pass a different `--name`",
+    ),
+    ErrorCode(
         "invalid_output_node_ids",
         "`comfy run --output-node-ids` named no ids, a node id that is not in the submitted "
         "API-format workflow (`details.unknown_node_ids`), or a node that is not an output node "
@@ -956,10 +964,45 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "description_ignored",
-        "`comfy workflow save --where local --description` was given a description, but the local "
-        "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
-        "(not as an error envelope) so the save still succeeds.",
-        "descriptions are a Comfy Cloud feature; drop `--description` on the local path",
+        "`comfy workflow save --description` was given a description, but the save went to a "
+        "file-backed `/userdata` store with nowhere to keep it: local ComfyUI, or a Comfy Cloud "
+        "Workflows-sidebar folder. Surfaced in `data.warnings[]` (not as an error envelope) so the save "
+        "still succeeds.",
+        "drop `--description`; a sidebar file carries only its name and contents",
+    ),
+    ErrorCode(
+        "workspace_unknown",
+        "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not say which "
+        "workspace it went to, so `data.url` leaves out the workspace and deployment and opens the folder in "
+        "whatever workspace the browser is on. Surfaced in `data.warnings[]` (not as an error envelope) "
+        "because the save itself succeeded.",
+        "switch the browser to the workspace `comfy cloud whoami` shows before opening the link",
+    ),
+    ErrorCode(
+        "workflow_record_unknown",
+        "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not show the "
+        "workflow record it makes from that file, so `data.workflow_id` and `data.latest_version` are null. "
+        "Surfaced in `data.warnings[]` (not as an error envelope) because the file itself was saved.",
+        "find the record with `comfy --json workflow list --name <data.name>`",
+    ),
+    ErrorCode(
+        "api_format_saved_as_record",
+        "`comfy workflow save` on a Comfy Cloud workspace that saves into Workflows-sidebar folders was given "
+        "an API-format workflow. The sidebar opens files as editor graphs and would show it empty, so it was "
+        "saved the record-only way, with no folder and no `data.url`. Surfaced in `data.warnings[]` (not as an "
+        "error envelope) because the record save succeeded.",
+        "save the editor format (ComfyUI `File > Save`) to get a sidebar folder and a link",
+    ),
+    ErrorCode(
+        "sidebar_file_kept",
+        "`comfy workflow delete` on a Comfy Cloud workspace with `cli_cloud_save_enabled` on deleted the "
+        "workflow record, but the Workflows-sidebar file the record was made from (`filename` in the "
+        "warning) still exists. The file counts as the record's only when the record is the one live "
+        "workflow of its name and the file matches the record's latest version; a file that only shares the "
+        "name may be another workflow's, and gets no warning. The CLI never deletes sidebar files, so it "
+        "stays in the sidebar. Surfaced in `data.warnings[]` (not as an error envelope) because the record "
+        "delete succeeded.",
+        "remove the file from the Workflows sidebar in Comfy Cloud",
     ),
     ErrorCode(
         "cql_query_invalid",
