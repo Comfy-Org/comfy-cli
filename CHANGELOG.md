@@ -79,6 +79,23 @@ history.
 
 ### Fixed
 
+- `comfy update` no longer dies with a `FileNotFoundError` traceback when the
+  configured workspace directory does not exist (never installed, or deleted).
+  It now fails with a `not_in_workspace` error that points at `comfy install`,
+  including when `--recent` cannot resolve a workspace, keeping the resolver's
+  exit status.
+
+- `comfy update cli` works for a `uv tool install` of comfy-cli. Those envs ship
+  without pip, so the old `python -m pip install -U` always failed; it now runs
+  `uv tool upgrade comfy-cli`, and any installer failure is reported as an
+  `update_cli_failed` error rather than a traceback. The upgrade targets the
+  running installation's tool directory even when `UV_TOOL_DIR` is absent or
+  selects a different directory in the current shell; when `uv` is not on PATH,
+  the hint names that directory too. The installer still runs without a time
+  limit, since stopping it partway can leave comfy-cli half-replaced. An exact uv version pin
+  is preserved and reported with manual reinstall guidance. Installer diagnostics
+  stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
+
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,
   instead of the option's current order. An option that has since gained a
