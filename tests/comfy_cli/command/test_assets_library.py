@@ -48,8 +48,22 @@ def reset_singleton():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(scope="module")
+def root_cli_ready():
+    """Load the actual CLI before a test's target fake can bind into lazy modules."""
+    from click import Context
+    from typer.main import get_command
+
+    from comfy_cli.cmdline import app as root_app
+
+    root = get_command(root_app)
+    with Context(root) as context:
+        for name in root.list_commands(context):
+            root.get_command(context, name)
+
+
 @pytest.fixture
-def cloud_target(monkeypatch: pytest.MonkeyPatch):
+def cloud_target(monkeypatch: pytest.MonkeyPatch, root_cli_ready):
     from comfy_cli.target import Target
 
     fake = Target(
