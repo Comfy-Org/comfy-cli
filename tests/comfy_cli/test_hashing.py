@@ -30,3 +30,19 @@ def test_blake3_file_matches_one_shot_hashing_across_multiple_chunks(tmp_path: P
     # Then
     expected = f"blake3:{blake3(path.read_bytes()).hexdigest()}"
     assert digest == expected
+
+
+def test_blake3_and_sha256_file_reads_once_for_both_hashes(tmp_path: Path) -> None:
+    # Given
+    import hashlib
+
+    path = tmp_path / "multi-chunk.bin"
+    data = (b"comfy" * ((_CHUNK_SIZE * 2) // 5 + 1)) + b"tail"
+    path.write_bytes(data)
+
+    # When
+    b3, sha256 = hashing.blake3_and_sha256_file(path)
+
+    # Then
+    assert b3 == hashing.blake3_file(path) == f"blake3:{blake3(data).hexdigest()}"
+    assert sha256 == hashlib.sha256(data).hexdigest()

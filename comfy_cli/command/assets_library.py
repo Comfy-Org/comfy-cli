@@ -373,6 +373,14 @@ _REFUSAL_HINTS = {
     "UNSUPPORTED_MODEL_TYPE": "pass a --type from `model_upload_folders` in GET /api/features",
     "FILE_TOO_LARGE": "files can be up to 2 GB",
 }
+# Any form Comfy Cloud reports a model's content hash in: bare hex, canonical
+# ``blake3:<hex>`` or the stored ``<hex>.<ext>``, any case.
+_ANY_HASH_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{64})(?:\.[A-Za-z0-9]+)?$")
+# One page at the API's maximum when looking up the models a name already
+# stands for; a name matching more than this is refused, not paged.
+_LOOKUP_LIMIT = 500
+# An approval's SHA-256: 64 hex, bare or ``sha256:``-prefixed, any case.
+_SHA256_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _sleep = time.sleep
 _clock = time.monotonic
 
@@ -552,15 +560,26 @@ def _send(target, sign_in, url: str, **kwargs) -> tuple[int, dict | None]:
     return http_request(url, replace(target, auth_token=sign_in.current()), **kwargs)
 
 
-def _call(renderer, target, operation: str, parts: tuple[str, ...], body: dict | None = None, *, sign_in=None) -> dict:
+def _call(
+    renderer,
+    target,
+    operation: str,
+    parts: tuple[str, ...],
+    body: dict | None = None,
+    *,
+    sign_in=None,
+    query: list[tuple[str, Any]] | None = None,
+) -> dict:
     """One JSON call to the cloud API; anything but a JSON object is a mapped error."""
     import http.client
     import urllib.error
+    import urllib.parse
 
     route = "/api/" + "/".join(parts)
     method = "GET" if body is None else "POST"
+    url = target.url(*parts) + ("?" + urllib.parse.urlencode(query) if query else "")
     try:
-        _, parsed = _send(target, sign_in, target.url(*parts), method=method, body=body, strict_json=True)
+        _, parsed = _send(target, sign_in, url, method=method, body=body, strict_json=True)
     # HTTPException: a connection closed partway through the body (IncompleteRead).
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise _http_failure(renderer, e, operation, sign_in) from e
@@ -571,8 +590,13 @@ def _call(renderer, target, operation: str, parts: tuple[str, ...], body: dict |
     return parsed
 
 
-def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
+def _put(upload_url: str, headers: dict, path: Path, progress) -> str | None:
     """Stream the file to its signed URL, or raise ``_PutFailed``.
+
+    Returns the ``blake3:<hex>`` hash of the bytes it read and sent, so the
+    caller can tell whether they are the bytes it hashed beforehand. ``None``
+    when storage answered before the whole file was read (a 412 can): there is
+    then nothing whole to compare, and the hash Comfy Cloud reports decides.
 
     A transport exception is dropped, never shown: its text quotes the signed
     URL, whose query string is a live credential. A file that cannot be opened,
@@ -585,6 +609,7 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
     import urllib.parse
 
     import requests
+    from blake3 import blake3
 
     from comfy_cli.builder_api import _CountingReader
 
@@ -596,6 +621,10 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
         def __init__(self, raw, progress, size: int) -> None:
             super().__init__(raw, progress)
             self._size = size
+            # What was actually sent, hashed as it goes: a file edited after
+            # it was hashed, or while it streams, shows up here.
+            self.sent = blake3()
+            self.sent_bytes = 0
 
         def __len__(self) -> int:
             # Requests takes the length from here rather than its own
@@ -605,10 +634,13 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
 
         def read(self, size: int = -1) -> bytes:
             try:
-                return super().read(size)
+                block = super().read(size)
             except OSError as e:
                 self.failed = e
                 raise
+            self.sent.update(block)
+            self.sent_bytes += len(block)
+            return block
 
     try:
         f = path.open("rb")
@@ -643,6 +675,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress) -> None:
             raise _TlsSetupFailed(text) from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
+    # More bytes than the size the request declared is a file that grew while
+    # it streamed: its hash differs from the one taken before, as it should.
+    return f"blake3:{reader.sent.hexdigest()}" if reader.sent_bytes >= size else None
 
 
 def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
@@ -694,28 +729,151 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
         _sleep(pause)
 
 
-@app.command("upload", help="Upload a .safetensors model file (up to 2 GB) into your Comfy Cloud model library.")
+def _content_hash(value: Any) -> str | None:
+    """``blake3:<hex>`` for any form Comfy Cloud reports a content hash in
+    (bare hex, canonical ``blake3:<hex>``, or the stored ``<hex>.<ext>``);
+    ``None`` for anything else, so an absent or garbled hash never matches."""
+    m = _ANY_HASH_RE.match(value) if isinstance(value, str) else None
+    return f"blake3:{m.group(1).lower()}" if m else None
+
+
+def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dict]:
+    """The models in ``folder`` named exactly ``name`` that this workspace can
+    load: its own, its members' and public ones.
+
+    A run loads a model by folder and name, so these are the rows the name
+    already stands for. A listing that does not fit on one page cannot show
+    that none of them holds other bytes, so it refuses rather than guess.
+    """
+    body = _call(
+        renderer,
+        target,
+        "lookup",
+        ("assets",),
+        sign_in=sign_in,
+        query=[
+            ("include_tags", "models"),
+            ("include_tags", folder),
+            ("name_contains", name),
+            ("include_public", "true"),
+            ("limit", _LOOKUP_LIMIT),
+        ],
+    )
+    rows = body.get("assets")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        raise _unexpected(renderer, "/api/assets", "assets must be a list of objects", operation="lookup")
+    if body.get("has_more") is True:
+        renderer.error(
+            code="asset_upload_invalid",
+            message=f"more than {_LOOKUP_LIMIT} models in {folder} have names containing {name!r}, "
+            "so it cannot be checked that none of them is already named that with other bytes",
+            hint="rename the file to a more distinctive name and upload it again",
+            details={"reason": "name_unverified", "file": name, "type": folder},
+        )
+        raise typer.Exit(code=1)
+    return [r for r in rows if r.get("name") == name]
+
+
+def _stored_asset(target, sign_in, asset_id: str) -> dict | None:
+    """Comfy Cloud's record of ``asset_id``, or ``None`` when it cannot be read."""
+    import http.client
+    import urllib.error
+    import urllib.parse
+
+    try:
+        _, asset = _send(target, sign_in, target.url("assets", urllib.parse.quote(asset_id, safe="")), strict_json=True)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ResponseUnparseable):
+        return None
+    return asset if isinstance(asset, dict) else None
+
+
+def _current_workspace(target, sign_in) -> str | None:
+    """The id of the workspace this sign-in uploads into, or ``None`` when Comfy Cloud does not say."""
+    import http.client
+    import urllib.error
+
+    try:
+        _, body = _send(target, sign_in, target.url("workspaces", "current"), strict_json=True)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ResponseUnparseable):
+        return None
+    ws = body.get("id") if isinstance(body, dict) else None
+    return ws if isinstance(ws, str) and ws else None
+
+
+def _loader_path(asset: dict | None, name: str) -> str:
+    """The value a loader widget takes for the model. Comfy Cloud gives a model's
+    as its name; its own answer wins when the record carries one."""
+    value = asset.get("loader_path") if isinstance(asset, dict) else None
+    return value if isinstance(value, str) and value else name
+
+
+@app.command(
+    "upload",
+    help="Upload one named .safetensors model file (up to 2 GB) into your Comfy Cloud model library. "
+    "Succeeds only once Comfy Cloud's hash of the stored file matches this file's; --dry-run checks without uploading.",
+)
 @tracking.track_command("assets")
 def upload_cmd(
     file: Annotated[Path, typer.Argument(help="The .safetensors file to upload.", show_default=False)],
     folder: Annotated[
         str, typer.Option("--type", help="Model folder to file it under (e.g. loras, checkpoints, vae).")
     ],
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Check the file, the folder and the library, and report the file's hashes and whether "
+            "Comfy Cloud already has it; upload nothing.",
+        ),
+    ] = False,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
+    run_upload(file, folder, where=where, dry_run=dry_run, command="assets library upload")
+
+
+def run_upload(
+    file: Path,
+    folder: str,
+    *,
+    where: str | None,
+    dry_run: bool,
+    command: str,
+    workspace: str | None = None,
+    expected_sha256: str | None = None,
+    yes: bool = True,
+    ctx: typer.Context | None = None,
+) -> None:
+    """Upload ``file``, and only ``file``, into ``folder`` of the Comfy Cloud model library.
+
+    Shared by ``comfy assets library upload`` and ``comfy model upload``. It
+    succeeds only once Comfy Cloud's hash of the stored bytes is the file's
+    own. ``workspace`` and ``expected_sha256`` pin an approval: when given, a
+    sign-in to another workspace, or a file whose bytes are not the ones
+    approved, uploads nothing. ``yes=False`` asks before the upload starts.
+    """
     import urllib.parse
 
     from comfy_cli.command.build_upload_progress import UploadProgressReporter
     from comfy_cli.credentials import DataPlaneToken
+    from comfy_cli.hashing import blake3_and_sha256_file
+    from comfy_cli.interaction import confirm
 
-    def refuse(reason: str, message: str) -> typer.Exit:
-        renderer.error(code="asset_upload_invalid", message=message, details={"reason": reason, "file": str(file)})
+    def refuse(reason: str, message: str, **details: Any) -> typer.Exit:
+        renderer.error(
+            code="asset_upload_invalid", message=message, details={"reason": reason, "file": str(file), **details}
+        )
         return typer.Exit(code=1)
 
     renderer = get_renderer()
     refusal = _local_refusal(file)
     if refusal is not None:
         raise refuse(*refusal)
+    approved = None
+    if expected_sha256 is not None:
+        m = _SHA256_RE.match(expected_sha256)
+        if m is None:
+            raise refuse("bad_expected_sha256", f"--expected-sha256 {expected_sha256!r} is not a 64-hex SHA-256")
+        approved = m.group(1).lower()
     target = cloud_target_or_local_error(where, renderer)
     # A stored sign-in's token can expire during the PUT, so completion and
     # polling keep it fresh, but only from the same sign-in: Comfy Cloud files the
@@ -728,6 +886,30 @@ def upload_cmd(
         if target.auth_token
         else None
     )
+
+    # The person approved an upload into one workspace; a sign-in that has
+    # since moved to another must not put the file there instead.
+    workspace_id = None
+    if workspace is not None:
+        workspace_id = _current_workspace(target, sign_in)
+        if workspace_id != workspace:
+            renderer.error(
+                code="asset_upload_wrong_workspace",
+                message=(
+                    f"this sign-in uploads into workspace {workspace_id}, not {workspace}"
+                    if workspace_id is not None
+                    else f"Comfy Cloud did not say which workspace this sign-in uploads into, "
+                    f"so it cannot be checked that it is {workspace}"
+                ),
+                hint="check the workspace with `comfy cloud status`; sign in to the approved one with "
+                "`comfy cloud login`, then run the upload again",
+                details={
+                    "reason": "workspace_mismatch" if workspace_id is not None else "workspace_unknown",
+                    "workspace": workspace,
+                    "current_workspace": workspace_id,
+                },
+            )
+            raise typer.Exit(code=1)
 
     # Absent while uploads are off for the workspace, or when the server could
     # not evaluate its flags. Either way the start call decides, and it refuses
@@ -746,12 +928,80 @@ def upload_cmd(
 
     try:
         size = file.stat().st_size
+        if renderer.is_pretty():
+            renderer.info(f"Hashing {file.name}...")
+        local_hash, sha256 = blake3_and_sha256_file(file)
     except OSError as e:  # removed or locked since it was checked; nothing is sent yet
         raise refuse(*_file_problem(file, e)) from None
+    if approved is not None and approved != sha256:
+        raise refuse(
+            "file_changed",
+            f"{file.name}'s bytes are not the ones --expected-sha256 names; the file changed since it was checked",
+            expected_sha256=approved,
+            sha256=sha256,
+        )
+
+    # A run loads the newest model of a name in a folder, so a second file
+    # under a name already in use would change what that name loads for every
+    # workflow in the workspace. The same bytes under the name are already
+    # there and need no upload.
+    named = _models_named(renderer, target, file.name, folder, sign_in)
+    others = [r for r in named if _content_hash(r.get("hash")) != local_hash]
+    if others:
+        raise refuse(
+            "name_in_use",
+            f"{folder}/{file.name} is already in your Comfy Cloud library with different bytes; "
+            "uploading would change what that name loads",
+            hash=local_hash,
+            existing=[{"id": r.get("id"), "hash": r.get("hash")} for r in others],
+        )
+    present = named[0] if named else None
+
+    def report(asset_id, *, task_id=None, uploaded=False, name=file.name, asset=None) -> dict:
+        return {
+            "id": asset_id,
+            "name": name,
+            "folder": folder,
+            "loader_path": _loader_path(asset, name),
+            "hash": local_hash,
+            "sha256": sha256,
+            "size": size,
+            "workspace_id": workspace_id,
+            "task_id": task_id,
+            "uploaded": uploaded,
+            "already_present": present is not None,
+            "dry_run": dry_run,
+        }
+
+    if dry_run or present is not None:
+        payload = report(present.get("id") if present is not None else None, asset=present)
+        if renderer.is_pretty():
+            if present is not None:
+                renderer.success(f"{folder}/{file.name} is already in your library with these bytes; nothing to upload")
+            else:
+                renderer.info(f"Would upload {file.name} ({size} bytes) to {folder}")
+            renderer.info(f"sha256: {sha256}\nhash: {local_hash}")
+        renderer.emit(payload, command=command, where="cloud", changed=False)
+        return
+
+    into = f" in workspace {workspace_id}" if workspace_id else ""
+    if not confirm(
+        f"Upload {file} ({size} bytes, sha256 {sha256}) to {folder} on Comfy Cloud{into}?",
+        yes=yes,
+        error_code="model_upload_needs_confirm",
+        details={"file": str(file), "type": folder, "sha256": sha256, "workspace_id": workspace_id},
+        ctx=ctx,
+    ):
+        # Only a prompt can decline, and one is allowed only in pretty mode,
+        # where `emit` writes nothing; a machine caller is refused above.
+        renderer.info("Nothing uploaded.")
+        return
+
     item = _UploadItem(filename=file.name, size_bytes=size)
     tags = ["models", folder]
     reporter = UploadProgressReporter(renderer)
     reporter.plan([item], already_held=0)
+    sent_hash: str | None = None
     for attempt in range(1, _UPLOAD_STARTS + 1):
         start = _call(
             renderer,
@@ -775,7 +1025,7 @@ def upload_cmd(
             raise _unexpected(renderer, "/api/assets/uploads", "expected upload_id, upload_url, method PUT and headers")
         try:
             with reporter.uploading(item, 1, 1) as progress:
-                _put(upload_url, headers, file, progress)
+                sent_hash = _put(upload_url, headers, file, progress)
             break
         except _FileUnreadable as e:
             renderer.error(
@@ -809,6 +1059,16 @@ def upload_cmd(
             )
             raise typer.Exit(code=1) from None
 
+    if sent_hash is not None and sent_hash != local_hash:
+        # Not completed, so the staged bytes never become an asset.
+        renderer.error(
+            code="asset_upload_failed",
+            message=f"{file.name} changed while it was being sent; the bytes sent are not the ones hashed",
+            hint="wait until nothing is writing the file, then upload it again; nothing was added to the library",
+            details={"reason": "file_changed", "upload_id": upload_id, "hash": local_hash, "sent_hash": sent_hash},
+        )
+        raise typer.Exit(code=1)
+
     complete = ("assets", "uploads", urllib.parse.quote(upload_id, safe=""), "complete")
     task_id = _call(
         renderer, target, "complete", complete, {"filename": item.filename, "tags": tags}, sign_in=sign_in
@@ -832,15 +1092,43 @@ def upload_cmd(
     asset_id = result.get("asset_id")
     if not isinstance(asset_id, str) or not asset_id:
         raise _unexpected(renderer, "/api/tasks", "a completed task with no asset_id", task_id=task_id)
-    payload = {
-        "id": asset_id,
-        "name": result["filename"] if isinstance(result.get("filename"), str) else item.filename,
-        "folder": folder,
-        "hash": result["hash"] if isinstance(result.get("hash"), str) else None,
-        "size": item.size_bytes,
-        "task_id": task_id,
-    }
+
+    # The upload counts only when Comfy Cloud's own hash of what it stored is
+    # this file's. The task reports it; the asset itself is read when not.
+    stored = _content_hash(result.get("hash"))
+    asset = None
+    if stored is None:
+        asset = _stored_asset(target, sign_in, asset_id)
+        stored = _content_hash(asset.get("hash")) if asset is not None else None
+    if stored != local_hash:
+        mismatch = stored is not None
+        renderer.error(
+            code="asset_upload_unverified",
+            message=(
+                f"Comfy Cloud stored asset {asset_id} with hash {stored}, not {item.filename}'s {local_hash}"
+                if mismatch
+                else f"Comfy Cloud stored asset {asset_id} but its hash could not be read to check it"
+            ),
+            hint=(
+                f"delete asset {asset_id} from your Comfy Cloud model library before running a workflow that "
+                f"loads {item.filename}, then upload it again"
+                if mismatch
+                else f"check asset {asset_id}'s hash with `comfy assets library ls --name {item.filename} "
+                "--tags models` before running a workflow that loads it"
+            ),
+            details={
+                "reason": "hash_mismatch" if mismatch else "hash_unavailable",
+                "asset_id": asset_id,
+                "task_id": task_id,
+                "hash": local_hash,
+                "stored_hash": stored,
+            },
+        )
+        raise typer.Exit(code=1)
+
+    name = result["filename"] if isinstance(result.get("filename"), str) else item.filename
+    payload = report(asset_id, task_id=task_id, uploaded=True, name=name, asset=asset)
     if renderer.is_pretty():
-        renderer.success(f"Added {payload['name']} to {folder}")
-        renderer.info(f"asset id: {asset_id}\nhash: {payload['hash'] or '-'}")
-    renderer.emit(payload, command="assets library upload", where="cloud", changed=True)
+        renderer.success(f"Added {name} to {folder}")
+        renderer.info(f"asset id: {asset_id}\nsha256: {sha256}\nhash: {local_hash} (matches the stored file)")
+    renderer.emit(payload, command=command, where="cloud", changed=True)

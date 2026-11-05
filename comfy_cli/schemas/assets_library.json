@@ -2,7 +2,7 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "$id": "https://comfy.org/schemas/assets_library.json",
  "title": "comfy assets library --json data payload",
- "description": "Union schema for `assets library ls`, `assets library ensure` and `assets library upload`. `upload` returns the stored asset: `id`, `name`, `folder` (its model folder), `hash`, `size` (bytes) and `task_id` (the server task that stored it).",
+ "description": "Union schema for `assets library ls`, `assets library ensure` and `assets library upload`. `upload` returns the same fields as `comfy model upload` (see model_upload.json): `id`, `name`, `folder` (its model folder), `loader_path`, `hash` (BLAKE3, checked against Comfy Cloud's hash of the stored file), `sha256`, `size` (bytes), `workspace_id` (always null here), `task_id` (the server task that stored it; null when nothing was uploaded), `uploaded`, `already_present` and `dry_run`.",
  "type": "object",
  "additionalProperties": true,
  "properties": {
@@ -33,6 +33,12 @@
   "name": { "type": "string" },
   "folder": { "type": "string" },
   "size": { "type": "integer", "minimum": 1 },
-  "task_id": { "type": "string" }
+  "task_id": { "type": ["string", "null"] },
+  "loader_path": { "type": "string" },
+  "sha256": { "type": "string" },
+  "workspace_id": { "type": ["string", "null"] },
+  "uploaded": { "type": "boolean" },
+  "already_present": { "type": "boolean" },
+  "dry_run": { "type": "boolean" }
  }
 }

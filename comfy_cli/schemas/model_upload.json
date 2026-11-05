@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/model_upload.json",
+  "title": "comfy model upload --json data payload",
+  "description": "One local .safetensors file and its place in the Comfy Cloud model library. A real upload succeeds only once Comfy Cloud's hash of the stored file equals `hash`. `uploaded` is true when this run added it; `already_present` is true when the library already held these bytes under this name and folder (nothing was uploaded); a `dry_run` uploads nothing and says which of the two a real run would do. `loader_path` is the value a loader widget in a workflow takes for the model on Comfy Cloud (for a dry run that would upload, the value it will have). `sha256` is the hash to show a person and pass back as `--expected-sha256`.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "id",
+    "name",
+    "folder",
+    "loader_path",
+    "hash",
+    "sha256",
+    "size",
+    "workspace_id",
+    "task_id",
+    "uploaded",
+    "already_present",
+    "dry_run"
+  ],
+  "properties": {
+    "id": { "type": ["string", "null"], "description": "The asset id; null for a dry run of a file Comfy Cloud does not have yet." },
+    "name": { "type": "string" },
+    "folder": { "type": "string", "description": "The model folder, from --type." },
+    "loader_path": { "type": "string" },
+    "hash": { "type": "string", "pattern": "^blake3:[0-9a-f]{64}$", "description": "The file's BLAKE3 hash, the one Comfy Cloud stores it under." },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "size": { "type": "integer", "minimum": 1 },
+    "workspace_id": { "type": ["string", "null"], "description": "The workspace checked against --workspace; null when --workspace was not given." },
+    "task_id": { "type": ["string", "null"], "description": "The server task that stored the file; null when nothing was uploaded." },
+    "uploaded": { "type": "boolean" },
+    "already_present": { "type": "boolean" },
+    "dry_run": { "type": "boolean" }
+  }
+}
