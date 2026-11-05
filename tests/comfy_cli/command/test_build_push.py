@@ -517,6 +517,27 @@ def test_a_repository_url_with_credentials_is_refused_before_any_request(
     assert "ghp_TOKENSECRET" not in result.output
 
 
+def test_a_signed_out_dry_run_refuses_a_credentialed_repository_before_asking_for_sign_in(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The address check reads only the spec, so a signed-out dry run gets
+    ``build_spec_invalid`` for it, as a signed-in one does, not ``build_not_signed_in``."""
+    # Given
+    node = {"name": "private-node", "source": "git", "repository": "https://ghp_TOKENSECRET@github.com/org/repo"}
+    write_spec(workspace, models=[], nodes=[{**node, "gitRef": "main"}])
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "private-node" in error["message"]
+    assert "ghp_TOKENSECRET" not in result.output
+
+
 @pytest.mark.parametrize(
     "repository",
     [

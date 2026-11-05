@@ -6,6 +6,11 @@ Date: 2026-11-04
 
 Proposed
 
+Relation: Builds on [ADR-AUTOMATION-0003](AUTOMATION-0003-one-versioned-machine-output-dialect.md).
+One envelope per command and append-only error codes stay as they are. This ADR
+adds no error code; it lets a dry run return `build_registry_pin_missing` with
+its existing meaning.
+
 ## Context
 
 `comfy build push --dry-run` used to send no HTTP at all. It computed the
@@ -54,7 +59,9 @@ for the pin check:
 - **Sign-in.** The request goes through the same authenticated builder client
   as a push (`_builder_client`): an injected token, a Cloud token or API key
   from the environment, or the stored sign-in. With none of these, a dry run
-  with public pins fails with `build_not_signed_in`.
+  with public pins fails with `build_not_signed_in`. The repository address
+  check reads only the spec and runs before sign-in is asked for, so a bad
+  address gets `build_spec_invalid` signed in or out.
 - **Parity with push.** Push and dry run share one function,
   `_require_public_pins`. They send the same payload, compare the same
   identities, and refuse with the same `build_registry_pin_missing` code,

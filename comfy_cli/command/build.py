@@ -1894,19 +1894,10 @@ def _repository_is_sendable(repository: str) -> bool:
     return _canonical_github_repository(repository) is not None
 
 
-def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
-    """Ask the builder's importer to place every public pack, and refuse with
-    ``build_registry_pin_missing`` naming each identity it could not place: a
-    registry version it does not publish (a Flagged one among them), or a
-    repository it cannot normalize. A pack the registry never answered about
-    (``report.unverifiedPins``) is refused the same way: unchecked is not placed.
-
-    The importer reads the snapshot and writes nothing, which is what lets
-    ``push --dry-run`` make the same call and refuse the same way. A lookup that
-    itself fails exits through ``_builder_call`` rather than passing the pins.
-    A ``repository`` that is not a recognized public GitHub address is refused
-    before anything is sent; that covers one that does not parse and one that
-    carries a user name or token."""
+def _refuse_unsendable_repositories(renderer, public_nodes: list[dict], spec_file: Path) -> None:
+    """Refuse with ``build_spec_invalid`` a public pack whose ``repository`` is not a
+    recognized public GitHub address. It reads the spec only, so a dry run runs it
+    before it asks for sign-in: a bad address gets the same answer signed in or out."""
     unsendable = sorted(
         str(node.get("name") or node.get("id") or "-")
         for node in public_nodes
@@ -1923,6 +1914,22 @@ def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: 
             details={"path": str(spec_file)},
         )
         raise typer.Exit(code=1)
+
+
+def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
+    """Ask the builder's importer to place every public pack, and refuse with
+    ``build_registry_pin_missing`` naming each identity it could not place: a
+    registry version it does not publish (a Flagged one among them), or a
+    repository it cannot normalize. A pack the registry never answered about
+    (``report.unverifiedPins``) is refused the same way: unchecked is not placed.
+
+    The importer reads the snapshot and writes nothing, which is what lets
+    ``push --dry-run`` make the same call and refuse the same way. A lookup that
+    itself fails exits through ``_builder_call`` rather than passing the pins.
+    A ``repository`` that is not a recognized public GitHub address is refused
+    before anything is sent; that covers one that does not parse and one that
+    carries a user name or token."""
+    _refuse_unsendable_repositories(renderer, public_nodes, spec_file)
     imported = _builder_call(
         renderer,
         lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
@@ -2104,6 +2111,7 @@ def push_cmd(
             # nothing, so it needs no sign-in.
             public_nodes = public_node_projection(preparation.definition)
             if public_nodes:
+                _refuse_unsendable_repositories(renderer, public_nodes, paths.spec_file)
                 _require_public_pins(renderer, _builder_client(renderer, builder_url), public_nodes, paths.spec_file)
             payload["public_pins_checked"] = len(public_nodes)
             # The envelope is the whole answer and prints nothing in pretty mode, so a
