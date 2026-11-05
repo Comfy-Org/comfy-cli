@@ -552,6 +552,22 @@ class TestWatchExecution:
 
 
 class TestExecuteErrorHandling:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Keep execute() off a live server: an empty catalog skips preflight."""
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return {}
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
     def _run_execute_expect_exit(self, workflow_file, **overrides):
         kwargs = dict(host="127.0.0.1", port=8188, wait=True, verbose=False, timeout=30)
         kwargs.update(overrides)
@@ -2363,14 +2379,33 @@ class TestSpendGateStdinAndMarkup:
 
 
 class TestExecuteUiWorkflow:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Validate against the complete conversion fixture without a live server."""
+        from copy import deepcopy
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return deepcopy(self.OBJECT_INFO)
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
+    # The conversion success fixture must also be an executable graph:
+    # PreviewImage consumes IMAGE, not an EmptyLatentImage's LATENT output.
     UI = {
         "nodes": [
             {
                 "id": 1,
-                "type": "EmptyLatentImage",
+                "type": "EmptyImage",
                 "inputs": [],
-                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-                "widgets_values": [512, 512, 1],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+                "widgets_values": [512, 512, 1, 0],
                 "mode": 0,
             },
             {
@@ -2384,19 +2419,20 @@ class TestExecuteUiWorkflow:
         "links": [[10, 1, 0, 2, 0, "IMAGE"]],
     }
     OBJECT_INFO = {
-        "EmptyLatentImage": {
+        "EmptyImage": {
             "input": {
                 "required": {
                     "width": ["INT", {"default": 512}],
                     "height": ["INT", {"default": 512}],
                     "batch_size": ["INT", {"default": 1}],
+                    "color": ["INT", {"default": 0}],
                 }
             },
-            "input_order": {"required": ["width", "height", "batch_size"]},
-            "output": ["LATENT"],
-            "output_name": ["LATENT"],
+            "input_order": {"required": ["width", "height", "batch_size", "color"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
             "output_node": False,
-            "display_name": "Empty Latent Image",
+            "display_name": "Empty Image",
         },
         "PreviewImage": {
             "input": {"required": {"images": ["IMAGE"]}},
@@ -2435,7 +2471,7 @@ class TestExecuteUiWorkflow:
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             api_workflow = MockExec.call_args.args[0]
             assert set(api_workflow) == {"1", "2"}
-            assert api_workflow["1"]["class_type"] == "EmptyLatentImage"
+            assert api_workflow["1"]["class_type"] == "EmptyImage"
             assert api_workflow["2"]["inputs"]["images"] == ["1", 0]
             mock_exec.queue.assert_called_once()
 

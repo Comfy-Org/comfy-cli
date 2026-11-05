@@ -923,6 +923,8 @@ def test_logs_pretty_no_mismatch_warning_for_explicit_port(monkeypatch, tmp_path
 
 def test_logs_pretty_warns_when_explicit_port_falls_back_to_unsuffixed(monkeypatch, tmp_path, capsys):
     """The unsuffixed fallback encodes no port, so say so instead of staying silent."""
+    # Assert routing and prose on a stable wide console, not path-dependent wrapping.
+    monkeypatch.setenv("COLUMNS", "512")
     _write_log(tmp_path, "comfyui.log", "no --port in argv\n")
     _fake_env(monkeypatch, workspace=tmp_path)
 
