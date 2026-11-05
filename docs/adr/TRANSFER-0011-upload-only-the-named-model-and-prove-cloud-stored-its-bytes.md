@@ -1,4 +1,4 @@
-# ADR-UPLOAD-0011: Upload Only the Named Model and Prove Comfy Cloud Stored Its Bytes
+# ADR-TRANSFER-0011: Upload Only the Named Model and Prove Comfy Cloud Stored Its Bytes
 
 Date: 2026-11-05
 
