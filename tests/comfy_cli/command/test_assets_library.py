@@ -1162,7 +1162,7 @@ def signed_in(monkeypatch: pytest.MonkeyPatch):
         session=SimpleNamespace(access_token="old-token", base_url="https://cloud.example.com"), forced=0
     )
 
-    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None):
+    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None, rejected_access_token=None):
         if force:
             state.forced += 1
             state.session = SimpleNamespace(access_token="new-token", base_url="https://cloud.example.com")
@@ -1275,7 +1275,7 @@ def stored_login(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(var, raising=False)
     state = SimpleNamespace(login=("a", 1), forced=0)
 
-    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None):
+    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None, rejected_access_token=None):
         if force:
             state.forced += 1
             state.login = (state.login[0], state.login[1] + 1)

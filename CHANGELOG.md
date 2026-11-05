@@ -65,6 +65,8 @@ history.
 
 ### Fixed
 
+- Parallel build and deploy requests rejected on an old access token now adopt a peer's refreshed token under the shared refresh lock instead of rotating it again. Each rejected request retries at most once. If session recovery still fails while a refreshable sign-in remains stored, the watch reports that the remote work may continue instead of telling you to sign in again. `comfy build release create --watch`, `comfy deploy up`, `promote`, `rollback` and `comfy deploy status --watch` now end with the new code `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint names the command that reads the release or deployment again. A 401 before anything was accepted, on a workspace API key, or when no refreshable sign-in remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
+
 - `comfy update` no longer dies with a `FileNotFoundError` traceback when the
   configured workspace directory does not exist (never installed, or deleted).
   It now fails with a `not_in_workspace` error that points at `comfy install`,
@@ -84,6 +86,12 @@ history.
 
 - Desktop discovery reads both modern and legacy registries and keeps each registry's shared model roots with its own installs. The selected Desktop install is a registry-derived candidate (the only usable install, or the most recently launched); it is not matched to a running server.
 - `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. On Linux, shared model roots are read from `settings.json` under `XDG_CONFIG_HOME`, where Desktop keeps it. A nonexistent selected workspace still exits 0 but reports `exists: false` and a `workspace_not_found` warning; discovery reports malformed or unreadable Desktop configuration, and Desktop paths that cannot be checked (permission denied, a symlink loop, no home directory), as `desktop_config_unreadable` warnings and marks inferred data roots as unverified. Both codes appear only in `data.warnings[]`; they are not error codes and `comfy discover` does not list them under `data.error_codes`.
+
+- `comfy node deps` reports malformed installed package versions as `unknown`
+  consistently across supported `packaging` versions. One metadata probe
+  preserves raw installed versions with or without pip. Every `===` clause
+  compares raw strings case-insensitively, including in mixed constraints;
+  ordinary clauses still require valid versions and use semantic comparison.
 
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,

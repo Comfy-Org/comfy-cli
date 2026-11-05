@@ -1319,9 +1319,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- custom node dependency report (`comfy node deps`) --------------------
     ErrorCode(
         "installed_versions_unavailable",
-        "`comfy node deps` could not read the workspace venv's installed packages (`pip list --format=json` "
-        "timed out, returned unparseable output, or exited non-zero and its `importlib.metadata` fallback "
-        "failed too), so every parseable requirement is reported with "
+        "`comfy node deps` could not read the workspace venv's raw installed-package metadata "
+        "(the guarded `importlib.metadata` probe timed out, returned unparseable output, or failed), "
+        "so every parseable requirement is reported with "
         '`status: "unknown"`. Surfaced in `data.warnings[]` (not as an error envelope) so the declared '
         "requirements are still reported.",
         "check the workspace interpreter runs (`comfy env`), then re-run",
@@ -1765,6 +1765,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
         "after a move, read `comfy deploy show --deployment <id>` instead: the move has landed once it shows no "
         "pendingUpdate and its releaseId is the release asked for",
+    ),
+    ErrorCode(
+        "watch_auth_lost",
+        "A watch over work the server had already accepted (`comfy build release create --watch`, `comfy deploy "
+        "up`, `promote` and `rollback`, `comfy deploy status --watch`) was refused with HTTP 401 despite "
+        "serialized session recovery and at most one retry, while a refreshable sign-in remains stored. "
+        "Only the watch ended: the release may still be building and the deployment may still be coming up. "
+        "The exit code is 75, not 1. `details.releaseId` (build) or "
+        "`details.deployment_id` (deploy) names what is still running. A 401 before anything was accepted, on a "
+        "workspace API key, or with no refreshable sign-in remaining stays `build_not_signed_in` or "
+        "`deploy_not_signed_in`.",
+        "the stored sign-in was preserved: re-read the work with `comfy build "
+        "release show <releaseId>` or `comfy deploy status --deployment <deployment_id> --watch`",
     ),
     ErrorCode(
         "deploy_update_failed",
