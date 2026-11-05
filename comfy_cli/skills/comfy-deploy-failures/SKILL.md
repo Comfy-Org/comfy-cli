@@ -69,8 +69,8 @@ argument you pass.
 | `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; the job was not submitted | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
-| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
-| `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read | Confirm the file is stable, retry |
+| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set, or its hash is not one `--allow-upload` names | `details.missing[]` lists each file: `local_path`, `bytes`, `hash`. Rerun with `--allow-upload <hash>` per approved file, drop `--no-upload`, or pre-upload it |
+| `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read, or with `--allow-upload` the private temporary copy of the file could not be made (a full disk, say; `details.temp_dir` names the folder; that file was not uploaded, though approved files before it may be, and a retry reuses them) | Confirm the file is stable, retry. For a failed copy, free space in `details.temp_dir` or set `TMPDIR` to a folder with room, then retry |
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
 | `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** The CLI cannot look the job up — ask the user |

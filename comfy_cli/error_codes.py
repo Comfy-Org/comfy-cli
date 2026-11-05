@@ -2022,15 +2022,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_asset_missing",
         "An input the run needs is not an asset this account can reach. Either a v2 asset hash probe found "
-        "no blob the caller may mint from while uploads were disabled (`details.file_path` and `details.hash` "
-        "identify it), or the submitted workflow referenced an asset id the account cannot mint, which the "
-        "server reports as `missing_asset` in `details.server_code`.",
-        "remove `--no-upload` to permit a streamed upload, or upload the input before retrying",
+        "no blob the caller may mint from while uploads were disabled by `--no-upload` or not allowed by "
+        "`--allow-upload` (`details.missing[]` names every such file with its absolute `local_path`, `bytes` "
+        "and `hash`; `details.file_path` and `details.hash` repeat the first), or the submitted workflow "
+        "referenced an asset id the account cannot mint, which the server reports as `missing_asset` in "
+        "`details.server_code`.",
+        "approve the files in `details.missing[]` and rerun with `--allow-upload <hash>` for each, remove "
+        "`--no-upload` to permit any upload, or upload the input before retrying",
     ),
     ErrorCode(
         "deploy_asset_upload_failed",
         "A v2 multipart asset upload failed or the server rejected its `expected_hash`. A hash mismatch "
-        "mints no asset and reports `hash_mismatch` in `details.server_code`.",
+        "mints no asset and reports `hash_mismatch` in `details.server_code`. With `--allow-upload`, it also "
+        "covers a private temporary copy of the file that could not be made (a full disk, say): "
+        "`details.local_path` names the file and `details.temp_dir` the folder. That file was not uploaded; "
+        "approved files before it may already be, and a retry reuses them.",
         "verify the local file is stable and readable, then retry the upload",
     ),
     # --- knowledge -----------------------------------------------------------

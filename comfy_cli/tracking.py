@@ -125,6 +125,8 @@ _SENSITIVE_EXACT = frozenset(
         # `workflow add-node --text`: a note body is verbatim user content, like
         # `--prompt` — analytics only learns that the option was supplied.
         "text",
+        # `deploy run --allow-upload` names the hashes of a person's own files.
+        "allow_upload",
         # `model upload --workspace` names a Comfy Cloud workspace, which can
         # identify a customer; `--expected-sha256` names one of their files.
         # The kwarg is `workspace_id`, not `workspace`, so `deploy --workspace`
