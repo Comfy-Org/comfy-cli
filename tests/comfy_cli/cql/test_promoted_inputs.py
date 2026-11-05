@@ -141,7 +141,7 @@ def test_every_promotion_resolver_skips_an_unheld_row_before_a_live_one():
 
     assert item.source_node == "8"
     assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
-    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+    assert promoted.boundary_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
 def test_every_promotion_resolver_rejects_a_non_proxy_listed_row():
@@ -164,7 +164,7 @@ def test_every_promotion_resolver_rejects_a_non_proxy_listed_row():
 
     assert item.value_index is None
     assert promoted._promotion_source(sg, sg["inputs"][0], definitions) is None
-    assert promoted.boundary_widget_targets(sg, item, definitions) == []
+    assert promoted.boundary_targets(sg, item, definitions) == []
 
 
 def test_promotion_visit_limit_counts_listed_link_ids():
@@ -233,12 +233,12 @@ def test_promotion_caches_do_not_expose_mutable_results():
     first_inputs = promoted.promoted_inputs(sg, definitions)
     item = first_inputs[0]
     first_inputs.clear()
-    first_targets = promoted.boundary_widget_targets(sg, item, definitions)
+    first_targets = promoted.boundary_targets(sg, item, definitions)
     first_targets[0][0].append("corrupt")
     first_targets.clear()
 
     assert len(promoted.promoted_inputs(sg, definitions)) == 1
-    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt")]
+    assert promoted.boundary_targets(sg, item, definitions) == [(["7"], "prompt")]
 
 
 def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
@@ -254,7 +254,7 @@ def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
 
     [item] = promoted.promoted_inputs(outer, definitions)
 
-    assert promoted.boundary_widget_targets(outer, item, definitions) == []
+    assert promoted.boundary_targets(outer, item, definitions) == []
 
 
 def test_registered_roots_share_one_non_creditable_index_budget():
@@ -354,7 +354,7 @@ def test_acyclic_shared_children_reuse_stable_promotion_results_across_roots():
     for root in roots:
         [item] = promoted.promoted_inputs(root, definitions)
         assert item.is_widget
-        assert promoted.boundary_widget_targets(root, item, definitions) == [(["7", "9"], "value")]
+        assert promoted.boundary_targets(root, item, definitions) == [(["7", "9"], "value")]
 
 
 def test_every_promotion_resolver_follows_a_holder_when_the_row_target_drifted():
@@ -377,7 +377,7 @@ def test_every_promotion_resolver_follows_a_holder_when_the_row_target_drifted()
 
     assert item.source_node == "8"
     assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
-    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+    assert promoted.boundary_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
 def test_boundary_targets_keep_every_duplicate_holder_live():
@@ -399,7 +399,50 @@ def test_boundary_targets_keep_every_duplicate_holder_live():
     [item] = promoted.promoted_inputs(sg, definitions)
 
     assert item.source_node == "7"
-    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt"), (["8"], "prompt")]
+    assert promoted.boundary_targets(sg, item, definitions) == [(["7"], "prompt"), (["8"], "prompt")]
+
+
+def test_boundary_targets_include_plain_sockets_in_link_order():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1, 2, 3]}],
+        "nodes": [
+            {"id": 7, "type": "Switch", "inputs": [{"name": "on_false", "type": "*", "link": 1}]},
+            {"id": 8, "type": "PromptNode", "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}]},
+            {"id": 9, "type": "Nameless", "inputs": [{"type": "*", "link": 3}]},
+        ],
+        "links": [
+            {"id": link_id, "origin_id": -10, "origin_slot": 0, "target_id": target, "target_slot": 0}
+            for link_id, target in ((1, 7), (2, 8), (3, 9))
+        ],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.is_widget
+    assert promoted.boundary_targets(sg, item, definitions) == [(["7"], "on_false"), (["8"], "prompt")]
+
+
+def test_socket_targets_count_against_the_boundary_output_cap():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1, 2]}],
+        "nodes": [
+            {"id": 7, "type": "PromptNode", "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}]},
+            {"id": 8, "type": "Switch", "inputs": [{"name": "on_false", "type": "*", "link": 2}]},
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    definitions = {"sg": sg}
+
+    assert len(promoted._boundary_targets(sg, sg["inputs"][0], definitions, 0, _output_budget=[2])) == 2
+    # Two targets, room for one: the socket must be charged like the widget.
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
+        promoted._boundary_targets(sg, sg["inputs"][0], {"sg": sg}, 0, _output_budget=[1])
 
 
 def test_shared_definition_input_membership_is_not_promoted_or_resolved():
@@ -423,7 +466,7 @@ def test_shared_definition_input_membership_is_not_promoted_or_resolved():
 
     assert [item.value_index for item in items] == [None, None]
     assert promoted._promotion_source(sg, shared_input, definitions) is None
-    assert promoted.boundary_widget_targets(sg, items[0], definitions) == []
+    assert promoted.boundary_targets(sg, items[0], definitions) == []
 
 
 def test_promoted_name_index_keeps_the_first_duplicate():
@@ -440,8 +483,8 @@ def test_synthetic_boundary_targets_do_not_share_the_minus_one_cache_key():
     second = promoted.PromotedInput("second", "STRING", -1, 0, source_node="b", source_widget="y")
 
     with mock.patch.object(promoted, "deepest_source", side_effect=[(["a"], "x"), (["b"], "y")]) as deepest:
-        assert promoted.boundary_widget_targets(sg, first, definitions) == [(["a"], "x")]
-        assert promoted.boundary_widget_targets(sg, second, definitions) == [(["b"], "y")]
+        assert promoted.boundary_targets(sg, first, definitions) == [(["a"], "x")]
+        assert promoted.boundary_targets(sg, second, definitions) == [(["b"], "y")]
 
     assert deepest.call_count == 2
 
@@ -559,7 +602,7 @@ def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
 
     [item] = promoted.promoted_inputs(sg, definitions)
 
-    assert len(promoted.boundary_widget_targets(sg, item, definitions)) == 66
+    assert len(promoted.boundary_targets(sg, item, definitions)) == 66
 
 
 @pytest.mark.parametrize("malformed_slot", [True, False, 0.0])
@@ -584,7 +627,7 @@ def test_malformed_target_slot_does_not_exact_match_a_holder(malformed_slot):
     [item] = promoted.promoted_inputs(sg, definitions)
 
     assert item.source_widget == "first"
-    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "first"), (["7"], "second")]
+    assert promoted.boundary_targets(sg, item, definitions) == [(["7"], "first"), (["7"], "second")]
 
 
 def test_promotion_resolvers_ignore_unhashable_link_ids():
@@ -608,7 +651,7 @@ def test_promotion_resolvers_ignore_unhashable_link_ids():
     [item] = promoted.promoted_inputs(sg, definitions)
 
     assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
-    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+    assert promoted.boundary_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
 def test_promotion_resolvers_do_not_alias_boolean_link_ids_to_integers():
@@ -630,7 +673,7 @@ def test_promotion_resolvers_do_not_alias_boolean_link_ids_to_integers():
 
     assert item.value_index is None
     assert promoted._promotion_source(sg, sg["inputs"][0], definitions) is None
-    assert promoted.boundary_widget_targets(sg, item, definitions) == []
+    assert promoted.boundary_targets(sg, item, definitions) == []
 
 
 def test_promotion_resolvers_treat_non_list_link_ids_as_empty():
@@ -651,7 +694,7 @@ def test_promotion_resolvers_treat_non_list_link_ids_as_empty():
 
     assert item.value_index is None
     assert promoted._promotion_source(sg, sg["inputs"][0], {"sg": sg}) is None
-    assert promoted.boundary_widget_targets(sg, item, {"sg": sg}) == []
+    assert promoted.boundary_targets(sg, item, {"sg": sg}) == []
 
 
 def test_primitive_targets_ignore_unhashable_listed_link_ids():
@@ -793,7 +836,7 @@ def test_reused_nested_boundary_paths_charge_each_materialized_copy():
 
     pi = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
-        promoted.boundary_widget_targets(definitions["level-0"], pi, definitions)
+        promoted.boundary_targets(definitions["level-0"], pi, definitions)
 
 
 def test_valid_six_level_four_way_boundary_fanout_uses_the_output_budget():
@@ -818,7 +861,7 @@ def test_valid_six_level_four_way_boundary_fanout_uses_the_output_budget():
             "links": [{"id": index + 1, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(4)],
         }
 
-    targets = promoted.boundary_widget_targets(
+    targets = promoted.boundary_targets(
         definitions["level-0"],
         promoted.PromotedInput("value", "STRING", 0, 0),
         definitions,
@@ -849,7 +892,7 @@ def test_valid_ten_level_three_way_boundary_fanout_stays_below_output_cap():
             "links": [{"id": index + 1, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(3)],
         }
 
-    targets = promoted.boundary_widget_targets(
+    targets = promoted.boundary_targets(
         definitions["level-0"],
         promoted.PromotedInput("value", "STRING", 0, 0),
         definitions,
@@ -958,7 +1001,7 @@ def test_falsy_boundary_name_stays_cacheable_and_preserves_fanout():
     definitions["root"] = root
     [item] = promoted.promoted_inputs(root, definitions)
 
-    assert promoted.boundary_widget_targets(root, item, definitions) == [(["7"], "0"), (["8"], "0")]
+    assert promoted.boundary_targets(root, item, definitions) == [(["7"], "0"), (["8"], "0")]
 
 
 def test_boundary_materialization_has_an_absolute_cap(monkeypatch):
@@ -981,7 +1024,7 @@ def test_boundary_materialization_has_an_absolute_cap(monkeypatch):
     monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
 
     with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
-        promoted.boundary_widget_targets(root, item, definitions)
+        promoted.boundary_targets(root, item, definitions)
 
 
 def test_boundary_output_allowance_does_not_accumulate_across_roots(monkeypatch):
@@ -1007,10 +1050,10 @@ def test_boundary_output_allowance_does_not_accumulate_across_roots(monkeypatch)
     monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
 
     [small_item] = promoted.promoted_inputs(small, definitions)
-    assert len(promoted.boundary_widget_targets(small, small_item, definitions)) == 1
+    assert len(promoted.boundary_targets(small, small_item, definitions)) == 1
     [wide_item] = promoted.promoted_inputs(wide, definitions)
     with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
-        promoted.boundary_widget_targets(wide, wide_item, definitions)
+        promoted.boundary_targets(wide, wide_item, definitions)
 
 
 def test_boundary_cache_hits_do_not_spend_the_distinct_materialization_budget(monkeypatch):
@@ -1024,7 +1067,7 @@ def test_boundary_cache_hits_do_not_spend_the_distinct_materialization_budget(mo
     )
     monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
 
-    assert promoted.boundary_widget_targets(root, item, definitions) == [
+    assert promoted.boundary_targets(root, item, definitions) == [
         (["1"], "value"),
         (["2"], "value"),
         (["3"], "value"),
@@ -1363,8 +1406,8 @@ def test_boundary_targets_are_cached_for_the_definition_index():
     item = promoted.PromotedInput("value", "STRING", 0, 0)
 
     with mock.patch.object(promoted, "_boundary_targets", wraps=promoted._boundary_targets) as resolver:
-        first = promoted.boundary_widget_targets(definition, item, definitions)
-        second = promoted.boundary_widget_targets(definition, item, definitions)
+        first = promoted.boundary_targets(definition, item, definitions)
+        second = promoted.boundary_targets(definition, item, definitions)
 
     assert second == first
     assert second is not first
@@ -1386,7 +1429,7 @@ def test_definition_repairs_invalidate_cached_limits_and_holders():
     original_links = promoted._cached_link_rows(definition, definitions)
     promoted.promoted_inputs(definition, definitions)
     promoted.promoted_inputs(other, definitions)
-    promoted.boundary_widget_targets(definition, promoted.PromotedInput("value", "STRING", 0, 0), definitions)
+    promoted.boundary_targets(definition, promoted.PromotedInput("value", "STRING", 0, 0), definitions)
     assert promoted._promotion_visit_limit(definitions, definition) > 0
     assert len(definitions.promotion_inputs) == 2
     assert definitions.promotion_boundaries
@@ -1460,7 +1503,7 @@ def test_boundary_target_fanout_is_bounded_by_definition_graph_size():
     item = promoted.PromotedInput("value", "STRING", 0, 0)
 
     with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
-        promoted.boundary_widget_targets(root, item, definitions)
+        promoted.boundary_targets(root, item, definitions)
 
 
 # --------------------------------------------------------------------------- #

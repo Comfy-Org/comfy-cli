@@ -992,7 +992,7 @@ def test_promoted_overlay_budget_charges_cached_boundary_targets(monkeypatch):
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 4)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [([str(i)], "value") for i in range(3)])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [([str(i)], "value") for i in range(3)])
 
     with pytest.raises(workflow_to_api.WorkflowConversionError, match="promoted-value overlay exceeded"):
         workflow_to_api._overlay_promoted_host_values({}, workflow, {definition_id: definition})
@@ -1012,7 +1012,7 @@ def test_promoted_overlay_treats_ordinary_interior_link_as_live(monkeypatch):
     prompt = {"1:leaf": {"inputs": {"value": "interior"}}}
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [(["leaf"], "value")])
 
     workflow_to_api._overlay_promoted_host_values(prompt, workflow, {definition_id: definition})
 
@@ -1038,7 +1038,7 @@ def test_promoted_overlay_uses_expansion_slot_mapping_for_liveness(monkeypatch):
     prompt = {"1:leaf": {"inputs": {"value": "interior"}}}
     item = promoted.PromotedInput("7", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [(["leaf"], "value")])
 
     workflow_to_api._overlay_promoted_host_values(prompt, workflow, {definition_id: definition})
 
@@ -1064,7 +1064,7 @@ def test_promoted_overlay_prefers_a_live_duplicate_mapped_slot(monkeypatch):
     prompt = {"1:leaf": {"inputs": {"value": "live external value"}}}
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [(["leaf"], "value")])
 
     workflow_to_api._overlay_promoted_host_values(prompt, workflow, {definition_id: definition})
 
@@ -1096,7 +1096,7 @@ def test_nested_overlay_keeps_a_uniquely_listed_input_proxy_value(monkeypatch):
     prompt = {"1:nested:leaf": {"inputs": {"value": "external value"}}}
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda sg, *_args: [item] if sg is child else [])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [(["leaf"], "value")])
 
     workflow_to_api._overlay_promoted_host_values(prompt, workflow, {parent_id: parent, child_id: child})
 
@@ -1114,7 +1114,7 @@ def test_promoted_overlay_ignores_unhashable_link_ids(monkeypatch):
     }
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [])
 
     workflow_to_api._overlay_promoted_host_values({}, workflow, {definition_id: definition})
 
@@ -1133,7 +1133,7 @@ def test_promoted_overlay_ignores_incomplete_interior_link_rows(monkeypatch):
     prompt = {"1:leaf": {"inputs": {"value": "interior"}}}
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [(["leaf"], "value")])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [(["leaf"], "value")])
 
     workflow_to_api._overlay_promoted_host_values(prompt, workflow, {definition_id: definition})
 
@@ -1292,7 +1292,7 @@ def test_promoted_overlay_caches_live_links_for_sibling_instances(monkeypatch):
     }
     item = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
     monkeypatch.setattr(promoted, "promoted_inputs", lambda *_args: [item])
-    monkeypatch.setattr(promoted, "boundary_widget_targets", lambda *_args: [])
+    monkeypatch.setattr(promoted, "boundary_targets", lambda *_args: [])
 
     with mock.patch.object(promoted, "_live_link_keys", wraps=promoted._live_link_keys) as live_keys:
         workflow_to_api._overlay_promoted_host_values({}, workflow, {definition_id: definition})
@@ -1364,3 +1364,225 @@ def test_promotion_traversal_limit_is_a_structured_conversion_failure(object_inf
         pytest.raises(workflow_to_api.WorkflowConversionError, match="promoted input traversal exceeded"),
     ):
         convert_ui_to_api(_load("audio_minimax_music_3.json"), object_info)
+
+
+def test_qwen_image_2_1_edit_prompt_reaches_the_switch_socket(object_info):
+    """The template's ``prompt`` input feeds both TextGenerate's ``prompt``
+    widget and a ``ComfySwitchNode``'s any-type ``on_false`` socket, the branch
+    the switch takes while the prompt enhancer is off. The frontend inlines the
+    host value into both; dropping the socket made the switch yield ``None`` and
+    the image encoder encode the string "None"."""
+    api = convert_ui_to_api(_load("image_qwen_image_2_1_image_edit.json"), object_info)
+    prompt = _api_node(api, "TextGenerate", "459:500")["inputs"]["prompt"]
+    switch = _api_node(api, "ComfySwitchNode", "459:484")["inputs"]
+    assert prompt == "Replace costumes for the character"
+    assert switch["on_false"] == prompt
+    assert switch["on_true"] == ["459:500", 0]
+
+
+_SOCKET_SG = "11111111-2222-4333-8444-555555555555"
+
+
+def _prompt_to_widget_and_socket(sg_id: str = _SOCKET_SG) -> dict:
+    return {
+        "id": sg_id,
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1, 2]}],
+        "nodes": [
+            {
+                "id": "text",
+                "type": "PrimitiveStringMultiline",
+                "inputs": [{"name": "value", "type": "STRING", "link": 1, "widget": {"name": "value"}}],
+                "widgets_values": ["interior default"],
+            },
+            {
+                "id": "switch",
+                "type": "ComfySwitchNode",
+                "inputs": [{"name": "on_false", "type": "*", "link": 2}],
+            },
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": "text", "target_slot": 0},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": "switch", "target_slot": 0},
+        ],
+    }
+
+
+def _nested_outer(inner_values: list | None = None) -> tuple[str, dict]:
+    outer_id = "66666666-7777-4888-8999-000000000000"
+    inner = {"id": "inner", "type": _SOCKET_SG, "inputs": [{"name": "prompt", "link": 99}]}
+    if inner_values is not None:
+        inner["widgets_values"] = inner_values
+    return outer_id, {
+        "id": outer_id,
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [99]}],
+        "nodes": [inner],
+        "links": [{"id": 99, "origin_id": -10, "origin_slot": 0, "target_id": "inner", "target_slot": 0}],
+    }
+
+
+def _socket_api(prefix: str) -> dict:
+    return {
+        f"{prefix}:text": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "interior default"}},
+        f"{prefix}:switch": {"class_type": "ComfySwitchNode", "inputs": {"switch": False}},
+    }
+
+
+def test_host_value_reaches_a_non_widget_socket_the_input_feeds():
+    workflow = {
+        "nodes": [
+            {"id": 9, "type": _SOCKET_SG, "inputs": [{"name": "prompt", "link": None}], "widgets_values": ["host"]}
+        ],
+        "links": [],
+    }
+    api = _socket_api("9")
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
+
+    assert api["9:text"]["inputs"]["value"] == "host"
+    assert api["9:switch"]["inputs"]["on_false"] == "host"
+
+
+def test_host_value_reaches_a_socket_through_a_nested_instance():
+    outer_id, outer = _nested_outer()
+    workflow = {"nodes": [{"id": 9, "type": outer_id, "widgets_values": ["outer host"]}], "links": []}
+    api = _socket_api("9:inner")
+
+    workflow_to_api._overlay_promoted_host_values(
+        api, workflow, {outer_id: outer, _SOCKET_SG: _prompt_to_widget_and_socket()}
+    )
+
+    assert api["9:inner:switch"]["inputs"]["on_false"] == "outer host"
+
+
+def test_socket_only_input_gets_no_host_value():
+    """An input that feeds no widget has no host widget in the frontend, so
+    nothing is inlined into its socket; a stray host value stays unused."""
+    sg = _prompt_to_widget_and_socket()
+    sg["inputs"][0]["linkIds"] = [2]
+    sg["links"] = [link for link in sg["links"] if link["id"] == 2]
+    sg["nodes"][0]["inputs"][0]["link"] = None
+    workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG, "widgets_values": ["stray"]}], "links": []}
+    api = _socket_api("9")
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: sg})
+
+    assert "on_false" not in api["9:switch"]["inputs"]
+
+
+def test_external_link_into_the_input_leaves_the_socket_to_expansion(object_info):
+    wf = _load("image_qwen_image_2_1_image_edit.json")
+    inst = next(n for n in wf["nodes"] if n["id"] == 459)
+    slot = next(i for i, entry in enumerate(inst["inputs"]) if entry.get("name") == "prompt")
+    wf["nodes"].append(
+        {
+            "id": 900,
+            "type": "PrimitiveStringMultiline",
+            "outputs": [{"name": "STRING", "type": "STRING", "links": [9000]}],
+            "inputs": [],
+            "widgets_values": ["wired prompt"],
+            "mode": 0,
+        }
+    )
+    inst["inputs"][slot]["link"] = 9000
+    wf["links"].append([9000, 900, 0, 459, slot, "STRING"])
+
+    api = convert_ui_to_api(wf, object_info)
+
+    assert _api_node(api, "ComfySwitchNode", "459:484")["inputs"]["on_false"] == ["900", 0]
+    assert _api_node(api, "TextGenerate", "459:500")["inputs"]["prompt"] == ["900", 0]
+
+
+def test_unset_host_value_feeds_the_socket_the_interior_source_value(object_info):
+    """With no host value the frontend seeds the promoted widget from its
+    interior source widget and inlines that into every target, so the switch
+    socket gets TextGenerate's interior prompt rather than nothing."""
+    wf = _load("image_qwen_image_2_1_image_edit.json")
+    next(n for n in wf["nodes"] if n["id"] == 459)["widgets_values"] = []
+    sg = wf["definitions"]["subgraphs"][0]
+    interior = next(n for n in sg["nodes"] if n["id"] == 500)
+    interior["widgets_values"][0] = "interior prompt"
+
+    api = convert_ui_to_api(wf, object_info)
+
+    assert _api_node(api, "TextGenerate", "459:500")["inputs"]["prompt"] == "interior prompt"
+    assert _api_node(api, "ComfySwitchNode", "459:484")["inputs"]["on_false"] == "interior prompt"
+
+
+def test_unset_host_value_feeds_every_target_the_source_value():
+    """The frontend inlines the one seeded value into every target, so a second
+    interior widget takes the source widget's value, not its own default."""
+    sg = _prompt_to_widget_and_socket()
+    sg["nodes"].append(
+        {
+            "id": "other",
+            "type": "PrimitiveStringMultiline",
+            "inputs": [{"name": "value", "type": "STRING", "link": 3, "widget": {"name": "value"}}],
+        }
+    )
+    sg["inputs"][0]["linkIds"].append(3)
+    sg["links"].append({"id": 3, "origin_id": -10, "origin_slot": 0, "target_id": "other", "target_slot": 0})
+    workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG, "widgets_values": []}], "links": []}
+    api = _socket_api("9")
+    api["9:other"] = {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "other default"}}
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: sg})
+
+    assert api["9:text"]["inputs"]["value"] == "interior default"
+    assert api["9:switch"]["inputs"]["on_false"] == "interior default"
+    assert api["9:other"]["inputs"]["value"] == "interior default"
+
+
+def test_unset_host_value_reaches_a_socket_through_a_nested_instance():
+    outer_id, outer = _nested_outer()
+    workflow = {"nodes": [{"id": 9, "type": outer_id}], "links": []}
+    api = _socket_api("9:inner")
+
+    workflow_to_api._overlay_promoted_host_values(
+        api, workflow, {outer_id: outer, _SOCKET_SG: _prompt_to_widget_and_socket()}
+    )
+
+    assert api["9:inner:switch"]["inputs"]["on_false"] == "interior default"
+
+
+def test_known_divergence_unemitted_source_leaves_the_socket_empty():
+    """Known divergence: the frontend still seeds from a muted source widget,
+    but the converter reads the seed from the emitted prompt, so a muted source
+    leaves the socket empty."""
+    workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG}], "links": []}
+    api = _socket_api("9")
+    del api["9:text"]
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
+
+    assert "on_false" not in api["9:switch"]["inputs"]
+
+
+def test_unset_outer_value_seeds_from_the_concrete_widget_not_the_inner_host():
+    """The frontend seeds a nested promotion from the deepest concrete widget;
+    an inner instance's own host value is linked over from the outer input."""
+    outer_id, outer = _nested_outer(inner_values=["inner host"])
+    workflow = {"nodes": [{"id": 9, "type": outer_id}], "links": []}
+    api = _socket_api("9:inner")
+
+    workflow_to_api._overlay_promoted_host_values(
+        api, workflow, {outer_id: outer, _SOCKET_SG: _prompt_to_widget_and_socket()}
+    )
+
+    assert api["9:inner:text"]["inputs"]["value"] == "interior default"
+    assert api["9:inner:switch"]["inputs"]["on_false"] == "interior default"
+
+
+def test_unset_host_value_with_the_source_widget_not_emitted_leaves_the_socket_empty():
+    workflow = {"nodes": [{"id": 9, "type": _SOCKET_SG}], "links": []}
+    api = _socket_api("9")
+    api["9:text"]["inputs"] = {}
+
+    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
+
+    assert "on_false" not in api["9:switch"]["inputs"]
+
+
+def test_source_widget_value_without_a_source_is_unset():
+    from comfy_cli.cql import promoted
+
+    assert workflow_to_api._source_widget_value({"9:text": {"inputs": {"value": "x"}}}, "9", None) is promoted.UNSET

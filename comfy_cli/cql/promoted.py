@@ -2186,10 +2186,11 @@ def flush_proxy_migration(
     return report
 
 
-def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
-    """Every concrete ``(interior node path, widget)`` a promoted input feeds —
-    all of its boundary links, through nested instances. A repaired primitive
-    fan-out has several; :func:`deepest_source` reports only the first."""
+def boundary_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
+    """Every concrete ``(interior node path, input)`` a promoted input feeds —
+    widgets and plain sockets alike, all of its boundary links, through nested
+    instances. A repaired primitive fan-out has several; :func:`deepest_source`
+    reports only the first."""
     cache = getattr(defs, "promotion_boundaries", None)
     cache_key = (id(sg), pi.index)
     raw_inputs = sg.get("inputs")
@@ -2368,15 +2369,20 @@ def _boundary_targets(
                     )
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
+            # A socket without a widget marker (a switch's any-type input) is a
+            # target too: the frontend inlines the host value into whatever
+            # input the boundary link reaches (``ExecutableNodeDTO.resolveInput``).
             marker = entry.get("widget")
-            if marker:
-                _spend_traversal_budget(
-                    _output_budget,
-                    1,
-                    "promoted widget boundary traversal exceeded its safe limit",
-                )
-                widget = marker.get("name") if isinstance(marker, dict) else None
-                out.append(([tid], str(widget or entry.get("name"))))
+            widget = marker.get("name") if isinstance(marker, dict) else None
+            name = widget or entry.get("name")
+            if name is None:
+                continue
+            _spend_traversal_budget(
+                _output_budget,
+                1,
+                "promoted widget boundary traversal exceeded its safe limit",
+            )
+            out.append(([tid], str(name)))
     _memo[memo_key] = out
     frozen_dependencies = frozenset(dependencies)
     _dependency_memo[memo_key] = frozen_dependencies

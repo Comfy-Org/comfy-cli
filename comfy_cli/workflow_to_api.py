@@ -223,7 +223,9 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     default, so a post-migration save (host prompt filled in, interior
     ``caption`` still ``''``) would submit the wrong prompt. Precedence, as the
     frontend serializes it: a link feeding the instance input wins (already
-    reattached), else the host value when materialized, else the interior.
+    reattached), else the host value when materialized, else the interior
+    source widget's value. The chosen value goes to every interior input the
+    input feeds, plain sockets included (``ExecutableNodeDTO.resolveInput``).
     Inner instances are visited first so an outer host wins over an inner one;
     an inner input promoted further (linked from ``-10``) is left to the outer.
     """
@@ -289,24 +291,32 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
-                continue
-            # Every interior widget the input feeds — a repaired primitive
-            # fan-out links one host value into several targets.
-            targets = _promoted.boundary_widget_targets(sg, pi, subgraph_defs)
+                # No host value: the frontend seeds the host widget from its
+                # interior source widget and inlines that value into every
+                # target, as emitted above (already wrapped).
+                value = _source_widget_value(api_prompt, prefix, _promoted.deepest_source(sg, pi, subgraph_defs))
+                if value is _promoted.UNSET:
+                    continue
+            else:
+                # Same wrapping every widget value gets, so a two-item list
+                # host value is never read back as a ``[node, slot]`` link.
+                value = _wrap_widget_value(value)
+            # Every interior input the boundary link feeds, widget or socket
+            # (the frontend inlines the host value into both) — a repaired
+            # primitive fan-out links one host value into several targets.
+            targets = _promoted.boundary_targets(sg, pi, subgraph_defs)
             if len(targets) > visit_budget[0]:
                 raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
             visit_budget[0] -= len(targets)
-            for path, widget in targets:
+            for path, input_name in targets:
                 entry = api_prompt.get(":".join([prefix, *path]))
                 if not isinstance(entry, dict):
                     continue
                 inputs = entry.setdefault("inputs", {})
-                current = inputs.get(widget)
+                current = inputs.get(input_name)
                 if isinstance(current, list) and len(current) == 2:
                     continue  # wired from inside the definition: the link wins
-                # Same wrapping every widget value gets, so a two-item list
-                # host value is never read back as a ``[node, slot]`` link.
-                inputs[widget] = _wrap_widget_value(value)
+                inputs[input_name] = value
 
     for node in workflow.get("nodes") or []:
         if not isinstance(node, dict):
@@ -315,6 +325,21 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         sg = subgraph_defs.get(str(node_type)) if is_subgraph_uuid(node_type) else None
         if sg is not None:
             visit(node, sg, workflow, str(node.get("id")), 0)
+
+
+def _source_widget_value(api_prompt: dict, prefix: str, source: tuple[list[str], str] | None) -> Any:
+    """The emitted value of a promoted input's interior source widget, or
+    ``UNSET`` when that node was not emitted."""
+    from comfy_cli.cql import promoted as _promoted
+
+    if source is None:
+        return _promoted.UNSET
+    path, widget = source
+    entry = api_prompt.get(":".join([prefix, *path]))
+    inputs = entry.get("inputs") if isinstance(entry, dict) else None
+    if not isinstance(inputs, dict) or widget not in inputs:
+        return _promoted.UNSET
+    return inputs[widget]
 
 
 def _has_group_nodes(workflow: dict) -> bool:
