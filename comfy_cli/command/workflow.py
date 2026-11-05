@@ -2752,3 +2752,11 @@ app.command("capture", help="Project a workflow into a reusable recipe (the op-b
 app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(
     _wedit.foreach_cmd
 )
+
+# `comfy workflow check --where cloud`: can Comfy Cloud run this workflow as it is?
+from comfy_cli.command import workflow_check as _wcheck  # noqa: E402
+
+app.command(
+    "check",
+    help="Check whether Comfy Cloud runs a workflow as it is, with model remaps, or only with a build.",
+)(_wcheck.check_cmd)
