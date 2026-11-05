@@ -1930,7 +1930,7 @@ class TestUploadVerifies:
 
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(cloud.urls[1]).query)
         assert query == {
-            "include_tags": ["models", "loras"],
+            "include_tags": ["models,loras"],
             "name_contains": ["style.safetensors"],
             "include_public": ["true"],
             "limit": ["500"],

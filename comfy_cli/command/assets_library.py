@@ -752,8 +752,8 @@ def _models_named(renderer, target, name: str, folder: str, sign_in) -> list[dic
         ("assets",),
         sign_in=sign_in,
         query=[
-            ("include_tags", "models"),
-            ("include_tags", folder),
+            # Comma-separated: Comfy Cloud refuses a repeated include_tags with a 400.
+            ("include_tags", f"models,{folder}"),
             ("name_contains", name),
             ("include_public", "true"),
             ("limit", _LOOKUP_LIMIT),
