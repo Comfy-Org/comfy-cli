@@ -77,6 +77,7 @@ def test_dry_run_is_signed_out_and_zero_http(workspace: Path, monkeypatch: pytes
     assert data["dry_run"] is True
     assert data["upload_count"] == 2
     assert data["upload_bytes"] == len(b"MODEL") + node_size
+    assert data["public_pins_checked"] == 0
     assert path.read_bytes() == before
 
 
@@ -374,7 +375,28 @@ def test_a_dry_run_asks_the_builder_only_to_place_its_public_pins(
     assert [(node["id"], node["version"]) for node in sent] == [("registry-node", "1.0.0")]
     data = envelope(result)["data"]
     assert (data["dry_run"], data["upload_count"], data["uploaded"]) == (True, 2, 0)
+    assert data["public_pins_checked"] == 1
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
     assert path.read_bytes() == before
+
+
+def test_a_real_push_reports_how_many_public_pins_the_builder_placed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry run and a push carry the same count, so a script reading either can
+    tell a checked pin set from a spec that had none to check."""
+    # Given
+    write_spec(workspace, models=[], nodes=[local_node(), _REGISTRY_PIN])
+    _install_client(monkeypatch, RecordingBuilder())
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert (data["dry_run"], data["public_pins_checked"]) == (False, 1)
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
 
 
 def test_a_dry_run_whose_pin_lookup_fails_exits_rather_than_passing(

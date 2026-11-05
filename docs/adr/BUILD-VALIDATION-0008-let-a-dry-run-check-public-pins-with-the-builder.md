@@ -60,6 +60,11 @@ for the pin check:
   identities, and refuse with the same `build_registry_pin_missing` code,
   message and hint. A spec the dry run passes on this check is one the push
   passes on this check, against the same builder state.
+- **The payload says the check ran.** Push and dry run both put
+  `public_pins_checked` in the `--json` payload: how many public pins the
+  builder placed, and 0 when the spec has none and the builder was not asked.
+  A script or agent reads it to tell a checked pin set from one with nothing
+  to check, which the exit code alone cannot say.
 - **Failure is terminal.** If the lookup itself fails (network, 5xx, refused
   credential, or a response body that times out or drops mid-read), the dry
   run exits through `_builder_call` with the same error a push would get. It

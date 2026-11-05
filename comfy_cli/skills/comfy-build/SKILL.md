@@ -119,7 +119,8 @@ computes every upload locally and makes one read: it asks the builder to place
 each public pack, and refuses with `build_registry_pin_missing` exactly as `push`
 would, so a pin the push cannot save fails here, before you disclose the plan.
 A spec that pins a public pack therefore needs sign-in for the dry run; one whose
-packs are all local sends nothing. Read what it plans, decide the pins, run the
+packs are all local sends nothing. The `--json` payload's `public_pins_checked`
+says how many public pins the builder placed (0: there were none to check). Read what it plans, decide the pins, run the
 conflict prediction in `comfy-build-pins`, disclose, get a yes. Only then:
 
 ```shell

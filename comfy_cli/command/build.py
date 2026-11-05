@@ -2105,6 +2105,7 @@ def push_cmd(
             public_nodes = public_node_projection(preparation.definition)
             if public_nodes:
                 _require_public_pins(renderer, _builder_client(renderer, builder_url), public_nodes, paths.spec_file)
+            payload["public_pins_checked"] = len(public_nodes)
             # The envelope is the whole answer and prints nothing in pretty mode, so a
             # person gets the real push's opening line and word that nothing moved.
             # "Already held" is what the spec records; the builder, never asked,
@@ -2139,6 +2140,7 @@ def push_cmd(
         public_nodes = public_node_projection(preparation.definition)
         if public_nodes:
             _require_public_pins(renderer, client, public_nodes, paths.spec_file)
+        payload["public_pins_checked"] = len(public_nodes)
 
         # Said before the first byte moves, and said even when nothing will: a
         # multi-GB upload is otherwise silent until it ends, and "0 files" is
