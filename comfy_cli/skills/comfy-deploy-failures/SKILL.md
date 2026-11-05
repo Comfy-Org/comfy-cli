@@ -55,6 +55,7 @@ argument you pass.
 | `deploy_update_replaced` | A watched `up`, `promote` or `rollback` was replaced by a newer update; `details.replacing_release_id` names its release | Follow it with `comfy deploy status --deployment <id>`, or end it with `comfy deploy cancel --deployment <id>` |
 | `deploy_updates_unavailable` | `promote`, `rollback`, `history`, `cancel` or `events --release` on a deployment with no `revision`, or `cancel` against a deploy service too old for it | `promote` or `rollback`: `up --create` on the release instead. `history`: read `events`. `cancel`: wait for the update to land or fail. `events`: drop `--release`; those events do not say which release made them |
 | `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`, or after a move `comfy deploy show --deployment <id>` until it shows no `pendingUpdate`; do not redeploy |
+| `watch_auth_lost` | A watch's read was refused with a 401 despite session recovery, and a refreshable sign-in remains stored (exit 75); the deployment may still be coming up | Reattach as for `deploy_watch_lost` before considering a new sign-in; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow
