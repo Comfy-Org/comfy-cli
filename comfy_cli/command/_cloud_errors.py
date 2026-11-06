@@ -21,6 +21,7 @@ with their own vocabulary.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 
 import typer
@@ -29,6 +30,10 @@ import typer
 # env-configurable, so a hostile or misbehaving endpoint must not be able to
 # OOM the CLI with an unbounded error response.
 _MAX_ERROR_BODY_BYTES = 1000
+# Cap on the 403 body read for ``insufficient_scope`` detection. A JSON body
+# cut at ``_MAX_ERROR_BODY_BYTES`` no longer parses, so detection reads more
+# than ``details.body`` shows — but still a bounded amount.
+_MAX_SCOPE_BODY_BYTES = 64 * 1024
 
 # A 401 is unambiguously an authentication failure. A 403 is not — it is also
 # how the server denies a forbidden resource, a quota, or an already-finished
@@ -38,6 +43,134 @@ _UNAUTHORIZED_HINTS = {
     401: "re-run `comfy cloud login`",
     403: "re-run `comfy cloud login` if your session expired; otherwise check `details.body` — the server may be denying access to this resource",
 }
+
+
+_INSUFFICIENT_SCOPE_MESSAGE = (
+    "Your Comfy Cloud login predates a permission change; run `comfy cloud login` to re-authorize"
+)
+# One piece of a WWW-Authenticate field (RFC 7235 §2.1): an auth-param
+# ``name = "quoted"`` / ``name = token``, or else a bare token, which starts a
+# new challenge. Quoted values are consumed whole, so the scan never reads
+# inside one such as ``error_description``.
+_CHALLENGE_PART = re.compile(
+    r"([!#$%&'*+\-.^_`|~0-9A-Za-z]+)"
+    r'(?P<param>\s*=\s*(?:"(?P<quoted>(?:[^"\\]|\\.)*)"|(?P<token>[^\s,"]*)))?'
+)
+# The plain-text body the scope middleware writes: ``insufficient_scope`` or
+# ``insufficient_scope: <scope>`` and nothing else. Anchored at both ends so a
+# body that merely mentions the token in prose is not mistaken for one.
+_BODY_SCOPE = re.compile(r"\s*insufficient_scope(?:\s*:\s*(?P<scope>[^\r\n]*?))?\s*\Z")
+# Structured fields a JSON error body may carry the error in.
+_BODY_SCOPE_FIELDS = ("message", "error", "code", "type")
+# ``required_scope`` comes from the server, and ``base_url`` is configurable,
+# so bound it and keep only RFC 6749 §3.3 scope-token characters.
+_SCOPE_TOKEN = re.compile(r"[\x21\x23-\x5B\x5D-\x7E]+")
+_MAX_REQUIRED_SCOPE_CHARS = 200
+
+
+def _www_authenticate_values(headers) -> list[str]:
+    """Every ``WWW-Authenticate`` value as ``str``; ``[]`` on any odd headers object.
+
+    ``headers`` may also be the values themselves (``HTTPError.www_authenticate``).
+    """
+    if headers is None:
+        return []
+    if isinstance(headers, (list, tuple)):
+        return [v for v in headers if isinstance(v, str) and v]
+    try:
+        get_all = getattr(headers, "get_all", None)
+        values = get_all("WWW-Authenticate") if callable(get_all) else [headers.get("WWW-Authenticate")]
+    except Exception:  # noqa: BLE001
+        return []
+    return [v for v in (values or []) if isinstance(v, str) and v]
+
+
+def _challenges(value: str) -> list[tuple[str, dict[str, str]]]:
+    """Split one ``WWW-Authenticate`` value into ``(scheme, params)`` challenges."""
+    challenges: list[tuple[str, dict[str, str]]] = []
+    for m in _CHALLENGE_PART.finditer(value):
+        if m.group("param") is None:
+            challenges.append((m.group(1).lower(), {}))
+        elif challenges:
+            raw = m.group("quoted")
+            param = re.sub(r"\\(.)", r"\1", raw) if raw is not None else m.group("token")
+            challenges[-1][1].setdefault(m.group(1).lower(), param)
+    return challenges
+
+
+def _bearer_scope_challenge(values: list[str]) -> tuple[bool, str | None]:
+    """Whether a Bearer challenge says ``error=insufficient_scope``, and the ``scope`` that challenge names."""
+    for value in values:
+        for scheme, params in _challenges(value):
+            if scheme == "bearer" and params.get("error") == "insufficient_scope":
+                return True, params.get("scope")
+    return False, None
+
+
+def _body_scope_error(body: str) -> tuple[bool, str | None]:
+    """Whether the body is an ``insufficient_scope`` error, and the scope it names.
+
+    A JSON body is judged by its structured fields only; a plain body must be
+    exactly the documented ``insufficient_scope[: <scope>]`` form.
+    """
+    candidates = [body]
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        candidates = [parsed[k] for k in _BODY_SCOPE_FIELDS if isinstance(parsed.get(k), str)]
+        nested = parsed.get("error")
+        if isinstance(nested, dict):
+            candidates += [nested[k] for k in _BODY_SCOPE_FIELDS if isinstance(nested.get(k), str)]
+    elif parsed is not None:
+        candidates = [parsed] if isinstance(parsed, str) else []
+    for text in candidates:
+        m = _BODY_SCOPE.match(text)
+        if m:
+            return True, m.group("scope")
+    return False, None
+
+
+def _clean_scope(scope: str | None) -> str | None:
+    if not scope:
+        return None
+    tokens = _SCOPE_TOKEN.findall(scope)
+    if not tokens or " ".join(tokens) != " ".join(scope.split()):
+        return None
+    cleaned = " ".join(tokens)
+    return cleaned if len(cleaned) <= _MAX_REQUIRED_SCOPE_CHARS else None
+
+
+def insufficient_scope_error(status: int, body: str | None, headers=None, details: dict | None = None) -> dict | None:
+    """The envelope fields for a 403 ``insufficient_scope``, or ``None`` for any other response.
+
+    Comfy Cloud answers a token whose grant lacks a route's scope with
+    ``403`` + ``WWW-Authenticate: Bearer error="insufficient_scope", scope="…"``
+    (RFC 6750 §3.1) and an ``insufficient_scope: <scope>`` body. Refreshing
+    cannot widen a grant, so the only fix is a new authorize flow — the
+    envelope says so instead of the generic 403 hint. It never opens a
+    browser: the caller may be non-interactive.
+    """
+    if status != 403:
+        return None
+    header_hit, header_scope = _bearer_scope_challenge(_www_authenticate_values(headers))
+    body_hit, body_scope = _body_scope_error(body if isinstance(body, str) else "")
+    if not header_hit and not body_hit:
+        return None
+    out_details = {**(details or {}), "status": 403, "reason": "insufficient_scope"}
+    required_scope = _clean_scope(header_scope) or _clean_scope(body_scope)
+    if required_scope:
+        out_details["required_scope"] = required_scope
+    return {
+        "code": "cloud_unauthorized",
+        "message": _INSUFFICIENT_SCOPE_MESSAGE,
+        "hint": (
+            "run `comfy cloud login` to re-authorize; refreshing the existing session cannot add the permission."
+            " If you set COMFY_CLOUD_SCOPES or the `cloud_scopes` config, add the required scope to it first"
+        ),
+        "details": out_details,
+    }
 
 
 def _read_error_body(e: urllib.error.HTTPError) -> str:
@@ -51,6 +184,21 @@ def _read_error_body(e: urllib.error.HTTPError) -> str:
         return (e.read(_MAX_ERROR_BODY_BYTES) or b"").decode("utf-8", "replace")
     except Exception:
         return ""
+
+
+def read_unauthorized_body(e: urllib.error.HTTPError) -> tuple[str, str]:
+    """``(detection_body, display_body)`` for a 401/403, from one bounded read.
+
+    Scope detection gets up to ``_MAX_SCOPE_BODY_BYTES`` so a structured
+    ``insufficient_scope`` field past the display cap is still seen; only the
+    ``details.body`` slice is capped at ``_MAX_ERROR_BODY_BYTES``. Read
+    failures degrade to empty bodies, as in ``_read_error_body``.
+    """
+    try:
+        raw = e.read(_MAX_SCOPE_BODY_BYTES) or b""
+    except Exception:
+        raw = b""
+    return raw.decode("utf-8", "replace"), raw[:_MAX_ERROR_BODY_BYTES].decode("utf-8", "replace")
 
 
 def retry_after_from_headers(headers) -> float | None:
@@ -144,6 +292,8 @@ def emit_status_error(
     hint: str | None,
     details: dict,
     rate_limited_next_step: str = _DEFAULT_RATE_LIMITED_NEXT_STEP,
+    scope_body: str | None = None,
+    www_authenticate: tuple[str, ...] | str | None = None,
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
@@ -160,7 +310,18 @@ def emit_status_error(
     ``rate_limited_next_step`` finishes the 429 hint for a caller that knows
     more (``run``'s submit: check the job list before re-running; its poll: the
     job exists, so follow it rather than re-running).
+    ``scope_body`` / ``www_authenticate`` let a caller whose ``details`` omit
+    the body (``run``'s poll) still have a 403 ``insufficient_scope`` detected.
     """
+    scope_error = insufficient_scope_error(
+        status,
+        scope_body if scope_body is not None else details.get("body"),
+        (www_authenticate,) if isinstance(www_authenticate, str) else www_authenticate,
+        details=details,
+    )
+    if scope_error is not None:
+        renderer.error(**scope_error)
+        return
     if status == 402:
         renderer.error(**payment_required_error(operation, 402, *_typed_error(details), details))
         return
@@ -241,12 +402,18 @@ def handle_cloud_http_error(
                 details={**id_detail, "operation": operation, **(not_found_details or {})},
             )
         elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint=_UNAUTHORIZED_HINTS[e.code],
-                details={"status": e.code, "body": _read_error_body(e), "operation": operation, **id_detail},
-            )
+            scope_body, body = read_unauthorized_body(e)
+            details = {"status": e.code, "body": body, "operation": operation, **id_detail}
+            scope_error = insufficient_scope_error(e.code, scope_body, getattr(e, "headers", None), details=details)
+            if scope_error is not None:
+                renderer.error(**scope_error)
+            else:
+                renderer.error(
+                    code="cloud_unauthorized",
+                    message=f"HTTP {e.code} during {operation}",
+                    hint=_UNAUTHORIZED_HINTS[e.code],
+                    details=details,
+                )
         else:
             emit_status_error(
                 renderer,
