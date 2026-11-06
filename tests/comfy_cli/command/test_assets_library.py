@@ -2631,8 +2631,9 @@ class TestResumableRefusals:
     def test_certificate_failure_stops_at_once_without_session_credentials(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait, quote, saved
     ):
-        import requests
         from urllib.parse import urlsplit
+
+        import requests
 
         args = [str(model_file), "--type", "loras"]
         if saved:
