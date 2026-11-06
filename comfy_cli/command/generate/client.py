@@ -49,7 +49,7 @@ def resolve_api_key(explicit: str | None = None) -> str:
         401,
         "",
         "Not signed in. Run `comfy cloud login`, or pass --api-key / set "
-        "COMFY_API_KEY (get one at https://platform.comfy.org/api-keys).",
+        "COMFY_API_KEY (get one at https://platform.comfy.org/profile/api-keys?onboarding=router).",
     )
 
 
