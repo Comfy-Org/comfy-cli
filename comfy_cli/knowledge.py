@@ -150,8 +150,9 @@ class Bundle:
     # :func:`_resolve_tokens`.
     capability_tokens: tuple[tuple[tuple[tuple[str, int], ...], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
-    # Lowercase lookup keys whose raw spelling is eligible for suggestions.
-    # Kept separate because lower() can hide non-ASCII alphanumerics (e.g. K).
+    # Raw lookup spellings whose final resolution has the same target and whose
+    # spelling is eligible for suggestions. Kept raw because lower() can hide
+    # non-ASCII characters (e.g. K) and merge case-distinct canonical ids.
     candidate_aliases: dict[str, str] = field(default_factory=dict)
 
 
@@ -335,7 +336,10 @@ def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[
 
 def resolve_id(bundle: Bundle, query: str) -> str | None:
     """Model id for an alias or id; ``None`` unless that id has a row."""
-    q = query.strip().lower()
+    raw = query.strip()
+    if raw in bundle.models:
+        return raw
+    q = raw.lower()
     model_id = bundle.aliases.get(q)
     if model_id is None:
         model_id = bundle.normalized_aliases.get(_normalize(q))
@@ -348,9 +352,9 @@ def resolve(bundle: Bundle, query: str) -> dict | None:
 
 
 def _candidate_tokens(value: str) -> list[str]:
-    # Suggestions support ASCII names only. Never discard a Unicode qualifier
-    # or digit, or normalize it into a different family/version spelling.
-    if any(char.isalnum() and not char.isascii() for char in value):
+    # Suggestions support ASCII names only. Never discard a Unicode qualifier,
+    # combining mark or digit, or normalize it into another family/version.
+    if not value.isascii():
         return []
     return re.findall(r"[a-z]+|[0-9]+", value.lower())
 
@@ -690,17 +694,20 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     models = {mid: row for mid, row in data["models"].items() if isinstance(mid, str) and isinstance(row, dict)}
 
     # Exact ids first so no alias can shadow a model's own id; then the compiled
-    # alias map, which wins over row-level aliases.
+    # alias map, which wins over row-level aliases. Case-distinct ids have no
+    # folded owner: exact spelling is the only safe way to choose between them.
     aliases: dict[str, str] = {}
-    candidate_aliases: dict[str, str] = {}
+    candidate_sources: list[tuple[str, str]] = []
+    id_targets: dict[str, set[str]] = defaultdict(set)
+    for mid in models:
+        id_targets[mid.lower()].add(mid)
+    ambiguous_id_keys = {key for key, targets in id_targets.items() if len(targets) > 1}
 
     def index_alias(alias: str, mid: str) -> None:
+        candidate_sources.append((alias, mid))
         key = alias.lower()
-        owner = aliases.setdefault(key, mid)
-        # Check before casing loses information, and retain resolution precedence.
-        # A valid ASCII spelling may still support the same winning target.
-        if owner == mid and _candidate_tokens(alias):
-            candidate_aliases.setdefault(key, mid)
+        if key not in ambiguous_id_keys:
+            aliases.setdefault(key, mid)
 
     for mid in models:
         index_alias(mid, mid)
@@ -778,6 +785,23 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         if isinstance(desc := cap.get("description"), str)
     }
 
+    normalized_aliases = _normalized_map(aliases, ids=models)
+
+    def indexed_target(alias: str) -> str | None:
+        if alias in models:
+            return alias
+        model_id = aliases.get(alias.lower())
+        if model_id is None:
+            model_id = normalized_aliases.get(_normalize(alias))
+        return model_id
+
+    candidate_aliases: dict[str, str] = {}
+    for alias, mid in candidate_sources:
+        # Eligibility is checked on the raw spelling before lowercasing, and a
+        # candidate source must observe the same precedence as resolve_id.
+        if _candidate_tokens(alias) and indexed_target(alias) == mid:
+            candidate_aliases.setdefault(alias, mid)
+
     version = manifest.get("version") if manifest is not None else None
     compiled_at = manifest.get("compiled_at") if manifest is not None else None
     return Bundle(
@@ -796,7 +820,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         nodes=nodes,
         model_capabilities=model_capabilities,
         custom_node_authoring=custom_node_authoring,
-        normalized_aliases=_normalized_map(aliases, ids=models),
+        normalized_aliases=normalized_aliases,
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
         capability_tokens=capability_tokens,
         capability_context=capability_context,
