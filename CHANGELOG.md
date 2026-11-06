@@ -15,6 +15,16 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- Both `comfy assets library upload` and `comfy model upload` request resumable
+  model uploads up to 25 GB. Dropped connections retry from storage's held
+  bytes, and running the command again within seven days continues a saved
+  upload for the same file, account, workspace and folder. Older servers keep
+  the single-PUT upload. File approval, block checks and the final stored-hash
+  check still apply. The final storage check no longer stops after fifteen
+  minutes.
+
 ### Added
 
 - The `comfy-run-on-cloud` agent skill, installed with the other bundled

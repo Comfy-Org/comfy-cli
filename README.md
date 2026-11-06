@@ -444,7 +444,9 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
   `comfy model upload <FILE> --type <FOLDER> --where cloud ?[--dry-run] ?[--workspace <ID>] ?[--expected-sha256 <SHA256>] ?[--yes]`
 
-  - Puts one local `.safetensors` file (up to 2 GB) into your Comfy Cloud model library, so a workflow run on Comfy Cloud can load it. `--type` is the model folder, e.g. `loras` or `checkpoints`; `comfy model list-folders --where cloud` lists them.
+  - Puts one local `.safetensors` file (up to 25 GB on servers with resumable uploads) into your Comfy Cloud model library, so a workflow run on Comfy Cloud can load it. `--type` is the model folder, e.g. `loras` or `checkpoints`; `comfy model list-folders --where cloud` lists them.
+  - Uploads use 64 MiB pieces when the server supports them. A dropped connection retries from the bytes storage holds. If the command stops, run it again with the same file, model folder, account and workspace within seven days to continue. The CLI hashes the file again before resuming. Older servers keep using one PUT and enforce their own size limit. Upload sessions are credentials, kept in a private `model-uploads` directory under the CLI config folder and removed after completion.
+  - After 30 minutes without progress, the command exits with the held byte count. The final check on Comfy Cloud can take longer than fifteen minutes; the command waits until it ends.
   - Only the file you name is uploaded, and only the bytes hashed before the upload: each block is checked against its hash before it is sent. The upload succeeds only once Comfy Cloud's hash of the stored file matches your file's.
   - `--dry-run` uploads nothing. It reports the file's `sha256` and whether Comfy Cloud already has the file.
   - The output's `loader_path` is the value a loader node takes for the model on Comfy Cloud, as Comfy Cloud's record of the model gives it. It is null for a dry run that would upload, or when Comfy Cloud gives none.

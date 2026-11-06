@@ -21,9 +21,9 @@ app = typer.Typer()
 
 @app.command(
     "upload",
-    help="Upload one named .safetensors model file (up to 2 GB) to your Comfy Cloud model library, so a "
+    help="Upload one named .safetensors model file (up to 25 GB) to your Comfy Cloud model library, so a "
     "workflow run on Comfy Cloud can load it. Uploads only the file named; succeeds only once Comfy Cloud's "
-    "hash of the stored file matches this file's. Run with --dry-run first to see its sha256 and whether "
+    "hash of the stored file matches this file's. Dropped uploads resume when you run the same command again. Run with --dry-run first to see its sha256 and whether "
     "Comfy Cloud already has it.",
 )
 @tracking.track_command("model")
