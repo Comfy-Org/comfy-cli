@@ -365,6 +365,23 @@ class TestResolveWorkflowModels:
 
         assert workflow == before
 
+    def test_saved_layout_failure_is_a_structured_model_resolution_error(self, graph, monkeypatch):
+        from comfy_cli.cql.engine import SavedWidgetLayoutError
+
+        workflow = _template()
+        before = copy.deepcopy(workflow)
+
+        def stale_layout(*_args, **_kwargs):
+            raise SavedWidgetLayoutError("saved widget is absent from the current catalog")
+
+        monkeypatch.setattr("comfy_cli.model_variants._model_widgets", stale_layout)
+
+        with pytest.raises(ModelVariantResolutionError, match="absent from the current catalog") as exc:
+            resolve_workflow_models(workflow, graph)
+
+        assert isinstance(exc.value.__cause__, SavedWidgetLayoutError)
+        assert workflow == before
+
     def test_promotion_budget_failure_happens_before_model_mutation(self, graph, monkeypatch):
         definitions: dict[str, dict] = {}
         depth = 18

@@ -7,6 +7,7 @@ cover everything that doesn't require a browser.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
 import os
 import threading
@@ -702,7 +703,8 @@ class TestConcurrentRefresh:
 
     # (b) Double-check: if a peer already rotated the token between our pre-lock
     # read and the post-lock re-read, we adopt it and do NOT refresh again.
-    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch):
+    @pytest.mark.parametrize("peer_expiry", [None, 1, 4102444800], ids=["unknown-expiry", "expired", "known-unexpired"])
+    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch, peer_expiry):
         self._persist_expired(refresh_token="RT0")
 
         # Simulate a peer that rotated RT0 → RT1 while we waited for the lock:
@@ -715,7 +717,7 @@ class TestConcurrentRefresh:
             access_token="PEER_NEW",
             refresh_token="RT1",
             token_type="Bearer",
-            expires_at=int(time.time()) + 3600,
+            expires_at=peer_expiry,
             saved_at="2026-01-01T00:00:02+00:00",
         )
         reads = [self._stale(), fresh_peer]
@@ -725,6 +727,65 @@ class TestConcurrentRefresh:
         result = oauth.ensure_fresh_session()
         assert result.refresh_token == "RT1"
         assert result.access_token == "PEER_NEW"
+
+    def test_a_rejected_older_token_does_not_adopt_an_already_expired_peer_token(self, persisted, monkeypatch):
+        from comfy_cli.credentials import refreshed_access_token
+
+        self._persist_expired()
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **_: self._token_set(access="NEW", refresh="RT1"))
+
+        assert refreshed_access_token("BEFORE_OLD") == "NEW"
+        assert auth_store.get_cloud_session().refresh_token == "RT1"
+
+    @pytest.mark.parametrize(
+        ("peer_access", "peer_expiry"),
+        [("PEER_UNUSABLE", None), ("PEER_UNUSABLE", 1), ("REJECTED_OLDER", 4102444800)],
+        ids=["unknown-expiry", "expired", "same-rejected-token"],
+    )
+    @pytest.mark.parametrize("peer_timing", ["already-stored", "after-first-read"])
+    def test_a_peer_token_that_cannot_be_retried_uses_its_available_refresh(
+        self, persisted, monkeypatch, peer_timing, peer_access, peer_expiry
+    ):
+        from comfy_cli.credentials import refreshed_access_token
+
+        def save(access, refresh, expiry):
+            return auth_store.save_cloud_session(
+                base_url="https://c",
+                resource="https://c/api",
+                client_id="cid",
+                scope="s",
+                access_token=access,
+                refresh_token=refresh,
+                token_type="Bearer",
+                expires_at=expiry,
+            )
+
+        save("REJECTED_OLDER", "RT0", 4102444800)
+        if peer_timing == "already-stored":
+            save(peer_access, "RT1", peer_expiry)
+        else:
+            real_read = auth_store.get_cloud_session
+
+            def read_then_peer_rotates():
+                session = real_read()
+                if session.refresh_token == "RT0":
+                    save(peer_access, "RT1", peer_expiry)
+                return session
+
+            monkeypatch.setattr(auth_store, "get_cloud_session", read_then_peer_rotates)
+        refreshes = []
+
+        def refresh(**kwargs):
+            refreshes.append(kwargs["refresh_token"])
+            return self._token_set(access="NEW", refresh="RT2")
+
+        monkeypatch.setattr(oauth, "refresh_tokens", refresh)
+
+        assert refreshed_access_token("REJECTED_OLDER") == "NEW"
+        stored = auth_store.get_cloud_session()
+        assert stored.access_token == "NEW"
+        assert stored.refresh_token == "RT2"
+        assert refreshes == ["RT1"]
 
     def _stale(self) -> auth_store.CloudSession:
         return auth_store.CloudSession(
@@ -1171,6 +1232,52 @@ class TestConcurrentRefresh:
         # The spent RT0 is gone — not re-persisted.
         assert result.refresh_token is None
         assert auth_store.get_cloud_session().refresh_token is None
+
+    @staticmethod
+    def _fatal(**kw):
+        raise oauth.OAuthRefreshError(
+            "refresh failed: HTTP 400", details={"status": 400, "body": '{"error":"invalid_grant"}'}
+        )
+
+    @pytest.mark.parametrize("force", [False, True], ids=["proactive", "forced"])
+    def test_a_session_the_caller_does_not_expect_is_neither_refreshed_nor_cleared(self, persisted, monkeypatch, force):
+        # Given: the store holds another login than the one the caller is bound to
+        self._persist_expired(refresh_token="RT-other")
+        monkeypatch.setattr(oauth, "refresh_tokens", self._fatal)
+
+        # When / Then: the mismatch is reported and the store is untouched
+        with pytest.raises(oauth.SessionReplaced) as replaced:
+            oauth.ensure_fresh_session(force=force, expect=lambda s: s.refresh_token == "RT-mine")
+        assert replaced.value.session.refresh_token == "RT-other"
+        assert auth_store.get_cloud_session().refresh_token == "RT-other"
+
+    def test_the_expected_session_is_checked_again_under_the_lock(self, persisted, monkeypatch):
+        # Given: the first read sees the caller's login, the locked re-read another
+        # one that happens to carry the same refresh token, so only the account
+        # check (not the rotation double-check) can stop the refresh
+        mine = self._stale()
+        other = dataclasses.replace(mine, access_token="OTHER")
+        reads = [mine, other]
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: reads.pop(0) if reads else other)
+        monkeypatch.setattr(auth_store, "clear_cloud_session", lambda: pytest.fail("must not clear another login"))
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: pytest.fail("must not refresh another login"))
+
+        # When / Then
+        with pytest.raises(oauth.SessionReplaced) as replaced:
+            oauth.ensure_fresh_session(force=True, expect=lambda s: s.access_token == "OLD")
+        assert replaced.value.session.access_token == "OTHER"
+
+    def test_the_expected_session_is_still_rotated(self, persisted, monkeypatch):
+        # Given: the stored login is the one the caller expects
+        self._persist_expired(refresh_token="RT0")
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: self._token_set(access="NEW", refresh="RT1"))
+
+        # When
+        result = oauth.ensure_fresh_session(expect=lambda s: s.base_url == "https://c")
+
+        # Then
+        assert result.access_token == "NEW"
+        assert auth_store.get_cloud_session().refresh_token == "RT1"
 
 
 class TestAtomicPersist:

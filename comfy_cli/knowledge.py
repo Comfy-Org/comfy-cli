@@ -56,6 +56,11 @@ MAX_LIST_ITEMS = 8
 # under that.
 MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
+MAX_DISCOVERY_ROUTES = 8
+MAX_DISCOVERY_ITEMS = 8
+MAX_DISCOVERY_TEXT_CHARS = 1024
+MAX_DISCOVERY_ID_CHARS = 256
+MAX_DISCOVERY_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
 MAX_AUTHORING_SLICE_BYTES = 8192
@@ -145,6 +150,9 @@ class Bundle:
     # :func:`_resolve_tokens`.
     capability_tokens: tuple[tuple[tuple[tuple[str, int], ...], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Lowercase lookup keys whose raw spelling is eligible for suggestions.
+    # Kept separate because lower() can hide non-ASCII alphanumerics (e.g. K).
+    candidate_aliases: dict[str, str] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -337,6 +345,40 @@ def resolve_id(bundle: Bundle, query: str) -> str | None:
 def resolve(bundle: Bundle, query: str) -> dict | None:
     model_id = resolve_id(bundle, query)
     return bundle.models[model_id] if model_id is not None else None
+
+
+def _candidate_tokens(value: str) -> list[str]:
+    # Suggestions support ASCII names only. Never discard a Unicode qualifier
+    # or digit, or normalize it into a different family/version spelling.
+    if any(char.isalnum() and not char.isascii() for char in value):
+        return []
+    return re.findall(r"[a-z]+|[0-9]+", value.lower())
+
+
+def model_candidates(bundle: Bundle, query: str) -> list[str]:
+    """At most five canonical ids for an incomplete family/version name.
+
+    Suggestions only: even one candidate requires the caller to confirm the
+    model. Match the family word exactly, preserve every numeric component,
+    and allow omitted words, not substituted words or reordered tokens.
+    """
+    if len(query) > MAX_QUERY_CHARS:
+        return []
+    parts = _candidate_tokens(query)
+    numbers = [part for part in parts if part.isdigit()]
+    if not parts or not parts[0].isalpha() or not numbers:
+        return []
+    candidates: set[str] = set()
+    for alias, model_id in bundle.candidate_aliases.items():
+        if model_id not in bundle.models:
+            continue
+        words = _candidate_tokens(alias)
+        if not words or words[0] != parts[0] or [word for word in words if word.isdigit()] != numbers:
+            continue
+        remaining = iter(words[1:])
+        if all(part in remaining for part in parts[1:]):
+            candidates.add(model_id)
+    return sorted(candidates)[:5]
 
 
 def pick(bundle: Bundle, capability: str) -> dict | None:
@@ -650,16 +692,26 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     # Exact ids first so no alias can shadow a model's own id; then the compiled
     # alias map, which wins over row-level aliases.
     aliases: dict[str, str] = {}
+    candidate_aliases: dict[str, str] = {}
+
+    def index_alias(alias: str, mid: str) -> None:
+        key = alias.lower()
+        owner = aliases.setdefault(key, mid)
+        # Check before casing loses information, and retain resolution precedence.
+        # A valid ASCII spelling may still support the same winning target.
+        if owner == mid and _candidate_tokens(alias):
+            candidate_aliases.setdefault(key, mid)
+
     for mid in models:
-        aliases.setdefault(mid.lower(), mid)
+        index_alias(mid, mid)
     compiled = data.get("aliases")
     if isinstance(compiled, dict):
         for alias, mid in compiled.items():
             if isinstance(alias, str) and isinstance(mid, str):
-                aliases.setdefault(alias.lower(), mid)
+                index_alias(alias, mid)
     for mid, row in models.items():
         for alias in _str_list(row.get("aliases")):
-            aliases.setdefault(alias.lower(), mid)
+            index_alias(alias, mid)
 
     caps_raw = data.get("capabilities")
     capabilities = (
@@ -739,6 +791,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         capabilities=capabilities,
         deprecations=deprecations,
         aliases=aliases,
+        candidate_aliases=candidate_aliases,
         templates=templates,
         nodes=nodes,
         model_capabilities=model_capabilities,
@@ -927,6 +980,60 @@ def pick_entry(bundle: Bundle, p: dict) -> dict:
     if best_for := [x for x in _str_list(row.get("best_for")) if x][:MAX_PICK_BEST_FOR]:
         entry["best_for"] = best_for
     return entry
+
+
+def discovery_entries(capability: dict) -> list[dict]:
+    """Project authored discovery routes into a bounded, explicitly unranked contract."""
+    raw_routes = capability.get("discovery")
+    if not isinstance(raw_routes, list):
+        return []
+    out: list[dict] = []
+    for raw in raw_routes[:MAX_DISCOVERY_ROUTES]:
+        if not isinstance(raw, dict):
+            continue
+        route = _text(raw.get("route"))
+        if not route:
+            continue
+        entry: dict[str, Any] = {"route": route[:MAX_DISCOVERY_ID_CHARS], "ranking": "unranked"}
+        if description := _text(raw.get("description")):
+            entry["description"] = description[:MAX_DISCOVERY_TEXT_CHARS]
+        templates = [x[:MAX_DISCOVERY_ID_CHARS] for x in _str_list(raw.get("templates"))[:MAX_DISCOVERY_ITEMS]]
+        if templates:
+            entry["templates"] = templates
+        nodes = []
+        raw_nodes = raw.get("nodes")
+        if isinstance(raw_nodes, list):
+            for raw_node in raw_nodes[:MAX_DISCOVERY_ITEMS]:
+                if not isinstance(raw_node, dict) or not (node_id := _text(raw_node.get("id"))):
+                    continue
+                node = {"id": node_id[:MAX_DISCOVERY_ID_CHARS]}
+                if description := _text(raw_node.get("description")):
+                    node["description"] = description[:MAX_DISCOVERY_TEXT_CHARS]
+                nodes.append(node)
+        if nodes:
+            entry["nodes"] = nodes
+        raw_requires = raw.get("requires")
+        if isinstance(raw_requires, dict):
+            requires: dict[str, Any] = {}
+            if comfyui := _text(raw_requires.get("comfyui")):
+                requires["comfyui"] = comfyui[:MAX_VERSION_CHARS]
+            distributions = [
+                x[:MAX_VERSION_CHARS] for x in _str_list(raw_requires.get("distributions"))[:MAX_DISCOVERY_ITEMS]
+            ]
+            if distributions:
+                requires["distributions"] = distributions
+            if requires:
+                entry["requires"] = requires
+        out.append(entry)
+    while out and len(json.dumps(out, ensure_ascii=False).encode()) > MAX_DISCOVERY_BYTES:
+        out.pop()
+    return out
+
+
+def discovery_failure_policy(capability: dict) -> str | None:
+    """Return the bounded authored reporting policy for a capability, when present."""
+    policy = _text(capability.get("failure_policy"))
+    return policy[:MAX_DISCOVERY_TEXT_CHARS] if policy else None
 
 
 def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:

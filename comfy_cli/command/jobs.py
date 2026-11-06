@@ -547,6 +547,30 @@ def _merge_jobs(state_rows: list[JobRow], server_rows: list[JobRow]) -> list[Job
     return sorted(by_id.values(), key=sort_key, reverse=False)
 
 
+# The five keys the LOCAL listing counts, and the only ones it counts.
+_LOCAL_LISTING_MEDIA_KEYS = ("images", "gifs", "videos", "audio", "files")
+
+
+def _media_item_count(outputs: Any) -> int:
+    """The local `jobs ls` output count for a `/history` record's outputs map.
+
+    `len()` of the five media keys, nulls included, every other key ignored.
+    Shared with `_nothing_to_show_note` rather than inlined at the one call
+    site, so the note that reconciles this number and the row that reports it
+    cannot drift onto two different rules.
+    """
+    if not isinstance(outputs, dict):
+        return 0
+    return sum(
+        len(items)
+        for v in outputs.values()
+        if isinstance(v, dict)
+        for key in _LOCAL_LISTING_MEDIA_KEYS
+        for items in [v.get(key) or []]
+        if isinstance(items, list)
+    )
+
+
 def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
     """Pull running + pending + recent history; merge into a single ordered list."""
     rows: list[JobRow] = []
@@ -603,15 +627,7 @@ def _gather_jobs(host: str, port: int, *, limit: int) -> list[JobRow]:
             if isinstance(msg, list) and msg and msg[0] == "execution_error":
                 status_str = "error"
                 break
-        outputs = body.get("outputs") or {}
-        output_count = sum(
-            len(items)
-            for v in outputs.values()
-            if isinstance(v, dict)
-            for key in ("images", "gifs", "videos", "audio", "files")
-            for items in [v.get(key) or []]
-            if isinstance(items, list)
-        )
+        output_count = _media_item_count(body.get("outputs") or {})
         wf = body.get("prompt") or [None, None, None, None]
         wf_dict = wf[2] if isinstance(wf, list) and len(wf) > 2 else None
         rows.append(
@@ -935,6 +951,282 @@ def _render_jobs_pretty(rows: list[JobRow], *, host: str, port: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+# What a completed run with an empty outputs map means. `jobs status` and
+# `jobs wait` used to report it as a bare `status: completed` with no outputs
+# and say nothing else, while `comfy download` explains the case — so the tools
+# an agent calls on one job disagreed, and the cloud agent read the silence as
+# a dead generation service and re-ran the graph. `wait_cmd` carries this on
+# its row too, so a wait answers the question instead of deferring it.
+#
+# Every clause is deliberately only as strong as the record supports, since a
+# note written to stop the agent overstating an outcome must not overstate one
+# itself:
+#
+# * "reported no outputs", not "saved nothing" — a node can write a file and
+#   report nothing (ComfyUI's own `CheckpointSave` has `RETURN_TYPES = ()` and
+#   returns no UI output).
+# * a cache hit is named as *possible*, not as the cause. An empty outputs map
+#   does not establish one, and the presence of a save node does not either —
+#   `CheckpointSave` is a counterexample to both.
+# * the save/preview check comes before the seed advice, as the `download`
+#   hint does. Telling a graph with no save node to change its seed walks
+#   straight back into the re-run loop this note exists to stop.
+_EMPTY_COMPLETION_NOTE = (
+    "completed and reported no outputs. Waiting will not produce files. Check that the workflow has "
+    "a save or preview node. A cache hit is also possible, so change an input or the seed if you need "
+    "to force fresh execution. Some nodes write files without reporting them. This is not a service "
+    "outage."
+)
+
+
+# The OTHER way a completion arrives with nothing to show, and the one that
+# was still silent: the record DID report output entries, and not one of them
+# resolves to a file this tool can fetch or to text it can read.
+#
+# It is also the half of "the listing and the status must agree on the output
+# count" that is fixable in this tool, and the reason they can disagree.
+# `jobs ls` counts raw record items — cloud's `/api/jobs` `outputs_count` takes
+# every non-null item under every node-output key bar `animated`/`result`, and
+# the local listing takes `len()` of the five media keys, nulls included — while
+# `jobs status` reports what the extractors can turn into a `/view` URL or a
+# text string: dicts carrying a `filename`, and a `text` list of `str`. The
+# vocabularies are not the same, so one job legitimately reads as `outputs: 1`
+# in the listing and `outputs: []` in the status, with nothing said about why.
+# That contradiction is what the reported session read as a dead generation
+# service.
+#
+# Same discipline as the note above: it states what the record carries and
+# names a possible cause as possible.
+#
+# * "cannot resolve", not "produced nothing" — the entry IS a report, in a
+#   shape this tool does not consume (a tagger's `{"tags": [...]}`, a
+#   bare-string `text`, a dict with no `filename`).
+# * a null item gets its own note, because it is the one case where something
+#   went wrong rather than merely being unreadable here: a hosted deployment
+#   writes `null` into the array for an output it recorded and could not
+#   upload. That note does NOT end in "this is not a service outage" — a run
+#   whose own output never stored is a failure of that run, just not a general
+#   outage — and does not claim re-reading cannot help, since this payload
+#   cannot prove the record had settled.
+# * it reconciles the listing's count explicitly, with THAT listing's own rule
+#   and its actual number, because an agent that sees 1 there and 0 here will
+#   otherwise go looking for a lost file.
+_UNRESOLVED_OUTPUTS_NOTE = (
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}. "
+    "There is nothing to download, and waiting will not change that.{listed} This is not a service outage."
+)
+_DROPPED_OUTPUTS_NOTE = (
+    "completed, and reported {entries} that this tool cannot resolve to a file or to text{keys}. "
+    "{subject} no file reference at all (a null entry){cause}. Nothing in this record can be "
+    "downloaded.{listed} Re-read the job once in case its record had not settled; past that, an output "
+    "was recorded and no file came with it, which is a failure of this run rather than a service outage."
+)
+_DROPPED_CAUSE_CLOUD = ", which is what a hosted output whose upload did not land leaves behind"
+_UNRESOLVED_LISTED_CLAUSE = (
+    " `jobs ls` reports {count} for this run, counting entries this payload cannot resolve, so that "
+    "count is not a file this tool failed to fetch."
+)
+
+# Keys are server-supplied. Bounded and sanitized before they enter the note:
+# the note is prose a consumer may print raw, and `rich.Text` forwards `\x1b`
+# (the same reason the text preview sanitizes).
+_MAX_NOTE_KEYS = 4
+_MAX_NOTE_KEY_CHARS = 24
+
+
+def _listing_output_count(record_outputs: dict, where: str) -> int:
+    """What `jobs ls` would report for this record, by THAT listing's own rule.
+
+    The two listings do not count alike, so a note that reconciles one number
+    has to know which one it is reconciling:
+
+    * cloud — `/api/jobs` `outputs_count`, written by the server from
+      `common.CountOutputs`: every NON-NULL item under every node-output key
+      except `animated`/`result`.
+    * local — `_local_jobs_rows`' own sum: `len()` of the five media keys,
+      NULLS INCLUDED, and no other key counted.
+
+    Stating the wrong one is worse than saying nothing: locally a
+    `{"tags": [...]}` run would be told the listing counts entries it shows as
+    0, and a `{"images": [None]}` run shows 1 there while the cloud rule says 0.
+    """
+    if where == "local":
+        return _media_item_count(record_outputs)
+    count = 0
+    for node_output in record_outputs.values():
+        if not isinstance(node_output, dict):
+            continue
+        for key, items in node_output.items():
+            if key in ("animated", "result") or not isinstance(items, list):
+                continue
+            count += sum(1 for item in items if item is not None)
+    return count
+
+
+def _nothing_to_show_note(status: Any, record_outputs: Any, *, where: str = "cloud") -> str | None:
+    """What a completed run with nothing to show means, or ``None``.
+
+    Three notes, because there are three observations and they are not the same
+    claim:
+
+    * the record reported no output items at all — ``_EMPTY_COMPLETION_NOTE``;
+    * it reported items none of which this tool can resolve —
+      ``_UNRESOLVED_OUTPUTS_NOTE``;
+    * at least one of those items is ``null``, i.e. an output the producer
+      recorded with no file reference — ``_DROPPED_OUTPUTS_NOTE``, which is the
+      only one of the three where something went wrong rather than merely being
+      unreadable here, and is correspondingly the only one that does not end
+      "this is not a service outage" flatly or claim another read cannot help.
+
+    ``where`` selects the listing whose count is reconciled, and is why it is a
+    parameter rather than a constant: this is called from the local snapshot as
+    well as the cloud one. See ``_listing_output_count``.
+
+    Decided on the RAW record outputs rather than on this module's extracted
+    `outputs` / `text_outputs` alone, for two reasons, both of which are ways
+    of not asserting more than the record establishes:
+
+    * The extractors recognize media entries and a ``text`` list of ``str``.
+      A node can report in neither shape — a custom UI key such as a tagger's
+      ``{"tags": [...]}``, a bare-string ``text``, non-``str`` text items — and
+      deciding the EMPTY note on what they recognized would tell a run that
+      *did* report something that it reported nothing. Such a run now gets the
+      unresolved note instead of silence, which says what was observed without
+      claiming the run reported nothing.
+    * A record that carries no ``outputs`` key at all establishes nothing. On
+      cloud, completion comes from ``/api/jobs/<id>`` while the record is
+      fetched separately, so a status-only record that has not caught up must
+      not produce "waiting will not produce files". Requiring the key is what
+      closes that; a source with no record at all (the state-file fallback,
+      which stores output URLs flat and no node text) passes ``None`` and
+      withholds both notes entirely.
+
+    Deliberately NOT also requiring the record's own status to confirm
+    completion: ``/api/jobs/<id>`` is the authority on terminal state on cloud
+    and the same body's status block already decided it on local, while the
+    record's ``status`` is ``omitempty`` — requiring it would silently disable
+    these notes on any deployment that omits the field.
+    """
+    if status != "completed" or not isinstance(record_outputs, dict):
+        return None
+    # Imported here, not at module scope, like every other use of the client in
+    # this module.
+    from comfy_cli.comfy_client import extract_output_entries, extract_text_outputs
+
+    # Anything the caller can actually be shown means there is nothing to
+    # explain: a file URL, or node text. Checked on the extracted views because
+    # that is exactly the question "is there something to show?".
+    record = {"outputs": record_outputs}
+    if extract_output_entries(record) or extract_text_outputs(record):
+        return None
+
+    # Two counts, because they answer two different questions and collapsing
+    # them is how a note starts asserting more than it saw:
+    #
+    # * `total` — everything the record reported that this tool cannot use. It
+    #   is what the note's "N output entries" states, so a payload in a shape
+    #   nothing here reads has to count: it IS a report. That includes a
+    #   bare-string `text`, a non-dict node entry, a legacy `result` path
+    #   string, and a present-but-falsy value like `{"text": ""}`.
+    # * `dropped` — null items, an output recorded with no file reference.
+    #
+    # The listing's own count is NOT derived from these; it is computed by that
+    # listing's rule in `_listing_output_count`, so the reconciliation sentence
+    # quotes the number the caller would actually see.
+    total = 0
+    dropped = 0
+    keys: list[str] = []
+    seen_keys: set[str] = set()
+    extra_keys = False
+
+    def note_key(key: Any) -> None:
+        # Sanitize and bound FIRST, then dedupe, then cap — in that order, so a
+        # key that sanitizes to nothing cannot occupy a slot or trigger the
+        # overflow marker, two keys that differ only in stripped bytes cannot
+        # render as `a, a`, and collection stays O(1) per item however many
+        # distinct keys a hostile or broken record carries.
+        nonlocal extra_keys
+        name = sanitize(str(key))[:_MAX_NOTE_KEY_CHARS]
+        if not name or name in seen_keys:
+            return
+        if len(keys) >= _MAX_NOTE_KEYS:
+            extra_keys = True
+            return
+        seen_keys.add(name)
+        keys.append(name)
+
+    for node_output in record_outputs.values():
+        if not isinstance(node_output, dict):
+            # A node entry that is not a map at all. Unusable, and still a
+            # report — there is no key to name for it. An empty container is
+            # not a report, the same way an empty array under a key is not.
+            if node_output is not None and node_output != [] and node_output != ():
+                total += 1
+            continue
+        for key, items in node_output.items():
+            # `animated` holds `(True,)` boolean flags, which neither listing
+            # counts and which are not outputs in any reading.
+            if key == "animated":
+                continue
+            if key == "result":
+                # Legacy PreviewUI3D: a dict with a `filename` here IS resolved
+                # by the extractor (so this function already returned), and
+                # what is left is bare path strings — a report, in a shape
+                # nothing here reads. `None` under this key means "no
+                # background supplied", not a dropped output, so it is skipped
+                # rather than counted as either. Neither listing counts
+                # `result` at all, which is why these never reach `dropped` or
+                # the reconciliation.
+                if isinstance(items, list):
+                    present = [item for item in items if item is not None]
+                    if present:
+                        total += len(present)
+                        note_key(key)
+                continue
+            if not isinstance(items, list):
+                # A non-list payload under an output key: `{"text": "a
+                # description"}` is the shape the text extractor misses.
+                # Tested for absence, not for truthiness — `{"text": ""}` is a
+                # node that reported, badly, and must not be called empty.
+                if items is not None:
+                    total += 1
+                    note_key(key)
+                continue
+            for item in items:
+                total += 1
+                if item is None:
+                    dropped += 1
+                note_key(key)
+
+    if total == 0:
+        # No node reported a single item — `{}`, `{"images": []}`, or flags
+        # only. That is the empty completion, whatever shape the map took.
+        return _EMPTY_COMPLETION_NOTE
+
+    entries = "1 output entry" if total == 1 else f"{total} output entries"
+    keys_clause = ""
+    if keys:
+        label = "key" if len(keys) == 1 else "keys"
+        more = ", …" if extra_keys else ""
+        keys_clause = f" ({label}: {', '.join(keys)}{more})"
+    listing = _listing_output_count(record_outputs, where)
+    listed_clause = _UNRESOLVED_LISTED_CLAUSE.format(count=listing) if listing else ""
+
+    if not dropped:
+        return _UNRESOLVED_OUTPUTS_NOTE.format(entries=entries, keys=keys_clause, listed=listed_clause)
+    if dropped == total:
+        subject = "It carries" if total == 1 else "All of them carry"
+    else:
+        subject = "1 of them carries" if dropped == 1 else f"{dropped} of them carry"
+    # The upload explanation is a hosted-deployment behaviour; naming it on a
+    # local record would be inventing a cause for a shape local ComfyUI does
+    # not produce.
+    cause = _DROPPED_CAUSE_CLOUD if where != "local" else ""
+    return _DROPPED_OUTPUTS_NOTE.format(
+        entries=entries, keys=keys_clause, subject=subject, cause=cause, listed=listed_clause
+    )
+
+
 def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, server_running: bool) -> dict:
     """Shape a `jobs status` payload out of the on-disk state file.
 
@@ -959,6 +1251,14 @@ def _state_file_snapshot(st: JobState, *, prompt_id: str, host: str, port: int, 
         # same thing the live queue-hit payload emits.
         "outputs_by_node": {},
         "outputs_by_item": {},
+        # Same reasoning, and the same reason it cannot be reconstructed: the
+        # state file records output URLs flat and no node text at all. Present
+        # but empty, so a consumer indexing it on any `jobs status` success
+        # payload stays safe. `source: "state_file"` is how a caller tells this
+        # apart from a record-backed `{}` — which is also why this path has no
+        # history record to pass to `_nothing_to_show_note` and so never
+        # carries either nothing-to-show note.
+        "text_outputs": {},
         "workflow_size": None,
         "error": st.error,
         "host": host,
@@ -1247,10 +1547,20 @@ def status_cmd(
     renderer.emit(snapshot, command="jobs status")
 
 
-def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
+def _snapshot(host: str, port: int, prompt_id: str, *, deadline: float | None = None) -> dict | None:
+    def get_json(url: str) -> Any:
+        if deadline is None:
+            return _http_get_json(url)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("snapshot deadline expired")
+        # urllib applies this timeout to the connected socket too, so the
+        # capped response-body read cannot outlive the same remaining budget.
+        return _http_get_json(url, timeout=remaining)
+
     # First: is it in the queue?
     try:
-        q = _http_get_json(f"http://{host}:{port}/queue")
+        q = get_json(f"http://{host}:{port}/queue")
     except RuntimeError:
         q = {}
     for state, key in (("running", "queue_running"), ("pending", "queue_pending")):
@@ -1271,7 +1581,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     # Then: history.
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
+        h = get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return None
     if not isinstance(h, dict) or prompt_id not in h:
@@ -1304,30 +1614,78 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
     # file, written at submit time by `comfy run`.
     try:
         job = jobs_state.read(prompt_id)
-    except ValueError:  # unsafe prompt_id — no state file to join against
+    except (ValueError, OSError):  # unsafe id or unavailable state dir — no local record
         job = None
     item_map = job.item_map if job is not None else None
     outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
+    # Text/STRING node outputs (image descriptions, ShowText, …) live under
+    # outputs[node]["text"] as bare strings, which the URL flatten drops.
+    # Additive key: full untruncated strings for `--json`; the pretty
+    # renderer previews them. Empty {} when the run emitted no text.
+    text_outputs = extract_text_outputs(body)
+    status = "error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"
 
-    return {
+    snap: dict[str, Any] = {
         "prompt_id": prompt_id,
-        "status": ("error" if error_detail else "completed" if completed else "cancelled" if interrupted else "queued"),
+        "status": status,
         "workflow_size": None,
         "outputs": output_urls,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
-        # Text/STRING node outputs (image descriptions, ShowText, …) live under
-        # outputs[node]["text"] as bare strings, which the URL flatten drops.
-        # Additive key: full untruncated strings for `--json`; the pretty
-        # renderer previews them. Empty {} when the run emitted no text.
-        "text_outputs": extract_text_outputs(body),
+        "text_outputs": text_outputs,
         "error": error_detail,
         "host": host,
         "port": port,
     }
+    if note := _nothing_to_show_note(status, body.get("outputs"), where="local"):
+        snap["note"] = note
+    return snap
 
 
 _TEXT_PREVIEW_LIMIT = 20
+
+
+def _text_preview_lines(text_outputs: Any) -> list:
+    """Bounded `text` rows for a status table, or `[]`.
+
+    First non-blank line, ~120 chars per entry, capped at
+    ``_TEXT_PREVIEW_LIMIT`` entries total. The full untruncated text ships on
+    the ``--json`` path (``renderer.emit``). Built as ``Text`` (not markup
+    strings) since node ids / node text are server-supplied and may contain
+    ``[...]`` that Rich would otherwise interpret as style markup. Shared by
+    the local and cloud pretty views so the two render the same text the same
+    way; the cloud one previously rendered none at all.
+
+    Both the node id and the text go through ``sanitize``. A ``Text`` cell
+    declines to *parse* markup but still forwards ``\\x1b``, as the badge in
+    ``_render_status_pretty`` already notes — and node text is the one cell
+    here whose content can come from a model describing an attacker-supplied
+    input, so an ANSI/OSC sequence in it would reach the terminal. The node id
+    is bounded as well: only the text body was length-capped before.
+    """
+    from rich.text import Text
+
+    if not isinstance(text_outputs, dict) or not text_outputs:
+        return []
+    preview_lines: list[Text] = []
+    total = sum(len(texts) for texts in text_outputs.values())
+    for node_id, texts in text_outputs.items():
+        for text in texts:
+            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+                break
+            # Slice before splitting: only the first ~120 chars of the first
+            # line survive, and `splitlines()` on a multi-megabyte single
+            # output would otherwise allocate one list entry per line of it.
+            stripped = str(text).strip()[:4096]
+            first = sanitize(stripped.splitlines()[0]) if stripped else ""
+            if len(first) > 120:
+                first = first[:117] + "…"
+            preview_lines.append(Text(f"[{sanitize(str(node_id))[:64]}] {first}"))
+        if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
+            break
+    if total > len(preview_lines):
+        preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
+    return preview_lines
 
 
 def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
@@ -1362,29 +1720,12 @@ def _render_status_pretty(snap: dict, *, host: str, port: int) -> None:
     tbl.add_row("status", badge)
     if snap.get("outputs"):
         tbl.add_row("outputs", "\n".join(sanitize_markup(o) for o in snap["outputs"]))
-    if snap.get("text_outputs"):
-        # Bounded preview: first non-blank line, ~120 chars per entry, capped at
-        # _TEXT_PREVIEW_LIMIT entries total. The full untruncated text ships on
-        # the `--json` path (renderer.emit). Built as Text (not markup strings)
-        # since node ids / node text are server-supplied and may contain `[...]`
-        # that Rich would otherwise interpret as style markup.
-        preview_lines: list[Text] = []
-        total = sum(len(texts) for texts in snap["text_outputs"].values())
-        for node_id, texts in snap["text_outputs"].items():
-            for text in texts:
-                if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
-                    break
-                stripped = str(text).strip()
-                first = stripped.splitlines()[0] if stripped else ""
-                if len(first) > 120:
-                    first = first[:117] + "…"
-                preview_lines.append(Text(f"[{node_id}] {first}"))
-            if len(preview_lines) >= _TEXT_PREVIEW_LIMIT:
-                break
-        if total > len(preview_lines):
-            preview_lines.append(Text(f"… ({total - len(preview_lines)} more)", style="dim"))
-        if preview_lines:
-            tbl.add_row("text", Text("\n").join(preview_lines))
+    if preview_lines := _text_preview_lines(snap.get("text_outputs")):
+        tbl.add_row("text", Text("\n").join(preview_lines))
+    if snap.get("note"):
+        # A completed run that saved nothing: say so here too, so the pretty
+        # view does not look like a successful run whose files went missing.
+        tbl.add_row("note", sanitize_markup(str(snap["note"])))
     if snap.get("error"):
         # Truncate first, escape second: the 600-char budget stays a budget on
         # the server's text rather than on the backslashes we add to it, and
@@ -1583,6 +1924,12 @@ def wait_cmd(
             row["outputs"] = snap["outputs"]
         if snap.get("error_message"):
             row["error_message"] = snap["error_message"]
+        if snap.get("note"):
+            # Without this the row is a bare `completed` with no `outputs`, and
+            # the caller has to go and ask `jobs status` the same question it
+            # just waited for an answer to. The row is the whole result of a
+            # wait, so the one thing that explains an empty one belongs on it.
+            row["note"] = snap["note"]
         jobs_list.append(row)
 
     completed = sum(1 for r in jobs_list if r["status"] == "completed")
@@ -1954,6 +2301,28 @@ class _ClientIdRejected(ValueError):
 # cadence for the whole watch, not just the first read, which is affordable
 # against a loopback/LAN ComfyUI.
 _POLL_ONLY_WATCH_POLL_S = 2.0
+_WATCH_HISTORY_SETTLE_S = 2.0
+_WATCH_HISTORY_RETRY_S = 0.05
+
+
+def _settled_terminal_snapshot(host: str, port: int, prompt_id: str) -> dict | None:
+    """Read the terminal history record after a live completion, with a short bound.
+
+    ComfyUI can publish ``execution_success`` just before the corresponding
+    history record becomes visible.  A watch must not turn that ordering gap
+    into a permanently missing completion note, but it also must not wait
+    indefinitely when history storage is unavailable.
+    """
+    deadline = time.monotonic() + _WATCH_HISTORY_SETTLE_S
+    snapshot = None
+    while True:
+        snapshot = _snapshot(host, port, prompt_id, deadline=deadline)
+        if snapshot and snapshot.get("status") in {"completed", "error", "cancelled"}:
+            return snapshot
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return snapshot
+        time.sleep(min(_WATCH_HISTORY_RETRY_S, remaining))
 
 
 def _get_json_object(url: str) -> dict[str, Any]:
@@ -2629,6 +2998,20 @@ def watch_cmd(
         # `borrowed` means drop --client-id, `indeterminate` means retry.
         "poll_reason": poll_reason,
     }
+    if final_status == "completed":
+        # A live WebSocket completion does not carry the raw /history outputs
+        # that `_snapshot` classifies.  Copy only its explanatory note into the
+        # live envelope; the stream remains authoritative for output URLs and
+        # all of the watch metadata above.
+        terminal_snapshot = state.end_details if isinstance(state.end_details, dict) else None
+        if not terminal_snapshot or terminal_snapshot.get("status") not in {"completed", "error", "cancelled"}:
+            terminal_snapshot = _settled_terminal_snapshot(h, p, prompt_id)
+        if isinstance(terminal_snapshot, dict) and isinstance(terminal_snapshot.get("note"), str):
+            payload["note"] = terminal_snapshot["note"]
+            if renderer.is_pretty():
+                from rich.text import Text
+
+                renderer.console().print(Text(sanitize(payload["note"]), style="dim"))
     if state.end_details is not None:
         details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}
         if final_status == "error" and isinstance(details.get("error"), dict):
@@ -2804,7 +3187,7 @@ def _ms_to_iso(value: Any) -> str | None:
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
-    from comfy_cli.comfy_client import _group_outputs
+    from comfy_cli.comfy_client import _group_outputs, extract_text_outputs
 
     client = _cloud_client()
     status = client.get_job_status(prompt_id)
@@ -2831,11 +3214,25 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     outputs: list[str] = []
     outputs_by_node: dict[str, list[str]] = {}
     outputs_by_item: dict[str, list[str]] = {}
+    text_outputs: dict[str, list[str]] = {}
+    record_outputs: Any = None
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
+            # The raw map, for `_nothing_to_show_note`'s own census — see there
+            # for why WHICH note is chosen cannot be decided on the extracted
+            # views below (they recognize a narrower set of shapes than the
+            # record, and than cloud's own output count).
+            record_outputs = record.get("outputs")
             node_outputs = client.extract_outputs(record)
             outputs = [o["url"] for o in node_outputs]
+            # Text/STRING node outputs live under outputs[node]["text"] as bare
+            # strings, which the media flatten above drops. The local snapshot
+            # has carried them since the key was added; cloud did not, so
+            # `comfy download`'s text-only hint ("read the text with
+            # `comfy jobs status <id>`") pointed at a cloud payload that could
+            # not answer it. Same source record, so no extra request.
+            text_outputs = extract_text_outputs(record)
             # The compose item_map (foreach item -> node ids) lives on the
             # job state file, written at submit time by `comfy run`.
             job = jobs_state.read(prompt_id)
@@ -2870,7 +3267,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     # everything through `execution_errors.parse_error_message`.
     error_message = (_execution_error_line(raw_execution_error) if failed else None) or status.get("error_message")
 
-    return {
+    snap: dict[str, Any] = {
         "prompt_id": prompt_id,
         "status": state,
         # The server's own spelling, before canonicalization. Always present so
@@ -2881,6 +3278,14 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "outputs": outputs,
         "outputs_by_node": outputs_by_node,
         "outputs_by_item": outputs_by_item,
+        # Same always-present additive key the local snapshot carries: full
+        # untruncated strings for `--json`. `{}` when the run emitted no text —
+        # and also, for now, on any non-completed status, since the history
+        # record is only fetched in the completed branch above. So a failed
+        # cloud run reports `{}` even if an earlier node emitted text, where
+        # the local snapshot would surface that partial text; fetching history
+        # for a failed cloud job is a separate change.
+        "text_outputs": text_outputs,
         # Not served by the plural jobs-detail endpoint at all — kept so an
         # older deployment still populates it; never synthesized.
         "assigned_inference": status.get("assigned_inference"),
@@ -2893,6 +3298,9 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
+    if note := _nothing_to_show_note(state, record_outputs, where="cloud"):
+        snap["note"] = note
+    return snap
 
 
 def _cloud_status(prompt_id: str) -> None:
@@ -2939,6 +3347,12 @@ def _cloud_status(prompt_id: str) -> None:
             tbl.add_row("error", sanitize_markup(str(snap["error_message"])[:600]))
         for u in snap.get("outputs") or []:
             tbl.add_row("output", sanitize_markup(u))
+        if preview_lines := _text_preview_lines(snap.get("text_outputs")):
+            from rich.text import Text
+
+            tbl.add_row("text", Text("\n").join(preview_lines))
+        if snap.get("note"):
+            tbl.add_row("note", sanitize_markup(str(snap["note"])))
         renderer.console().print(tbl)
     renderer.emit(snap, command="jobs status", where="cloud")
 

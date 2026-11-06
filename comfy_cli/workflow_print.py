@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import keyword
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -55,10 +56,12 @@ from comfy_cli.cql import promoted as _promoted
 from comfy_cli.cql.engine import (
     _UNRESOLVED,
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _expand_widget_entries,
     _resolve_proxy_value,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
+    saved_widget_order,
 )
 from comfy_cli.workflow_to_api import is_subgraph_uuid
 
@@ -86,6 +89,9 @@ class PrintResult:
     node_count: int = 0  # nodes that got a line (top level + subgraph interiors)
     skipped: list[dict] = field(default_factory=list)  # {"id": str, "type": str, "reason": str}
     warnings: list[str] = field(default_factory=list)
+    # The same graph as structured records (``--format json``), one per printed
+    # node, subgraph interiors once per instance address. See ``_NodeRecorder``.
+    nodes: list[dict] = field(default_factory=list)
 
 
 class PrintUnsupported(Exception):
@@ -139,6 +145,13 @@ def py_literal(value: Any) -> str:
     is also valid Python string-literal syntax); lists/dicts via ``json.dumps``
     too — ``True``/``False``/``None`` nested inside those stay JSON-cased
     (``true``/``false``/``null``); that's acceptable and documented here."""
+    rec = _RECORDER.get()
+    if rec is not None:
+        rec.last_literal = (_literal_text(value), value)
+    return _literal_text(value)
+
+
+def _literal_text(value: Any) -> str:
     if value is None:
         return "None"
     if value is True:
@@ -624,6 +637,15 @@ def _edge_ref(binding: str, src_node: dict, src_type: str, slot: int, ctx: _Rend
     """
     outputs = src_node.get("outputs") or []
     if len(outputs) == 1:
+        rec = _RECORDER.get()
+        if rec is not None:
+            entry = outputs[0]
+            name = entry.get("name") if isinstance(entry, dict) else None
+            rec.refs[binding] = {
+                "node": str(src_node.get("id")),
+                "output": name if isinstance(name, str) else "",
+                "slot": 0,
+            }
         return binding, None
     out_name = None
     warning = None
@@ -639,9 +661,18 @@ def _edge_ref(binding: str, src_node: dict, src_type: str, slot: int, ctx: _Rend
         m = ctx.graph.node(src_type)
         if m is not None and 0 <= slot < len(m.outputs):
             out_name = m.outputs[slot].name
+    rec = _RECORDER.get()
     if out_name and isinstance(out_name, str) and _IDENT.match(out_name) and not keyword.iskeyword(out_name):
-        return f"{binding}.{out_name}", warning
-    return f"{binding}.out[{slot}]", warning
+        ref = f"{binding}.{out_name}"
+    else:
+        ref = f"{binding}.out[{slot}]"
+    if rec is not None:
+        rec.refs[ref] = {
+            "node": str(src_node.get("id")),
+            "output": out_name if isinstance(out_name, str) else "",
+            "slot": slot,
+        }
+    return ref, warning
 
 
 def _note_comment(node: dict) -> str:
@@ -887,7 +918,11 @@ class _RenderCtx:
 
     def in_ref(self, slot: Any) -> str:
         """``IN.<name>`` / ``IN["<name>"]`` for one input-proxy slot."""
-        return _member_ref("IN", self.proxy_in_name(slot))
+        ref = _member_ref("IN", self.proxy_in_name(slot))
+        rec = _RECORDER.get()
+        if rec is not None:
+            rec.ins[ref] = self.proxy_in_name(slot)
+        return ref
 
     def qualify(self, nid: Any) -> str:
         """This block's fully-qualified address for a bare local node id —
@@ -957,10 +992,66 @@ def _resolve_edge_text(src_id: Any, src_slot: Any, name: str, tgt_id: str, ctx: 
 def _place_arg(name: str, text: str, args: list[str], extra: dict[str, str]) -> None:
     """Append ``name=text`` to ``args`` when ``name`` is a valid Python
     identifier, else collect it into ``extra`` for a trailing ``**{}``."""
+    rec = _RECORDER.get()
+    if rec is not None:
+        rec.place(name, text)
     if _IDENT.match(name) and not keyword.iskeyword(name):
         args.append(f"{name}={text}")
     else:
         extra[name] = text
+
+
+class _NodeRecorder:
+    """Records one node's arguments as structure while its line is rendered,
+    so ``--format json`` reports exactly what the source says without a second
+    resolver: every ref text the line uses was produced by ``_edge_ref`` or
+    ``_RenderCtx.in_ref`` (registered here), and every value by ``py_literal``
+    immediately before it is placed. A ``None`` that is not a literal is an
+    unlinked socket."""
+
+    def __init__(self, record: dict) -> None:
+        self.record = record
+        self.refs: dict[str, dict] = {}
+        self.ins: dict[str, str] = {}
+        self.last_literal: tuple[str, Any] | None = None
+
+    def place(self, name: str, text: str) -> None:
+        r = self.record
+        literal, self.last_literal = self.last_literal, None
+        if text in self.refs:
+            r["links"][name] = dict(self.refs[text])
+        elif text in self.ins:
+            r["promoted"][name] = self.ins[text]
+        elif literal is not None and literal[0] == text:
+            r["widgets"][name] = literal[1]
+        elif text == "None":
+            r["links"][name] = None
+        else:  # not expected; keep the text rather than drop the argument
+            r["widgets"][name] = text
+
+
+_RECORDER: ContextVar[_NodeRecorder | None] = ContextVar("workflow_print_recorder", default=None)
+
+_MODE_NAMES = {0: "normal", 2: "muted", 4: "bypassed"}
+
+
+def _new_record(n: dict, name: str, ctx: _RenderCtx) -> dict:
+    flags = n.get("flags") if isinstance(n.get("flags"), dict) else {}
+    t = n.get("type", "")
+    title = n.get("title")
+    return {
+        "id": str(n.get("id")),
+        "name": name,
+        "type": t,
+        "title": title if isinstance(title, str) and title != t else "",
+        "mode": _MODE_NAMES.get(n.get("mode") or 0, str(n.get("mode"))),
+        "collapsed": bool(flags.get("collapsed")),
+        "pinned": bool(flags.get("pinned")),
+        "outputs": [o.get("name") if isinstance(o, dict) else None for o in n.get("outputs") or []],
+        "widgets": {},
+        "links": {},
+        "promoted": {},
+    }
 
 
 def _autogrow_annotation(group: Any, inputs: list[dict]) -> str:
@@ -1004,6 +1095,9 @@ def _ensure_open_autogrow_slot(group: Any, inputs: list[dict], extra: dict[str, 
     template = group.autogrow_template
     n = _first_free_autogrow_index(set(members), group.name, template)
     slot = f"{group.name}.{_autogrow_elem_name(group.name, n, template)}"
+    rec = _RECORDER.get()
+    if rec is not None:
+        rec.record["links"][slot] = None  # the open slot: wireable, nothing in it yet
     items = list(extra.items())
     last = max((i for i, (k, _v) in enumerate(items) if k in members), default=None)
     if last is None:
@@ -1148,12 +1242,40 @@ def _build_args(
         _ensure_open_autogrow_slot(group, inputs, extra)
         annotations.append(_autogrow_annotation(group, inputs))
 
-    if unknown:
+    entries: list | None = None
+    unreadable_layout: str | None = None
+    if not unknown:
+        try:
+            saved_names = saved_widget_order(node, ctx.graph, class_type)
+            entries = (
+                validated_entries
+                if validated_entries is not None
+                else _expand_widget_entries(m, positional, saved_widget_names=saved_names)
+            )
+        except SavedWidgetLayoutError as exc:
+            # The save names a widget today's catalog does not place, so no slot
+            # in this array has a known name. Print the raw values with the same
+            # positional escape hatch an uncatalogued class gets: naming them
+            # from the current order is the misalignment this read prevents.
+            # One such node must not cost the whole render — the rest of the
+            # graph is still readable, and a reader needs it to see which node
+            # is stale.
+            unreadable_layout = str(exc)
+    if unknown or unreadable_layout is not None:
         if positional:
             args.append(f"widgets={py_literal(positional)}")
-        warnings.append(f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally")
-    else:
-        entries = validated_entries if validated_entries is not None else _expand_widget_entries(m, positional)
+        if unreadable_layout is not None:
+            # A known class reaches no class_unknown branch, so record the raw
+            # values here: the record must carry what the line prints.
+            rec = _RECORDER.get()
+            if rec is not None and positional:
+                rec.record["widgets_positional"] = positional
+            warnings.append(f"node {ctx.qualify(nid)}: {unreadable_layout}; widgets printed positionally")
+        else:
+            warnings.append(
+                f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally"
+            )
+    elif entries is not None:
         for idx, entry in enumerate(entries):
             if entry.frontend_injected:
                 # ``upload`` / ``audioUI`` / PREVIEW_3D ``image``: a frontend
@@ -1503,6 +1625,9 @@ class _State:
         self.skipped = skipped
         self.bindings = bindings
         self.def_order: list[str] = []
+        # Structured records per block: None is the top level, else the
+        # definition id whose interior they were rendered from (local ids).
+        self.records: dict[str | None, list[dict]] = {}
         self.def_seen: set[str] = set()
         self.def_depth: dict[str, int] = {}
         # def_id -> [(owning definition id or None at top level, bare local id)].
@@ -1588,20 +1713,50 @@ def _render_nodes(
         nid = str(n.get("id"))
         t = n.get("type", "")
         name = binding_by_id[nid]
-        if is_subgraph_uuid(t):
-            sg_def = defs_by_id.get(t)
-            addr = ctx.qualify(nid)
-            if sg_def is not None:
-                line, prim_hits = _render_subgraph_instance_line(n, t, sg_def, name, ctx, state)
-                for prim_id, reason in prim_hits:
-                    state.primitive_reason.setdefault(prim_id, reason)
-                state.register_instance(t, ctx.owner_def, nid, addr, depth)
-            else:
-                line = _render_missing_subgraph_line(n, t, name, ctx, state.warnings)
-        else:
-            line = _render_node_line(n, name, ctx, graph, state)
-        lines.append(line)
+        record = _new_record(n, name, ctx)
+        state.records.setdefault(ctx.owner_def, []).append(record)
+        token = _RECORDER.set(_NodeRecorder(record))
+        try:
+            lines.append(_render_one(n, nid, t, name, ctx, graph, defs_by_id, state, depth, record))
+        finally:
+            _RECORDER.reset(token)
     return lines
+
+
+def _render_one(
+    n: dict,
+    nid: str,
+    t: str,
+    name: str,
+    ctx: _RenderCtx,
+    graph: Graph | None,
+    defs_by_id: dict[str, dict],
+    state: _State,
+    depth: int,
+    record: dict,
+) -> str:
+    """One node's printed line; ``record`` is its structured record."""
+    if is_subgraph_uuid(t):
+        record["subgraph"] = t
+        sg_def = defs_by_id.get(t)
+        addr = ctx.qualify(nid)
+        if sg_def is not None:
+            line, prim_hits = _render_subgraph_instance_line(n, t, sg_def, name, ctx, state)
+            for prim_id, reason in prim_hits:
+                state.primitive_reason.setdefault(prim_id, reason)
+            state.register_instance(t, ctx.owner_def, nid, addr, depth)
+        else:
+            line = _render_missing_subgraph_line(n, t, name, ctx, state.warnings)
+            record["definition_missing"] = True
+            if isinstance(n.get("widgets_values"), list) and n.get("widgets_values"):
+                record["widgets_positional"] = n.get("widgets_values")
+    else:
+        line = _render_node_line(n, name, ctx, graph, state)
+        if graph is None or graph.node(t) is None:
+            record["class_unknown"] = True
+            if isinstance(n.get("widgets_values"), list):
+                record["widgets_positional"] = n.get("widgets_values")
+    return line
 
 
 def _build_bindings(order: list[dict], defs_by_id: dict[str, dict]) -> dict[str, str]:
@@ -1915,7 +2070,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
 
     try:
         return _render_py(workflow, graph)
-    except PromotionTraversalLimitError as exc:
+    except (PromotionTraversalLimitError, SavedWidgetLayoutError) as exc:
         raise PrintUnsupported([str(exc)]) from exc
 
 
@@ -2114,4 +2269,33 @@ def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         lines.extend("    " + bl for bl in block_lines_by_def[def_id])
 
     source = "\n".join(lines) + "\n"
-    return PrintResult(source=source, bindings=bindings, node_count=node_count, skipped=skipped, warnings=warnings)
+    return PrintResult(
+        source=source,
+        bindings=bindings,
+        node_count=node_count,
+        skipped=skipped,
+        warnings=warnings,
+        nodes=_expand_records(state),
+    )
+
+
+def _expand_records(state: _State) -> list[dict]:
+    """The recorded nodes with the ids the edit commands take: top-level
+    records as they are, and a definition's interior once per instance
+    address (``57/3``, and ``100/5/3`` when nested), its link sources and
+    ``IN`` references qualified the same way. Every copy is its own dict."""
+    import copy as _copy
+
+    out = [_copy.deepcopy(r) for r in state.records.get(None, [])]
+    for def_id in state.def_order:
+        for addr in sorted(set(state.instance_addresses(def_id)), key=_sort_key):
+            for r in state.records.get(def_id, []):
+                c = _copy.deepcopy(r)
+                c["id"] = f"{addr}/{r['id']}"
+                c["definition"] = def_id
+                for link in c["links"].values():
+                    if link is not None:
+                        link["node"] = f"{addr}/{link['node']}"
+                c["promoted"] = {k: {"instance": addr, "widget": v} for k, v in c["promoted"].items()}
+                out.append(c)
+    return out

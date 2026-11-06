@@ -593,6 +593,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
             renderer = get_renderer()
             ops: list | None = None
+            ops_skipped: str | None = None
             from comfy_cli import workflow_ops
 
             try:
@@ -625,7 +626,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                         # is left without its terminal event.
                         _track_error("emit", e)
                         raise
-                    workflow, ops = emit.write_frontend_workflow(
+                    workflow, ops, ops_skipped = emit.write_frontend_workflow(
                         name,
                         values,
                         Path(emit_path).expanduser(),
@@ -683,6 +684,17 @@ def _generate(model: str, extra_args: list[str]) -> None:
             if renderer.is_pretty():
                 rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
                 rprint(f"  run it: comfy run --workflow {emit_path}")
+                if ops_skipped:
+                    # `--emit-ops` is a request, and this is the one path where
+                    # it silently went unanswered: the batch is reported as
+                    # `ops_skipped` in the envelope below, which `emit()` does
+                    # not print in pretty mode. Without this the user asked for
+                    # ops, saw only "Wrote workflow", and had no way to tell the
+                    # batch apart from one that was minted.
+                    renderer.warn(
+                        f"--emit-ops: no batch was minted — {ops_skipped}",
+                        hint="the workflow file above is complete; apply it as a whole document",
+                    )
             payload = {
                 "out": str(Path(emit_path).expanduser()),
                 "model": name,
@@ -691,6 +703,12 @@ def _generate(model: str, extra_args: list[str]) -> None:
             }
             if ops is not None:
                 payload["ops"] = ops
+            elif ops_skipped:
+                # Same envelope key `templates fetch --emit-ops` uses: the file
+                # was written, the batch was not minted, and this says why so a
+                # consumer can fall back to the whole-document path instead of
+                # guessing from a missing key.
+                payload["ops_skipped"] = ops_skipped
             renderer.emit(payload, command="generate emit-workflow")
             return
 

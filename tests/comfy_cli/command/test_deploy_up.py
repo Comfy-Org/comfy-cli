@@ -10,7 +10,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import jsonschema
 import pytest
@@ -812,6 +812,93 @@ def test_a_4xx_on_the_follow_read_still_fails_at_once(tmp_path, monkeypatch) -> 
     assert "not answering" not in result.stderr
     assert sleeps == []
     assert client.get_calls == 2
+
+
+_CLOUD = "https://cloud.comfy.org"
+
+
+def _refused() -> DeployAPIError:
+    # What the client raises once a 401 outlives its forced refresh and its one retry.
+    return DeployAPIError(
+        "deploy_not_signed_in",
+        "invalid auth token",
+        status=401,
+        details={"operation": "get", "status": 401, "server_code": "UNAUTHORIZED"},
+    )
+
+
+def _stored_sign_in(monkeypatch, base_url: str | None) -> None:
+    session = (
+        SimpleNamespace(access_token="token", refresh_token="rt", base_url=base_url) if base_url is not None else None
+    )
+    monkeypatch.setattr("comfy_cli.credentials.get_session", lambda **_: session)
+
+
+def test_a_401_on_the_follow_read_with_the_sign_in_still_stored_ends_the_watch_not_the_deployment(
+    tmp_path, monkeypatch
+) -> None:
+    """Parallel watches can each be refused after the shared refresh. The deployment
+    was accepted with that same sign-in and keeps coming up, so the envelope must
+    not send an agent to sign in, nor report a failure that did not happen."""
+    # Given a deployment the service accepted, then a follow read it refuses
+    client = FlakyFollow([_refused()], get_statuses=["queued", "ready"])
+    client.sign_in_base_url = _CLOUD  # type: ignore[attr-defined]
+    _stored_sign_in(monkeypatch, _CLOUD)
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then
+    assert result.exit_code == 75, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "watch_auth_lost"
+    assert "may still be coming up" in error["message"]
+    assert error["hint"].startswith("run `comfy deploy status --deployment dep-1 --watch` to watch it again")
+    assert "comfy cloud login" not in error["hint"]
+    assert error["details"] == {"deployment_id": "dep-1"}
+    assert sleeps == []
+    assert len(client.create_keys) == 1
+
+
+@pytest.mark.parametrize(
+    ("client_sign_in", "stored_sign_in"),
+    [(_CLOUD, None), (_CLOUD, "https://staging.comfy.test"), (None, _CLOUD)],
+    ids=["refresh_signed_the_user_out", "signed_in_to_another_environment", "workspace_key"],
+)
+def test_a_401_on_the_follow_read_with_no_sign_in_to_keep_still_says_to_sign_in(
+    tmp_path, monkeypatch, client_sign_in, stored_sign_in
+) -> None:
+    # Given a follow read refused, and no sign-in this watch's client could keep using
+    client = FlakyFollow([_refused()], get_statuses=["queued", "ready"])
+    client.sign_in_base_url = client_sign_in  # type: ignore[attr-defined]
+    _stored_sign_in(monkeypatch, stored_sign_in)
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, [])
+
+    # Then
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "deploy_not_signed_in"
+
+
+class _RefusesTheCreate(FakeDeploy):
+    def create_deployment(self, release_id: str, compute_config: JsonObject, **kwargs) -> JsonObject:
+        raise _refused()
+
+
+def test_a_401_on_the_create_keeps_the_sign_in_code(tmp_path, monkeypatch) -> None:
+    # Given a sign-in still stored, and a service that refuses the create itself
+    client = _RefusesTheCreate()
+    client.sign_in_base_url = _CLOUD  # type: ignore[attr-defined]
+    _stored_sign_in(monkeypatch, _CLOUD)
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, [])
+
+    # Then nothing was accepted, so nothing runs on, and the refusal is the sign-in's
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "deploy_not_signed_in"
 
 
 def test_a_second_outage_in_one_watch_is_announced_and_backed_off_afresh(tmp_path, monkeypatch) -> None:

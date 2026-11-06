@@ -129,6 +129,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow fragment ls": "workflow",
     "comfy workflow fragment show": "workflow",
     "comfy workflow fragment validate": "workflow",
+    # Comfy Cloud coverage: its own payload (verdict, blocking[], models[]).
+    "comfy workflow check": "workflow_check",
     # the local comfy agent's approvals
     "comfy agent permissions": "agent",
     "comfy agent allow": "agent",
@@ -164,6 +166,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy model download-status": "download_status",
     "comfy model download-cancel": "download_status",
     "comfy model downloads": "downloads",
+    # one local model file into the Comfy Cloud model library
+    "comfy model upload": "model_upload",
     # partner-model discovery (`comfy generate`'s two read-only sub-actions —
     # they are argv-tail actions, not Typer subcommands, so they have no node in
     # the help tree; agents resolve them through `command_schemas`).
@@ -198,6 +202,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy assets push": "assets",
     "comfy assets library ls": "assets_library",
     "comfy assets library ensure": "assets_library",
+    "comfy assets library upload": "assets_library",
     # config
     "comfy set-default": "set_default",
     # Not a subcommand: the root `--version` flag emits `command="version"`,
@@ -227,6 +232,8 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy jobs watch": "run_event",
     # upload progress; under plain --json the same lines go to stderr
     "comfy build push": "build_push_event",
+    "comfy assets library upload": "build_push_event",
+    "comfy model upload": "build_push_event",
     # the deployment coming up; same rule about stderr
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",

@@ -22,12 +22,14 @@ import copy
 import logging
 import random
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from comfy_cli.cql.engine import (
     _FRONTEND_DOM_WIDGET_TYPES,
     LOAD_3D_BUTTON_VALUES,
     DynamicGroupBindingError,
+    SavedWidgetLayoutError,
     _dynamic_combo_server_key_matches,
     _dynamic_group_fields,
     _dynamic_group_row_count,
@@ -36,7 +38,10 @@ from comfy_cli.cql.engine import (
     _SubgraphDefs,
     _validate_dynamic_group_layout,
     _validate_dynamic_group_schema,
+    load_3d_advanced_has_legacy_buttons,
+    saved_sub_order,
 )
+from comfy_cli.cql.engine import saved_widget_order as _saved_widget_order
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +223,9 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     default, so a post-migration save (host prompt filled in, interior
     ``caption`` still ``''``) would submit the wrong prompt. Precedence, as the
     frontend serializes it: a link feeding the instance input wins (already
-    reattached), else the host value when materialized, else the interior.
+    reattached), else the host value when materialized, else the interior
+    source widget's value. The chosen value goes to every interior input the
+    input feeds, plain sockets included (``ExecutableNodeDTO.resolveInput``).
     Inner instances are visited first so an outer host wins over an inner one;
     an inner input promoted further (linked from ``-10``) is left to the outer.
     """
@@ -284,24 +291,28 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
-                continue
-            # Every interior widget the input feeds — a repaired primitive
-            # fan-out links one host value into several targets.
-            targets = _promoted.boundary_widget_targets(sg, pi, subgraph_defs)
+                # No host value: the frontend seeds the promoted widget from its interior source widget.
+                if len(inner_nodes) + 1 > visit_budget[0]:
+                    raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
+                visit_budget[0] -= len(inner_nodes) + 1
+                value = _source_widget_value(api_prompt, prefix, _promoted.deepest_source(sg, pi, subgraph_defs))
+                if value is _promoted.UNSET:
+                    continue
+            else:
+                value = _wrap_widget_value(value)
+            targets = _promoted.boundary_targets(sg, pi, subgraph_defs)
             if len(targets) > visit_budget[0]:
                 raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
             visit_budget[0] -= len(targets)
-            for path, widget in targets:
+            for path, input_name in targets:
                 entry = api_prompt.get(":".join([prefix, *path]))
                 if not isinstance(entry, dict):
                     continue
                 inputs = entry.setdefault("inputs", {})
-                current = inputs.get(widget)
+                current = inputs.get(input_name)
                 if isinstance(current, list) and len(current) == 2:
                     continue  # wired from inside the definition: the link wins
-                # Same wrapping every widget value gets, so a two-item list
-                # host value is never read back as a ``[node, slot]`` link.
-                inputs[widget] = _wrap_widget_value(value)
+                inputs[input_name] = value
 
     for node in workflow.get("nodes") or []:
         if not isinstance(node, dict):
@@ -310,6 +321,21 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
         sg = subgraph_defs.get(str(node_type)) if is_subgraph_uuid(node_type) else None
         if sg is not None:
             visit(node, sg, workflow, str(node.get("id")), 0)
+
+
+def _source_widget_value(api_prompt: dict, prefix: str, source: tuple[list[str], str] | None) -> Any:
+    from comfy_cli.cql import promoted as _promoted
+
+    if source is None:
+        return _promoted.UNSET
+    path, widget = source
+    entry = api_prompt.get(":".join([prefix, *path]))
+    inputs = entry.get("inputs") if isinstance(entry, dict) else None
+    if not isinstance(inputs, dict) or widget not in inputs:
+        return _promoted.UNSET
+    value = inputs[widget]
+    # Emitted widget values are wrapped, so a bare pair is a link: never fan it out.
+    return _promoted.UNSET if isinstance(value, list) and len(value) == 2 else value
 
 
 def _has_group_nodes(workflow: dict) -> bool:
@@ -1726,7 +1752,11 @@ def _build_api_node(
             link_inputs[input_name] = [actual_id_str, actual_slot]
 
     widget_inputs = _collect_widget_inputs(node, node_type, object_info, link_inputs)
-    default_inputs = _collect_default_inputs(schema, widget_inputs, primitive_inputs, link_inputs)
+    # ``widget_inputs`` is the save's own positional fill, so it is what tells a
+    # complete widget inventory from a legacy converted-only marker list — see
+    # ``_saved_widget_names``.
+    saved_widget_names = _saved_widget_names(node, schema, widget_inputs)
+    default_inputs = _collect_default_inputs(schema, widget_inputs, primitive_inputs, link_inputs, saved_widget_names)
 
     ordered = _get_ordered_input_names(node_type, node, object_info)
     if ordered:
@@ -1909,7 +1939,13 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
     return [option.get("key") for option in options if isinstance(option, dict)]
 
 
-def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | None = None) -> list[tuple[str, Any]]:
+def _schema_widget_pairs(
+    schema: Any,
+    widget_values: list[Any],
+    *,
+    node_type: str | None = None,
+    node: dict | None = None,
+) -> list[tuple[str, Any]]:
     """Pair a schema's widget inputs with their ``widgets_values`` slots.
 
     One ordered walk that unifies name-order and control-marker filtering so the
@@ -1931,7 +1967,13 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
     A dynamic combo's selected sub-inputs are expanded in the order the SAVE
     recorded them when ``node`` records one (:func:`_saved_sub_order`), because
     ``widgets_values`` is positional against the option's sub-input list AT SAVE
-    TIME, not against today's.
+    TIME, not against today's. A save that names only SOME of the option's
+    sub-inputs is a partial layout, not a historical one: it consumes too few
+    slots and shifts every later widget. Such a walk accounts for fewer than all
+    the values, so when neither stream shape is exact under the saved order the
+    walk is retried on the catalog order and taken only if THAT is exact — a
+    short or extra ``widgets_values`` array is also inexact, and there the saved
+    order is still the better guess.
 
     Returns ``[]`` when the schema declares no widget inputs, so the caller can
     fall back to node-input inspection exactly as before.
@@ -1943,6 +1985,11 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
     # viewers fed by a ``model_3d`` link (Preview3DAdvanced,
     # SaveGaussianSplat, …). The value gate below supports both generations.
     injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
+    if node_type == "Load3DAdvanced" and not load_3d_advanced_has_legacy_buttons(widget_values):
+        # Same predicate the editor's ``load_3d_button_slots`` uses: a lone
+        # marker at the viewport slot is the viewport's own value, not a
+        # legacy button, so skipping it would shift width/height by one.
+        injects_load_3d_buttons = False
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -1978,7 +2025,9 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
             names = listed + [n for n in names if n not in listed]
         ordered.extend((n, section_def[n]) for n in names)
 
-    def walk(strict: bool) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+    def walk(strict: bool, saved_node: dict | None = node) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+        # ``saved_node`` is the node whose recorded widget order sub-inputs are
+        # expanded in; ``None`` means "ignore the save, use the catalog order".
         # ``strict`` assumes the current frontend's slot layout: every exact
         # ``seed``/``noise_seed`` INT is followed by its companion slot, so a
         # control keyword there is always consumed. Returns the pairs and
@@ -2005,13 +2054,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
                 # component widget, so their values sit between ``model_file`` and
                 # this slot. Consuming them here read "upload3dmodel" into the
                 # viewport input and shifted width/height by three.
-                while (
-                    vidx < len(widget_values)
-                    and isinstance(widget_values[vidx], str)
-                    and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
-                ):
+                if node_type == "Load3DAdvanced":
+                    # The shared predicate matched, so the editor placed all
+                    # three button slots here whatever the third value holds;
+                    # skip the same three or the two read different values.
                     legacy_buttons_consumed = True
-                    vidx += 1
+                    vidx = min(vidx + len(LOAD_3D_BUTTON_VALUES), len(widget_values))
+                else:
+                    while (
+                        vidx < len(widget_values)
+                        and isinstance(widget_values[vidx], str)
+                        and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+                    ):
+                        legacy_buttons_consumed = True
+                        vidx += 1
             if vidx >= len(widget_values):
                 if legacy_buttons_consumed:
                     # A save truncated after its button markers still names this
@@ -2036,7 +2092,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
                 return
             pairs.append((name, value))
             if is_dynamic:
-                subs = _saved_sub_order(node, name, _dynamic_combo_selected_subs(name, spec, value))
+                subs = _saved_sub_order(saved_node, name, _dynamic_combo_selected_subs(name, spec, value))
                 if not subs and not any(
                     _dynamic_combo_server_key_matches(value, key) for key in _dynamic_combo_option_keys(spec)
                 ):
@@ -2086,7 +2142,31 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
     # take a keyword the next COMBO lists.
     pairs, exact, warnings = walk(strict=True)
     if not exact:
-        pairs, _exact, warnings = walk(strict=False)
+        pairs, exact, warnings = walk(strict=False)
+    if not exact and node is not None:
+        # Neither stream shape accounts for the array under the SAVED sub-order.
+        # One cause is a partial set of ``widget`` markers: a save that names
+        # only some of an option's sub-inputs makes ``_saved_sub_order`` consume
+        # too few slots, so every later widget reads a shifted one. Retrying on
+        # the catalog order recovers that — but only when the catalog walk is
+        # itself exact. ``exact`` is also false for an unrelated short or extra
+        # ``widgets_values`` array, where both orders leave values over and the
+        # saved one is still the better guess; retrying unconditionally there
+        # would discard a valid saved order and shift the earlier sub-values.
+        #
+        # This is the gate every OTHER reader of the saved layout already has.
+        # ``engine.saved_widget_order`` refuses a saved order whose expansion
+        # does not account for the whole array (``len(entries) != len(values)``
+        # -> ``None`` -> catalog order), but it can only run that check with a
+        # Graph, and conversion has none here. ``exact`` is the same question
+        # answered from the walk itself, so an edit and a conversion resolve a
+        # partially-marked save the same way instead of disagreeing — the
+        # failure this function's saved-order rule exists to prevent.
+        for catalog_strict in (True, False):
+            catalog_pairs, catalog_exact, catalog_warnings = walk(strict=catalog_strict, saved_node=None)
+            if catalog_exact:
+                pairs, warnings = catalog_pairs, catalog_warnings
+                break
     for warning in warnings:
         logger.warning(*warning)
     return pairs
@@ -2095,68 +2175,38 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any], node: dict | Non
 def _saved_sub_order(node: dict | None, parent: str, subs: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
     """Expand a dynamic combo's selected sub-inputs in the order the SAVE recorded.
 
-    A ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option contributes its
-    sub-inputs as contiguous ``widgets_values`` slots right after the selector
-    (``dynamicComboWidget.updateWidgets`` -> ``addNodeInput``), and the saved
-    graph names them on its ``inputs[]`` entries, dotted and in that order:
-    ``model.prompt``, ``model.resolution``, ``model.auto_downscale``, ... The
-    option's sub-input list in today's catalog is only today's layout.
+    Thin adapter over :func:`comfy_cli.cql.engine.saved_sub_order`, which is the
+    one implementation of this rule. The edit path (``_write_widget``, the order
+    ``set-widget`` indexes by) resolves through the same function, because the
+    two resolved it independently and disagreed: on a Seedance save made before
+    its option gained ``auto_upscale``, conversion read the seed from one slot
+    while an edit wrote to the next one along, clobbering the seed's
+    ``control_after_generate`` marker.
 
-    ``ByteDance2ReferenceNode`` (Seedance 2.0) gained an OPTIONAL
-    ``auto_upscale`` after ``auto_downscale``. Expanding the current option
-    shifted every later slot by one, so the seed landed on
-    ``model.auto_upscale`` and the seed's ``control_after_generate`` marker
-    landed on ``seed`` — ten of the public Comfy Hub workflows in the 2026-10
-    conversion audit. Ordering by the saved names puts each value back, and a
-    sub the save never named owns no slot, which is what the frontend does with
-    a widget the node does not have.
-
-    Unlike a node's top-level ``inputs[]``, this order is trustworthy: the
-    frontend splices an option's sub-widgets in contiguously when the selector
-    changes, so their relative order is the option's own, not an artifact of
-    when each socket happened to be created.
-
-    Conservative in both directions. If the save names a dotted sub the current
-    option no longer declares, the two layouts disagree in a way this cannot
-    reconcile and ``subs`` is returned unchanged rather than guessed at. Same
-    when the save records no dotted names for this parent, so a graph without
-    the markers expands exactly as before. A repeated name is taken once, at its
-    first position.
+    A sub the save did not name owns no ``widgets_values`` slot. Connection-only
+    subs own none either way, so they are carried through to keep the emitted
+    input set identical to the unordered expansion.
     """
-    if not isinstance(node, dict) or not subs:
+    if not subs:
         return subs
-    raw_inputs = node.get("inputs")
-    if not isinstance(raw_inputs, list):
+    try:
+        order = saved_sub_order(_saved_widget_order(node), parent, [name for name, _spec in subs])
+    except SavedWidgetLayoutError as exc:
+        raise WorkflowConversionError(str(exc)) from exc
+    if order is None:
         return subs
-    by_name = dict(subs)
-    prefix = f"{parent}."
-    saved: list[tuple[str, Any]] = []
-    seen: set[str] = set()
-    for inp in raw_inputs:
-        if not isinstance(inp, dict) or not inp.get("widget"):
-            continue
-        name = inp.get("name")
-        if not isinstance(name, str) or not name.startswith(prefix) or name in seen:
-            continue
-        if name not in by_name:
-            # A DESCENDANT of a nested selector among these subs
-            # (``model.variant.width`` under ``model.variant``). It is not this
-            # level's slot, and the recursive ``consume`` orders it with the
-            # nested selector as its own parent, so skip it rather than
-            # abandoning the saved order for every sibling at this level.
-            head = name[len(prefix) :].split(".", 1)[0]
-            if f"{prefix}{head}" in by_name:
-                continue
-            # A sub this option no longer declares at all: the layouts disagree
-            # beyond repair from here.
-            return subs
-        seen.add(name)
-        saved.append((name, by_name[name]))
-    if not saved:
-        return subs
-    # Connection-only subs own no slot either way, so carrying them through
-    # keeps the emitted input set identical to the unordered expansion.
-    return saved + [(n, sp) for n, sp in subs if n not in seen and not _is_widget_input(sp)[0]]
+    remaining = list(subs)
+    kept: list[tuple[str, Any]] = []
+    for saved_name in order:
+        index = next((i for i, (name, _spec) in enumerate(remaining) if name == saved_name), None)
+        if index is not None:
+            pair = remaining.pop(index)
+            if not _is_widget_input(pair[1])[0]:
+                raise WorkflowConversionError(
+                    f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                )
+            kept.append(pair)
+    return kept + [(name, spec) for name, spec in remaining if not _is_widget_input(spec)[0]]
 
 
 def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | None]:
@@ -2197,6 +2247,7 @@ def _fallback_widget_names(node: dict, widget_values: list[Any]) -> list[str | N
 
 def _filter_control_values(
     widget_values: list[Any],
+    *,
     node_type: str | None = None,
     node: dict | None = None,
     object_info: dict | None = None,
@@ -2473,7 +2524,7 @@ def _collect_widget_inputs(
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
-    pairs = _schema_widget_pairs(schema, widget_values, node) if schema else []
+    pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
     schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
@@ -2485,7 +2536,13 @@ def _collect_widget_inputs(
     # No schema, or the schema declares no widget inputs: fall back to the
     # positional control-marker heuristic + node-input name inspection, which
     # matches the reference behavior for unknown node types.
-    filtered = _filter_control_values(widget_values, node_type, node, object_info)
+    # A socket for every value leaves no room for a control marker, so a COMBO
+    # value that reads "fixed" stays a value.
+    sockets = [i for i in node.get("inputs") or [] if isinstance(i, dict) and i.get("widget")]
+    if len(sockets) == len(widget_values):
+        filtered = widget_values
+    else:
+        filtered = _filter_control_values(widget_values, node_type=node_type, node=node, object_info=object_info)
     names = _fallback_widget_names(node, filtered)
     if not names:
         if filtered:
@@ -2527,16 +2584,178 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
             out.setdefault("➕ Add Lora", value)
 
 
+def _saved_widget_names(
+    node: dict,
+    schema: dict | None = None,
+    filled_widget_names: Iterable[str] = (),
+) -> frozenset[str] | None:
+    """The widget names the SAVED node records, when they are a COMPLETE inventory.
+
+    ``None`` means "no usable evidence", and the caller then changes nothing.
+
+    Two frontend generations write ``inputs[]`` markers differently, and only
+    one of them is an inventory:
+
+    * the older one wrote an entry only for a widget CONVERTED to a socket, so
+      an ordinary unconverted widget is simply absent from the list. Reading
+      that as an inventory would drop a widget the node really has;
+    * the current one writes an entry for every widget-backed input, converted
+      or not (the linked-inputs model).
+
+    Two independent tests separate them, and the list is an inventory only if
+    it passes BOTH.
+
+    **1. At least one unlinked widget marker.** Converting a widget is what
+    adds its socket, so a list of only *linked* markers could have come from
+    either generation. This is the bulk of the discrimination: measured over
+    the 500 oracle fixtures, 6676 of 7945 marker-bearing nodes carry an
+    unlinked marker and 1269 are the ambiguous converted-only shape.
+
+    It is weaker than it looks, and an earlier version of this docstring
+    overstated it as "a converted widget always carries a ``link``". Legacy
+    ``convertToInput`` added the socket *without* connecting it, so a widget
+    converted and left unconnected — or connected and later disconnected —
+    serializes as an unlinked marker on a legacy save too
+    (``src/extensions/core/widgetInputs.ts`` at ComfyUI_frontend
+    ``d2e9943e79``, before #2925 / #2930 removed it). The marker is
+    byte-indistinguishable from a current one: ``GET_CONFIG`` is a ``Symbol()``
+    so the config never reaches JSON, and both generations write
+    ``{"name": ...}``.
+
+    **2. Every widget the save positionally filled is named.** A legacy
+    converted-only list omits exactly the *unconverted* widgets — which are the
+    ones carrying ``widgets_values`` entries. So a declared widget input the
+    save filled but the markers do not name proves the list is not an
+    inventory, whatever its link states, and that is what closes the hole left
+    by (1). ``schema``/``filled_widget_names`` are optional only so the helper
+    stays callable with a node alone; omit them and only (1) applies.
+
+    Compare against *flattened* names (``_marker_coverage``): a dict widget is
+    declared as ``regions`` but marked per leaf (``regions.face_oval``,
+    ``regions.lips``), so a marker covers its own name and the declared name it
+    is a leaf of.
+    """
+    raw = node.get("inputs")
+    if not isinstance(raw, list):
+        return None
+    names: set[str] = set()
+    saw_unlinked = False
+    for inp in raw:
+        if not isinstance(inp, dict) or not inp.get("widget"):
+            continue
+        name = inp.get("name")
+        if not isinstance(name, str):
+            continue
+        names.add(name)
+        if not _is_link_id(inp.get("link")):
+            saw_unlinked = True
+    if not names or not saw_unlinked:
+        return None
+    if _markers_omit_a_filled_widget(names, schema, filled_widget_names):
+        return None
+    return frozenset(names)
+
+
+def _marker_coverage(marker_names: Iterable[str]) -> frozenset[str]:
+    """The declared input names a marker list accounts for.
+
+    A dict widget is DECLARED as ``regions`` but MARKED per leaf
+    (``regions.face_oval``, ``regions.0.lips``), so a marker accounts for its
+    own string and for the declared input it is a leaf of.
+
+    Both readers of a marker list compare against this set: the inventory test
+    below, and the suppression predicate in ``_widget_absent_from_the_save``.
+    They have to agree. A reader doing a flat membership test instead reads the
+    very marker that proves an input EXISTS as proof that it does not, and then
+    drops that input's declared default.
+    """
+    covered: set[str] = set()
+    for name in marker_names:
+        covered.add(name)
+        head = name.split(".", 1)[0]
+        if head:
+            covered.add(head)
+    return frozenset(covered)
+
+
+def _markers_omit_a_filled_widget(
+    marker_names: set[str], schema: dict | None, filled_widget_names: Iterable[str]
+) -> bool:
+    """Whether the save filled a declared widget input the markers do not name.
+
+    See ``_saved_widget_names`` test (2): this is the shape a legacy
+    converted-only marker list has and a complete inventory cannot.
+
+    Socketless widgets are excluded. They render no input socket, so whether
+    the linked-inputs model marks them at all is not something this corpus
+    settles — and they are never dropped anyway, so a refusal here would only
+    cost fixes elsewhere on the node.
+    """
+    input_def = _schema_input_def(schema)
+    if not input_def:
+        return False
+    covered = _marker_coverage(marker_names)
+    for name in filled_widget_names:
+        if name in covered:
+            continue
+        spec = _declared_input_spec(input_def, name)
+        if spec is None or not _is_widget_input(spec)[0] or _is_socketless_widget(spec):
+            continue
+        return True
+    return False
+
+
+def _widget_absent_from_the_save(
+    input_name: str, input_spec: Any, section: str, saved_widget_coverage: frozenset[str] | None
+) -> bool:
+    """Whether the saved node proves it never carried this widget.
+
+    ``graphToPrompt()`` serializes the widgets a node actually has, so an input
+    the node did not carry is absent from its prompt. Synthesizing a schema
+    default for one put inputs in the prompt the frontend's golden does not
+    contain: ``CreateVideo`` in the ``03_video_wan2_2_14B_i2v_subgraphed``
+    oracle fixture saves ``widgets_values: [16]`` and the golden holds exactly
+    ``{"fps": 16, "images": [...]}``, while today's object_info also declares
+    optional ``bit_depth`` / ``color_space`` / ``codec``.
+
+    The evidence is the node's own marker list, NOT the length of
+    ``widgets_values``. That same fixture's node records
+    ``inputs[]: [images, audio, fps{widget}]`` — one widget-flagged entry,
+    naming ``fps`` only — so the file itself says the three optional inputs did
+    not exist on it, independently of the golden. Keying on "absent from
+    ``widgets_values``" instead would also have dropped an optional widget the
+    node really had and whose value simply ran past a truncated save, where the
+    frontend does send the default.
+
+    Required inputs are never dropped: the server rejects a prompt without
+    them, and that repair is load-bearing for a truncated save. A socketless
+    widget is never dropped either — the branch below exists precisely because
+    the frontend submits those from live widget state even when they were never
+    serialized.
+
+    The argument is marker COVERAGE (``_marker_coverage``), not the raw marker
+    strings: a dict widget declared ``regions`` is marked per leaf, so
+    ``regions.face_oval`` is what proves the node carried ``regions``.
+    """
+    if section != "optional" or saved_widget_coverage is None:
+        return False
+    if not _is_widget_input(input_spec)[0] or _is_socketless_widget(input_spec):
+        return False
+    return input_name not in saved_widget_coverage
+
+
 def _collect_default_inputs(
     schema: dict | None,
     widget_inputs: dict[str, Any],
     primitive_inputs: dict[str, Any],
     link_inputs: dict[str, list],
+    saved_widget_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     if not schema:
         return {}
     input_def = _schema_input_def(schema)
     defaults: dict[str, Any] = {}
+    saved_widget_coverage = None if saved_widget_names is None else _marker_coverage(saved_widget_names)
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
@@ -2545,7 +2764,9 @@ def _collect_default_inputs(
             if input_name in widget_inputs or input_name in primitive_inputs or input_name in link_inputs:
                 continue
             default = _extract_default(input_spec)
-            if default is not _MISSING:
+            if default is not _MISSING and not _widget_absent_from_the_save(
+                input_name, input_spec, section, saved_widget_coverage
+            ):
                 defaults[input_name] = _wrap_widget_value(default)
             elif section == "required" and _is_socketless_widget(input_spec):
                 # A socketless widget the saved workflow never persisted

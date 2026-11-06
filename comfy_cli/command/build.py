@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -1878,6 +1879,97 @@ def _write_spec(renderer, path: Path, spec: dict) -> None:
         raise typer.Exit(code=1) from error
 
 
+def _repository_is_sendable(repository: str) -> bool:
+    """Whether the pin check may send this ``repository``: only a public GitHub
+    form that ``_canonical_github_repository`` recognizes (``https://github.com/org/repo``,
+    ``git@github.com:org/repo.git`` or ``ssh://git@github.com/org/repo``), with no
+    user name other than ssh's ``git`` and no password, query or fragment.
+
+    Anything else is refused before the request, because the builder fetches
+    public GitHub repositories only and refuses the rest after receipt, by which
+    point a token in the string has left the machine. That includes a URL that
+    does not parse (``https://TOKEN@[github.com/org/repo``) and a scp-style
+    address with a token for its user (``TOKEN@github.com:org/repo.git``): a
+    string that cannot be recognized as safe is not sent."""
+    return _canonical_github_repository(repository) is not None
+
+
+def _refuse_unsendable_repositories(renderer, public_nodes: list[dict], spec_file: Path) -> None:
+    """Refuse with ``build_spec_invalid`` a public pack whose ``repository`` is not a
+    recognized public GitHub address. It reads the spec only, so a dry run runs it
+    before it asks for sign-in: a bad address gets the same answer signed in or out."""
+    unsendable = sorted(
+        str(node.get("name") or node.get("id") or "-")
+        for node in public_nodes
+        if node.get("repository") is not None
+        and not (isinstance(node["repository"], str) and _repository_is_sendable(node["repository"]))
+    )
+    if unsendable:
+        renderer.error(
+            code="build_spec_invalid",
+            message="these custom nodes name a repository that is not a public GitHub address without credentials, "
+            "so it is never sent: " + ", ".join(unsendable),
+            hint="write the repository as https://github.com/<org>/<repo> or git@github.com:<org>/<repo>.git, "
+            "with no user name or token; the builder fetches public GitHub repositories only",
+            details={"path": str(spec_file)},
+        )
+        raise typer.Exit(code=1)
+
+
+def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: Path) -> None:
+    """Ask the builder's importer to place every public pack, and refuse with
+    ``build_registry_pin_missing`` naming each identity it could not place: a
+    registry version it does not publish (a Flagged one among them), or a
+    repository it cannot normalize. A pack the registry never answered about
+    (``report.unverifiedPins``) is refused the same way: unchecked is not placed.
+
+    The importer reads the snapshot and writes nothing, which is what lets
+    ``push --dry-run`` make the same call and refuse the same way. A lookup that
+    itself fails exits through ``_builder_call`` rather than passing the pins.
+    A ``repository`` that is not a recognized public GitHub address is refused
+    before anything is sent; that covers one that does not parse and one that
+    carries a user name or token."""
+    _refuse_unsendable_repositories(renderer, public_nodes, spec_file)
+    imported = _builder_call(
+        renderer,
+        lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
+    )
+    checked = (imported.get("definition") or {}).get("customNodes") or []
+    try:
+        missing = public_node_identities(public_nodes) - public_node_identities(
+            public_node_projection({"customNodes": checked})
+        )
+    except BuildSpecInvalidError as error:
+        renderer.error(code=error.code, message=str(error), details={"path": str(spec_file)})
+        raise typer.Exit(code=1) from error
+    if missing:
+        labels = sorted(f"{identity.kind}:{identity.value}@{identity.version or '-'}" for identity in missing)
+        renderer.error(
+            code="build_registry_pin_missing",
+            message="the builder could not resolve these custom node identities: " + ", ".join(labels),
+            hint="edit the spec to name a published registry version or normalized repository, or remove the node",
+        )
+        raise typer.Exit(code=1)
+    # The importer keeps a pack the registry did not answer for in the definition,
+    # so the identity check above passes it; the report is the only place that says
+    # nothing confirmed it.
+    report = imported.get("report") if isinstance(imported, dict) else None
+    unverified = report.get("unverifiedPins") if isinstance(report, dict) else None
+    if unverified:
+        names = (
+            sorted(_from_server(name) for name in unverified)
+            if isinstance(unverified, list)
+            else [_unrenderable("unverifiedPins", unverified)]
+        )
+        renderer.error(
+            code="build_registry_pin_missing",
+            message="the registry did not answer for these custom nodes, so their pins were not checked: "
+            + ", ".join(names),
+            hint="retry when the Comfy Registry is reachable; nothing was uploaded or saved",
+        )
+        raise typer.Exit(code=1)
+
+
 @app.command("push", help="Push the local comfy-build spec to the builder.")
 @tracking.track_command("build")
 def push_cmd(
@@ -1911,7 +2003,13 @@ def push_cmd(
             help="With --release, cut the release even though the save warned about a model link.",
         ),
     ] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Compute uploads locally; send no HTTP requests.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Compute uploads locally and check public custom node pins with the builder; upload and save nothing.",
+        ),
+    ] = False,
     models_dir: Annotated[
         str | None,
         typer.Option("--models-dir", help="Models folder used to resolve model localPath values."),
@@ -1926,7 +2024,7 @@ def push_cmd(
     if release and dry_run:
         renderer.error(
             code="build_missing_input",
-            message="--release cuts a release from a real push, and --dry-run sends nothing.",
+            message="--release cuts a release from a real push, and --dry-run saves nothing.",
             hint="drop --dry-run to cut the release, or drop --release to preview the push",
             details={"conflict": ["--release", "--dry-run"]},
         )
@@ -2007,15 +2105,32 @@ def push_cmd(
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The pin check is the one question a dry run asks the builder: it is a
+            # read, it costs nothing, and it is the refusal a push otherwise meets
+            # only after the plan was disclosed. A spec without a public pin asks
+            # nothing, so it needs no sign-in.
+            public_nodes = public_node_projection(preparation.definition)
+            if public_nodes:
+                _refuse_unsendable_repositories(renderer, public_nodes, paths.spec_file)
+                _require_public_pins(renderer, _builder_client(renderer, builder_url), public_nodes, paths.spec_file)
+            payload["public_pins_checked"] = len(public_nodes)
             # The envelope is the whole answer and prints nothing in pretty mode, so a
             # person gets the real push's opening line and word that nothing moved.
             # "Already held" is what the spec records; the builder, never asked,
             # may hold more.
             if renderer.is_pretty():
                 renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
-                renderer.info(
-                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
-                )
+                if public_nodes:
+                    count = len(public_nodes)
+                    renderer.info(f"The builder resolved {count} public custom node pin{'' if count == 1 else 's'}.")
+                    renderer.info(
+                        "--dry-run: nothing was uploaded or saved; the builder may already hold more of these "
+                        "than the spec records."
+                    )
+                else:
+                    renderer.info(
+                        "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                    )
                 if _has_models(spec):
                     renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
@@ -2032,26 +2147,8 @@ def push_cmd(
 
         public_nodes = public_node_projection(preparation.definition)
         if public_nodes:
-            imported = _builder_call(
-                renderer,
-                lambda: client.resolve_snapshot(snapshot_from_definition({"customNodes": public_nodes})),
-            )
-            checked = (imported.get("definition") or {}).get("customNodes") or []
-            try:
-                missing = public_node_identities(public_nodes) - public_node_identities(
-                    public_node_projection({"customNodes": checked})
-                )
-            except BuildSpecInvalidError as error:
-                renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-                raise typer.Exit(code=1) from error
-            if missing:
-                labels = sorted(f"{identity.kind}:{identity.value}@{identity.version or '-'}" for identity in missing)
-                renderer.error(
-                    code="build_registry_pin_missing",
-                    message="the builder could not resolve these custom node identities: " + ", ".join(labels),
-                    hint="edit the spec to name a published registry version or normalized repository, or remove the node",
-                )
-                raise typer.Exit(code=1)
+            _require_public_pins(renderer, client, public_nodes, paths.spec_file)
+        payload["public_pins_checked"] = len(public_nodes)
 
         # Said before the first byte moves, and said even when nothing will: a
         # multi-GB upload is otherwise silent until it ends, and "0 files" is
@@ -2798,6 +2895,12 @@ def _builder_call(
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         _report_builder_error(renderer, e, subject, hint, models)
         raise typer.Exit(code=1) from e
+    # A response body that stalls past the timeout or drops mid-read is raised by
+    # ``resp.read`` (``http.read_capped``), outside urllib's ``URLError`` wrapping of
+    # the request itself. Report it as the same transport failure, not a traceback.
+    except (TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
+        _report_builder_error(renderer, urllib.error.URLError(e), subject, hint, models)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
         raise typer.Exit(code=1) from e
@@ -2979,6 +3082,10 @@ def show_cmd(
 
 
 _RELEASE_POLL_SECONDS = 2.0
+#: Failed polls in a row a watch rides out before it ends: transport failures and
+#: answers too damaged to read, counted together. With the backoff in
+#: ``_poll_call``, about a minute of outage.
+_POLL_TRANSPORT_MISSES = 5
 
 
 #: Sorts below every usable timestamp, so a release the builder dated badly loses
@@ -3134,9 +3241,105 @@ def _selected_release_id(renderer, client, scope: _BuildScope, release: str | No
     return _newest_release_id(renderer, client, _resolve_build_id(renderer, client, scope))
 
 
+#: The exit a watch that lost its sign-in ends with, as `comfy deploy`'s watches do
+#: (``deploy_runtime.EXIT_WATCH_LOST``): only the watch ended, so it must not exit 1,
+#: which says the release failed. 75 is EX_TEMPFAIL in sysexits.h.
+_EXIT_WATCH_LOST: Final = 75
+
+
+def _watched_release(renderer, client, release_id: str) -> dict:
+    """One read of a release this command has already cut.
+
+    The builder accepted the cut with this sign-in, so a 401 session recovery did
+    not clear ends the watch while a refreshable sign-in remains stored. The
+    release may continue remotely. A key, a handed token, or a sign-in without
+    a refresh token keeps ``build_not_signed_in``.
+    """
+    from comfy_cli import credentials
+    from comfy_cli.builder_api import BuilderCredentialRefused
+
+    try:
+        return client.get_release(release_id)
+    except BuilderCredentialRefused as error:
+        if not credentials.sign_in_still_stored(getattr(client, "sign_in_base_url", None)):
+            raise
+        renderer.error(
+            code="watch_auth_lost",
+            message=f"the builder refused the sign-in (401) after attempting session recovery; "
+            f"release {release_id} may still be building on the server",
+            hint=f"read it with `comfy build release show {release_id}` until its status is complete; "
+            "the stored sign-in was preserved",
+            details={"releaseId": release_id},
+            exit_code=_EXIT_WATCH_LOST,
+        )
+        raise typer.Exit(code=_EXIT_WATCH_LOST) from error
+
+
+def _poll_call(renderer, fn, usable=None):
+    """``_builder_call`` for one poll of a watch, which a single timed-out or
+    dropped request must not end: the release keeps building either way. A
+    transport failure sleeps and polls again, up to ``_POLL_TRANSPORT_MISSES`` in
+    a row; the builder's own answer (an ``HTTPError``) and every other failure
+    still end the watch on the first one, through the same envelope.
+
+    The builder client is urllib-only: a connect timeout arrives wrapped in a
+    ``URLError``, a timeout or reset while awaiting the response arrives bare, and
+    a connection closed partway through the body arrives as ``IncompleteRead``.
+    A certificate the CA store refuses also arrives as a ``URLError``, but it
+    will be refused again, so it ends the watch at once with its trust hint.
+    A fixed-length body cut short arrives as no error at all: the HTTP layer
+    returns the partial bytes, which parse as ``{}``. So an answer ``usable``
+    rejects counts as a miss in the same run, and the last one ends the watch."""
+    from comfy_cli.http import tls_verification_failed
+
+    def attempt():
+        for miss in range(1, _POLL_TRANSPORT_MISSES + 1):
+            try:
+                answer = fn()
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as e:
+                if isinstance(e, urllib.error.HTTPError) or tls_verification_failed(e):
+                    raise
+                if miss == _POLL_TRANSPORT_MISSES:
+                    if isinstance(e, urllib.error.URLError):
+                        raise
+                    # Wrapped, or a bare one would escape ``_builder_call`` as a traceback.
+                    raise urllib.error.URLError(e) from e
+                renderer.warn(f"builder unreachable ({e}); polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
+            else:
+                if usable is None or usable(answer):
+                    return answer
+                if miss == _POLL_TRANSPORT_MISSES:
+                    renderer.error(
+                        code="build_builder_error",
+                        message=f"the builder sent no readable answer in {miss} polls in a row.",
+                    )
+                    raise typer.Exit(code=1)
+                renderer.warn(f"builder answer unreadable; polling again ({miss}/{_POLL_TRANSPORT_MISSES - 1})")
+            time.sleep(min(_RELEASE_POLL_SECONDS * 2**miss, 30.0))
+
+    return _builder_call(renderer, attempt)
+
+
+def _readable_log(answer) -> bool:
+    """The builder always sends ``log``, empty when none was captured yet, so an
+    answer without one is a body cut short."""
+    return isinstance(answer, dict) and isinstance(answer.get("log"), str)
+
+
+def _poll_status(renderer, client, release_id: str) -> dict:
+    """One status read of a watch. An answer with no status string is unreadable
+    and polled again; a whole answer naming an unknown status is the builder's
+    word and ends the watch at the caller."""
+    return _poll_call(
+        renderer,
+        lambda: _watched_release(renderer, client, release_id),
+        usable=lambda release: isinstance(release, dict) and isinstance(release.get("status"), str),
+    )
+
+
 def _poll_release(renderer, client, release_id: str) -> dict:
     while True:
-        release = _builder_call(renderer, lambda: client.get_release(release_id))
+        release = _poll_status(renderer, client, release_id)
         status = release.get("status")
         if renderer.is_pretty():
             renderer.info(f"release {release_id}: {status}")
@@ -3324,21 +3527,39 @@ def release_logs(
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     previous_log = ""
     content: dict = {}
+    complete = False
+
+    def read_log() -> dict:
+        return client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu)
+
     while True:
-        content = _builder_call(
-            renderer,
-            lambda: client.get_release_logs(release_id, os=selected_target.os, gpu=selected_target.gpu),
-        )
+        # Only a follow is a watch; a single read fails fast like every other command.
+        # A body cut short inside its Content-Length parses as `{}` rather than
+        # raising. Before any whole log is in hand the follow polls again, as for
+        # a status read; after, publishing it would drop the log already read and
+        # fail `build_release_logs.json`, so the last whole log stands until a
+        # later read replaces it.
+        if follow:
+            had_log = _readable_log(content)
+            read = _poll_call(renderer, read_log, usable=lambda answer: had_log or _readable_log(answer))
+        else:
+            read = _builder_call(renderer, read_log)
+        if _readable_log(read) or not content:
+            content = read
+        elif complete:
+            renderer.warn("the final log read came back incomplete; showing the log read before the release completed")
         log = content.get("log", "")
         if renderer.is_pretty() and isinstance(log, str) and log:
             renderer.print(log[len(previous_log) :] if log.startswith(previous_log) else log)
             previous_log = log
-        if not follow:
+        if not follow or complete:
             break
-        detail = _builder_call(renderer, lambda: client.get_release(release_id))
+        detail = _poll_status(renderer, client, release_id)
         match detail.get("status"):
             case "complete":
-                break
+                # The log above may predate completion (a retried status read
+                # widens that gap), so read it once more for the final lines.
+                complete = True
             case "queued" | "building":
                 time.sleep(_RELEASE_POLL_SECONDS)
             case status:

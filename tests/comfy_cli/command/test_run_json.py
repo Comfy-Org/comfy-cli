@@ -52,13 +52,30 @@ def ndjson_renderer():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def local_preflight_catalog(monkeypatch):
+    """Keep event/queue tests independent of any real server on localhost.
+
+    Validation still runs against complete schemas. Tests for conversion HTTP
+    and deliberately invalid catalogs override their specific boundary below.
+    """
+    from copy import deepcopy
+
+    monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", lambda *a, **k: deepcopy(OBJECT_INFO))
+
+    def unexpected_catalog_request(*args, **kwargs):
+        pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+    monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+
+
 @pytest.fixture
 def simple_workflow():
     return {
         "1": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {"width": 64, "height": 64, "batch_size": 1},
-            "_meta": {"title": "Latent"},
+            "class_type": "EmptyImage",
+            "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+            "_meta": {"title": "Image"},
         },
         "2": {
             "class_type": "SaveImage",
@@ -524,8 +541,8 @@ class TestQueuedEventShape:
         nodes = queued["nodes"]
         assert len(nodes) == 2
         by_id = {n["node_id"]: n for n in nodes}
-        assert by_id["1"]["class_type"] == "EmptyLatentImage"
-        assert by_id["1"]["title"] == "Latent"  # _meta.title wins
+        assert by_id["1"]["class_type"] == "EmptyImage"
+        assert by_id["1"]["title"] == "Image"  # _meta.title wins
         assert by_id["2"]["class_type"] == "SaveImage"
         assert by_id["2"]["title"] == "Save"
 
@@ -621,7 +638,7 @@ class TestWebSocketEvents:
                     "data": {
                         "prompt_id": "p",
                         "node_id": "1",
-                        "node_type": "EmptyLatentImage",
+                        "node_type": "EmptyImage",
                         "exception_type": "RuntimeError",
                         "exception_message": "boom",
                         "traceback": ['  File "x.py"\n', "    raise RuntimeError\n"],
@@ -635,12 +652,12 @@ class TestWebSocketEvents:
         assert any(e["type"] == "execution_error" for e in _events(lines))
         env = _envelope(lines)
         assert env["error"]["code"] == "execution_error"
-        assert env["error"]["message"] == "EmptyLatentImage (node 1): boom"
+        assert env["error"]["message"] == "EmptyImage (node 1): boom"
         details = env["error"]["details"]
         assert details["node_id"] == "1"
-        assert details["class_type"] == "EmptyLatentImage"
+        assert details["class_type"] == "EmptyImage"
         assert details["exception_type"] == "RuntimeError"
-        assert details["title"] == "Latent"  # from _meta.title
+        assert details["title"] == "Image"  # from _meta.title
         # The envelope carries only the traceback tail; the full traceback
         # stays on the execution_error event.
         assert isinstance(details["traceback_tail"], list)
@@ -658,7 +675,7 @@ class TestWebSocketEvents:
                     "data": {
                         "prompt_id": "p",
                         "node_id": 7,
-                        "node_type": "EmptyLatentImage",
+                        "node_type": "EmptyImage",
                         "exception_type": "RuntimeError",
                         "exception_message": "boom",
                         "traceback": [],
@@ -797,8 +814,8 @@ class TestNodeBookkeeping:
             assert isinstance(ev["node"], str), f"{ev['type']} node is {type(ev['node']).__name__}"
 
     def test_title_falls_back_to_class_type(self):
-        ex = _make_workflow_execution({"1": {"class_type": "EmptyLatentImage", "inputs": {}}})
-        assert ex.get_node_title("1") == "EmptyLatentImage"
+        ex = _make_workflow_execution({"1": {"class_type": "EmptyImage", "inputs": {}}})
+        assert ex.get_node_title("1") == "EmptyImage"
 
     def test_title_falls_back_to_node_id_for_unknown(self):
         ex = _make_workflow_execution({})
@@ -809,10 +826,10 @@ UI_WORKFLOW = {
     "nodes": [
         {
             "id": 1,
-            "type": "EmptyLatentImage",
+            "type": "EmptyImage",
             "inputs": [],
-            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-            "widgets_values": [64, 64, 1],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+            "widgets_values": [64, 64, 1, 0],
             "mode": 0,
         },
         {
@@ -827,17 +844,26 @@ UI_WORKFLOW = {
 }
 
 OBJECT_INFO = {
-    "EmptyLatentImage": {
+    "EmptyImage": {
         "input": {
             "required": {
                 "width": ["INT", {"default": 512}],
                 "height": ["INT", {"default": 512}],
                 "batch_size": ["INT", {"default": 1}],
+                "color": ["INT", {"default": 0}],
             }
         },
-        "input_order": {"required": ["width", "height", "batch_size"]},
+        "input_order": {"required": ["width", "height", "batch_size", "color"]},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
         "output_node": False,
-        "display_name": "Empty Latent Image",
+        "display_name": "Empty Image",
+    },
+    "SaveImage": {
+        "input": {"required": {"filename_prefix": ["STRING", {"default": "ComfyUI"}], "images": ["IMAGE"]}},
+        "input_order": {"required": ["filename_prefix", "images"]},
+        "output": [],
+        "output_node": True,
     },
     "PreviewImage": {
         "input": {"required": {"images": ["IMAGE"]}},
@@ -970,7 +996,7 @@ class TestPromptPreviewAlwaysEmitted:
         assert types[0] == "prompt_preview"
         assert "queued" in types
         assert types.index("prompt_preview") < types.index("queued")
-        assert _events(lines)[0]["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+        assert _events(lines)[0]["prompt"]["1"]["class_type"] == "EmptyImage"
 
     def test_ui_input_emits_converted_then_prompt_preview_then_queued(self, ui_workflow_file, capsys):
         with (
@@ -1035,7 +1061,7 @@ class TestPrintPrompt:
         assert [e["type"] for e in _events(lines)] == ["prompt_preview"]
         preview = _events(lines)[0]
         assert preview["schema"] == "event/1"
-        assert preview["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+        assert preview["prompt"]["1"]["class_type"] == "EmptyImage"
         env = _envelope(lines)
         assert env["ok"] is True
         assert env["data"]["status"] == "preview"
@@ -1092,7 +1118,7 @@ class TestPrintPrompt:
         out, _err = capsys.readouterr()
         parsed = json.loads(out)
         assert "1" in parsed
-        assert parsed["1"]["class_type"] == "EmptyLatentImage"
+        assert parsed["1"]["class_type"] == "EmptyImage"
 
     def test_print_prompt_does_not_post_when_workflow_invalid(self, capsys):
         # Pre-flight failures (workflow_not_found, workflow_not_api_format)
@@ -1240,10 +1266,10 @@ class TestNodeCachedIntegration:
 
         cached_events = [e for e in _events(lines) if e["type"] == "execution_cached"]
         assert len(cached_events) == 2
-        # Node 1 has _meta.title="Latent"; class_type=EmptyLatentImage
+        # Node 1 has _meta.title="Image"; class_type=EmptyImage
         n1 = next(e for e in cached_events if e["node"] == "1")
-        assert n1["class_type"] == "EmptyLatentImage"
-        assert n1["title"] == "Latent"
+        assert n1["class_type"] == "EmptyImage"
+        assert n1["title"] == "Image"
         # Node 2 has _meta.title="Save"; class_type=SaveImage
         n2 = next(e for e in cached_events if e["node"] == "2")
         assert n2["class_type"] == "SaveImage"
@@ -1380,9 +1406,9 @@ class TestErrorPathCoverage:
     def _make_workflow(self):
         return {
             "1": {
-                "class_type": "EmptyLatentImage",
-                "inputs": {"width": 64, "height": 64, "batch_size": 1},
-                "_meta": {"title": "Latent"},
+                "class_type": "EmptyImage",
+                "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                "_meta": {"title": "Image"},
             },
             "2": {
                 "class_type": "SaveImage",
@@ -1399,10 +1425,10 @@ class TestErrorPathCoverage:
             "nodes": [
                 {
                     "id": 1,
-                    "type": "EmptyLatentImage",
+                    "type": "EmptyImage",
                     "inputs": [],
                     "outputs": [],
-                    "widgets_values": [64, 64, 1],
+                    "widgets_values": [64, 64, 1, 0],
                     "mode": 0,
                 }
             ],
@@ -1414,9 +1440,10 @@ class TestErrorPathCoverage:
         try:
             with (
                 patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-                patch("comfy_cli.http._AUTHED_OPENER.open", side_effect=TimeoutError("timed out")),
+                patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")) as mock_open,
             ):
                 lines, exit_code = _run_execute_capture(path, capsys)
+            mock_open.assert_called_once_with("http://127.0.0.1:8188/object_info", timeout=30)
             assert _envelope(lines)["error"]["code"] == "connection_error"
         finally:
             os.unlink(path)
@@ -1427,10 +1454,10 @@ class TestErrorPathCoverage:
             "nodes": [
                 {
                     "id": 1,
-                    "type": "EmptyLatentImage",
+                    "type": "EmptyImage",
                     "inputs": [],
                     "outputs": [],
-                    "widgets_values": [64, 64, 1],
+                    "widgets_values": [64, 64, 1, 0],
                     "mode": 0,
                 }
             ],
@@ -1876,7 +1903,7 @@ class TestCloudStreamContract:
         assert isinstance(queued["client_id"], str) and queued["client_id"]
         assert queued["validation_warnings"] == []
         assert queued["nodes"] == [
-            {"node_id": "1", "class_type": "EmptyLatentImage", "title": "Latent"},
+            {"node_id": "1", "class_type": "EmptyImage", "title": "Image"},
             {"node_id": "2", "class_type": "SaveImage", "title": "Save"},
         ]
         assert queued["base_url"] == "https://api.comfy.org"
@@ -3203,6 +3230,38 @@ class TestOutputNodeIdsLocal:
         assert exit_code == 1
         assert _envelope(lines)["error"]["details"]["unknown_node_ids"] == ["99"]
 
+    def test_execution_gets_the_run_graph_preflight_checked(self, two_output_workflow_file, capsys):
+        """The targets' subgraph is computed once: preflight and the progress
+        count read the same graph, so they cannot disagree."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate") as preflight,
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            MockExec.return_value.outputs = []
+            MockExec.return_value.borrowed_client_id = False
+            _run_execute_capture(two_output_workflow_file, capsys, wait=True, output_node_ids=["2"])
+        assert MockExec.call_args.kwargs["run_graph"] is preflight.call_args.args[1]
+
+    def test_progress_uses_the_given_run_graph(self, two_output_workflow_file):
+        workflow = json.loads(open(two_output_workflow_file).read())
+        run_graph = {"1": workflow["1"], "2": workflow["2"]}
+        with patch("comfy_cli.command.run.execution.target_subgraph") as recompute:
+            ex = WorkflowExecution(
+                workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"], run_graph=run_graph
+            )
+        assert not recompute.called
+        assert ex.remaining_nodes == {"1", "2"}
+        assert ex.total_nodes == 2
+
+    def test_run_graph_without_targets_counts_the_whole_graph(self, two_output_workflow_file):
+        """Without targets the whole graph is submitted, so a stray subgraph
+        must not shrink the progress count."""
+        workflow = json.loads(open(two_output_workflow_file).read())
+        ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, run_graph={"2": workflow["2"]})
+        assert ex.remaining_nodes == set(workflow)
+
     def test_progress_counts_only_the_targets_subgraph(self, two_output_workflow_file):
         workflow = json.loads(open(two_output_workflow_file).read())
         ex = WorkflowExecution(workflow, "127.0.0.1", 8188, False, None, False, 5, output_node_ids=["2"])
@@ -3326,3 +3385,68 @@ class TestOutputNodeIdsFlag:
         assert result.exit_code == 1
         assert not mock_execute.called
         assert "invalid_output_node_ids" in result.output
+
+
+class TestOutputNodeIdsFullGraphClassCheck:
+    """ComfyUI's validate_prompt rejects an unknown class anywhere in the
+    submitted graph before it looks at partial_execution_targets, so the CLI's
+    preflight must catch it too, not only inside the targets' subgraph."""
+
+    @staticmethod
+    def _workflow(tmp_path, skipped_node):
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+            "2": skipped_node,
+            "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+        }
+        path = tmp_path / "skipped_branch.json"
+        path.write_text(json.dumps(wf))
+        return str(path)
+
+    @pytest.mark.parametrize(
+        ("skipped_node", "code"),
+        [
+            ({"class_type": "NotInstalledNode", "inputs": {}}, "unknown_class_type"),
+            ({"inputs": {}}, "missing_class_type"),
+        ],
+    )
+    def test_cloud_rejects_bad_class_in_skipped_branch_before_submit(
+        self, monkeypatch, tmp_path, capsys, skipped_node, code
+    ):
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        lines, exit_code = _cloud_capture(
+            capsys, self._workflow(tmp_path, skipped_node), wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 1
+        assert client.submitted == []
+        err = _envelope(lines)["error"]
+        assert err["code"] == "workflow_unknown_nodes"
+        assert [(e["node_id"], e["code"]) for e in err["details"]["errors"]] == [("2", code)]
+
+    def test_local_rejects_unknown_class_in_skipped_branch_before_submit(self, tmp_path, capsys):
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=_TARGET_OBJECT_INFO),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            lines, exit_code = _run_execute_capture(
+                self._workflow(tmp_path, {"class_type": "NotInstalledNode", "inputs": {}}),
+                capsys,
+                wait=True,
+                output_node_ids=["3"],
+            )
+        assert exit_code == 1
+        assert not MockExec.called
+        assert _envelope(lines)["error"]["code"] == "workflow_unknown_nodes"
+
+    def test_input_errors_in_skipped_branch_still_do_not_block(self, monkeypatch, tmp_path, capsys):
+        """Only class existence is graph-wide; input checks stay scoped to what runs."""
+        client = _recording_client()
+        _install_cloud_stubs(monkeypatch, client_cls=client, object_info=_TARGET_OBJECT_INFO)
+        skipped = {"class_type": "SaveImage", "inputs": {"filename_prefix": "a", "images": ["404", 0]}}
+        _lines, exit_code = _cloud_capture(
+            capsys, self._workflow(tmp_path, skipped), wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert len(client.submitted) == 1

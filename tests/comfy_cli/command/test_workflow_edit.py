@@ -645,16 +645,23 @@ class TestAddNode:
         assert env["ok"] is True
         assert captured["where"] == "cloud"
 
-    def test_ids_are_large_ints_and_collision_free(self, patched_graph, tmp_path, capsys):
-        """CRDT identity: leaderless, collision-free, int-typed (converter-safe)."""
+    def test_ids_follow_agent_partition(self, patched_graph, tmp_path, capsys, monkeypatch):
+        """Agent IDs set bit 40 and stay below the documented ``2**52`` bound."""
+        draws = iter([0, (1 << 52) - 1])
+
+        def draw(bits: int) -> int:
+            assert bits == 52
+            return next(draws)
+
+        monkeypatch.setattr(workflow_ops.random, "getrandbits", draw)
         path = _write(tmp_path, _base_workflow())
         env1 = _run(["add-node", str(path), "VAEDecode"], capsys)
         env2 = _run(["add-node", str(path), "VAEDecode"], capsys)
         id1, id2 = env1["data"]["op"]["node_id"], env2["data"]["op"]["node_id"]
-        assert isinstance(id1, int) and isinstance(id2, int)
-        assert id1 != id2
-        # Not a small sequential counter value — minted from a large space.
-        assert id1 > 10_000 and id2 > 10_000
+        assert id1 == 1 << 40
+        assert id2 == (1 << 52) - 1
+        assert all(isinstance(node_id, int) for node_id in (id1, id2))
+        assert all(node_id & (1 << 40) for node_id in (id1, id2))
 
     def test_add_node_without_at_does_not_stack(self):
         """No explicit `pos` → the layout-aware cascade default, not the old
@@ -977,6 +984,7 @@ class TestSetWidgetSubgraph:
         replayed = workflow_ops.apply_op(copy.deepcopy(base), op, _graph())
         for w in (applied, replayed):
             w.pop("_applied_ops", None)
+            w.pop("_applied_op_digests", None)
             w.pop("_widget_stamps", None)
         assert json.dumps(replayed, sort_keys=True) == json.dumps(applied, sort_keys=True)
 
@@ -1595,6 +1603,41 @@ class TestApplyBatch:
         assert env["error"]["code"] == "workflow_edit_invalid"
         assert path.read_text() == before, "failed batch must not write a partial graph"
 
+    def test_typed_batch_failure_keeps_summary_receipt(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        before = path.read_text()
+        specs = [
+            {
+                "op": "set_widget",
+                "node": 3,
+                "widget": "sampler_name",
+                "value": "totally_made_up",
+            }
+        ]
+        ops_path = tmp_path / "ops.json"
+        ops_path.write_text(json.dumps(specs), encoding="utf-8")
+        env = _run(["apply", str(path), "--ops", str(ops_path), "--ack", "summary"], capsys)
+
+        assert env["ok"] is False
+        error = env["error"]
+        assert error["code"] == "unknown_enum_value"
+        assert error["message"].startswith("batch failed: ")
+        assert error["details"]["value"] == "totally_made_up"
+        assert error["details"]["failed"] == {
+            "index": 0,
+            "op": "set_widget",
+            "code": "unknown_enum_value",
+        }
+        assert error["details"]["applied_count"] == 0
+        assert "retry the whole batch" in error["hint"]
+        assert path.read_text() == before
+
+    def test_typed_error_details_are_strict_json_safe(self):
+        finding = workflow_ops.FatalFindingError(
+            {"code": "unknown_enum_value", "message": "bad value", "value": float("inf")}
+        )
+        assert workflow_edit._json_safe_evidence(finding.finding)["value"] == "inf"
+
     def test_duplicate_alias_is_rejected(self, patched_graph, tmp_path, capsys):
         """A repeated `as` name would silently clobber the earlier node — reject it."""
         path = self._empty(tmp_path)
@@ -1634,6 +1677,25 @@ class TestApplyBatch:
         positions = [tuple(n["pos"]) for n in wf["nodes"]]
         assert len(set(positions)) == len(positions)
         assert (0, 0) not in positions
+
+    def test_apply_specs_preserves_typed_catalog_refusal(self):
+        workflow = _base_workflow()
+        before = json.loads(json.dumps(workflow))
+
+        with pytest.raises(workflow_ops.FatalFindingError) as exc:
+            workflow_ops.apply_specs(
+                workflow,
+                _graph(),
+                [{"op": "set_widget", "node": 3, "widget": "sampler_name", "value": "totally_made_up"}],
+            )
+
+        assert exc.value.finding["code"] == "unknown_enum_value"
+        assert exc.value.finding["value"] == "totally_made_up"
+        assert "No changes were applied" in exc.value.finding["message"]
+        assert exc.value.spec_index == 0
+        assert exc.value.spec_op == "set_widget"
+        assert exc.value.applied_count == 0
+        assert workflow == before
 
 
 # ---------------------------------------------------------------------------

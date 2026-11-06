@@ -1,9 +1,8 @@
 """Replays tests/data/selector_conformance.json through ``comfy_cli.selector``.
 
-The corpus is language-neutral on purpose: the cloud agent holds a Go twin of
-this grammar (its recall tool projects archived payloads it cannot hand back
-to the CLI) and replays a verbatim copy of the same file, so a change here that
-the twin does not make fails there too.
+The corpus is language-neutral on purpose: a Go port of this grammar in a
+downstream consumer replays a verbatim copy of the same file, so a change here
+that the port does not make fails there too.
 """
 
 from __future__ import annotations

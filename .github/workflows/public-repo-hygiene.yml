@@ -40,7 +40,19 @@ jobs:
       # set_title prototype that ADR-032 originally recorded, since
       # generalized and merged there as PR #235). It fits the ticket-ID shape
       # but is a public doc filename, not an internal ticket.
-      ticket_allowlist: HAILUO-03,HALO-03,ADR-032
+      # `IEEE-754` is the IEEE floating-point standard, named in
+      # comfy_cli/workflow_ops.py, docs/op-vocabulary-v1.md and
+      # tests/comfy_cli/test_op_id_reuse_contract.py while documenting why an
+      # integer past 2^53 is spelled the way ECMAScript spells it. The checker
+      # already carries `UTF-8`, `ISO-8601`, `SHA-256` and three `RFC-####`s as
+      # exact tokens and `CVE`/`CWE`/`PEP`/`RFC`/`ISO`/`UTF` as prefixes, so a
+      # public standards identifier is a known class of false positive there;
+      # `IEEE` is simply not on either list yet. Only the exact-token list is
+      # reachable from a caller, so this is the token, not the namespace — a
+      # prefix carve-out for `IEEE` belongs upstream in
+      # TICKET_ALLOWED_PREFIXES, where the same comment already argues the
+      # namespace is the right granularity for this class.
+      ticket_allowlist: HAILUO-03,HALO-03,ADR-032,IEEE-754
       # One `exclude_paths:` entry, and the bar it had to clear is recorded here
       # because the entry is permanent. Every entry this caller used to carry
       # was a false positive in the checker itself — Hugging Face model URLs and

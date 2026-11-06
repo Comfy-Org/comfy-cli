@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import mimetypes
 import os
+import shutil
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Final
@@ -51,9 +55,43 @@ _DEFAULT_ERROR: Final = {"code": "deploy_server_error", "message": "the asset re
 
 @dataclass(frozen=True, slots=True)
 class AssetResolveRequest:
+    """One local file to turn into a data-plane asset.
+
+    ``allowed_hashes`` is ``--allow-upload``: when set, a file the deployment
+    does not already hold is uploaded only if its hash is listed. A person
+    approves the exact files a ``--no-upload`` refusal listed, by hash, so a
+    same-named file from another root, or a file edited since, is refused
+    rather than sent. An approved upload reads one private snapshot, checked
+    against the approved hash, so a file rewritten during the probe or the
+    upload cannot send bytes nobody approved.
+    """
+
     local_path: Path
     file_path: str
     upload_enabled: bool = True
+    allowed_hashes: frozenset[str] | None = None
+
+
+class DeployAssetMissingError(DeployAPIError):
+    """A file the deployment lacks, which this run may not upload.
+
+    ``details`` names it in full (the absolute ``local_path``, its ``bytes``
+    and ``hash``) so a refusal can serve as the exact upload plan to approve.
+    """
+
+    def __init__(self, request: AssetResolveRequest, expected_hash: str, size: int) -> None:
+        # ``local_path`` is always the file the scanner picked, never a snapshot.
+        reason = "uploads are disabled" if not request.upload_enabled else "its hash is not one --allow-upload names"
+        super().__init__(
+            code="deploy_asset_missing",
+            message=f"the asset is not already present and {reason}",
+            details={
+                "file_path": request.file_path,
+                "hash": expected_hash,
+                "local_path": str(request.local_path),
+                "bytes": size,
+            },
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,15 +278,25 @@ class DeployAssetClient:
         raise _invalid_response("mint", status)
 
     def _resolve_miss(self, request: AssetResolveRequest, expected_hash: str) -> AssetResolveResult:
-        if not request.upload_enabled:
-            raise DeployAPIError(
-                code="deploy_asset_missing",
-                message="the asset is not already present and uploads are disabled",
-                details={"file_path": request.file_path, "hash": expected_hash},
-            )
+        approved = request.allowed_hashes is None or expected_hash in request.allowed_hashes
+        if not request.upload_enabled or not approved:
+            raise DeployAssetMissingError(request, expected_hash, request.local_path.stat().st_size)
+        if request.allowed_hashes is None:
+            return self._upload(request, request.local_path, expected_hash)
+        # An approval binds bytes, not a path: the path can be rewritten after
+        # the hash above. Copy it once, check the copy, and send only the copy.
+        # The copy is made only here, on a miss, so a file Cloud already holds
+        # never needs temporary disk space.
+        with _snapshot(request) as snapshot:
+            snapshot_hash = blake3_file(snapshot)
+            if snapshot_hash != expected_hash:
+                raise DeployAssetMissingError(request, snapshot_hash, snapshot.stat().st_size)
+            return self._upload(request, snapshot, snapshot_hash)
+
+    def _upload(self, request: AssetResolveRequest, source: Path, expected_hash: str) -> AssetResolveResult:
         # The handle stays open across the urlopen because urllib consumes the
         # body iterator lazily, after the request is built.
-        with request.local_path.open("rb") as file:
+        with source.open("rb") as file:
             upload, file_size = _multipart_request(self.target, request, expected_hash, file)
             try:
                 with no_redirect_urlopen(upload, timeout=_UPLOAD_TIMEOUT) as response:
@@ -269,3 +317,73 @@ class DeployAssetClient:
         if status in {200, 201} and isinstance(parsed, dict):
             return AssetResolveResult(asset=parsed, uploaded=1, deduped=0, bytes=file_size)
         raise _invalid_response("upload", status)
+
+
+_SNAPSHOT_PREFIX = "comfy-cli-asset-"
+
+
+def _snapshot_error(request: AssetResolveRequest, error: OSError) -> DeployAPIError:
+    """The copy could not be made (a full disk, say): a local failure, not the server's."""
+    reason = error.strerror or str(error)
+    # Not ``tempfile.gettempdir()``: when no temp folder is usable, asking again
+    # raises the same error and this report never reaches the person.
+    copy = str(error.filename) if error.filename else ""
+    temp_dir = os.path.dirname(copy) if os.path.basename(copy).startswith(_SNAPSHOT_PREFIX) else tempfile.tempdir
+    return DeployAPIError(
+        code="deploy_asset_upload_failed",
+        message=f"could not copy {request.local_path} to a private temporary file to upload it: {reason}",
+        details={
+            "file_path": request.file_path,
+            "local_path": str(request.local_path),
+            "temp_dir": temp_dir,
+            "reason": reason,
+        },
+        hint=(
+            "this file was not uploaded, but approved files before it may already be on Comfy Cloud, and a "
+            "retry reuses them; free space in `details.temp_dir` or set TMPDIR to a folder with room, then retry"
+        ),
+    )
+
+
+def _require_free_space(snapshot: str, size: int) -> None:
+    """Refuse before copying when the temp folder cannot hold the whole file.
+
+    The copy is as large as the file. Checking first fails a large file at once,
+    rather than after it has filled the disk. A folder that fills up during the
+    copy still fails the write, which reports the same way. A folder whose free
+    space cannot be read is not checked.
+    """
+    try:
+        free = shutil.disk_usage(os.path.dirname(snapshot)).free
+    except OSError:
+        return
+    if free < size:
+        raise OSError(errno.ENOSPC, f"the copy needs {size:,} bytes and {free:,} are free", snapshot)
+
+
+@contextmanager
+def _snapshot(request: AssetResolveRequest) -> Iterator[Path]:
+    """A private copy of the request's file in the system temp folder, removed on every exit.
+
+    ``mkstemp`` creates it readable by this user only. The ``comfy-cli-`` prefix
+    names the tool that left it, should a crash skip the ``finally``. A folder
+    without room for the whole file is refused before any byte is copied. A
+    failure to make the copy is reported as such, naming the file; an error
+    raised while the copy is in use passes through unchanged.
+    """
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=_SNAPSHOT_PREFIX)
+    except OSError as error:
+        raise _snapshot_error(request, error) from error
+    snapshot = Path(name)
+    try:
+        try:
+            with os.fdopen(descriptor, "wb") as copy, request.local_path.open("rb") as original:
+                _require_free_space(name, os.fstat(original.fileno()).st_size)
+                shutil.copyfileobj(original, copy, UPLOAD_CHUNK_BYTES)
+        except OSError as error:
+            raise _snapshot_error(request, error) from error
+        yield snapshot
+    finally:
+        with suppress(OSError):
+            snapshot.unlink(missing_ok=True)

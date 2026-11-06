@@ -1428,7 +1428,7 @@ class TestSignInTokenPerOutput:
             self.token = first
             self.refreshing_reads: list[bool] = []
 
-        def __call__(self, *, refresh=True, force=False, allow_clear=True):
+        def __call__(self, *, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
             from types import SimpleNamespace
 
             if refresh:
