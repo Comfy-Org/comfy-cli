@@ -1660,3 +1660,35 @@ selector or count, because the rebuild resets the value but not the stamp
 
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 24. Amendment v1.15 — 2026-11-05 (`capture` reports dropped canvas groups)
+
+**No op kind was added, removed, or re-scoped.** `FROZEN_OPS` /
+`DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables and §§1-8 are untouched.
+This amendment records one reporting change in `capture`, which §18.2 last
+described, and states the gap it makes visible.
+
+**`capture` now emits a `group_dropped` warning** when the source workflow
+carries canvas groups, alongside the existing `ui_only_node_skipped` /
+`ui_only_link_dropped`. The warning carries `count` and `titles`. Behaviour is
+otherwise unchanged: groups were already absent from every recipe `capture` has
+ever produced, so a recipe captured before this amendment and one captured after
+are byte-identical. Only the envelope's `warnings` array differs.
+
+*Why now*: the loss was silent in the one place it matters most. §8.8's bulk
+writers already refuse a graph carrying a canvas group outright
+(`NotExpressibleError` → `ops_skipped` — one of the three structures behind the
+447-of-735 refusal rate §21 measures across the gallery), and a
+subgraph raises `RecipeError` — but `capture` simply read `nodes` and never
+looked at `groups`. The consumer that feels this is "build one copy of a
+repeated branch, capture it, re-apply once per copy": every copy comes back
+unframed with no signal, and the caller finds out by looking at the canvas.
+
+**The underlying gap is unchanged and is deliberately not closed here.** No
+frozen kind creates, moves, retitles or deletes a canvas group, so the group a
+user or a template put on the canvas is reachable by exactly one op —
+`insert_workflow` (§1.7), which merges a whole authored workflow and cannot
+frame nodes already placed. Giving the batch surface a group kind is a real
+amendment with real consequences (geometry ownership above all: a group's
+bounds are frontend-owned layout, not semantic document state) and belongs to
+its own proposal, under §9's rules, not to a warning.
