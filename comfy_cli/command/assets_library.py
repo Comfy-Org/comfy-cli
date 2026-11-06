@@ -648,14 +648,15 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
     A transport exception is dropped, never shown: its text quotes the signed
     URL, whose query string is a live credential. A file that cannot be opened
     or read raises ``_FileUnreadable`` instead: a fresh upload would fail
-    the same way, so it is not a transport failure to retry. Any other
-    ``OSError`` comes from setting up TLS (a CA bundle path that no longer
-    exists) and raises ``_TlsSetupFailed`` with fixed TLS guidance; a retry would
-    fail the same way too.
+    the same way, so it is not a transport failure to retry. Certificate
+    verification/loading errors and other TLS setup ``OSError`` failures
+    raise ``_TlsSetupFailed`` with fixed TLS guidance; a retry would fail the
+    same way too. Transient TLS errors still permit a fresh upload.
     """
     import requests
 
     from comfy_cli.builder_api import _CountingReader
+    from comfy_cli.command.model_upload_resume import _tls_setup_failure
 
     class _Reader(_CountingReader):
         # urllib3 reports a body that fails to read as a dropped connection,
@@ -700,6 +701,8 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
                 raise _FileChanged(str(reader.failed)) from None
             if reader.failed is not None:
                 raise _FileUnreadable(reader.failed) from None
+            if isinstance(e, requests.exceptions.SSLError) and _tls_setup_failure(e):
+                raise _TlsSetupFailed() from None
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None
             # Neither the file nor the transport (Requests wraps those): the

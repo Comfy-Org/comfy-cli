@@ -34,7 +34,10 @@ history.
   A closed progress pipe or stream does not stop task polling or the final
   stored-hash check, including when Rich converts the pipe failure to an exit.
   Legacy single-PUT storage addresses
-  retain HTTP compatibility.
+  retain HTTP compatibility. Certificate verification and invalid CA-bundle
+  errors on that path also stop immediately with fixed TLS guidance.
+- `comfy build push` shares the upload progress reporter. A broken pipe or
+  closed progress stream now mutes its progress instead of ending the push.
 
 ### Added
 

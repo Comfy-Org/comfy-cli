@@ -2953,6 +2953,71 @@ def test_invalid_ca_contents_stop_without_backoff(
 
 
 @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("failure", ["certificate", "bundle", "flattened"])
+def test_legacy_tls_certificate_failure_stops_without_a_fresh_upload(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, failure
+):
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, SSLError
+
+    if failure == "bundle":
+        bundle = tmp_path / "invalid-ca.pem"
+        bundle.write_text("not a certificate\n")
+        with pytest.raises(ssl.SSLError) as native:
+            ssl.create_default_context(cafile=str(bundle))
+        reason = native.value
+    else:
+        reason = ssl.SSLCertVerificationError("certificate verify failed")
+    attempts = []
+
+    def put(url, **kw):
+        prepared = requests.Request("PUT", url).prepare().url
+        attempts.append(prepared)
+        assert "signature=SECRETSIG" in prepared
+        assert "Content-Range" not in kw["headers"]
+        wrapped = MaxRetryError(None, prepared, SSLError(reason))
+        raise requests.exceptions.SSLError(str(wrapped) if failure == "flattened" else wrapped)
+
+    routes = dict(_UPLOAD_ROUTES)
+    routes[("POST", "/api/assets/uploads")] = {
+        **_started(),
+        "upload_url": "https://bucket.example/?signature=%53ECRETSIG",
+    }
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    env, rc, cloud, _, everything = run(monkeypatch, capsys, args, routes, [], storage=put)
+    assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+    assert "CA certificate bundle" in env["error"]["message"]
+    assert env["error"]["details"]["attempts"] == 1
+    assert len(attempts) == 1 and no_wait[0] == 0
+    assert cloud.paths("POST").count("/api/assets/uploads") == 1
+    assert _COMPLETE_1 not in cloud.paths()
+    assert "SECRETSIG" not in everything and "%53ECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+def test_legacy_tls_eof_still_retries_with_a_fresh_upload(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, model
+):
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, SSLError
+
+    failure = requests.exceptions.SSLError(MaxRetryError(None, "SECRETSIG", SSLError(ssl.SSLEOFError("TLS EOF"))))
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    env, rc, cloud, storage, everything = run(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [failure, 200])
+    assert rc == 0 and env["ok"] is True
+    assert len(storage.puts) == 2
+    assert cloud.paths("POST").count("/api/assets/uploads") == 2
+    assert "/api/tasks/task-1" in cloud.paths()
+    assert "SECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
 @pytest.mark.parametrize("mismatch", [False, True], ids=["verified", "wrong-hash"])
 @pytest.mark.parametrize("failure", ["broken-pipe", "closed-stream"])
 @pytest.mark.parametrize("notice", ["storing", "polling"])

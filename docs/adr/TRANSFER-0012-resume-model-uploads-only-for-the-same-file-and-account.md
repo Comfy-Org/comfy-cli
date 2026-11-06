@@ -44,6 +44,8 @@ Expired sessions and permanent storage refusals discard the saved record and
 restart once; thirty minutes without acknowledged progress pauses. Certificate
 verification and certificate-bundle loading failures stop immediately with
 credential-safe TLS guidance.
+The legacy single-PUT path uses the same certificate classifier and guidance;
+transient TLS failures there retain the existing bounded fresh-upload retry.
 HTTP 408 and transient TLS failures query held bytes and retry within the same
 session. TLS setup diagnostics use fixed text, including for normalized URLs.
 Completion deletes the session after a valid task response, and the command
@@ -55,6 +57,8 @@ the existing validation for compatibility with storage emulators.
 Progress output failures, including Rich converting broken pipes to process-exit
 exceptions, mute reporting without stopping task polling or the stored-hash check.
 Later storage-wait notices use the same reporting boundary.
+The shared reporter also keeps `comfy build push` running after a broken pipe
+or closed progress stream; its upload protocol is unchanged.
 
 ## Alternatives considered
 
