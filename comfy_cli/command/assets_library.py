@@ -774,7 +774,7 @@ def _complete_upload(renderer, target, sign_in, upload_id: str, body: dict, *, r
             return parsed
 
 
-def _wait_for_task(renderer, target, task_id: str, sign_in=None, *, reporter: UploadProgressReporter) -> dict:
+def _wait_for_task(renderer, target, task_id: str, sign_in=None, *, reporter) -> dict:
     """Read the task until it ends, riding out a brief 5xx, 429 or dropped connection."""
     import http.client
     import urllib.error
