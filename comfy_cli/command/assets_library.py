@@ -650,7 +650,7 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
     or read raises ``_FileUnreadable`` instead: a fresh upload would fail
     the same way, so it is not a transport failure to retry. Any other
     ``OSError`` comes from setting up TLS (a CA bundle path that no longer
-    exists) and raises ``_TlsSetupFailed`` with its message; a retry would
+    exists) and raises ``_TlsSetupFailed`` with fixed TLS guidance; a retry would
     fail the same way too.
     """
     import requests
@@ -703,10 +703,9 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None
             # Neither the file nor the transport (Requests wraps those): the
-            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file. Its
-            # text names a certificate path, but is never shown if it quotes
-            # the signed URL.
-            raise _TlsSetupFailed(e, upload_url) from None
+            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file. Never
+            # retain its text: Requests may normalize a credential in the URL.
+            raise _TlsSetupFailed() from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 
@@ -1240,7 +1239,7 @@ def run_upload(
                 and isinstance(e, TransferFailed)
                 and status is not None
                 and 400 <= status < 500
-                and status != 429
+                and status not in (408, 429)
             )
             if expired or refused:
                 store.clear()
@@ -1258,9 +1257,7 @@ def run_upload(
             )
             raise typer.Exit(code=1) from None
 
-    if renderer.is_pretty():
-        renderer.info(f"Uploaded; Comfy Cloud is checking and storing the file. Task id: {task_id}")
-    renderer.progress_event("upload_storing", task_id=task_id)
+    reporter.storing(task_id)
     task = _wait_for_task(renderer, target, task_id, sign_in)
 
     result = task.get("result") if isinstance(task.get("result"), dict) else {}

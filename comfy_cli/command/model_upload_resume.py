@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import ssl
 import stat
 import tempfile
 import time
@@ -32,13 +33,10 @@ class TransferFailed(Exception):
 
 
 class TlsSetupFailed(Exception):
-    """A permanent local TLS setup error, with session credentials removed."""
+    """A permanent TLS failure; never retain transport exception text."""
 
-    def __init__(self, error: OSError, url: str) -> None:
-        text, query = str(error) or type(error).__name__, urlsplit(url).query
-        if url in text or (query and query in text):
-            text = type(error).__name__
-        super().__init__(text)
+    def __init__(self) -> None:
+        super().__init__("certificate verification or CA certificate bundle setup failed")
 
 
 class UploadPaused(Exception):
@@ -200,6 +198,28 @@ def valid_start(start: dict) -> bool:
         return False
 
 
+def _certificate_failure(error: BaseException) -> bool:
+    """Recognize native and wrapped certificate errors without reporting their text."""
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        # Some adapters flatten the native error into a message.
+        text = str(current).lower()
+        if "certificate_verify_failed" in text or "certificate verify failed" in text:
+            return True
+        pending.extend(
+            value
+            for value in (*current.args, getattr(current, "reason", None), current.__cause__, current.__context__)
+            if isinstance(value, BaseException)
+        )
+    return False
+
+
 def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, str | None]:
     try:
         response = requests.put(
@@ -210,12 +230,14 @@ def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, 
             allow_redirects=False,
         )
     except requests.exceptions.SSLError as error:
-        raise TlsSetupFailed(error, start["upload_url"]) from None
+        if _certificate_failure(error):
+            raise TlsSetupFailed() from None
+        return None, None
     except requests.RequestException:
         # Transport exceptions may quote the session credential.
         return None, None
-    except OSError as error:
-        raise TlsSetupFailed(error, start["upload_url"]) from None
+    except OSError:
+        raise TlsSetupFailed() from None
     try:
         return response.status_code, response.headers.get("Range")
     finally:
@@ -262,7 +284,7 @@ def transfer(
             if query:
                 query = False
                 continue
-        elif status is not None and status != 429 and status < 500:
+        elif status is not None and status not in (408, 429) and status < 500:
             raise TransferFailed(status)
         sleep(min(delay, max(0, STALL_SECONDS - (clock() - last_progress))))
         delay, query = min(delay * 2, 60), True

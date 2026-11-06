@@ -519,7 +519,8 @@ arrives before task polling and follows the same stdout/stderr rules above.
 If the wait is interrupted, look up that id at Cloud's
 `GET /api/tasks/<task_id>` endpoint.
 The final success envelope still requires a completed task and a matching
-stored hash.
+stored hash. A closed progress pipe mutes progress reporting; task polling and
+the stored-hash check still run.
 
 ```json
 {"schema": "event/1", "type": "upload_storing", "task_id": "task-1"}

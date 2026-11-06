@@ -112,7 +112,7 @@ def test_last_piece_without_an_answer_goes_to_complete(session, file, clock, mon
         assert len(bucket.calls) == 1
 
 
-@pytest.mark.parametrize("status", [429, 500, 503, None])
+@pytest.mark.parametrize("status", [408, 429, 500, 503, None])
 def test_transient_errors_back_off_and_query(session, file, clock, monkeypatch, status):
     bucket = Bucket()
     calls = []

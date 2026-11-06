@@ -44,6 +44,7 @@ _LINE_SECONDS: Final = 5.0
 EVENT_PLAN: Final = "upload_plan"
 EVENT_PROGRESS: Final = "upload_progress"
 EVENT_COMPLETE: Final = "upload_complete"
+EVENT_STORING: Final = "upload_storing"
 
 
 class Clock(Protocol):
@@ -151,6 +152,12 @@ class UploadProgressReporter:
             self._event(EVENT_PLAN, files=len(uploads), bytes_total=self._overall_total, already_held=already_held)
         else:
             self._say(plan_line(len(uploads), self._overall_total, already_held))
+
+    def storing(self, task_id: str) -> None:
+        """Report the model's storage task without letting a closed pipe stop verification."""
+        if self._renderer.is_pretty():
+            self._say(f"Uploaded; Comfy Cloud is checking and storing the file. Task id: {task_id}")
+        self._event(EVENT_STORING, task_id=task_id)
 
     # ----- one file -----
 

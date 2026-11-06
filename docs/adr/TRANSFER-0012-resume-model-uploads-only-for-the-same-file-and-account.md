@@ -43,12 +43,16 @@ errors keep no exception text because it can contain the session credential.
 Expired sessions and permanent storage refusals discard the saved record and
 restart once; thirty minutes without acknowledged progress pauses. Certificate
 verification failures stop immediately with credential-safe TLS guidance.
+HTTP 408 and transient TLS failures query held bytes and retry within the same
+session. TLS setup diagnostics use fixed text, including for normalized URLs.
 Completion deletes the session after a valid task response, and the command
 waits for the task without a total deadline. Repeated unanswered task polls
 still have a bounded retry window. The task id is emitted before waiting, so
 a caller can look it up if the command stops. HTTPS with a host and no userinfo
 is required for resumable and saved sessions; legacy single-PUT addresses retain
 the existing validation for compatibility with storage emulators.
+Progress output failures mute reporting without stopping task polling or the
+stored-hash check.
 
 ## Alternatives considered
 
