@@ -2422,10 +2422,11 @@ class TestResumableCommands:
         monkeypatch.setattr("requests.put", bucket)
         cloud = _Cloud(_resume_routes())
         monkeypatch.setattr("urllib.request.urlopen", cloud)
-        from comfy_cli.command import models
+        from comfy_cli.command.models import models
 
         result = CliRunner().invoke(models.app if model else assets_library.app, ["upload", *args, "--where", "cloud"])
         assert result.exit_code != 0
+        assert bucket.held == _MODEL_BYTES[:5]
         capsys.readouterr()
         bucket.puts.clear()
         env, rc, cloud, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=bucket)
