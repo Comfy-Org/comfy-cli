@@ -9,9 +9,9 @@ Two directions are enforced:
 
 1. Every code raised in source is in the registry. A typo or a fresh code
    added without registry update fails the test and surfaces the typo.
-2. Every code in the registry is raised somewhere. A code that's
-   deprecated or removed but left in the registry fails the test, forcing
-   the dead entry to be deleted.
+2. Every code in the registry is raised somewhere or explicitly retired.
+   Retired codes stay registered under ADR-AUTOMATION-0003's append-only
+   contract; an accidental unused entry still fails the test.
 
 Warning objects (``{"code": …, "message": …}`` placed in a ``warnings`` list)
 are collected separately from failures. Registered codes are failure
@@ -256,6 +256,11 @@ LEGACY_WARNING_REGISTRATIONS = frozenset(
 )
 
 
+# The storage wait no longer has a total deadline. Keep the published code
+# discoverable for clients that also handle output from older CLI versions.
+RETIRED_ERROR_REGISTRATIONS = frozenset({"asset_upload_timeout"})
+
+
 @pytest.fixture(scope="module")
 def collected_codes() -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
     return _collect_codes()
@@ -343,18 +348,28 @@ def test_every_registered_code_is_raised(raised_codes, warned_codes):
     """If this fails: a code in the registry is no longer raised anywhere.
 
     A legacy warning registration (:data:`LEGACY_WARNING_REGISTRATIONS`)
-    counts as used while its warning is still emitted.
+    counts as used while its warning is still emitted. Explicitly retired
+    codes stay registered for compatibility but must no longer be emitted.
 
-    Fix: delete the dead entry from the registry, or wire the code up.
+    Fix: wire up an accidental unused code, or explicitly retire a published
+    code whose behavior was removed. Never delete a published registration.
     """
     dead = [
         c
         for c in error_codes.all_codes()
-        if c not in raised_codes and not (c in LEGACY_WARNING_REGISTRATIONS and c in warned_codes)
+        if c not in raised_codes
+        and c not in RETIRED_ERROR_REGISTRATIONS
+        and not (c in LEGACY_WARNING_REGISTRATIONS and c in warned_codes)
     ]
     assert not dead, (
-        f"Registered but never raised:\n{dead}\nEither delete these from comfy_cli/error_codes.REGISTRY or use them."
+        f"Registered but never raised:\n{dead}\nUse these codes or explicitly retire their published registrations."
     )
+    invalid_retired = sorted(
+        c
+        for c in RETIRED_ERROR_REGISTRATIONS
+        if not error_codes.is_registered(c) or c in raised_codes or c in warned_codes
+    )
+    assert not invalid_retired, f"Retired codes must stay registered and never be emitted: {invalid_retired}"
 
 
 def test_every_build_code_has_a_first_call_site(raised_codes):

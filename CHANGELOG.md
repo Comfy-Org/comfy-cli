@@ -15,6 +15,32 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- Both `comfy assets library upload` and `comfy model upload` request resumable
+  model uploads up to 25 GB. Dropped connections retry from storage's held
+  bytes. Running the command again continues a saved upload for the same file,
+  account, workspace and folder while its session remains valid. Sessions expire
+  no later than seven days after creation; the server can expire them earlier.
+  A paused upload reports whether its session was saved for a later run. Older
+  servers keep the single-PUT upload. File approval, block checks and the final stored-hash
+  check still apply. The final storage check no longer stops after fifteen
+  minutes. The retired `asset_upload_timeout` error code stays discoverable
+  for compatibility with older versions. The task id is reported before the
+  storage wait. Refused resumable sessions are discarded and restarted once;
+  certificate verification and invalid CA-bundle failures stop immediately
+  without transport exception text.
+  HTTP timeouts and transient TLS interruptions query the held bytes and retry.
+  A closed progress pipe or stream does not stop task polling or the final
+  stored-hash check, including when Rich converts the pipe failure to an exit.
+  Legacy single-PUT storage addresses
+  retain HTTP compatibility. Certificate verification and invalid CA-bundle
+  errors on that path also stop immediately with fixed TLS guidance.
+  Both paths recognize certificate failures wrapped by an HTTPS proxy while
+  retaining retries for temporary proxy failures.
+- `comfy build push` shares the upload progress reporter. A broken pipe or
+  closed progress stream now mutes its progress instead of ending the push.
+
 ### Added
 
 - The `comfy-run-on-cloud` agent skill, installed with the other bundled
