@@ -58,8 +58,10 @@ still have a bounded retry window.
 Reruns hash the whole file again. Storage receives only newly needed pieces,
 and no temporary copy of a multi-GB model is created. State is local to one
 machine; simultaneous invocations are not coordinated and may start separate
-uploads. Losing saved state loses the ability to resume that session, but a
-new upload still works. A task may continue after the command loses its sign-in.
+uploads. Each new upload has a separate record, so completing one does not
+delete another upload's saved state. Losing saved state loses the ability to
+resume that session, but a new upload still works. A task may continue after
+the command loses its sign-in.
 
 ## Validation
 

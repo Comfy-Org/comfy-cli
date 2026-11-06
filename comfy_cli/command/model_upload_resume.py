@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -12,6 +11,8 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 import requests
 
@@ -28,6 +29,16 @@ class SessionExpired(Exception):
 
 class TransferFailed(Exception):
     """Only a status is safe to expose; never keep a transport exception."""
+
+
+class TlsSetupFailed(Exception):
+    """A permanent local TLS setup error, with session credentials removed."""
+
+    def __init__(self, error: OSError, url: str) -> None:
+        text, query = str(error) or type(error).__name__, urlsplit(url).query
+        if url in text or (query and query in text):
+            text = type(error).__name__
+        super().__init__(text)
 
 
 class UploadPaused(Exception):
@@ -133,8 +144,9 @@ class SessionStore:
         temporary = None
         try:
             self._secure()
-            key = hashlib.sha256(json.dumps([self.binding, identity], sort_keys=True).encode()).hexdigest()
-            path = self.directory / f"{key}.json"
+            # Two commands may both start before either has saved a session.
+            # Each owns a separate record, including when their bindings match.
+            path = self.directory / f"{uuid4().hex}.json"
             entries = self._entries()
             for old in entries[: max(0, len(entries) - _MAX_ENTRIES + 1)]:
                 old.unlink(missing_ok=True)
@@ -167,8 +179,8 @@ class SessionStore:
 
 
 def valid_start(start: dict) -> bool:
-    from urllib.parse import urlsplit
-
+    if not isinstance(start.get("upload_url"), str):
+        return False
     try:
         url = urlsplit(start.get("upload_url", ""))
         return (
@@ -196,9 +208,11 @@ def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, 
             timeout=(10, 60),
             allow_redirects=False,
         )
-    except OSError:
-        # Requests exceptions may quote the credential, as may TLS setup errors.
+    except requests.RequestException:
+        # Transport exceptions may quote the session credential.
         return None, None
+    except OSError as error:
+        raise TlsSetupFailed(error, start["upload_url"]) from None
     try:
         return response.status_code, response.headers.get("Range")
     finally:

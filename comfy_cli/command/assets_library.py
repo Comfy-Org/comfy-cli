@@ -24,6 +24,7 @@ from comfy_cli.command.cloud_http import (
     handle_cloud_http_error,
     http_request,
 )
+from comfy_cli.command.model_upload_resume import TlsSetupFailed as _TlsSetupFailed
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow, upload).")
@@ -400,10 +401,6 @@ class _FileUnreadable(Exception):
     """The file could not be opened or read while it was being sent; ``args[0]`` is the ``OSError``."""
 
 
-class _TlsSetupFailed(Exception):
-    """This machine's TLS settings stopped the PUT before it connected; ``args[0]`` is the message to show."""
-
-
 class _FileChanged(Exception):
     """A block of the file read for the PUT is not the block hashed before it; ``args[0]`` is the block's index."""
 
@@ -656,8 +653,6 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
     exists) and raises ``_TlsSetupFailed`` with its message; a retry would
     fail the same way too.
     """
-    import urllib.parse
-
     import requests
 
     from comfy_cli.builder_api import _CountingReader
@@ -711,10 +706,7 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
             # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file. Its
             # text names a certificate path, but is never shown if it quotes
             # the signed URL.
-            text, query = str(e) or type(e).__name__, urllib.parse.urlsplit(upload_url).query
-            if upload_url in text or (query and query in text):
-                text = type(e).__name__
-            raise _TlsSetupFailed(text) from None
+            raise _TlsSetupFailed(e, upload_url) from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 

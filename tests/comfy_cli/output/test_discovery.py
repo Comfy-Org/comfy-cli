@@ -104,6 +104,18 @@ def test_discover_includes_error_codes_from_markdown():
     assert "cql_no_graph" in codes  # the loader's "no source available" survives
 
 
+def test_model_upload_guidance_leaves_size_limits_to_cloud_and_explains_resume():
+    from comfy_cli.discovery import load_error_codes
+
+    codes = {row["code"]: row for row in load_error_codes()}
+    assert "file_too_large" not in codes["asset_upload_invalid"]["meaning"]
+    assert "FILE_TOO_LARGE" in codes["asset_upload_refused"]["meaning"]
+    paused = codes["asset_upload_failed"]
+    assert "upload_paused" in paused["meaning"]
+    assert "bytes_held" in paused["meaning"]
+    assert "same command" in paused["hint"]
+
+
 def test_discover_capabilities_flags():
     envelope = _run_cli(["--json", "discover"])
     caps = envelope["data"]["capabilities"]

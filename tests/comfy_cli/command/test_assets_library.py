@@ -1004,7 +1004,7 @@ class TestUpload:
         path = tmp_path / name
         if size is not None:
             with path.open("wb") as f:
-                f.truncate(size)  # sparse: no 2 GB written to disk
+                f.truncate(size)
 
         env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(path), "--type", "loras"], {}, [])
 
@@ -1013,10 +1013,19 @@ class TestUpload:
         assert cloud.calls == [] and storage.puts == []
 
     @pytest.mark.parametrize("size", [2 * 1024**3 + 1, 25 * 1024**3, 25 * 1024**3 + 1])
-    def test_size_limit_is_left_to_the_server(self, tmp_path, size):
+    def test_size_limit_is_left_to_the_server(self, tmp_path, monkeypatch, size):
         path = tmp_path / "big.SAFETENSORS"
-        with path.open("wb") as f:
-            f.truncate(size)
+        path.write_bytes(b"x")
+        real_stat = Path.stat
+
+        def stat_with_large_size(candidate, *args, **kwargs):
+            info = real_stat(candidate, *args, **kwargs)
+            if candidate == path:
+                return os.stat_result((*info[:6], size, *info[7:]))
+            return info
+
+        # Extending a file can allocate its full size on Windows.
+        monkeypatch.setattr(Path, "stat", stat_with_large_size)
         assert assets_library._local_refusal(path) is None
 
     def test_unknown_type_is_refused_listing_the_valid_ones_before_the_upload(
@@ -1747,8 +1756,9 @@ class TestUploadFileErrors:
         assert "Transfer-Encoding" not in storage.prepared
         assert storage.puts[0]["body"] == model_file.read_bytes()
 
+    @pytest.mark.parametrize("resumable", [False, True], ids=["single-put", "resumable"])
     def test_a_missing_ca_bundle_ends_the_upload_with_a_tls_setup_error(
-        self, cloud_target, monkeypatch, model_file, tmp_path, no_wait
+        self, cloud_target, monkeypatch, model_file, tmp_path, no_wait, resumable
     ):
         # The real Requests adapter: with REQUESTS_CA_BUNDLE naming a removed
         # file, it raises a plain OSError while setting up TLS, before any
@@ -1769,7 +1779,7 @@ class TestUploadFileErrors:
                 return real_put(url, **kw)
 
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "removed-ca-bundle.pem"))
-        cloud, storage = _Cloud(dict(_UPLOAD_ROUTES)), _RealPut([])
+        cloud, storage = _Cloud(_resume_routes() if resumable else dict(_UPLOAD_ROUTES)), _RealPut([])
         monkeypatch.setattr("urllib.request.urlopen", cloud)
         monkeypatch.setattr("requests.put", storage)
         result = CliRunner().invoke(
@@ -2541,6 +2551,39 @@ class TestResumableCommands:
 
 
 class TestResumableRefusals:
+    @pytest.mark.parametrize("url", [1, True, {}, []])
+    @pytest.mark.parametrize("resumable", [False, True])
+    def test_invalid_start_url_returns_the_cloud_error(
+        self, cloud_target, monkeypatch, capsys, model_file, url, resumable
+    ):
+        routes = _resume_routes()
+        start = _resumable_started() if resumable else _started()
+        routes[("POST", "/api/assets/uploads")] = {**start, "upload_url": url}
+        env, rc, _, storage, everything = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+        assert storage.puts == []
+        assert "SECRETSIG" not in everything
+
+    @pytest.mark.parametrize("quote", ["url", "query"])
+    def test_tls_setup_error_never_displays_session_credentials(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, quote
+    ):
+        from urllib.parse import urlsplit
+
+        attempts = []
+
+        def failed(url, **kw):
+            attempts.append(url)
+            raise OSError(url if quote == "url" else urlsplit(url).query)
+
+        env, rc, cloud, _, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], _resume_routes(), [], storage=failed
+        )
+        assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+        assert len(attempts) == 1
+        assert _COMPLETE_1 not in cloud.paths()
+        assert "SECRETSIG" not in everything
+
     def test_server_size_refusal_prints_its_message_before_sending(self, cloud_target, monkeypatch, capsys, model_file):
         routes = _resume_routes()
         routes[("POST", "/api/assets/uploads")] = _cloud_error(400, "FILE_TOO_LARGE", "Model files can be up to 25 GB.")

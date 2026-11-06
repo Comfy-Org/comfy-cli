@@ -320,3 +320,37 @@ def test_failed_atomic_save_keeps_the_previous_session(tmp_path, session, monkey
     assert not store.save({**session, "upload_id": "other"}, identity)
     assert store.load(identity) == session
     assert not list(store.directory.glob(".upload-*"))
+
+
+@pytest.mark.parametrize("url", [1, True, {}, [], b"https://bucket.example/upload"])
+def test_invalid_url_types_are_refused(session, url):
+    assert not resume.valid_start({**session, "upload_url": url})
+
+
+@pytest.mark.parametrize("url", [1, True, {}, []])
+def test_malformed_saved_url_is_ignored(tmp_path, session, url):
+    store = resume.SessionStore(tmp_path / "sessions", {})
+    identity = {"account": "user", "workspace": "ws"}
+    assert store.save(session, identity)
+    saved = json.loads(store.path.read_text())
+    saved["start"]["upload_url"] = url
+    store.path.write_text(json.dumps(saved))
+    assert resume.SessionStore(store.directory, {}).load(identity) is None
+
+
+def test_overlapping_uploads_keep_separate_sessions(tmp_path, session):
+    identity = {"account": "user", "workspace": "ws"}
+    first = resume.SessionStore(tmp_path / "sessions", {"path": "model", "hash": "hash"})
+    second = resume.SessionStore(first.directory, first.binding)
+    assert first.load(identity) is None
+    assert second.load(identity) is None
+    other_session = {**session, "upload_id": "upload-2", "upload_url": "https://bucket.example/other"}
+    assert first.save(session, identity)
+    assert second.save(other_session, identity)
+    assert first.path != second.path
+    first.clear()
+    rerun = resume.SessionStore(first.directory, first.binding)
+    assert rerun.load(identity) == other_session
+    assert rerun.path == second.path
+    rerun.clear()
+    assert not list(first.directory.glob("*.json"))

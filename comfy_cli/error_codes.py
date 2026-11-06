@@ -498,7 +498,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "asset_upload_invalid",
         "`model upload` or `assets library upload` refused the file or `--type` before uploading anything: "
         "`details.reason` is unsupported_file_type (not .safetensors), bad_filename, file_not_found, "
-        "file_unreadable (it could not be opened or its size read), empty_file, file_too_large (over 2 GB), "
+        "file_unreadable (it could not be opened or its size read), empty_file, "
         "unsupported_model_type (`details.valid_types` lists the folders the workspace takes), "
         "bad_expected_sha256 (`--expected-sha256` is not 64 hex), file_changed (the file's sha256, "
         "`details.sha256`, is not `details.expected_sha256`: it changed since the dry run that was approved), "
@@ -529,13 +529,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Comfy Cloud refused a model upload; the message is the server's. `details.server_code` is its "
         "code, e.g. FEATURE_DISABLED (uploads are off for this workspace), MODEL_STORAGE_LIMIT_REACHED "
         "(the message names the cap), UNSUPPORTED_FILE_TYPE, UNSUPPORTED_MODEL_TYPE or FILE_TOO_LARGE. "
-        "Retrying the same upload gets the same answer.",
+        "Cloud decides the size limit. Retrying the same upload gets the same answer.",
         "act on the server's message; do not retry unchanged",
     ),
     ErrorCode(
         "asset_upload_failed",
         "A model upload did not end in a stored asset: sending the bytes to storage failed after a fresh "
-        "retry (`details.status`, null when no answer came), the local file could not be read while it "
+        "retry (`details.status`, null when no answer came), a resumable transfer paused after thirty minutes "
+        "without acknowledged progress (`details.reason` upload_paused; `details.bytes_held` counts the bytes "
+        "storage holds, and saved state permits a later run to continue), the local file could not be read while it "
         "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
         "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
         "file; not retried), a block of the file read for sending was not the block hashed before it "
@@ -543,7 +545,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "none of the changed bytes were, and the upload was not completed, so no asset was added), or "
         "Comfy Cloud's storing task failed or was cancelled (the message carries the task's error, e.g. not a "
         "valid .safetensors file).",
-        "retry for a storage failure; for an unreadable file or a task failure fix the file the message names; "
+        "retry for a storage failure; for upload_paused run the same command again to continue a saved upload; "
+        "for an unreadable file or a task failure fix the file the message names; "
         "for tls_setup fix the certificate setting the message names; for file_changed wait until nothing "
         "writes the file, then run the dry run again",
     ),
