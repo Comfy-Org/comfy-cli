@@ -527,7 +527,9 @@ def background_launch(extra, frontend_pr=None):
         raise typer.Exit(code=1)
 
     cmd = [
-        "comfy",
+        sys.executable,
+        "-m",
+        "comfy_cli",
         f"--workspace={os.path.abspath(os.getcwd())}",
         "launch",
     ]

@@ -6,6 +6,7 @@ implicit main-thread loop creation was removed. `background_launch` now uses
 `asyncio.run(...)`, which works identically on 3.10-3.14+.
 """
 
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -54,6 +55,25 @@ def test_background_launch_drives_coroutine_without_event_loop_error(
 
     mock_monitor.assert_awaited_once()
     mock_exit.assert_called_once_with(1)
+
+
+@patch("comfy_cli.command.launch.os._exit")
+@patch("comfy_cli.command.launch.launch_and_monitor", new_callable=AsyncMock)
+@patch("comfy_cli.command.launch.check_comfy_server_running", return_value=False)
+@patch("comfy_cli.command.launch.ConfigManager")
+def test_background_launch_reexecs_with_current_interpreter(
+    mock_config_manager, mock_check_running, mock_monitor, mock_exit
+):
+    """The child must be spawned through `sys.executable -m comfy_cli`, not a
+    bare `comfy` that only resolves when the venv's bin directory is on PATH."""
+    mock_config_manager.return_value.background = None
+    mock_monitor.return_value = None
+
+    launch.background_launch(extra=[])
+
+    cmd = mock_monitor.await_args.args[0]
+    assert cmd[:3] == [sys.executable, "-m", "comfy_cli"]
+    assert cmd[-1] == "launch"
 
 
 def test_background_launch_does_not_use_deprecated_get_event_loop():
