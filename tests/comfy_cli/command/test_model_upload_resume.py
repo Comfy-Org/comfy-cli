@@ -342,7 +342,7 @@ def test_invalid_url_types_are_refused(session, url):
     assert not resume.valid_start({**session, "upload_url": url})
 
 
-@pytest.mark.parametrize("url", [1, True, {}, []])
+@pytest.mark.parametrize("url", [1, True, {}, [], "http://bucket.example/upload"])
 def test_malformed_saved_url_is_ignored(tmp_path, session, url):
     store = resume.SessionStore(tmp_path / "sessions", {})
     identity = {"account": "user", "workspace": "ws"}
@@ -369,3 +369,10 @@ def test_overlapping_uploads_keep_separate_sessions(tmp_path, session):
     assert rerun.path == second.path
     rerun.clear()
     assert not list(first.directory.glob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "url", ["http://bucket.example/upload", "https:///missing-host", "https://user:pass@bucket.example/upload"]
+)
+def test_resumable_addresses_still_require_https_without_userinfo(session, url):
+    assert not resume.valid_start({**session, "upload_url": url})

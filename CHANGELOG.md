@@ -26,7 +26,10 @@ history.
   servers keep the single-PUT upload. File approval, block checks and the final stored-hash
   check still apply. The final storage check no longer stops after fifteen
   minutes. The retired `asset_upload_timeout` error code stays discoverable
-  for compatibility with older versions.
+  for compatibility with older versions. The task id is reported before the
+  storage wait. Refused resumable sessions are discarded and restarted once;
+  certificate failures stop immediately. Legacy single-PUT storage addresses
+  retain HTTP compatibility.
 
 ### Added
 

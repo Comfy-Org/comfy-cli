@@ -186,10 +186,11 @@ def valid_start(start: dict) -> bool:
         return (
             isinstance(start.get("upload_id"), str)
             and bool(start["upload_id"])
-            and url.scheme == "https"
-            and bool(url.hostname)
-            and not url.username
-            and not url.password
+            and bool(start["upload_url"])
+            and (
+                start.get("upload_mode") is None
+                or (url.scheme == "https" and bool(url.hostname) and not url.username and not url.password)
+            )
             and start.get("method") == "PUT"
             and isinstance(start.get("headers"), dict)
             and all(isinstance(k, str) and isinstance(v, str) for k, v in start["headers"].items())
@@ -208,6 +209,8 @@ def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, 
             timeout=(10, 60),
             allow_redirects=False,
         )
+    except requests.exceptions.SSLError as error:
+        raise TlsSetupFailed(error, start["upload_url"]) from None
     except requests.RequestException:
         # Transport exceptions may quote the session credential.
         return None, None

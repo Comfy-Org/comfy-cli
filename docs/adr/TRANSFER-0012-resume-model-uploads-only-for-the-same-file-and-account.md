@@ -40,10 +40,15 @@ Storage's status query decides where to resume. Each piece is at most 64 MiB.
 A resumed offset inside a hashing block still checks that whole block before
 sending any part of it. Only acknowledged bytes advance progress. Transport
 errors keep no exception text because it can contain the session credential.
-Expired sessions restart; thirty minutes without acknowledged progress pauses.
+Expired sessions and permanent storage refusals discard the saved record and
+restart once; thirty minutes without acknowledged progress pauses. Certificate
+verification failures stop immediately with credential-safe TLS guidance.
 Completion deletes the session after a valid task response, and the command
 waits for the task without a total deadline. Repeated unanswered task polls
-still have a bounded retry window.
+still have a bounded retry window. The task id is emitted before waiting, so
+a caller can look it up if the command stops. HTTPS with a host and no userinfo
+is required for resumable and saved sessions; legacy single-PUT addresses retain
+the existing validation for compatibility with storage emulators.
 
 ## Alternatives considered
 

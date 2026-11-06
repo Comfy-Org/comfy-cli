@@ -1226,17 +1226,27 @@ def run_upload(
             renderer.error(
                 code="asset_upload_failed",
                 message=f"could not set up a secure connection to storage ({e.args[0]})",
-                hint="point REQUESTS_CA_BUNDLE (or CURL_CA_BUNDLE) at a certificate bundle that exists, or unset it, "
-                "then upload again; nothing was added to the library",
+                hint="check the storage certificate and proxy, and point REQUESTS_CA_BUNDLE (or CURL_CA_BUNDLE) "
+                "at a trusted certificate bundle that exists, or unset it; then upload again; "
+                "nothing was added to the library",
                 details={"reason": "tls_setup", "upload_id": upload_id, "attempts": attempt},
             )
             raise typer.Exit(code=1) from None
         except (_PutFailed, TransferFailed, SessionExpired) as e:
             expired = isinstance(e, SessionExpired)
             status = 404 if expired else e.args[0]
-            if expired:
+            refused = (
+                resumable
+                and isinstance(e, TransferFailed)
+                and status is not None
+                and 400 <= status < 500
+                and status != 429
+            )
+            if expired or refused:
                 store.clear()
-            if (expired or (not resumable and (status is None or status >= 500))) and attempt < _UPLOAD_STARTS:
+            if (
+                expired or refused or (not resumable and (status is None or status >= 500))
+            ) and attempt < _UPLOAD_STARTS:
                 renderer.warn("The upload to storage did not go through; starting a fresh upload.")
                 continue
             answer = "no response" if status is None else f"HTTP {status}"
@@ -1249,7 +1259,8 @@ def run_upload(
             raise typer.Exit(code=1) from None
 
     if renderer.is_pretty():
-        renderer.info("Uploaded; Comfy Cloud is checking and storing the file.")
+        renderer.info(f"Uploaded; Comfy Cloud is checking and storing the file. Task id: {task_id}")
+    renderer.progress_event("upload_storing", task_id=task_id)
     task = _wait_for_task(renderer, target, task_id, sign_in)
 
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
