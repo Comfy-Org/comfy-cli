@@ -1603,24 +1603,19 @@ def test_unset_host_value_never_fans_out_a_wired_source():
     assert "on_false" not in api["9:switch"]["inputs"], "a link pair must not be copied into sibling targets"
 
 
-def test_unset_host_value_source_walk_runs_once_per_definition_input(monkeypatch):
-    from comfy_cli.cql import promoted
+def test_unset_host_value_source_walk_is_charged_to_the_overlay_budget(monkeypatch):
+    workflow = {"nodes": [{"id": 8, "type": _SOCKET_SG}], "links": []}
+    definitions = {_SOCKET_SG: _prompt_to_widget_and_socket()}
+    monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 8)
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="promoted-value overlay exceeded"):
+        workflow_to_api._overlay_promoted_host_values(_socket_api("8"), workflow, definitions)
 
-    calls = []
-    original = promoted.deepest_source
-
-    def counted(sg, pi, defs):
-        calls.append(pi.index)
-        return original(sg, pi, defs)
-
-    monkeypatch.setattr(promoted, "deepest_source", counted)
-    workflow = {"nodes": [{"id": i, "type": _SOCKET_SG} for i in (8, 9)], "links": []}
-    api = {**_socket_api("8"), **_socket_api("9")}
-
-    workflow_to_api._overlay_promoted_host_values(api, workflow, {_SOCKET_SG: _prompt_to_widget_and_socket()})
-
-    assert calls == [0]
-    assert api["8:switch"]["inputs"]["on_false"] == api["9:switch"]["inputs"]["on_false"] == "interior default"
+    monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 9)
+    api = _socket_api("8")
+    workflow_to_api._overlay_promoted_host_values(api, workflow, definitions)
+    assert api["8:switch"]["inputs"]["on_false"] == "interior default", (
+        "visit (2 nodes + 1 input + 1) + source walk (2 nodes + 1) + 2 targets = 9 must fit"
+    )
 
 
 def test_known_divergence_unset_host_value_fans_out_the_processed_dynamic_prompt(object_info):

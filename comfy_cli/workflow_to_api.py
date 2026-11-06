@@ -234,15 +234,6 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     visit_budget = [_MAX_SUBGRAPH_EXPANSION_BUDGET]
     definition_nodes: dict[int, tuple[dict, list[dict]]] = {}
     scope_links: dict[int, tuple[dict, set[tuple[type, int | str]]]] = {}
-    sources: dict[tuple[int, int], tuple[dict, tuple[list[str], str] | None]] = {}
-
-    def source_for(sg: dict, pi: Any) -> tuple[list[str], str] | None:
-        cached = sources.get((id(sg), pi.index))
-        if cached is not None and cached[0] is sg:
-            return cached[1]
-        source = _promoted.deepest_source(sg, pi, subgraph_defs)
-        sources[(id(sg), pi.index)] = (sg, source)
-        return source
 
     def nodes_for(definition: dict) -> list[dict]:
         cached = definition_nodes.get(id(definition))
@@ -301,7 +292,10 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
                 # No host value: the frontend seeds the promoted widget from its interior source widget.
-                value = _source_widget_value(api_prompt, prefix, source_for(sg, pi))
+                if len(inner_nodes) + 1 > visit_budget[0]:
+                    raise WorkflowConversionError("promoted-value overlay exceeded its safe limit")
+                visit_budget[0] -= len(inner_nodes) + 1
+                value = _source_widget_value(api_prompt, prefix, _promoted.deepest_source(sg, pi, subgraph_defs))
                 if value is _promoted.UNSET:
                     continue
             else:
