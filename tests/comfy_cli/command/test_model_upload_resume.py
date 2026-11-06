@@ -376,3 +376,26 @@ def test_overlapping_uploads_keep_separate_sessions(tmp_path, session):
 )
 def test_resumable_addresses_still_require_https_without_userinfo(session, url):
     assert not resume.valid_start({**session, "upload_url": url})
+
+
+@pytest.mark.parametrize("setting", ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"])
+@pytest.mark.parametrize(
+    "contents", ["not a certificate\n", "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n"]
+)
+def test_existing_invalid_ca_bundle_is_fatal_with_real_requests(tmp_path, monkeypatch, setting, contents):
+    """Exercise Requests, urllib3 and OpenSSL without contacting a remote service."""
+    import socket
+
+    bundle = tmp_path / "invalid-ca.pem"
+    bundle.write_text(contents)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.setenv(setting, str(bundle))
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        start = {"upload_url": f"https://127.0.0.1:{listener.getsockname()[1]}/?secret=SESSION", "headers": {}}
+        with pytest.raises(resume.TlsSetupFailed) as error:
+            resume._request(start, b"", "bytes */16")
+        assert "SESSION" not in str(error.value)

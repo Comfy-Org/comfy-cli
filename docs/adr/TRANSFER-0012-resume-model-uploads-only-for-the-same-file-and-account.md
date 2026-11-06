@@ -42,7 +42,8 @@ sending any part of it. Only acknowledged bytes advance progress. Transport
 errors keep no exception text because it can contain the session credential.
 Expired sessions and permanent storage refusals discard the saved record and
 restart once; thirty minutes without acknowledged progress pauses. Certificate
-verification failures stop immediately with credential-safe TLS guidance.
+verification and certificate-bundle loading failures stop immediately with
+credential-safe TLS guidance.
 HTTP 408 and transient TLS failures query held bytes and retry within the same
 session. TLS setup diagnostics use fixed text, including for normalized URLs.
 Completion deletes the session after a valid task response, and the command
@@ -51,8 +52,9 @@ still have a bounded retry window. The task id is emitted before waiting, so
 a caller can look it up if the command stops. HTTPS with a host and no userinfo
 is required for resumable and saved sessions; legacy single-PUT addresses retain
 the existing validation for compatibility with storage emulators.
-Progress output failures mute reporting without stopping task polling or the
-stored-hash check.
+Progress output failures, including Rich converting broken pipes to process-exit
+exceptions, mute reporting without stopping task polling or the stored-hash check.
+Later storage-wait notices use the same reporting boundary.
 
 ## Alternatives considered
 
@@ -77,7 +79,10 @@ the command loses its sign-in.
 The model-upload tests use a fake bucket for mid-piece drops, process reruns,
 final-piece recovery, refusal, expiry, transient errors and byte verification.
 State tests cover each identity field, expiration, permissions and bounds.
-Existing command tests retain approval and stored-hash assertions. CI runs
+Real Requests and OpenSSL check invalid local certificate bundles. Real Rich
+rendering checks closed streams and broken pipes during storage notices and
+polling. Tests isolate Rich's process-wide stdout redirection. Existing command
+tests retain approval and stored-hash assertions. CI runs
 these tests on Linux, macOS and Windows. Real multi-GB storage is not exercised
 by the fake bucket.
 

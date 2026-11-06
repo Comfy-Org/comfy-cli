@@ -2914,3 +2914,110 @@ def test_normalized_tls_error_never_exposes_session_credentials(
     assert _COMPLETE_1 not in cloud.paths()
     assert "SECRETSIG" not in everything
     assert "%53ECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("saved", [False, True], ids=["piece", "status-query"])
+def test_invalid_ca_contents_stop_without_backoff(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, saved
+):
+    """Preserve a real OpenSSL loading error through the transport's wrappers."""
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, SSLError
+
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    if saved:
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = _http_error(403)
+        _, rc, *_ = run(monkeypatch, capsys, args, routes, [], storage=_ResumableBucket())
+        assert rc == 1
+    bundle = tmp_path / "invalid-ca.pem"
+    bundle.write_text("not a certificate\n")
+    with pytest.raises(ssl.SSLError) as native:
+        ssl.create_default_context(cafile=str(bundle))
+    attempts = []
+
+    def put(url, **kw):
+        attempts.append(kw["headers"]["Content-Range"])
+        raise requests.exceptions.SSLError(MaxRetryError(None, url, SSLError(native.value)))
+
+    env, rc, cloud, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=put)
+    assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+    assert len(attempts) == 1 and no_wait[0] == 0
+    assert attempts[0].startswith("bytes */") is saved
+    assert _COMPLETE_1 not in cloud.paths()
+    assert "SECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("mismatch", [False, True], ids=["verified", "wrong-hash"])
+@pytest.mark.parametrize("failure", ["broken-pipe", "closed-stream"])
+@pytest.mark.parametrize("notice", ["storing", "polling"])
+def test_real_pretty_output_failure_preserves_polling_and_hash_check(
+    cloud_target, monkeypatch, model_file, no_wait, model, mismatch, failure, notice
+):
+    """Run real Rich rendering; isolate only its process-wide stdout redirection."""
+    import rich.console
+
+    from comfy_cli.command.models import models
+
+    # Keep Rich's real BrokenPipeError -> SystemExit conversion, but do not
+    # let on_broken_pipe redirect pytest's stdout file descriptor to /dev/null.
+    redirected = []
+
+    def redirect(fd, target):
+        redirected.append((fd, target))
+        os.close(fd)
+
+    monkeypatch.setattr(rich.console, "os", SimpleNamespace(**{**vars(os), "dup2": redirect}))
+    monkeypatch.setattr(
+        rich.console, "sys", SimpleNamespace(**{**vars(sys), "stdout": SimpleNamespace(fileno=lambda: 1)})
+    )
+    failed_writes = []
+
+    class Output(io.StringIO):
+        def write(self, text):
+            marker = "Task id:" if notice == "storing" else "still checking"
+            if failed_writes or marker in text:
+                failed_writes.append(text)
+                if failure == "broken-pipe":
+                    raise BrokenPipeError()
+                raise ValueError("I/O operation on closed file.")
+            return super().write(text)
+
+    renderer = Renderer(mode=OutputMode.PRETTY)
+    renderer.pretty_stream = Output()
+    routes = _resume_routes()
+    routes[("GET", "/api/tasks/task-1")] = [{"id": "task-1", "status": "running"}] * 40 + [
+        {**_DONE, "result": {"success": True, "asset_id": "asset-9"}}
+    ]
+    verified = []
+    original_stored = assets_library._stored_asset
+    routes[("GET", "/api/assets/asset-9")] = {"id": "asset-9", "hash": "b" * 64 if mismatch else _MODEL_HASH}
+
+    def stored(*args):
+        verified.append(True)
+        # The final result has its own output boundary. Restore that output
+        # only once the task completed and its hash is about to be checked.
+        renderer.pretty_stream = io.StringIO()
+        return original_stored(*args)
+
+    monkeypatch.setattr(assets_library, "_stored_asset", stored)
+    cloud = _Cloud(routes)
+    monkeypatch.setattr("urllib.request.urlopen", cloud)
+    monkeypatch.setattr("requests.put", _ResumableBucket())
+    set_renderer(renderer)
+    result = CliRunner().invoke(
+        models.app if model else assets_library.app,
+        ["upload", str(model_file), "--type", "loras", "--where", "cloud", *(["--yes"] if model else [])],
+    )
+    assert verified, repr(result.exception)
+    assert cloud.paths().count("/api/tasks/task-1") == 41
+    assert result.exit_code == (1 if mismatch else 0), repr(result.exception)
+    assert len(failed_writes) == 1
+    assert bool(redirected) is (failure == "broken-pipe")
+    if mismatch:
+        assert "asset_upload_unverified" in renderer.pretty_stream.getvalue()

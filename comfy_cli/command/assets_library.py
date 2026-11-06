@@ -774,7 +774,7 @@ def _complete_upload(renderer, target, sign_in, upload_id: str, body: dict, *, r
             return parsed
 
 
-def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
+def _wait_for_task(renderer, target, task_id: str, sign_in=None, *, reporter: UploadProgressReporter) -> dict:
     """Read the task until it ends, riding out a brief 5xx, 429 or dropped connection."""
     import http.client
     import urllib.error
@@ -813,7 +813,7 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
             if status in _TASK_DONE:
                 return task
         if renderer.is_pretty() and _clock() - last_notice >= 30:
-            renderer.info(f"Comfy Cloud is still checking and storing the file ({int(_clock() - started)}s so far).")
+            reporter.waiting(int(_clock() - started))
             last_notice = _clock()
         _sleep(pause)
 
@@ -1258,7 +1258,7 @@ def run_upload(
             raise typer.Exit(code=1) from None
 
     reporter.storing(task_id)
-    task = _wait_for_task(renderer, target, task_id, sign_in)
+    task = _wait_for_task(renderer, target, task_id, sign_in, reporter=reporter)
 
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     if task["status"] != "completed" or result.get("success") is False:

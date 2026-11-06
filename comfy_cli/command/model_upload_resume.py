@@ -198,19 +198,33 @@ def valid_start(start: dict) -> bool:
         return False
 
 
-def _certificate_failure(error: BaseException) -> bool:
-    """Recognize native and wrapped certificate errors without reporting their text."""
+def _tls_setup_failure(error: BaseException) -> bool:
+    """Recognize certificate verification/loading errors through transport wrappers."""
     pending, seen = [error], set()
     while pending:
         current = pending.pop()
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, ssl.SSLCertVerificationError):
+        if isinstance(current, ssl.SSLCertVerificationError) or (
+            isinstance(current, ssl.SSLError) and getattr(current, "library", None) in {"X509", "PEM", "ASN1"}
+        ):
             return True
         # Some adapters flatten the native error into a message.
         text = str(current).lower()
-        if "certificate_verify_failed" in text or "certificate verify failed" in text:
+        if any(
+            marker in text
+            for marker in (
+                "certificate_verify_failed",
+                "certificate verify failed",
+                "no_certificate_or_crl_found",
+                "no certificate or crl found",
+                "pem lib",
+                "[pem:",
+                "[x509:",
+                "[asn1:",
+            )
+        ):
             return True
         pending.extend(
             value
@@ -230,7 +244,7 @@ def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, 
             allow_redirects=False,
         )
     except requests.exceptions.SSLError as error:
-        if _certificate_failure(error):
+        if _tls_setup_failure(error):
             raise TlsSetupFailed() from None
         return None, None
     except requests.RequestException:

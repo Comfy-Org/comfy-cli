@@ -28,9 +28,11 @@ history.
   minutes. The retired `asset_upload_timeout` error code stays discoverable
   for compatibility with older versions. The task id is reported before the
   storage wait. Refused resumable sessions are discarded and restarted once;
-  certificate failures stop immediately without transport exception text.
+  certificate verification and invalid CA-bundle failures stop immediately
+  without transport exception text.
   HTTP timeouts and transient TLS interruptions query the held bytes and retry.
-  A closed progress pipe does not stop the final stored-hash check.
+  A closed progress pipe or stream does not stop task polling or the final
+  stored-hash check, including when Rich converts the pipe failure to an exit.
   Legacy single-PUT storage addresses
   retain HTTP compatibility.
 
