@@ -537,7 +537,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A model upload did not end in a stored asset: sending the bytes to storage failed after a fresh "
         "retry (`details.status`, null when no answer came), a resumable transfer paused after thirty minutes "
         "without acknowledged progress (`details.reason` upload_paused; `details.bytes_held` counts the bytes "
-        "storage holds, and saved state permits a later run to continue), the local file could not be read while it "
+        "storage holds; `details.session_saved` says whether the session was saved for a later run), "
+        "the local file could not be read while it "
         "was being sent (`details.reason` file_unreadable; not retried), this machine's TLS settings stopped "
         "the PUT before it connected (`details.reason` tls_setup, e.g. REQUESTS_CA_BUNDLE naming a missing "
         "file; not retried), a block of the file read for sending was not the block hashed before it "
@@ -545,7 +546,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "none of the changed bytes were, and the upload was not completed, so no asset was added), or "
         "Comfy Cloud's storing task failed or was cancelled (the message carries the task's error, e.g. not a "
         "valid .safetensors file).",
-        "retry for a storage failure; for upload_paused run the same command again to continue a saved upload; "
+        "retry for a storage failure; for upload_paused run the same command again to continue only when "
+        "session_saved is true and the session remains valid; otherwise start a new upload; "
         "for an unreadable file or a task failure fix the file the message names; "
         "for tls_setup fix the certificate setting the message names; for file_changed wait until nothing "
         "writes the file, then run the dry run again",

@@ -2604,20 +2604,59 @@ class TestResumableRefusals:
 
         assert list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json")) == []
 
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
     def test_paused_upload_redacts_the_credential_and_keeps_the_state(
-        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model
     ):
         import requests
 
         def lost(*a, **kw):
             raise requests.ConnectionError("SECRETSIG")
 
-        env, rc, _, _, everything = _upload(
-            monkeypatch, capsys, [str(model_file), "--type", "loras"], _resume_routes(), [], storage=lost
-        )
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+        env, rc, _, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=lost)
         assert rc == 1 and env["error"]["details"]["reason"] == "upload_paused"
+        assert env["error"]["details"]["session_saved"] is True
         assert "SECRETSIG" not in everything
         assert "Run the same command again" in env["error"]["message"]
         from comfy_cli.config_manager import ConfigManager
 
         assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+
+        env, rc, cloud, _, _ = run(monkeypatch, capsys, args, _resume_routes(), [], storage=lost)
+        assert rc == 1 and env["error"]["details"]["session_saved"] is True
+        assert "/api/assets/uploads" not in cloud.paths()
+
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+    @pytest.mark.parametrize("unsaved", ["user", "workspaces/current", "write-failed"])
+    def test_paused_upload_without_saved_state_explains_it_must_start_again(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model, unsaved
+    ):
+        import requests
+
+        from comfy_cli.command.model_upload_resume import SessionStore
+        from comfy_cli.config_manager import ConfigManager
+
+        def lost(*a, **kw):
+            raise requests.ConnectionError("SECRETSIG")
+
+        def cannot_save(self):
+            raise OSError("permission denied")
+
+        routes = _resume_routes()
+        if unsaved == "write-failed":
+            monkeypatch.setattr(SessionStore, "_secure", cannot_save)
+        else:
+            routes[("GET", "/api/" + unsaved)] = {}
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+        env, rc, cloud, _, everything = run(monkeypatch, capsys, args, routes, [], storage=lost)
+        assert rc == 1 and env["error"]["details"]["reason"] == "upload_paused"
+        assert env["error"]["details"]["session_saved"] is False
+        assert "not saved" in env["error"]["message"]
+        assert "start a new upload" in env["error"]["message"]
+        assert "to continue" not in env["error"]["message"]
+        assert "SECRETSIG" not in everything
+        assert _COMPLETE_1 not in cloud.paths()
+        assert list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json")) == []

@@ -19,9 +19,11 @@ history.
 
 - Both `comfy assets library upload` and `comfy model upload` request resumable
   model uploads up to 25 GB. Dropped connections retry from storage's held
-  bytes, and running the command again within seven days continues a saved
-  upload for the same file, account, workspace and folder. Older servers keep
-  the single-PUT upload. File approval, block checks and the final stored-hash
+  bytes. Running the command again continues a saved upload for the same file,
+  account, workspace and folder while its session remains valid. Sessions expire
+  no later than seven days after creation; the server can expire them earlier.
+  A paused upload reports whether its session was saved for a later run. Older
+  servers keep the single-PUT upload. File approval, block checks and the final stored-hash
   check still apply. The final storage check no longer stops after fifteen
   minutes. The retired `asset_upload_timeout` error code stays discoverable
   for compatibility with older versions.

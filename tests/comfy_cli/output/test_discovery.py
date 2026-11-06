@@ -113,7 +113,9 @@ def test_model_upload_guidance_leaves_size_limits_to_cloud_and_explains_resume()
     paused = codes["asset_upload_failed"]
     assert "upload_paused" in paused["meaning"]
     assert "bytes_held" in paused["meaning"]
+    assert "session_saved" in paused["meaning"]
     assert "same command" in paused["hint"]
+    assert "start a new upload" in paused["hint"]
 
 
 def test_discover_capabilities_flags():

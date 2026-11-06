@@ -263,6 +263,21 @@ def test_state_never_follows_a_symlink(tmp_path, session):
     assert list(actual.iterdir()) == []
 
 
+def test_corrupt_newer_session_does_not_hide_valid_session(tmp_path, session):
+    identity = {"account": "user", "workspace": "ws"}
+    first = resume.SessionStore(tmp_path / "sessions", {"path": "model"})
+    second = resume.SessionStore(first.directory, first.binding)
+    assert first.save(session, identity)
+    assert second.save(session, identity)
+    second.path.write_text("{broken")
+    now = time.time()
+    os.utime(first.path, (now - 10, now - 10))
+    os.utime(second.path, (now, now))
+    loaded = resume.SessionStore(first.directory, first.binding)
+    assert loaded.load(identity) == session
+    assert loaded.path == first.path
+
+
 def test_unknown_identity_is_never_persisted(tmp_path, session):
     store = resume.SessionStore(tmp_path / "sessions", {})
     assert not store.save(session, None)

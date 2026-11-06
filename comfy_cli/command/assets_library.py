@@ -1138,6 +1138,7 @@ def run_upload(
     saved = store.load(identity)
     for attempt in range(1, _UPLOAD_STARTS + 1):
         resumed = saved is not None
+        session_saved = resumed
         start = saved or _call(
             renderer,
             target,
@@ -1153,7 +1154,8 @@ def run_upload(
         resumable = start.get("upload_mode") == "resumable"
         if resumable and not resumed:
             identity = identity or _upload_identity(target, sign_in)
-            if not store.save(start, identity):
+            session_saved = store.save(start, identity)
+            if not session_saved:
                 renderer.warn("This upload cannot be saved for a later run; connection retries still work.")
         try:
             with reporter.uploading(item, 1, 1) as progress:
@@ -1184,11 +1186,20 @@ def run_upload(
         except UploadPaused as e:
             from comfy_cli.output.progress import human_bytes
 
+            next_run = (
+                "Run the same command again to continue while the saved session remains valid."
+                if session_saved
+                else "This session was not saved. Run the same command again to start a new upload."
+            )
             renderer.error(
                 code="asset_upload_failed",
-                message=f"Upload paused at {human_bytes(e.args[0])} of {human_bytes(size)}. "
-                "Run the same command again to continue.",
-                details={"reason": "upload_paused", "upload_id": upload_id, "bytes_held": e.args[0]},
+                message=f"Upload paused at {human_bytes(e.args[0])} of {human_bytes(size)}. {next_run}",
+                details={
+                    "reason": "upload_paused",
+                    "upload_id": upload_id,
+                    "bytes_held": e.args[0],
+                    "session_saved": session_saved,
+                },
             )
             raise typer.Exit(code=1) from None
         except _FileUnreadable as e:
