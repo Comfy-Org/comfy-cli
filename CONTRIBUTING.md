@@ -241,6 +241,38 @@ scope in the command module, or import them inside the command function.
 `tests/comfy_cli/test_import_budget.py` fails if `comfy --version` starts
 importing them.
 
+### Updating searchable agent documentation
+
+`comfy docs` indexes a curated allowlist of README sections, `docs/json-output.md`,
+and the shipped agent skill files. When changing an included source, rebuild the
+checked-in corpus and verify it is current:
+
+```bash
+python scripts/build_docs_bundle.py
+python scripts/build_docs_bundle.py --check
+```
+
+Add or remove sources in `docs/search-sources.json`; the generator fails when a
+selected README heading is missing. Keep generated IDs, excerpts, and content
+derived from the Markdown rather than maintaining a second copy.
+
+The optional LanceDB pack stores chunks and precomputed vectors alongside the
+pinned BGE query encoder. Test the hybrid path from an isolated environment
+with the extra enabled:
+
+```bash
+uv sync --locked --extra dev --extra docs-search
+python scripts/build_docs_lancedb.py  # fetches the pinned model for local pack creation
+python scripts/build_docs_lancedb.py --check
+uv run --locked --extra dev --extra docs-search pytest tests/comfy_cli/test_docs_lancedb.py
+```
+
+The build downloads the pinned ONNX model once and creates ignored pack assets;
+search then runs from those local files. Release automation builds the same
+archive from the pinned source revision, validates it against the current corpus,
+and publishes the version-matched companion package with comfy-cli. PyPI must
+trust the release workflow for both project names before the next release.
+
 ## Important notes
 
 - Use `typer` for all command args management

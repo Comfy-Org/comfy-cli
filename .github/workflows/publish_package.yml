@@ -21,8 +21,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install build and tomlkit dependencies
-        run: python -m pip install --upgrade pip build tomlkit
+      - name: Install build and LanceDB pack dependencies
+        run: >-
+          python -m pip install --upgrade pip build tomlkit jsonschema
+          "lancedb==0.25.0" "pyarrow>=16,<25" "onnxruntime>=1.23.2,<1.24" "tokenizers>=0.15,<1"
 
       - name: Extract version from tag
         id: get_version
@@ -31,18 +33,21 @@ jobs:
           VERSION="${VERSION#v}"
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
-      - name: Update version in pyproject.toml
-        run: |
-          python -c "
-          import tomlkit
-          with open('pyproject.toml', 'r') as f:
-              content = tomlkit.load(f)
-          content['project']['version'] = '${{ env.VERSION }}'
-          with open('pyproject.toml', 'w') as f:
-              tomlkit.dump(content, f)
-          "
+      - name: Set matching CLI and docs-pack versions
+        run: python scripts/set_release_version.py "${VERSION}"
 
-      - name: Build distribution
+      - name: Check bundled documentation
+        run: python scripts/build_docs_bundle.py --check
+
+      - name: Build and validate offline LanceDB docs pack
+        run: |
+          python scripts/build_docs_lancedb.py
+          python scripts/build_docs_lancedb.py --check
+
+      - name: Build the version-matched docs-search package
+        run: python -m build --sdist --wheel --outdir dist/ packages/comfy-cli-docs-search
+
+      - name: Build comfy-cli distribution
         run: python -m build --sdist --wheel --outdir dist/
 
       # - name: Publish distribution to TestPyPI for Validation
@@ -94,3 +99,37 @@ jobs:
 
       - name: Test Comfy CLI Help
         run: comfy --help
+
+  test-docs-search-installation:
+    name: Test optional LanceDB docs search from PyPI
+    needs: build-n-publish-pypi
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          VERSION="${VERSION#v}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Install optional docs-search extra
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if pip install --no-cache-dir "comfy-cli[docs-search]==${VERSION}"; then
+              exit 0
+            fi
+            echo "Attempt ${attempt}: package not yet available on PyPI, waiting 15s..."
+            sleep 15
+          done
+          echo "::error::Failed to install comfy-cli[docs-search]==${VERSION} after 8 attempts"
+          exit 1
+
+      - name: Search the shipped corpus offline
+        run: |
+          comfy --json docs status
+          comfy --json docs search "stuck job wait timeout" --mode hybrid
