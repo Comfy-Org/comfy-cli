@@ -76,6 +76,7 @@ from comfy_cli.cql.engine import (
     SOCKETED_WIDGET_TYPES,
     DynamicGroupBindingError,
     SavedWidgetLayoutError,
+    _drop_named_values,
     _dynamic_group_widgets,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
@@ -4127,6 +4128,9 @@ def _apply_positional_write(node: dict, positional: dict, value: Any) -> None:
         values.append(None)
     values[idx] = value
     node["widgets_values"] = values
+    # Positional write with no maintained name map: drop it rather than leave
+    # a map that disagrees with the array. See engine._drop_named_values.
+    _drop_named_values(node)
 
 
 def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: str, value: Any) -> None:
@@ -4163,6 +4167,9 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = value
+    # Positional write with no maintained name map: drop it rather than leave
+    # a map that disagrees with the array. See engine._drop_named_values.
+    _drop_named_values(dst)
     _lww_commit(workflow, widget_op)
 
 
@@ -4992,6 +4999,9 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, 
         node["title"] = title
     node["properties"] = {}
     node["widgets_values"] = widgets
+    # Positional write with no maintained name map: drop it rather than leave
+    # a map that disagrees with the array. See engine._drop_named_values.
+    _drop_named_values(node)
     return node
 
 

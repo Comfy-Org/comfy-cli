@@ -218,6 +218,22 @@ history.
   preserves raw installed versions with or without pip. Every `===` clause
   compares raw strings case-insensitively, including in mixed constraints;
   ordinary clauses still require valid versions and use semantic comparison.
+- `widgets_values_named`, when a node records one, now agrees with
+  `widgets_values` after an edit. It was maintained only for nodes carrying a
+  DynamicGroup, so editing a plain node moved the positional array and left the
+  map holding the value the edit replaced. ComfyUI_frontend writes that map on
+  every save and prefers it when restoring a node, so the two disagreeing is a
+  real divergence (latent today only because the frontend's named-restore path
+  sits behind a setting that defaults off).
+
+  The guarantee is deliberately "a map that is **present** agrees with the
+  array", not "the map is always maintained". Where an edit can keep it true it
+  mirrors; where it cannot it drops the field, because absence is unambiguous —
+  the frontend rebuilds from the array and converters read positionally — while
+  a half-updated map is not. The field is dropped by: a dynamic-combo option
+  change on a node with no DynamicGroup, an edit to a widget name the node
+  carries twice, the promoted-host and inputcount writes, and the positional
+  writes in `workflow_ops`. A node that records no map never gains one.
 
 - UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
   the order the workflow was SAVED with, when the saved graph records one,

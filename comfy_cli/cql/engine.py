@@ -5364,6 +5364,23 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     return _UNRESOLVED
 
 
+def _drop_named_values(node: dict) -> None:
+    """Remove ``widgets_values_named`` because this edit cannot maintain it.
+
+    ComfyUI_frontend writes that map on every save and prefers it over the
+    positional array when restoring a node, so a map an edit did not follow is a
+    map that LIES about the node. Absence does not lie: the frontend rebuilds the
+    map from the positional array, every converter reads a missing map as "read
+    positionally", and the next save writes a fresh one.
+
+    That is what makes the contract usable -- **a map that is present agrees with
+    the array** -- and the price is dropping the field on the write paths that
+    cannot keep it true. A partially-updated map is the only genuinely dangerous
+    state, because nothing downstream can tell which of its keys are stale.
+    """
+    node.pop("widgets_values_named", None)
+
+
 def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, extend: bool) -> list[dict]:
     """Write ``value`` into ``node``'s ``widgets_values`` slot for ``input_name``.
 
@@ -5576,8 +5593,24 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         node["widgets_values"] = {**raw_values, input_name: value}
     else:
         node["widgets_values"] = widgets
-    if has_group and "widgets_values_named" in node:
-        node["widgets_values_named"][input_name] = value
+    # Keep the name map in step on every node that records a usable one, not
+    # only grouped ones. Previously a plain node's edit updated the positional
+    # array and left the map holding the value the edit replaced.
+    named = node.get("widgets_values_named")
+    if isinstance(named, dict):
+        if order.count(input_name) > 1:
+            # A plain node can carry the same widget name twice (two
+            # ``control_after_generate`` markers on a node with both ``seed``
+            # and ``noise_seed``). The positional write lands on the FIRST
+            # occurrence while the map holds one key for that name, so mirroring
+            # would file one slot's value under a name a restore may apply to
+            # the other, or to both. The map cannot represent that node.
+            _drop_named_values(node)
+        else:
+            named[input_name] = value
+    # A map that is present but unusable (``None``, a list, a scalar) is left
+    # exactly as found: this path has always been editable, and guessing a
+    # malformed map's intent is worse than ignoring it.
     return warnings
 
 
@@ -5736,6 +5769,12 @@ def _write_dynamic_combo_selector(
             widgets.extend([None] * (widget_idx + 1 - len(widgets)))
         widgets[widget_idx] = value
         node["widgets_values"] = {**raw_values, input_name: value} if preserve_named else widgets
+        # Same option re-selected, so only the selector's own slot moved. Its
+        # name is unique by construction, so the map can follow it exactly.
+        # Without this the map kept the previous spelling while the array moved.
+        selector_named = node.get("widgets_values_named")
+        if isinstance(selector_named, dict):
+            selector_named[input_name] = value
         return []
 
     # Sub-entries owned (directly or via nesting) by this combo sit contiguously
@@ -5762,6 +5801,14 @@ def _write_dynamic_combo_selector(
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
     _clear_dynamic_combo_widget_markers(node, input_name)
+    if not any(entry.port and entry.port.is_dynamic_group for entry in entries):
+        # Changing the option swaps the selector's sub-widgets wholesale: old
+        # names leave, new ones arrive. The branch below keeps the map true for a
+        # node with a DynamicGroup entry; without one there is no maintained
+        # path, and leaving the map would hand a reader the OLD option's selector
+        # plus the OLD sub-values plus whatever later edits mirrored in -- a
+        # mixture nothing downstream can untangle.
+        _drop_named_values(node)
     if any(entry.port and entry.port.is_dynamic_group for entry in entries):
         if "widgets_values_form" in node:
             node["widgets_values_form"]["order"] = (
