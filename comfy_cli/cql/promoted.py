@@ -958,7 +958,15 @@ def deepest_source(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> tuple[
         path.append(current.source_node)
         if not current.nested:
             return path, str(current.source_widget)
-        inner = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == current.source_node), None)
+        nodes = current_sg.get("nodes")
+        inner = next(
+            (
+                n
+                for n in (nodes if isinstance(nodes, list) else [])
+                if isinstance(n, dict) and str(n.get("id")) == current.source_node
+            ),
+            None,
+        )
         inner_def = defs.get(str(inner.get("type", ""))) if inner is not None else None
         if inner_def is None or current.source_input is None:
             return None
@@ -2186,10 +2194,8 @@ def flush_proxy_migration(
     return report
 
 
-def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
-    """Every concrete ``(interior node path, widget)`` a promoted input feeds —
-    all of its boundary links, through nested instances. A repaired primitive
-    fan-out has several; :func:`deepest_source` reports only the first."""
+def boundary_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
+    """Every ``(interior node path, input)`` the input's boundary links reach, sockets included."""
     cache = getattr(defs, "promotion_boundaries", None)
     cache_key = (id(sg), pi.index)
     raw_inputs = sg.get("inputs")
@@ -2368,15 +2374,18 @@ def _boundary_targets(
                     )
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
+            # Unmarked sockets count too: the frontend inlines into any input the link reaches (resolveInput).
             marker = entry.get("widget")
-            if marker:
-                _spend_traversal_budget(
-                    _output_budget,
-                    1,
-                    "promoted widget boundary traversal exceeded its safe limit",
-                )
-                widget = marker.get("name") if isinstance(marker, dict) else None
-                out.append(([tid], str(widget or entry.get("name"))))
+            widget = marker.get("name") if isinstance(marker, dict) else None
+            name = widget or entry.get("name")
+            if name is None:
+                continue
+            _spend_traversal_budget(
+                _output_budget,
+                1,
+                "promoted widget boundary traversal exceeded its safe limit",
+            )
+            out.append(([tid], str(name)))
     _memo[memo_key] = out
     frozen_dependencies = frozenset(dependencies)
     _dependency_memo[memo_key] = frozen_dependencies
