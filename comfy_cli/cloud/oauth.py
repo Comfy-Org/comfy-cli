@@ -54,7 +54,7 @@ from comfy_cli.cloud import (
     CLIENT_NAME,
     get_base_url,
 )
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+from comfy_cli.http import USAGE_SOURCE_HEADERS, NoRedirectHandler, build_http_only_opener
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1043,6 +1043,8 @@ _OAUTH_OPENER = build_http_only_opener(NoRedirectHandler())
 
 def _send_and_parse(req: urllib.request.Request, *, timeout: float = _HTTP_TIMEOUT_S) -> dict:
     _assert_https_or_loopback(req.full_url)
+    for k, v in USAGE_SOURCE_HEADERS.items():
+        req.add_header(k, v)
     try:
         with _OAUTH_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace") or "{}"

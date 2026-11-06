@@ -22,6 +22,12 @@ DEFAULT_HTTP_TIMEOUT = 30.0
 # capping a legitimately long transfer.
 DOWNLOAD_TIMEOUT = (10.0, 60.0)
 
+# Usage-source attribution, sent on every request to a Comfy-owned API (local
+# or cloud ComfyUI, the builder, deploy, the registry, sign-in) so the server
+# can tell CLI-originated traffic apart from the web UI (#468). Third-party
+# hosts (GitHub, PyPI, model hosts, pre-signed storage URLs) never get it.
+USAGE_SOURCE_HEADERS: Final[dict[str, str]] = {"Comfy-Usage-Source": "comfy-cli"}
+
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 
@@ -353,7 +359,7 @@ def build_authed_request(
     Target can't carry a stray credential into this path either.
     """
     req = urllib.request.Request(url, data=data, method=method)
-    for k, v in target_auth_headers(target).items():
+    for k, v in {**USAGE_SOURCE_HEADERS, **target_auth_headers(target)}.items():
         req.add_header(k, v)
     if content_type:
         req.add_header("Content-Type", content_type)
@@ -468,7 +474,7 @@ def request_json(
         assert_safe_url(url)
     data = encode_json_body(body) if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    for k, v in (headers or {}).items():
+    for k, v in {**USAGE_SOURCE_HEADERS, **(headers or {})}.items():
         req.add_header(k, v)
     for k, v in auth_headers.items():
         req.add_header(k, v)
