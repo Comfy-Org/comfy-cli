@@ -430,29 +430,70 @@ def _cloud_search(
     The ``include_tags`` parameter is comma-separated, not repeated — cloud
     rejects the repeated-key form (``include_tags=a&include_tags=b``) per its
     OpenAPI spec (``style: form, explode: false``).
+
+    ``name_contains`` is one case-insensitive substring over the whole name, so
+    a query the user writes with spaces ("MiniMax H3") can never match the
+    filename (``minimax_h3_…``). When ``text`` is more than one word, or carries
+    a separator, the server is asked for its longest word only and every word
+    is then checked client-side with ``_name_matches``: the same token-AND,
+    separator-insensitive rule local search uses.
     """
     tags = ["models"]
     if type_:
         tags.append(_TYPE_TO_FOLDER.get(type_, type_))
-    params: dict[str, Any] = {
+    base: dict[str, Any] = {
         "include_tags": ",".join(tags),
-        "limit": min(max(limit, 1), 500),
         "include_public": str(include_public).lower(),
     }
-    if text:
-        params["name_contains"] = text
+    tokens = _search_tokens(text)
+    fragments = [f for f in _NAME_SEPARATORS.split((text or "").lower()) if f]
+    if tokens is None or (len(fragments) == 1 and fragments[0] == (text or "").lower().strip()):
+        # No filter, or a single separator-free word: the server's substring
+        # match is already exact, so ask for it directly.
+        if text:
+            base["name_contains"] = text
+        body = _assets_page(target, {**base, "limit": min(max(limit, 1), 500)})
+        rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
+        return rows, int(body.get("total") or len(rows))
+    if not tokens:
+        # Only separators: a filter nothing satisfies (same as local).
+        return [], 0
 
-    qs = urllib.parse.urlencode(params)
-    url = target.url("assets") + "?" + qs
+    base["name_contains"] = max(fragments, key=len)
+    rows: list[dict[str, Any]] = []
+    total = 0
+    offset = 0
+    for _ in range(_CLOUD_TOKEN_SCAN_MAX_PAGES):
+        body = _assets_page(target, {**base, "limit": _CLOUD_TOKEN_SCAN_PAGE, "offset": offset})
+        page = [a for a in body.get("assets") or [] if isinstance(a, dict)]
+        for asset in page:
+            names = (asset.get("name") or "", asset.get("display_name") or "")
+            if any(isinstance(n, str) and n and _name_matches(n, tokens) for n in names):
+                total += 1
+                if len(rows) < max(limit, 0):
+                    rows.append(_asset_to_row(asset))
+        offset += len(page)
+        if not page or not body.get("has_more"):
+            break
+    return rows, total
+
+
+# The longest word narrows the server query, but every row it returns still has
+# to pass the other words, so the scan pages until the server runs out. Capped
+# so a broad word ("image") cannot page forever: 20 × 500 = 10k assets.
+_CLOUD_TOKEN_SCAN_PAGE = 500
+_CLOUD_TOKEN_SCAN_MAX_PAGES = 20
+
+
+def _assets_page(target, params: dict[str, Any]) -> dict[str, Any]:
+    url = target.url("assets") + "?" + urllib.parse.urlencode(params)
     body = _http_get_json(url, target)
     if not isinstance(body, dict):
         # Callers route JSONDecodeError to an envelope error; a non-object
         # top-level body (list/scalar) must surface the same way, not crash
         # on body.get().
         raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
-    assets = body.get("assets") or []
-    rows = [_asset_to_row(a) for a in assets if isinstance(a, dict)]
-    return rows, int(body.get("total") or len(rows))
+    return body
 
 
 def _local_folder_names(target) -> list[str]:

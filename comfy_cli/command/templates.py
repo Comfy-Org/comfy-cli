@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -489,13 +490,32 @@ def _matches(
         return False
     if tag and not any((t or "").lower() == tag.lower() for t in row.get("tags") or []):
         return False
-    if model and not any(model.lower() in (m or "").lower() for m in row.get("models") or []):
+    if model and not any(_contains(m, model) for m in row.get("models") or []):
         return False
-    if provider and not any(provider.lower() in (p or "").lower() for p in row.get("providers") or []):
+    if provider and not any(_contains(p, provider) for p in row.get("providers") or []):
         return False
-    if name_sub and name_sub.lower() not in (row.get("name") or "").lower():
+    if name_sub and not _contains(row.get("name"), name_sub):
         return False
     return True
+
+
+# The gallery and its readers put separators in different places: the gallery
+# says "Wan2.2" and "Z-Image-Turbo", a request says "Wan 2.2" and "z image".
+_SEPARATORS = re.compile(r"[-_. ]+")
+
+
+def _contains(haystack: Any, needle: str) -> bool:
+    """Case-insensitive substring match that also ignores ``- _ . space``.
+
+    The raw match is tried first so a needle made only of separators (which
+    squashes to nothing) still means itself rather than "match everything".
+    """
+    hay = (haystack or "").lower() if isinstance(haystack, str) else ""
+    n = needle.lower()
+    if n in hay:
+        return True
+    squashed = _SEPARATORS.sub("", n)
+    return bool(squashed) and squashed in _SEPARATORS.sub("", hay)
 
 
 # ---------------------------------------------------------------------------
