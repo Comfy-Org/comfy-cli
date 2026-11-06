@@ -5,11 +5,11 @@ enforce this both ways:
 
   - ``tests/comfy_cli/output/test_error_code_registry.py``:
       every raised code is registered
-      every registered code is raised somewhere
+      every registered code is raised somewhere or explicitly retired
 
 That makes this module the canonical contract for agents. Agents fetch the
-list via ``comfy discover`` and branch on the codes; if you rename, deprecate,
-or remove one, you're breaking the contract and the tests fail before merge.
+list via ``comfy discover`` and branch on the codes. Retired codes stay
+registered for compatibility; never rename, repurpose or remove one.
 
 Codes are snake_case and match ``^[a-z][a-z0-9_]*$``.
 
@@ -552,7 +552,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "asset_upload_timeout",
-        "The model file was uploaded, but Comfy Cloud had not finished storing it when "
+        "Retired: current versions wait until storing ends. Older versions raised this when "
+        "the model file was uploaded, but Comfy Cloud had not finished storing it when "
         "`model upload` or `assets library upload` stopped waiting. `details.task_id` is the storing task, "
         "which goes on.",
         "check `comfy assets library ls --tags models` later instead of uploading again",

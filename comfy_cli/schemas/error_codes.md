@@ -27,7 +27,10 @@ comfy --json discover | jq '.data.error_codes[]'
 Three tests pin the contract:
 
 - Every `renderer.error(code="…")` site is registered.
-- Every registered code is raised somewhere (no dead codes).
+- Every registered code is raised somewhere or explicitly retired in the
+  registry test. Retired codes stay discoverable for compatibility and must
+  no longer be emitted. `asset_upload_timeout` is retired because model
+  uploads now wait until storing ends instead of stopping after fifteen minutes.
 - A code emitted only as a warning (an object in a `warnings` list of a
   successful result) is not registered. Registered codes are failure
   categories; a warning keeps its `code` string in `warnings[]`. Warning-only

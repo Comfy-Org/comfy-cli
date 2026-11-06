@@ -23,7 +23,8 @@ history.
   upload for the same file, account, workspace and folder. Older servers keep
   the single-PUT upload. File approval, block checks and the final stored-hash
   check still apply. The final storage check no longer stops after fifteen
-  minutes.
+  minutes. The retired `asset_upload_timeout` error code stays discoverable
+  for compatibility with older versions.
 
 ### Added
 
