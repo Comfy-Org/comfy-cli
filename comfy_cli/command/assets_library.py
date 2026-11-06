@@ -701,7 +701,7 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
                 raise _FileChanged(str(reader.failed)) from None
             if reader.failed is not None:
                 raise _FileUnreadable(reader.failed) from None
-            if isinstance(e, requests.exceptions.SSLError) and _tls_setup_failure(e):
+            if isinstance(e, (requests.exceptions.SSLError, requests.exceptions.ProxyError)) and _tls_setup_failure(e):
                 raise _TlsSetupFailed() from None
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None

@@ -399,3 +399,28 @@ def test_existing_invalid_ca_bundle_is_fatal_with_real_requests(tmp_path, monkey
         with pytest.raises(resume.TlsSetupFailed) as error:
             resume._request(start, b"", "bytes */16")
         assert "SESSION" not in str(error.value)
+
+
+@pytest.mark.parametrize("certificate", [False, True], ids=["transient-eof", "certificate"])
+def test_https_proxy_error_uses_real_requests_adapter(session, monkeypatch, certificate):
+    """Keep Requests' proxy exception translation; replace only the network call."""
+    import ssl
+
+    from urllib3.connectionpool import HTTPSConnectionPool
+    from urllib3.exceptions import MaxRetryError, ProxyError
+
+    calls = []
+
+    def fail(pool, method, url, **kwargs):
+        calls.append((method, url))
+        reason = ssl.SSLCertVerificationError("certificate verify failed") if certificate else ssl.SSLEOFError("EOF")
+        raise MaxRetryError(pool, url, ProxyError("proxy failed", reason))
+
+    monkeypatch.setattr(HTTPSConnectionPool, "urlopen", fail)
+    if certificate:
+        with pytest.raises(resume.TlsSetupFailed) as error:
+            resume._request(session, b"", "bytes */16")
+        assert "SESSION" not in str(error.value)
+    else:
+        assert resume._request(session, b"", "bytes */16") == (None, None)
+    assert len(calls) == 1

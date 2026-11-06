@@ -44,6 +44,8 @@ Expired sessions and permanent storage refusals discard the saved record and
 restart once; thirty minutes without acknowledged progress pauses. Certificate
 verification and certificate-bundle loading failures stop immediately with
 credential-safe TLS guidance.
+This includes certificate failures wrapped by an HTTPS proxy; temporary proxy
+failures remain retryable.
 The legacy single-PUT path uses the same certificate classifier and guidance;
 transient TLS failures there retain the existing bounded fresh-upload retry.
 HTTP 408 and transient TLS failures query held bytes and retry within the same

@@ -36,6 +36,8 @@ history.
   Legacy single-PUT storage addresses
   retain HTTP compatibility. Certificate verification and invalid CA-bundle
   errors on that path also stop immediately with fixed TLS guidance.
+  Both paths recognize certificate failures wrapped by an HTTPS proxy while
+  retaining retries for temporary proxy failures.
 - `comfy build push` shares the upload progress reporter. A broken pipe or
   closed progress stream now mutes its progress instead of ending the push.
 

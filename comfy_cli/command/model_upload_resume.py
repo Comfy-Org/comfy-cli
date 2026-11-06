@@ -243,7 +243,7 @@ def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, 
             timeout=(10, 60),
             allow_redirects=False,
         )
-    except requests.exceptions.SSLError as error:
+    except (requests.exceptions.SSLError, requests.exceptions.ProxyError) as error:
         if _tls_setup_failure(error):
             raise TlsSetupFailed() from None
         return None, None

@@ -2843,7 +2843,7 @@ def test_closed_progress_pipe_still_polls_and_verifies(cloud_target, monkeypatch
 
 
 @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
-@pytest.mark.parametrize("failure", ["tls-eof", "408"])
+@pytest.mark.parametrize("failure", ["tls-eof", "proxy-tls-eof", "proxy-connect", "408"])
 @pytest.mark.parametrize("saved", [False, True], ids=["piece", "status-query"])
 def test_transient_storage_failure_keeps_session_and_queries_offset(
     cloud_target, monkeypatch, capsys, model_file, no_wait, model, failure, saved
@@ -2851,7 +2851,7 @@ def test_transient_storage_failure_keeps_session_and_queries_offset(
     import ssl
 
     import requests
-    from urllib3.exceptions import MaxRetryError, SSLError
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
 
     run = _model_upload if model else _upload
     args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
@@ -2868,6 +2868,9 @@ def test_transient_storage_failure_keeps_session_and_queries_offset(
         if len(calls) == 1:
             if failure == "tls-eof":
                 raise requests.exceptions.SSLError(MaxRetryError(None, url, SSLError(ssl.SSLEOFError("TLS EOF"))))
+            if failure.startswith("proxy-"):
+                reason = ssl.SSLEOFError("TLS EOF") if failure == "proxy-tls-eof" else OSError("proxy unavailable")
+                raise requests.exceptions.ProxyError(MaxRetryError(None, url, ProxyError("proxy failed", reason)))
             return SimpleNamespace(status_code=408, headers={}, close=lambda: None)
         if len(calls) == 2:
             assert no_wait[0] == 1
@@ -2883,14 +2886,14 @@ def test_transient_storage_failure_keeps_session_and_queries_offset(
 
 
 @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
-@pytest.mark.parametrize("failure", ["certificate", "setup"])
+@pytest.mark.parametrize("failure", ["certificate", "proxy-certificate", "setup"])
 def test_normalized_tls_error_never_exposes_session_credentials(
     cloud_target, monkeypatch, capsys, model_file, no_wait, model, failure
 ):
     import ssl
 
     import requests
-    from urllib3.exceptions import MaxRetryError, SSLError
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
 
     routes = _resume_routes()
     start = {**_resumable_started(), "upload_url": "https://bucket.example/?upload_id=%53ECRETSIG"}
@@ -2901,8 +2904,10 @@ def test_normalized_tls_error_never_exposes_session_credentials(
         prepared = requests.Request("PUT", url).prepare().url
         attempts.append(prepared)
         assert "upload_id=SECRETSIG" in prepared
-        if failure == "certificate":
+        if failure in ("certificate", "proxy-certificate"):
             reason = ssl.SSLCertVerificationError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+            if failure == "proxy-certificate":
+                raise requests.exceptions.ProxyError(MaxRetryError(None, prepared, ProxyError("proxy failed", reason)))
             raise requests.exceptions.SSLError(MaxRetryError(None, prepared, SSLError(reason)))
         raise OSError(f"TLS setup failed for {prepared}")
 
@@ -2918,14 +2923,15 @@ def test_normalized_tls_error_never_exposes_session_credentials(
 
 @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
 @pytest.mark.parametrize("saved", [False, True], ids=["piece", "status-query"])
+@pytest.mark.parametrize("proxy", [False, True], ids=["direct", "proxy"])
 def test_invalid_ca_contents_stop_without_backoff(
-    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, saved
+    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, saved, proxy
 ):
     """Preserve a real OpenSSL loading error through the transport's wrappers."""
     import ssl
 
     import requests
-    from urllib3.exceptions import MaxRetryError, SSLError
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
 
     run = _model_upload if model else _upload
     args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
@@ -2942,6 +2948,8 @@ def test_invalid_ca_contents_stop_without_backoff(
 
     def put(url, **kw):
         attempts.append(kw["headers"]["Content-Range"])
+        if proxy:
+            raise requests.exceptions.ProxyError(MaxRetryError(None, url, ProxyError("proxy failed", native.value)))
         raise requests.exceptions.SSLError(MaxRetryError(None, url, SSLError(native.value)))
 
     env, rc, cloud, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=put)
@@ -2954,13 +2962,14 @@ def test_invalid_ca_contents_stop_without_backoff(
 
 @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
 @pytest.mark.parametrize("failure", ["certificate", "bundle", "flattened"])
+@pytest.mark.parametrize("proxy", [False, True], ids=["direct", "proxy"])
 def test_legacy_tls_certificate_failure_stops_without_a_fresh_upload(
-    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, failure
+    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, failure, proxy
 ):
     import ssl
 
     import requests
-    from urllib3.exceptions import MaxRetryError, SSLError
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
 
     if failure == "bundle":
         bundle = tmp_path / "invalid-ca.pem"
@@ -2977,8 +2986,9 @@ def test_legacy_tls_certificate_failure_stops_without_a_fresh_upload(
         attempts.append(prepared)
         assert "signature=SECRETSIG" in prepared
         assert "Content-Range" not in kw["headers"]
-        wrapped = MaxRetryError(None, prepared, SSLError(reason))
-        raise requests.exceptions.SSLError(str(wrapped) if failure == "flattened" else wrapped)
+        wrapped = MaxRetryError(None, prepared, ProxyError("proxy failed", reason) if proxy else SSLError(reason))
+        error_type = requests.exceptions.ProxyError if proxy else requests.exceptions.SSLError
+        raise error_type(str(wrapped) if failure == "flattened" else wrapped)
 
     routes = dict(_UPLOAD_ROUTES)
     routes[("POST", "/api/assets/uploads")] = {
@@ -2998,15 +3008,19 @@ def test_legacy_tls_certificate_failure_stops_without_a_fresh_upload(
 
 
 @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("failure_kind", ["tls-eof", "proxy-tls-eof", "proxy-connect"])
 def test_legacy_tls_eof_still_retries_with_a_fresh_upload(
-    cloud_target, monkeypatch, capsys, model_file, no_wait, model
+    cloud_target, monkeypatch, capsys, model_file, no_wait, model, failure_kind
 ):
     import ssl
 
     import requests
-    from urllib3.exceptions import MaxRetryError, SSLError
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
 
     failure = requests.exceptions.SSLError(MaxRetryError(None, "SECRETSIG", SSLError(ssl.SSLEOFError("TLS EOF"))))
+    if failure_kind.startswith("proxy-"):
+        reason = ssl.SSLEOFError("TLS EOF") if failure_kind == "proxy-tls-eof" else OSError("proxy unavailable")
+        failure = requests.exceptions.ProxyError(MaxRetryError(None, "SECRETSIG", ProxyError("proxy failed", reason)))
     run = _model_upload if model else _upload
     args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
     env, rc, cloud, storage, everything = run(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [failure, 200])
