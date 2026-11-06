@@ -486,6 +486,7 @@ _CLOUD_TOKEN_SCAN_MAX_PAGES = 20
 
 
 def _assets_page(target, params: dict[str, Any]) -> dict[str, Any]:
+    """GET one page of ``/api/assets`` with ``params`` and return the JSON object."""
     url = target.url("assets") + "?" + urllib.parse.urlencode(params)
     body = _http_get_json(url, target)
     if not isinstance(body, dict):
