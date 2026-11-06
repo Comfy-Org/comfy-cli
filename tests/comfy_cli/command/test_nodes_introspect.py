@@ -306,6 +306,37 @@ class TestSearch:
         assert "KSampler" in names
         assert "KSamplerAdvanced" in names
 
+    @pytest.mark.parametrize("query", ["LTX-2.5", "ltx_2.5", "ltx 2.5", "wan2.2 animate"])
+    def test_query_ignores_separators(self, query, monkeypatch, capsys):
+        """Version names are written 'LTX-2.5' or 'wan2.2' as often as 'LTX 2.5'."""
+        from comfy_cli.cql.engine import Graph
+
+        info = _fake_object_info()
+        for cls, display in (
+            ("LTXV25ImageToVideo", "LTX 2.5 Image to Video"),
+            ("WanAnimateToVideo", "Wan 2.2 Animate"),
+        ):
+            info[cls] = {
+                "input": {"required": {}},
+                "output": ["LATENT"],
+                "output_name": ["LATENT"],
+                "category": "video",
+                "display_name": display,
+                "description": "",
+                "output_node": False,
+                "python_module": "nodes",
+            }
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: Graph.from_object_info(info))
+        env = _run(["search", query], capsys)
+        names = [r["name"] for r in env["data"]["rows"]]
+        want = "WanAnimateToVideo" if "wan" in query else "LTXV25ImageToVideo"
+        assert names[:1] == [want], names
+        assert env["data"]["close_match"] is False, "a real match, not the typo fallback"
+
+    def test_a_separator_only_query_stays_a_word_not_a_wildcard(self, patched_loader, capsys):
+        env = _run(["search", "-"], capsys)
+        assert env["data"]["total"] == 0
+
     def test_exact_name_outranks_prefix_sibling(self, patched_loader, capsys):
         """Regression: tier 0 (exact) must beat KSamplerAdvanced's tier 1."""
         env = _run(["search", "KSampler"], capsys)
