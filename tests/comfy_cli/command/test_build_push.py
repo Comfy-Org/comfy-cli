@@ -61,6 +61,7 @@ def _schema(name: str) -> JsonObject:
 
 
 def test_dry_run_is_signed_out_and_zero_http(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a public pin needs the builder, so a spec without one asks it nothing."""
     # Given
     path = write_spec(workspace)
     before = path.read_bytes()
@@ -76,6 +77,7 @@ def test_dry_run_is_signed_out_and_zero_http(workspace: Path, monkeypatch: pytes
     assert data["dry_run"] is True
     assert data["upload_count"] == 2
     assert data["upload_bytes"] == len(b"MODEL") + node_size
+    assert data["public_pins_checked"] == 0
     assert path.read_bytes() == before
 
 
@@ -277,13 +279,13 @@ def test_pin_gate_normalizes_equivalent_repository_identities(workspace: Path, m
             {
                 "name": "repo-node",
                 "source": "git",
-                "repository": "git@Example.COM:Owner/Repo.git",
+                "repository": "git@GitHub.COM:Owner/Repo.git",
                 "gitRef": "main",
             }
         ],
     )
     client = RecordingBuilder()
-    client.checked_nodes = [{"name": "repo-node", "repository": "https://example.com/Owner/Repo/"}]
+    client.checked_nodes = [{"name": "repo-node", "repository": "https://github.com/Owner/Repo/"}]
     _install_client(monkeypatch, client)
 
     # When
@@ -292,6 +294,299 @@ def test_pin_gate_normalizes_equivalent_repository_identities(workspace: Path, m
     # Then
     assert result.exit_code == 0, result.stderr
     assert len(client.snapshots) == 1
+
+
+#: A pin to a version the registry has Flagged. The builder's importer cannot
+#: place it, so the push refuses it.
+_FLAGGED_PIN: JsonObject = {
+    "name": "ComfyUI-DepthAnythingV3",
+    "id": "ComfyUI-DepthAnythingV3",
+    "registryVersion": "0.1.19",
+    "source": "registry",
+}
+
+_REGISTRY_PIN: JsonObject = {
+    "name": "registry-node",
+    "id": "registry-node",
+    "registryVersion": "1.0.0",
+    "source": "registry",
+}
+
+
+class _FlaggedImporter(RecordingBuilder):
+    """The importer's answer for a Flagged version, in the shape the live builder
+    sends: the pack is left out of the definition and named in the report."""
+
+    def resolve_snapshot(self, snapshot: JsonObject) -> JsonObject:
+        super().resolve_snapshot(snapshot)
+        return {
+            "definition": {},
+            "report": {"notInRegistry": [_FLAGGED_PIN["id"]], "unresolvedNodes": [_FLAGGED_PIN["id"]]},
+        }
+
+
+def test_a_dry_run_refuses_a_flagged_pin_with_the_push_s_own_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry run is the free check before disclosing and spending, so it must
+    refuse a pin the builder cannot place the way the push does, not pass it."""
+    # Given
+    pushed_root = make_workspace(tmp_path / "push")
+    write_spec(pushed_root, models=[], nodes=[_FLAGGED_PIN])
+    pushed = _FlaggedImporter()
+    _install_client(monkeypatch, pushed)
+    push = invoke_push(pushed_root)
+
+    dry_root = make_workspace(tmp_path / "dry-run")
+    spec = write_spec(dry_root, models=[], nodes=[_FLAGGED_PIN])
+    before = spec.read_bytes()
+    dry = _FlaggedImporter()
+    _install_client(monkeypatch, dry)
+
+    # When
+    result = invoke_push(dry_root, "--dry-run")
+
+    # Then
+    assert (push.exit_code, result.exit_code) == (1, 1)
+    error = envelope(result)["error"]
+    assert error == envelope(push)["error"]
+    assert error["code"] == "build_registry_pin_missing"
+    assert "registry:ComfyUI-DepthAnythingV3@0.1.19" in error["message"]
+    assert [call["method"] for call in dry.calls] == ["resolve_snapshot"]
+    assert spec.read_bytes() == before
+
+
+def test_a_dry_run_asks_the_builder_only_to_place_its_public_pins(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    path = write_spec(workspace, nodes=[local_node(), _REGISTRY_PIN])
+    before = path.read_bytes()
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [call["method"] for call in client.calls] == ["resolve_snapshot"]
+    sent = client.snapshots[0]["snapshots"][0]["customNodes"]
+    assert [(node["id"], node["version"]) for node in sent] == [("registry-node", "1.0.0")]
+    data = envelope(result)["data"]
+    assert (data["dry_run"], data["upload_count"], data["uploaded"]) == (True, 2, 0)
+    assert data["public_pins_checked"] == 1
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
+    assert path.read_bytes() == before
+
+
+def test_a_real_push_reports_how_many_public_pins_the_builder_placed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry run and a push carry the same count, so a script reading either can
+    tell a checked pin set from a spec that had none to check."""
+    # Given
+    write_spec(workspace, models=[], nodes=[local_node(), _REGISTRY_PIN])
+    _install_client(monkeypatch, RecordingBuilder())
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert (data["dry_run"], data["public_pins_checked"]) == (False, 1)
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
+
+
+def test_a_dry_run_whose_pin_lookup_fails_exits_rather_than_passing(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[_REGISTRY_PIN])
+    client = RecordingBuilder()
+
+    def unreachable(snapshot: JsonObject) -> JsonObject:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(client, "resolve_snapshot", unreachable)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["code"] == "build_builder_error"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [TimeoutError("The read operation timed out"), ConnectionResetError(54, "reset"), http.client.IncompleteRead(b"{")],
+    ids=["timeout", "reset", "incomplete"],
+)
+def test_a_pin_lookup_whose_response_body_fails_is_a_transport_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    """``read_capped`` raises these from ``resp.read``, past urllib's URLError
+    wrapping, so they reach ``_builder_call`` bare."""
+    # Given
+    write_spec(workspace, models=[], nodes=[_REGISTRY_PIN])
+    client = RecordingBuilder()
+
+    def stalled(snapshot: JsonObject) -> JsonObject:
+        raise failure
+
+    monkeypatch.setattr(client, "resolve_snapshot", stalled)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["code"] == "build_builder_error"
+
+
+class _UnansweredImporter(RecordingBuilder):
+    """The registry did not answer: the importer keeps the pin in the definition
+    unchanged and names it in ``report.unverifiedPins``, with HTTP 200."""
+
+    def resolve_snapshot(self, snapshot: JsonObject) -> JsonObject:
+        answer = super().resolve_snapshot(snapshot)
+        return {**answer, "report": {"unverifiedPins": [_REGISTRY_PIN["id"]]}}
+
+
+def test_unverified_pins_are_refused_by_push_and_dry_run_alike(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    pushed_root = make_workspace(tmp_path / "push")
+    write_spec(pushed_root, models=[], nodes=[_REGISTRY_PIN])
+    pushed = _UnansweredImporter()
+    _install_client(monkeypatch, pushed)
+    push = invoke_push(pushed_root)
+
+    dry_root = make_workspace(tmp_path / "dry-run")
+    write_spec(dry_root, models=[], nodes=[_REGISTRY_PIN])
+    dry = _UnansweredImporter()
+    _install_client(monkeypatch, dry)
+
+    # When
+    result = invoke_push(dry_root, "--dry-run", agentic=False)
+    dry_json = invoke_push(dry_root, "--dry-run")
+
+    # Then
+    assert (push.exit_code, result.exit_code, dry_json.exit_code) == (1, 1, 1)
+    error = envelope(dry_json)["error"]
+    assert error == envelope(push)["error"]
+    assert error["code"] == "build_registry_pin_missing"
+    assert "registry-node" in error["message"] and "not checked" in error["message"]
+    assert _calls(pushed, "create_build") == []
+    assert "The builder resolved" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "https://ghp_TOKENSECRET@github.com/org/repo",
+        "https://x-access-token:ghp_TOKENSECRET@github.com/org/repo",
+        # Does not parse (unmatched bracket): a parse failure is a refusal, not "no credentials".
+        "https://ghp_TOKENSECRET@[github.com/org/repo",
+        # scp-style, so there is no URL authority to read a user name from.
+        "ghp_TOKENSECRET@github.com:org/repo.git",
+    ],
+)
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_repository_url_with_credentials_is_refused_before_any_request(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, repository: str, dry_run: bool
+) -> None:
+    # Given
+    node = {"name": "private-node", "source": "git", "repository": repository, "gitRef": "main"}
+    write_spec(workspace, models=[], nodes=[node])
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, *(["--dry-run"] if dry_run else []))
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "private-node" in error["message"]
+    assert client.calls == []
+    assert "ghp_TOKENSECRET" not in result.output
+
+
+def test_a_signed_out_dry_run_refuses_a_credentialed_repository_before_asking_for_sign_in(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The address check reads only the spec, so a signed-out dry run gets
+    ``build_spec_invalid`` for it, as a signed-in one does, not ``build_not_signed_in``."""
+    # Given
+    node = {"name": "private-node", "source": "git", "repository": "https://ghp_TOKENSECRET@github.com/org/repo"}
+    write_spec(workspace, models=[], nodes=[{**node, "gitRef": "main"}])
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "private-node" in error["message"]
+    assert "ghp_TOKENSECRET" not in result.output
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "https://github.com/org/repo",
+        "https://github.com/org/repo.git",
+        "https://github.com/org/repo/",
+        "git@github.com:org/repo.git",
+        "ssh://git@github.com/org/repo",
+    ],
+)
+def test_a_public_github_repository_is_sendable(repository: str) -> None:
+    assert build._repository_is_sendable(repository)
+
+
+@pytest.mark.parametrize(
+    "repository",
+    [
+        "https://user@github.com/org/repo",
+        "https://user:TOKEN@github.com/org/repo",
+        "https://TOKEN@[github.com/org/repo",
+        "TOKEN@github.com:org/repo.git",
+        "ssh://git:TOKEN@github.com/org/repo",
+        "git@github.com:TOKEN@org/repo.git",
+        "https://github.com/org/repo?token=TOKEN",
+        "https://github.com/org/repo#TOKEN",
+        "https://github.com:8443/org/repo",
+        "http://github.com/org/repo",
+        "https://example.com/org/repo",
+        "https://github.com/org",
+    ],
+)
+def test_a_repository_that_is_not_a_public_github_address_is_not_sendable(repository: str) -> None:
+    assert not build._repository_is_sendable(repository)
+
+
+def test_a_dry_run_tells_a_person_it_checked_the_public_pins(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    write_spec(workspace, nodes=[local_node(), _REGISTRY_PIN])
+    _install_client(monkeypatch, RecordingBuilder())
+
+    # When
+    result = invoke_push(workspace, "--dry-run", agentic=False)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.stdout.split())
+    assert "The builder resolved 1 public custom node pin." in text
+    assert "nothing was uploaded or saved" in text
+    assert "nothing was sent" not in text
 
 
 def test_a_skipped_symlink_is_named_on_stderr_and_carried_in_the_payload(

@@ -171,11 +171,17 @@ provisioning". Things to read correctly:
 - No `progress` at all is an older service, or a status other than the two above.
 
 Interrupting the wait leaves the deployment coming up on the service's side;
-`comfy deploy status --deployment <id> --watch` attaches again. A deploy API that
+read `comfy deploy show --deployment <id>` from any folder. To watch again,
+use `comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's
+verified spec. A deploy API that
 stops answering (a 5xx or a dropped connection, as during its own rollout) is
 retried for about a minute; if it is still down, the wait ends with
 `deploy_watch_lost` and **exit 75**, not 1. That is not a failed deployment:
 attach again with the command in the hint rather than redeploying.
+`watch_auth_lost`, also exit 75, is a read refused with a 401 despite session
+recovery, while a refreshable sign-in remains stored. Parallel requests adopt a
+peer's refreshed token and retry at most once. Attach again the same way before
+considering a new sign-in; the deployment may still be coming up.
 
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,
 `credits`, or `policy`. `credits` is a billing problem and not something a retry
@@ -325,6 +331,7 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
 comfy deploy run [PATH] --workflow <api-workflow>.json
                         [--output-dir outputs] [--timeout <s>]
                         [--no-wait] [--no-upload] [--asset-root <dir>]
+                        [--allow-upload <hash> ...]
 ```
 
 - **API format only.** A UI-format export (the one with `nodes` and `links`) is
@@ -350,6 +357,9 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   `uploaded`/`deduped`/`bytes` totals never name a filename. A user who is about
   to send files off their machine is owed that list. `--no-upload` turns a needed
   upload into `deploy_asset_missing` instead, for when nothing may leave the box.
+  Its `details.missing[]` lists every file it would have sent: the absolute
+  `local_path`, `bytes` and `hash`. `--allow-upload <hash>` (repeatable) then
+  uploads only those exact files; any other file fails the same way.
 - **It waits and downloads by default.** Outputs land in `./outputs/` unless
   `--output-dir` says otherwise, and each is reported with its `node_id`, `name`,
   `type` and `path`. `--no-wait` returns the job id immediately instead.

@@ -51,10 +51,11 @@ argument you pass.
 | `deploy_ambiguous_build` | Two or more Builds share the name before the slash | Name the Build by its id, as `<build id>/<name>` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
-| `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
-| `deploy_update_replaced` | A watched `up`, `promote` or `rollback` was replaced by a newer update; `details.replacing_release_id` names its release | Follow it with `comfy deploy status --deployment <id>`, or end it with `comfy deploy cancel --deployment <id>` |
+| `deploy_server_error` | Control plane unavailable or 5xx | Re-read `comfy deploy show --deployment <id>` before retrying, so a retry cannot double-create |
+| `deploy_update_replaced` | A watched `up`, `promote` or `rollback` was replaced by a newer update; `details.replacing_release_id` names its release | Read it with `comfy deploy show --deployment <id>`, or end it with `comfy deploy cancel --deployment <id>` |
 | `deploy_updates_unavailable` | `promote`, `rollback`, `history`, `cancel` or `events --release` on a deployment with no `revision`, or `cancel` against a deploy service too old for it | `promote` or `rollback`: `up --create` on the release instead. `history`: read `events`. `cancel`: wait for the update to land or fail. `events`: drop `--release`; those events do not say which release made them |
-| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`, or after a move `comfy deploy show --deployment <id>` until it shows no `pendingUpdate`; do not redeploy |
+| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | Read `comfy deploy show --deployment <id>` from any folder; watching requires `comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's verified spec. After a move, read until no `pendingUpdate`; do not redeploy |
+| `watch_auth_lost` | A watch's read was refused with a 401 despite session recovery, and a refreshable sign-in remains stored (exit 75); the deployment may still be coming up | Reattach as for `deploy_watch_lost` before considering a new sign-in; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow
@@ -68,8 +69,8 @@ argument you pass.
 | `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; the job was not submitted | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
-| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
-| `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read | Confirm the file is stable, retry |
+| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set, or its hash is not one `--allow-upload` names | `details.missing[]` lists each file: `local_path`, `bytes`, `hash`. Rerun with `--allow-upload <hash>` per approved file, drop `--no-upload`, or pre-upload it |
+| `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read, or with `--allow-upload` the private temporary copy of the file could not be made (a full disk, say; `details.temp_dir` names the folder; that file was not uploaded, though approved files before it may be, and a retry reuses them) | Confirm the file is stable, retry. For a failed copy, free space in `details.temp_dir` or set `TMPDIR` to a folder with room, then retry |
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
 | `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** The CLI cannot look the job up — ask the user |

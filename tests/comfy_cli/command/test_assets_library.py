@@ -22,6 +22,7 @@ The caller had to guess its way past a message about the wrong resource.
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import io
 import json
@@ -33,6 +34,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from blake3 import blake3
 from typer.testing import CliRunner
 
 from comfy_cli import error_codes
@@ -48,8 +50,22 @@ def reset_singleton():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(scope="module")
+def root_cli_ready():
+    """Load the actual CLI before a test's target fake can bind into lazy modules."""
+    from click import Context
+    from typer.main import get_command
+
+    from comfy_cli.cmdline import app as root_app
+
+    root = get_command(root_app)
+    with Context(root) as context:
+        for name in root.list_commands(context):
+            root.get_command(context, name)
+
+
 @pytest.fixture
-def cloud_target(monkeypatch: pytest.MonkeyPatch):
+def cloud_target(monkeypatch: pytest.MonkeyPatch, root_cli_ready):
     from comfy_cli.target import Target
 
     fake = Target(
@@ -747,11 +763,17 @@ _PUT_HEADERS = {
     "x-goog-if-generation-match": "0",
 }
 _FOLDERS = {"model_upload_folders": ["checkpoints", "embeddings", "loras", "vae"]}
+# What the `model_file` fixture holds, and its hashes.
+_MODEL_BYTES = b"0123456789abcdef"
+_MODEL_HASH = "blake3:" + blake3(_MODEL_BYTES).hexdigest()
+_MODEL_SHA256 = hashlib.sha256(_MODEL_BYTES).hexdigest()
 _DONE = {
     "id": "task-1",
     "status": "completed",
-    "result": {"success": True, "asset_id": "asset-9", "hash": "blake3:" + "cd" * 32, "filename": "style.safetensors"},
+    "result": {"success": True, "asset_id": "asset-9", "hash": _MODEL_HASH, "filename": "style.safetensors"},
 }
+# No model in the folder has the file's name yet.
+_NONE_NAMED = {"assets": [], "has_more": False}
 
 
 def _started(n: int = 1) -> dict:
@@ -825,6 +847,25 @@ class _Storage:
         return _Resp()
 
 
+class _SentSoFar(_Storage):
+    """A ``_Storage`` that records each block as it reads it, so a PUT whose body read
+    raises still shows the bytes a socket would already have sent."""
+
+    def __call__(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
+        put = {"url": url, "headers": headers, "body": b"", "allow_redirects": allow_redirects}
+        self.puts.append(put)
+        while block := data.read(4):
+            put["body"] += block
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+
+        class _Resp:
+            status_code = outcome
+
+        return _Resp()
+
+
 def _cloud_error(code: int, server_code: str, message: str):
     body = json.dumps({"code": server_code, "message": message}).encode()
     return urllib.error.HTTPError("https://cloud.example.com/api/x", code, "err", {}, io.BytesIO(body))
@@ -833,7 +874,7 @@ def _cloud_error(code: int, server_code: str, message: str):
 @pytest.fixture
 def model_file(tmp_path):
     path = tmp_path / "style.safetensors"
-    path.write_bytes(b"0123456789abcdef")
+    path.write_bytes(_MODEL_BYTES)
     return path
 
 
@@ -853,6 +894,7 @@ def _upload(
     puts: list,
     cloud: _Cloud | None = None,
     storage: _Storage | None = None,
+    app: Any = None,
 ) -> tuple[dict, int, _Cloud, _Storage, str]:
     cloud, storage = cloud or _Cloud(routes), storage or _Storage(puts)
     monkeypatch.setattr("urllib.request.urlopen", cloud)
@@ -862,7 +904,7 @@ def _upload(
     )
     r.mode = OutputMode.JSON
     set_renderer(r)
-    result = CliRunner().invoke(assets_library.app, ["upload", *args, "--where", "cloud"], standalone_mode=False)
+    result = CliRunner().invoke(app or assets_library.app, ["upload", *args, "--where", "cloud"], standalone_mode=False)
     captured = capsys.readouterr()
     everything = captured.out + captured.err + result.output
     rc = result.exit_code or (result.return_value if isinstance(result.return_value, int) else 0)
@@ -873,6 +915,7 @@ def _upload(
 
 _UPLOAD_ROUTES = {
     ("GET", "/api/features"): _FOLDERS,
+    ("GET", "/api/assets"): _NONE_NAMED,
     ("POST", "/api/assets/uploads"): [_started(1), _started(2)],
     ("POST", "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete"): {
         "task_id": "task-1",
@@ -883,6 +926,8 @@ _UPLOAD_ROUTES = {
         "status": "created",
     },
     ("GET", "/api/tasks/task-1"): [{"id": "task-1", "status": "running"}, _DONE],
+    # Read after the hash check, for Comfy Cloud's loader_path.
+    ("GET", "/api/assets/asset-9"): {"id": "asset-9", "hash": _MODEL_HASH, "loader_path": "style.safetensors"},
 }
 
 
@@ -901,9 +946,15 @@ class TestUpload:
             "id": "asset-9",
             "name": "style.safetensors",
             "folder": "loras",
-            "hash": "blake3:" + "cd" * 32,
+            "loader_path": "style.safetensors",
+            "hash": _MODEL_HASH,
+            "sha256": _MODEL_SHA256,
             "size": 16,
+            "workspace_id": None,
             "task_id": "task-1",
+            "uploaded": True,
+            "already_present": False,
+            "dry_run": False,
         }
         schema = json.loads(
             (Path(assets_library.__file__).resolve().parents[1] / "schemas" / "assets_library.json").read_text()
@@ -911,13 +962,15 @@ class TestUpload:
         jsonschema.Draft202012Validator(schema).validate(env["data"])
         assert cloud.paths() == [
             "/api/features",
+            "/api/assets",
             "/api/assets/uploads",
             "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete",
             "/api/tasks/task-1",
             "/api/tasks/task-1",
+            "/api/assets/asset-9",
         ]
-        assert cloud.calls[1][2] == {"filename": "style.safetensors", "size_bytes": 16, "tags": ["models", "loras"]}
-        assert cloud.calls[2][2] == {"filename": "style.safetensors", "tags": ["models", "loras"]}
+        assert cloud.calls[2][2] == {"filename": "style.safetensors", "size_bytes": 16, "tags": ["models", "loras"]}
+        assert cloud.calls[3][2] == {"filename": "style.safetensors", "tags": ["models", "loras"]}
         (put,) = storage.puts
         assert put["url"] == f"{_SIGNED}1" and put["headers"] == _PUT_HEADERS and put["allow_redirects"] is False
         assert put["body"] == model_file.read_bytes()
@@ -971,6 +1024,7 @@ class TestUpload:
     def test_without_upload_folders_the_start_call_decides(self, cloud_target, monkeypatch, capsys, model_file):
         routes = {
             ("GET", "/api/features"): {"max_upload_size": 1},
+            ("GET", "/api/assets"): _NONE_NAMED,
             ("POST", "/api/assets/uploads"): _cloud_error(
                 403, "FEATURE_DISABLED", "Uploading a model file is not enabled for this workspace"
             ),
@@ -1110,7 +1164,15 @@ class TestUpload:
         assert rc == 1 and env["ok"] is False and env["error"]["code"] == "cloud_http_error"
 
     def test_new_codes_are_registered(self):
-        for code in ("asset_upload_invalid", "asset_upload_refused", "asset_upload_failed", "asset_upload_timeout"):
+        for code in (
+            "asset_upload_invalid",
+            "asset_upload_refused",
+            "asset_upload_failed",
+            "asset_upload_timeout",
+            "asset_upload_unverified",
+            "asset_upload_wrong_workspace",
+            "model_upload_needs_confirm",
+        ):
             assert error_codes.is_registered(code), code
 
 
@@ -1148,7 +1210,7 @@ def signed_in(monkeypatch: pytest.MonkeyPatch):
         session=SimpleNamespace(access_token="old-token", base_url="https://cloud.example.com"), forced=0
     )
 
-    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None):
+    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None, rejected_access_token=None):
         if force:
             state.forced += 1
             state.session = SimpleNamespace(access_token="new-token", base_url="https://cloud.example.com")
@@ -1179,7 +1241,7 @@ class TestUploadOutlastsTheToken:
     def test_a_401_on_complete_refreshes_the_sign_in_and_completes(
         self, signed_in, monkeypatch, capsys, model_file, no_wait
     ):
-        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=2)  # features, start, then expired
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=3)  # features, lookup, start, then expired
         env, rc, _, storage, _ = _upload(
             monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
         )
@@ -1188,12 +1250,12 @@ class TestUploadOutlastsTheToken:
         assert signed_in.forced == 1
         assert len(storage.puts) == 1
         assert cloud.paths().count(_COMPLETE_1) == 2
-        assert cloud.auth[2:] == ["Bearer old-token"] + ["Bearer new-token"] * 3
+        assert cloud.auth[3:] == ["Bearer old-token"] + ["Bearer new-token"] * 4
 
     def test_a_401_on_a_task_poll_refreshes_the_sign_in_and_keeps_waiting(
         self, signed_in, monkeypatch, capsys, model_file, no_wait
     ):
-        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=3)  # expires after complete
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=4)  # expires after complete
         env, rc, _, storage, _ = _upload(
             monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
         )
@@ -1207,7 +1269,7 @@ class TestUploadOutlastsTheToken:
         self, cloud_target, signed_in, monkeypatch, capsys, model_file, no_wait
     ):
         monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: cloud_target)
-        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=2)
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=3)
         env, rc, _, storage, _ = _upload(
             monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
         )
@@ -1220,7 +1282,7 @@ class TestUploadOutlastsTheToken:
         self, signed_in, monkeypatch, capsys, model_file, no_wait
     ):
         monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "old-token")
-        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=2)
+        cloud = _ExpiringCloud(dict(_UPLOAD_ROUTES), expires_at=3)
         env, rc, _, storage, _ = _upload(
             monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud
         )
@@ -1261,7 +1323,7 @@ def stored_login(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv(var, raising=False)
     state = SimpleNamespace(login=("a", 1), forced=0)
 
-    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None):
+    def get_session(*, refresh=True, force=False, allow_clear=True, expect=None, rejected_access_token=None):
         if force:
             state.forced += 1
             state.login = (state.login[0], state.login[1] + 1)
@@ -1321,7 +1383,7 @@ class TestUploadKeepsItsAccount:
     """
 
     @pytest.mark.parametrize(
-        "lands_during", [pytest.param(1, id="before-complete"), pytest.param(3, id="during-polling")]
+        "lands_during", [pytest.param(2, id="before-complete"), pytest.param(4, id="during-polling")]
     )
     def test_another_login_does_not_change_the_upload_owner(
         self, stored_login, monkeypatch, capsys, model_file, no_wait, lands_during
@@ -1332,13 +1394,13 @@ class TestUploadKeepsItsAccount:
         )
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth == [f"Bearer {_jwt('a')}"] * 5
+        assert cloud.auth == [f"Bearer {_jwt('a')}"] * 7
         assert stored_login.login == ("b", 1) and stored_login.forced == 0
         assert len(storage.puts) == 1
 
     @pytest.mark.parametrize(
         ("lands_during", "a_expires_from", "operation"),
-        [pytest.param(1, 2, "complete", id="at-complete"), pytest.param(3, 4, "task", id="during-polling")],
+        [pytest.param(2, 3, "complete", id="at-complete"), pytest.param(4, 5, "task", id="during-polling")],
     )
     def test_an_expired_token_with_another_login_stored_ends_with_a_clear_error(
         self, stored_login, monkeypatch, capsys, model_file, no_wait, lands_during, a_expires_from, operation
@@ -1361,19 +1423,19 @@ class TestUploadKeepsItsAccount:
     def test_the_same_login_refreshed_in_another_shell_is_picked_up(
         self, stored_login, monkeypatch, capsys, model_file, no_wait
     ):
-        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands=("a", 2), lands_during=1, a_expires_from=2)
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands=("a", 2), lands_during=2, a_expires_from=3)
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth[2:] == [f"Bearer {_jwt('a', 2)}"] * 3
+        assert cloud.auth[3:] == [f"Bearer {_jwt('a', 2)}"] * 4
         assert stored_login.forced == 0
 
     def test_the_same_login_is_refreshed_after_a_401(self, stored_login, monkeypatch, capsys, model_file, no_wait):
-        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, a_expires_from=2)
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, a_expires_from=3)
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth[2:] == [f"Bearer {_jwt('a')}"] + [f"Bearer {_jwt('a', 2)}"] * 3
+        assert cloud.auth[3:] == [f"Bearer {_jwt('a')}"] + [f"Bearer {_jwt('a', 2)}"] * 4
         assert stored_login.forced == 1
 
     @pytest.mark.parametrize("explicit", ["env-token", "api-key"])
@@ -1387,11 +1449,11 @@ class TestUploadKeepsItsAccount:
         else:
             monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **kw: cloud_target)
             sent = "test-key"
-        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands_during=1)
+        cloud = _AccountCloud(dict(_UPLOAD_ROUTES), stored_login, lands_during=2)
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], {}, [200], cloud=cloud)
 
         assert rc == 0 and env["data"]["id"] == "asset-9"
-        assert cloud.auth == [sent] * 5
+        assert cloud.auth == [sent] * 7
         assert stored_login.forced == 0
 
 
@@ -1651,33 +1713,6 @@ class TestUploadFileErrors:
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert "SECRETSIG" not in everything
 
-    def test_a_file_error_while_sizing_the_body_fails_without_a_retry(
-        self, cloud_target, monkeypatch, capsys, model_file, no_wait
-    ):
-        # The body is sized from the open handle before Requests sees it; on a
-        # network filesystem that can raise a stale handle before any read.
-        import errno
-
-        class _Os:
-            def __getattr__(self, name):
-                return getattr(os, name)
-
-            def fstat(self, fd):
-                raise OSError(errno.ESTALE, "Stale NFS file handle")
-
-        monkeypatch.setattr(assets_library, "os", _Os())
-        env, rc, cloud, storage, everything = _upload(
-            monkeypatch, capsys, [str(model_file), "--type", "loras"], dict(_UPLOAD_ROUTES), [200, 200]
-        )
-
-        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
-        assert env["error"]["details"]["reason"] == "file_unreadable"
-        assert env["error"]["details"]["attempts"] == 1
-        assert "Stale NFS file handle" in env["error"]["message"]
-        assert storage.puts == []
-        assert cloud.paths("POST").count("/api/assets/uploads") == 1
-        assert "SECRETSIG" not in everything
-
     def test_requests_sends_the_body_with_its_content_length_not_chunked(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait
     ):
@@ -1836,3 +1871,480 @@ class TestErrorBodyCutOff:
 
         assert rc == 1 and env["error"]["code"] == code
         assert env["error"]["details"]["status"] == status
+
+
+# --- the upload checks the bytes, the name and the workspace ------------------
+
+
+def _row(name: str = "style.safetensors", hash_: str = _MODEL_HASH, asset_id: str = "asset-3") -> dict:
+    return {"id": asset_id, "name": name, "hash": hash_, "tags": ["models", "loras"], "loader_path": name}
+
+
+class _UrlCloud(_Cloud):
+    """``_Cloud`` that also keeps each request's full URL."""
+
+    def __init__(self, routes: dict):
+        super().__init__(routes)
+        self.urls: list[str] = []
+
+    def __call__(self, req, timeout=None):
+        self.urls.append(req.full_url)
+        return super().__call__(req, timeout)
+
+
+class TestUploadVerifies:
+    def test_a_dry_run_reports_the_hashes_and_sends_nothing(self, cloud_target, monkeypatch, capsys, model_file):
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras", "--dry-run"], dict(_UPLOAD_ROUTES), []
+        )
+
+        assert rc == 0 and env["ok"] is True and env["changed"] is False
+        assert env["data"] == {
+            "id": None,
+            "name": "style.safetensors",
+            "folder": "loras",
+            # No record exists yet, so Comfy Cloud has no loader_path to give.
+            "loader_path": None,
+            "hash": _MODEL_HASH,
+            "sha256": _MODEL_SHA256,
+            "size": 16,
+            "workspace_id": None,
+            "task_id": None,
+            "uploaded": False,
+            "already_present": False,
+            "dry_run": True,
+        }
+        assert cloud.paths() == ["/api/features", "/api/assets"] and storage.puts == []
+
+    def test_the_lookup_asks_for_the_models_of_that_name_in_that_folder(
+        self, cloud_target, monkeypatch, capsys, model_file
+    ):
+        import urllib.parse
+
+        cloud = _UrlCloud(dict(_UPLOAD_ROUTES))
+        _upload(monkeypatch, capsys, [str(model_file), "--type", "loras", "--dry-run"], {}, [], cloud=cloud)
+
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(cloud.urls[1]).query)
+        assert query == {
+            "include_tags": ["models,loras"],
+            "name_contains": ["style.safetensors"],
+            # The workspace's library, every member's models, is what a run
+            # loads from; the public catalog is not.
+            "workspace_library": ["true"],
+            "include_public": ["false"],
+            "limit": ["500"],
+        }
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_the_same_bytes_under_the_name_are_not_uploaded_again(
+        self, cloud_target, monkeypatch, capsys, model_file, dry_run
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        stored_form = _MODEL_HASH.removeprefix("blake3:").upper() + ".safetensors"
+        routes[("GET", "/api/assets")] = {
+            # A longer name that only contains the file's name is not the file's.
+            "assets": [_row(hash_=stored_form), _row("old-style.safetensors", "blake3:" + "ab" * 32, "asset-4")],
+            "has_more": False,
+        }
+        args = [str(model_file), "--type", "loras"] + (["--dry-run"] if dry_run else [])
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 0 and env["changed"] is False
+        assert env["data"]["id"] == "asset-3" and env["data"]["loader_path"] == "style.safetensors"
+        assert env["data"]["already_present"] is True and env["data"]["uploaded"] is False
+        assert env["data"]["dry_run"] is dry_run
+        assert cloud.paths() == ["/api/features", "/api/assets"] and storage.puts == []
+
+    def test_a_name_already_holding_other_bytes_is_refused(self, cloud_target, monkeypatch, capsys, model_file):
+        routes = dict(_UPLOAD_ROUTES)
+        other = "blake3:" + "ab" * 32
+        routes[("GET", "/api/assets")] = {"assets": [_row(hash_=other), _row()], "has_more": False}
+        args = [str(model_file), "--type", "loras", "--yes"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["reason"] == "name_in_use"
+        assert env["error"]["details"]["hash"] == _MODEL_HASH
+        assert env["error"]["details"]["existing"] == [{"id": "asset-3", "hash": other}]
+        assert cloud.paths() == ["/api/features", "/api/assets"] and storage.puts == []
+
+    def test_a_row_with_no_hash_counts_as_other_bytes(self, cloud_target, monkeypatch, capsys, model_file):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": [_row(hash_=None)], "has_more": False}
+        args = [str(model_file), "--type", "loras", "--yes"]
+        env, rc, _, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "name_in_use" and storage.puts == []
+
+    def test_assets_library_upload_still_uploads_a_new_version_of_a_name(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        # A script that replaces a model by uploading new bytes under its name keeps working.
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": [_row(hash_="blake3:" + "ab" * 32)], "has_more": False}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["ok"] is True and env["changed"] is True
+        assert env["data"]["id"] == "asset-9" and env["data"]["uploaded"] is True
+        assert env["data"]["already_present"] is False
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
+        assert "/api/assets/uploads/00000000-0000-0000-0000-000000000001/complete" in cloud.paths()
+
+    def test_assets_library_upload_sends_the_same_bytes_again_over_a_newer_version(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        # The name also holds other bytes, so only a new upload makes this
+        # file the one the name loads; it is not "already present".
+        routes = dict(_UPLOAD_ROUTES)
+        other = "blake3:" + "ab" * 32
+        routes[("GET", "/api/assets")] = {"assets": [_row(hash_=other, asset_id="asset-4"), _row()], "has_more": False}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["already_present"] is False
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
+
+    def test_a_lookup_too_long_to_settle_the_name_is_refused_for_model_upload(
+        self, cloud_target, monkeypatch, capsys, model_file
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": [], "has_more": True}
+        args = [str(model_file), "--type", "loras", "--yes"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["reason"] == "name_unverified"
+        assert "/api/assets/uploads" not in cloud.paths() and storage.puts == []
+
+    def test_assets_library_upload_uploads_when_the_lookup_is_too_long_to_settle_the_name(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": [_row()], "has_more": True}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["already_present"] is False
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
+
+    def test_an_unusable_lookup_is_an_error_not_a_go_ahead(self, cloud_target, monkeypatch, capsys, model_file):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets")] = {"assets": "none"}
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error" and storage.puts == []
+
+    def test_a_file_changed_after_it_was_hashed_sends_none_of_the_change(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        # Same size, other bytes: written after the hash and before the PUT reads it.
+        rewrite = _then(lambda: model_file.write_bytes(b"fedcba9876543210"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [rewrite, _started(2)]
+        storage = _SentSoFar([200, 200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        details = env["error"]["details"]
+        assert details["reason"] == "file_changed" and details["hash"] == _MODEL_HASH
+        assert details["attempts"] == 1
+        # The one block is checked before any of it is sent.
+        assert [p["body"] for p in storage.puts] == [b""]
+        assert cloud.paths("POST").count("/api/assets/uploads") == 1
+        assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_only_the_blocks_before_a_changed_one_are_sent(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        from comfy_cli import hashing
+
+        monkeypatch.setattr(hashing, "_CHUNK_SIZE", 4)  # blocks 0123 4567 89ab cdef
+        routes = dict(_UPLOAD_ROUTES)
+        rewrite = _then(lambda: model_file.write_bytes(b"01234567XXXXcdef"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [rewrite, _started(2)]
+        storage = _SentSoFar([200, 200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "file_changed"
+        assert [p["body"] for p in storage.puts] == [b"01234567"]
+        assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_a_file_cut_short_after_it_was_hashed_is_not_completed(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        from comfy_cli import hashing
+
+        monkeypatch.setattr(hashing, "_CHUNK_SIZE", 4)
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [_then(lambda: model_file.write_bytes(b"0123456789"), _started(1))]
+        storage = _SentSoFar([200])
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=storage
+        )
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "file_changed"
+        assert [p["body"] for p in storage.puts] == [b"01234567"]
+        assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_bytes_added_after_the_hash_are_not_sent(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = dict(_UPLOAD_ROUTES)
+        grow = _then(lambda: model_file.write_bytes(_MODEL_BYTES + b"tail"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [grow, _started(2)]
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        # The hashed bytes are whole, so they are the upload; the added tail stays here.
+        assert rc == 0 and env["data"]["hash"] == _MODEL_HASH and env["data"]["size"] == len(_MODEL_BYTES)
+        assert [p["body"] for p in storage.puts] == [_MODEL_BYTES]
+
+    def test_a_stored_hash_that_is_not_the_files_fails_the_upload(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        wrong = "blake3:" + "cd" * 32
+        routes[("GET", "/api/tasks/task-1")] = {**_DONE, "result": {**_DONE["result"], "hash": wrong}}
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_unverified"
+        assert env["error"]["details"] == {
+            "reason": "hash_mismatch",
+            "asset_id": "asset-9",
+            "task_id": "task-1",
+            "hash": _MODEL_HASH,
+            "stored_hash": wrong,
+        }
+
+    def test_a_task_with_no_hash_is_checked_against_the_stored_asset(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        result = {k: v for k, v in _DONE["result"].items() if k != "hash"}
+        routes[("GET", "/api/tasks/task-1")] = {**_DONE, "result": result}
+        routes[("GET", "/api/assets/asset-9")] = {
+            "id": "asset-9",
+            "hash": _MODEL_HASH.removeprefix("blake3:"),
+            "loader_path": "style.safetensors",
+        }
+        env, rc, cloud, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["loader_path"] == "style.safetensors"
+        assert cloud.paths()[-1] == "/api/assets/asset-9"
+        assert cloud.paths().count("/api/assets/asset-9") == 1
+
+    @pytest.mark.parametrize("answer", [_http_error(500), b"not json"], ids=["asset-unreadable", "asset-unparseable"])
+    def test_a_record_that_cannot_be_read_after_a_verified_upload_leaves_loader_path_null(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, answer
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets/asset-9")] = answer
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        # The task's hash already matched, so the bytes are verified; only the loader_path is missing.
+        assert rc == 0 and env["ok"] is True and env["data"]["uploaded"] is True
+        assert env["data"]["id"] == "asset-9" and env["data"]["loader_path"] is None
+        assert cloud.paths()[-1] == "/api/assets/asset-9" and len(storage.puts) == 1
+
+    @pytest.mark.parametrize("present", [False, True], ids=["uploaded", "already-present"])
+    def test_a_record_without_loader_path_reports_null_not_the_file_name(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, present
+    ):
+        import jsonschema
+
+        # Comfy Cloud gives no loader_path when the name does not form a valid model path.
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("GET", "/api/assets/asset-9")] = {"id": "asset-9", "hash": _MODEL_HASH, "loader_path": None}
+        if present:
+            row = {k: v for k, v in _row().items() if k != "loader_path"}
+            routes[("GET", "/api/assets")] = {"assets": [row], "has_more": False}
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["loader_path"] is None
+        assert env["data"]["already_present"] is present and env["data"]["uploaded"] is not present
+        jsonschema.Draft202012Validator(_model_schema()).validate(env["data"])
+
+    @pytest.mark.parametrize(
+        "answer", [_http_error(500), {"id": "asset-9"}], ids=["asset-unreadable", "asset-without-hash"]
+    )
+    def test_a_stored_hash_that_cannot_be_read_fails_the_upload(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, answer
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        result = {k: v for k, v in _DONE["result"].items() if k != "hash"}
+        routes[("GET", "/api/tasks/task-1")] = {**_DONE, "result": result}
+        routes[("GET", "/api/assets/asset-9")] = answer
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_unverified"
+        assert env["error"]["details"]["reason"] == "hash_unavailable"
+        assert env["error"]["details"]["stored_hash"] is None
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (_MODEL_HASH, _MODEL_HASH),
+            (_MODEL_HASH.removeprefix("blake3:").upper(), _MODEL_HASH),
+            (_MODEL_HASH.removeprefix("blake3:") + ".safetensors", _MODEL_HASH),
+            ("blake3:abc", None),
+            (None, None),
+            (42, None),
+        ],
+    )
+    def test_content_hash_reads_every_form_comfy_cloud_reports(self, value, expected):
+        assert assets_library._content_hash(value) == expected
+
+
+# --- comfy model upload -------------------------------------------------------
+
+_WORKSPACE = {"id": "ws-1", "name": "Studio", "type": "team", "auth_method": "api_key"}
+
+
+def _model_upload(monkeypatch, capsys, args: list[str], routes: dict, puts: list, **kw):
+    from comfy_cli.command.models import models
+
+    return _upload(monkeypatch, capsys, args, routes, puts, app=models.app, **kw)
+
+
+@pytest.fixture
+def agent_caller(monkeypatch):
+    """The caller is an agent: nothing can answer a prompt."""
+    monkeypatch.setattr(
+        "comfy_cli.interaction.detect_caller", lambda: Caller(kind="agent", agentic=True, source_env="CLAUDECODE")
+    )
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: True)
+
+
+def _model_schema() -> dict:
+    path = Path(assets_library.__file__).resolve().parents[1] / "schemas" / "model_upload.json"
+    return json.loads(path.read_text())
+
+
+class TestModelUpload:
+    def test_the_dry_run_names_the_workspace_and_the_sha256_to_approve(
+        self, cloud_target, monkeypatch, capsys, model_file, agent_caller
+    ):
+        import jsonschema
+
+        routes = {**_UPLOAD_ROUTES, ("GET", "/api/workspaces/current"): _WORKSPACE}
+        args = [str(model_file), "--type", "loras", "--workspace", "ws-1", "--dry-run"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 0 and env["command"] == "model upload"
+        data = env["data"]
+        assert data["sha256"] == _MODEL_SHA256 and data["hash"] == _MODEL_HASH
+        assert data["workspace_id"] == "ws-1" and data["loader_path"] is None
+        assert data["dry_run"] is True and data["uploaded"] is False and data["already_present"] is False
+        jsonschema.Draft202012Validator(_model_schema()).validate(data)
+        assert cloud.paths() == ["/api/workspaces/current", "/api/features", "/api/assets"]
+        assert storage.puts == []
+
+    def test_the_approved_upload_runs_and_reports_the_loader_path(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, agent_caller
+    ):
+        import jsonschema
+
+        routes = {**_UPLOAD_ROUTES, ("GET", "/api/workspaces/current"): _WORKSPACE}
+        args = [str(model_file), "--type", "loras", "--workspace", "ws-1", "--yes", "--expected-sha256", _MODEL_SHA256]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [200])
+
+        assert rc == 0 and env["changed"] is True
+        data = env["data"]
+        assert data["id"] == "asset-9" and data["uploaded"] is True and data["task_id"] == "task-1"
+        assert data["loader_path"] == "style.safetensors" and data["workspace_id"] == "ws-1"
+        jsonschema.Draft202012Validator(_model_schema()).validate(data)
+        (put,) = storage.puts
+        assert put["body"] == model_file.read_bytes()
+
+    def test_the_sha256_may_carry_a_prefix_and_any_case(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, agent_caller
+    ):
+        args = [str(model_file), "--type", "loras", "--yes", "--expected-sha256", "sha256:" + _MODEL_SHA256.upper()]
+        env, rc, *_ = _model_upload(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True
+
+    def test_without_yes_an_agent_is_refused_before_anything_is_sent(
+        self, cloud_target, monkeypatch, capsys, model_file, agent_caller
+    ):
+        args = [str(model_file), "--type", "loras", "--expected-sha256", _MODEL_SHA256]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [])
+
+        assert rc == 1 and env["error"]["code"] == "model_upload_needs_confirm"
+        details = env["error"]["details"]
+        assert details["missing"] == ["--yes"] and details["sha256"] == _MODEL_SHA256
+        assert details["type"] == "loras" and details["file"] == str(model_file)
+        assert "/api/assets/uploads" not in cloud.paths() and storage.puts == []
+
+    def test_bytes_other_than_the_approved_ones_are_not_uploaded(
+        self, cloud_target, monkeypatch, capsys, model_file, agent_caller
+    ):
+        args = [str(model_file), "--type", "loras", "--yes", "--expected-sha256", "0" * 64]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_invalid"
+        assert env["error"]["details"]["reason"] == "file_changed"
+        assert env["error"]["details"]["sha256"] == _MODEL_SHA256
+        assert env["error"]["details"]["expected_sha256"] == "0" * 64
+        assert cloud.paths() == ["/api/features"] and storage.puts == []
+
+    def test_a_file_replaced_after_its_approval_was_checked_sends_none_of_the_new_bytes(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, agent_caller
+    ):
+        # The sha256 matches when it is checked; another process then replaces
+        # the file with same-sized bytes nobody approved, before the PUT.
+        routes = dict(_UPLOAD_ROUTES)
+        swap = _then(lambda: model_file.write_bytes(b"fedcba9876543210"), _started(1))
+        routes[("POST", "/api/assets/uploads")] = [swap, _started(2)]
+        storage = _SentSoFar([200, 200])
+        args = [str(model_file), "--type", "loras", "--yes", "--expected-sha256", _MODEL_SHA256]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [], storage=storage)
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_failed"
+        assert env["error"]["details"]["reason"] == "file_changed"
+        assert [p["body"] for p in storage.puts] == [b""]
+        assert not any(p.endswith("/complete") for p in cloud.paths())
+
+    def test_a_malformed_sha256_is_refused_before_any_request(
+        self, cloud_target, monkeypatch, capsys, model_file, agent_caller
+    ):
+        args = [str(model_file), "--type", "loras", "--yes", "--expected-sha256", "abc"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [])
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "bad_expected_sha256"
+        assert cloud.calls == [] and storage.puts == []
+
+    def test_another_workspace_gets_nothing(self, cloud_target, monkeypatch, capsys, model_file, agent_caller):
+        routes = {**_UPLOAD_ROUTES, ("GET", "/api/workspaces/current"): {**_WORKSPACE, "id": "ws-2"}}
+        args = [str(model_file), "--type", "loras", "--workspace", "ws-1", "--yes", "--expected-sha256", _MODEL_SHA256]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_wrong_workspace"
+        assert env["error"]["details"] == {
+            "reason": "workspace_mismatch",
+            "workspace": "ws-1",
+            "current_workspace": "ws-2",
+        }
+        assert cloud.paths() == ["/api/workspaces/current"] and storage.puts == []
+
+    @pytest.mark.parametrize("answer", [_http_error(404), {"name": "Studio"}], ids=["older-server", "no-id"])
+    def test_a_workspace_comfy_cloud_does_not_name_gets_nothing(
+        self, cloud_target, monkeypatch, capsys, model_file, agent_caller, answer
+    ):
+        routes = {**_UPLOAD_ROUTES, ("GET", "/api/workspaces/current"): answer}
+        args = [str(model_file), "--type", "loras", "--workspace", "ws-1", "--dry-run"]
+        env, rc, cloud, storage, _ = _model_upload(monkeypatch, capsys, args, routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_wrong_workspace"
+        assert env["error"]["details"]["reason"] == "workspace_unknown"
+        assert cloud.paths() == ["/api/workspaces/current"] and storage.puts == []
+
+    def test_it_is_registered_under_the_model_noun_with_a_schema(self):
+        from comfy_cli.command.models import models
+        from comfy_cli.discovery import COMMAND_SCHEMAS, STREAM_EVENT_SCHEMAS
+
+        assert "upload" in {c.name for c in models.app.registered_commands}
+        assert COMMAND_SCHEMAS["comfy model upload"] == "model_upload"
+        assert STREAM_EVENT_SCHEMAS["comfy model upload"] == "build_push_event"

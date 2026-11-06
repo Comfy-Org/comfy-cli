@@ -24,9 +24,14 @@ comfy --json discover | jq '.data.error_codes[]'
 
 ## Tests
 
-Two tests pin the contract:
+Three tests pin the contract:
 
 - Every `renderer.error(code="…")` site is registered.
 - Every registered code is raised somewhere (no dead codes).
+- A code emitted only as a warning (an object in a `warnings` list of a
+  successful result) is not registered. Registered codes are failure
+  categories; a warning keeps its `code` string in `warnings[]`. Warning-only
+  codes registered before this rule stay registered, since codes are
+  append-only.
 
 A code goes into `error_codes.py` *before* it lands in any call site.

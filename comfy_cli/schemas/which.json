@@ -6,6 +6,41 @@
   "required": ["workspace_path"],
   "additionalProperties": true,
   "properties": {
+    "exists": {"type": "boolean", "description": "Whether the workspace directory exists on disk."},
+    "desktop": {
+      "type": "object",
+      "description": "Desktop installation records, including separate code, data, Python, and model roots.",
+      "properties": {
+        "code_dir": {"type": ["string", "null"]},
+        "data_dir": {"type": ["string", "null"]},
+        "custom_nodes_dir": {"type": ["string", "null"]},
+        "python": {"type": ["string", "null"]},
+        "selected_reason": {"type": ["string", "null"]},
+        "comfyui_version": {"type": ["string", "null"]},
+        "model_roots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "source", "exists"],
+            "properties": {
+              "path": {"type": "string"},
+              "source": {"enum": ["data", "shared", "install"]},
+              "exists": {"type": "boolean"}
+            }
+          }
+        },
+        "installs": {"type": "array", "items": {"type": "object"}},
+        "problems": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
+      }
+    },
     "workspace_path": {"type": ["string", "null"]},
     "workspace_type": {"type": ["string", "null"]}
   }
