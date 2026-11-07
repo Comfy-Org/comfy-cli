@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 import shlex
 from typing import Annotated, Any
 
@@ -559,6 +560,28 @@ def show_cmd(
 # ---------------------------------------------------------------------------
 
 
+# Separators inside a word: 'LTX-2.5', 'ltx_2.5' and 'LTX 2.5' name one model.
+_WORD_SEPARATORS = re.compile(r"[-_. ]+")
+
+
+def _all_tokens_in(tokens: list[str], field: str) -> bool:
+    """Every token is in ``field``, as written or with ``- _ . space`` removed
+    from both sides. A token made only of separators keeps its raw meaning, so
+    ``-`` stays a literal rather than squashing to a match-everything ``""``."""
+    squashed_field = None
+    for t in tokens:
+        if t in field:
+            continue
+        st = _WORD_SEPARATORS.sub("", t)
+        if not st:
+            return False
+        if squashed_field is None:
+            squashed_field = _WORD_SEPARATORS.sub("", field)
+        if st not in squashed_field:
+            return False
+    return True
+
+
 @app.command(
     "search",
     help=(
@@ -650,13 +673,13 @@ def search_cmd(
             score = 0
         elif name_l.startswith(q) or name_l.startswith(q_joined):
             score = 1
-        elif all(t in name_l for t in tokens):
+        elif _all_tokens_in(tokens, name_l):
             score = 2
-        elif all(t in display_l for t in tokens):
+        elif _all_tokens_in(tokens, display_l):
             score = 3
-        elif all(t in cat_l for t in tokens):
+        elif _all_tokens_in(tokens, cat_l):
             score = 4
-        elif all(t in blob for t in tokens):
+        elif _all_tokens_in(tokens, blob):
             score = 5
         else:
             continue

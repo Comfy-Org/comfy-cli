@@ -880,6 +880,126 @@ class TestSearch:
         assert env["error"]["details"]["body"] == '{"detail": "bad tag"}'
 
 
+# Cloud asset names as the catalog actually spells them: separators sit wherever
+# the uploader put them, and the display name a user types ("MiniMax H3") never
+# appears verbatim in the filename.
+_CLOUD_CATALOG = [
+    "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "minimax_music3_dit_fp16.safetensors",
+    "sd_xl_base_1.0.safetensors",
+    "wan2.2_t2v_lightx2v.safetensors",
+    "flux1-dev.safetensors",
+]
+
+
+def _patch_asset_server(monkeypatch: pytest.MonkeyPatch, names: list[str]):
+    """Serve /api/assets the way the real server filters it.
+
+    ``name_contains`` is ONE case-insensitive substring over the whole name
+    (ingest's ``NameContainsFold``), paged by ``limit``/``offset`` with
+    ``has_more``. Returns the parsed query of every request made.
+    """
+    queries: list[dict[str, list[str]]] = []
+
+    def _fake(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        queries.append(query)
+        needle = (query.get("name_contains") or [""])[0].lower()
+        limit = int((query.get("limit") or ["20"])[0])
+        offset = int((query.get("offset") or ["0"])[0])
+        hits = [n for n in names if needle in n.lower()]
+        page = hits[offset : offset + limit]
+        body = {
+            "assets": [{"name": n, "tags": ["models", "diffusion_models"]} for n in page],
+            "total": len(hits),
+            "has_more": offset + len(page) < len(hits),
+        }
+        return _fake_resp(json.dumps(body).encode())
+
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
+    return queries
+
+
+class TestCloudSearchTokens:
+    """Cloud `--text` matches the way local does: every word, separators ignored."""
+
+    def test_display_name_with_a_space_finds_the_underscored_file(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "MiniMax H3", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert sorted(r["name"] for r in env["data"]["rows"]) == [
+            "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        ]
+        assert env["data"]["total"] == 2
+
+    def test_version_written_with_a_space_matches_the_joined_spelling(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "wan 2.2", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["wan2.2_t2v_lightx2v.safetensors"]
+
+    def test_every_word_must_match(self, cloud_target, monkeypatch, capsys):
+        """`minimax h3` must not return `minimax_music3` just because it shares the first word."""
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "minimax h3", "--where", "cloud"], capsys)
+        assert "minimax_music3_dit_fp16.safetensors" not in [r["name"] for r in env["data"]["rows"]]
+
+    def test_pages_past_rows_the_words_reject_to_fill_the_limit(self, cloud_target, monkeypatch, capsys):
+        """The server filters on one word, so its first page can be all rejects."""
+        names = [f"minimax_music3_variant{i}.safetensors" for i in range(30)] + [
+            "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+        ]
+        _patch_asset_server(monkeypatch, names)
+        env = _run(["search", "--text", "minimax h3", "--limit", "5", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["minimax_h3_ref2va_pruned_int8_convrot.safetensors"]
+
+    def test_single_word_query_is_sent_to_the_server_unchanged(self, cloud_target, monkeypatch, capsys):
+        queries = _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "flux", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["flux1-dev.safetensors"]
+        assert queries[0]["name_contains"] == ["flux"]
+        assert len(queries) == 1
+
+    def test_a_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
+        """`sdxl base` must find `sd_xl_base_1.0`, as local search does, though the server only knows `sd_xl`."""
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "sdxl base", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+        assert env["data"]["total"] == 1
+
+    def test_a_single_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "sdxl", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+
+    def test_a_query_nothing_matches_is_still_empty(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "hunyuan 3d", "--where", "cloud"], capsys)
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+        assert env["data"]["total_is_lower_bound"] is False
+
+    def test_a_scan_stopped_by_the_page_cap_says_its_total_is_a_lower_bound(self, cloud_target, monkeypatch, capsys):
+        import comfy_cli.command.models.search as search_mod
+
+        monkeypatch.setattr(search_mod, "_CLOUD_TOKEN_SCAN_PAGE", 2)
+        monkeypatch.setattr(search_mod, "_CLOUD_TOKEN_SCAN_MAX_PAGES", 2)
+        names = [f"minimax_h3_v{i}.safetensors" for i in range(10)]
+        _patch_asset_server(monkeypatch, names)
+        env = _run(["search", "--text", "minimax h3", "--where", "cloud"], capsys)
+        assert env["data"]["total"] == 4
+        assert env["data"]["total_is_lower_bound"] is True
+
+    def test_a_scan_that_reaches_the_end_has_an_exact_total(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "MiniMax H3", "--where", "cloud"], capsys)
+        assert env["data"]["total_is_lower_bound"] is False
+
+
 # ---------------------------------------------------------------------------
 # show
 # ---------------------------------------------------------------------------
