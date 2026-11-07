@@ -964,6 +964,41 @@ class TestCloudSearchTokens:
         assert queries[0]["name_contains"] == ["flux"]
         assert len(queries) == 1
 
+    def test_a_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
+        """`sdxl base` must find `sd_xl_base_1.0`, as local search does, though the server only knows `sd_xl`."""
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "sdxl base", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+        assert env["data"]["total"] == 1
+
+    def test_a_single_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "sdxl", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+
+    def test_a_query_nothing_matches_is_still_empty(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "hunyuan 3d", "--where", "cloud"], capsys)
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+        assert env["data"]["total_is_lower_bound"] is False
+
+    def test_a_scan_stopped_by_the_page_cap_says_its_total_is_a_lower_bound(self, cloud_target, monkeypatch, capsys):
+        import comfy_cli.command.models.search as search_mod
+
+        monkeypatch.setattr(search_mod, "_CLOUD_TOKEN_SCAN_PAGE", 2)
+        monkeypatch.setattr(search_mod, "_CLOUD_TOKEN_SCAN_MAX_PAGES", 2)
+        names = [f"minimax_h3_v{i}.safetensors" for i in range(10)]
+        _patch_asset_server(monkeypatch, names)
+        env = _run(["search", "--text", "minimax h3", "--where", "cloud"], capsys)
+        assert env["data"]["total"] == 4
+        assert env["data"]["total_is_lower_bound"] is True
+
+    def test_a_scan_that_reaches_the_end_has_an_exact_total(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "MiniMax H3", "--where", "cloud"], capsys)
+        assert env["data"]["total_is_lower_bound"] is False
+
 
 # ---------------------------------------------------------------------------
 # show

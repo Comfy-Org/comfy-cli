@@ -424,8 +424,8 @@ def _cloud_search(
     type_: str | None,
     limit: int,
     include_public: bool,
-) -> tuple[list[dict[str, Any]], int]:
-    """Page through /api/assets, returning (rows, total).
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Page through /api/assets, returning ``(rows, total, total_is_lower_bound)``.
 
     The ``include_tags`` parameter is comma-separated, not repeated — cloud
     rejects the repeated-key form (``include_tags=a&include_tags=b``) per its
@@ -433,10 +433,19 @@ def _cloud_search(
 
     ``name_contains`` is one case-insensitive substring over the whole name, so
     a query the user writes with spaces ("MiniMax H3") can never match the
-    filename (``minimax_h3_…``). When ``text`` is more than one word, or carries
-    a separator, the server is asked for its longest word only and every word
-    is then checked client-side with ``_name_matches``: the same token-AND,
-    separator-insensitive rule local search uses.
+    filename (``minimax_h3_…``). Search therefore follows the local rule
+    (``_name_matches``: every word, separators ignored) in up to two passes:
+
+    1. Ask the server for the query's longest fragment, the cheap narrowing
+       (for one plain word that is the whole query, sent unchanged), and check
+       every word client-side.
+    2. If that finds nothing, the fragment may be split in the filename
+       (``sdxl`` vs ``sd_xl_base_1.0``), which the server cannot see. Scan
+       without ``name_contains`` and match client-side.
+
+    A scan stops after ``_CLOUD_TOKEN_SCAN_MAX_PAGES`` pages; when it stops
+    with more assets left, ``total`` counts only what it saw and the third
+    value is True.
     """
     tags = ["models"]
     if type_:
@@ -446,25 +455,45 @@ def _cloud_search(
         "include_public": str(include_public).lower(),
     }
     tokens = _search_tokens(text)
-    fragments = [f for f in _NAME_SEPARATORS.split((text or "").lower()) if f]
-    if tokens is None or (len(fragments) == 1 and fragments[0] == (text or "").lower().strip()):
-        # No filter, or a single separator-free word: the server's substring
-        # match is already exact, so ask for it directly.
-        if text:
-            base["name_contains"] = text
+    if tokens is None:
+        # No filter: one page, the server's own total.
         body = _assets_page(target, {**base, "limit": min(max(limit, 1), 500)})
         rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
-        return rows, int(body.get("total") or len(rows))
+        return rows, int(body.get("total") or len(rows)), False
     if not tokens:
         # Only separators: a filter nothing satisfies (same as local).
-        return [], 0
+        return [], 0, False
 
-    base["name_contains"] = max(fragments, key=len)
+    fragments = [f for f in _NAME_SEPARATORS.split(text.lower()) if f]
+    plain_word = len(fragments) == 1 and fragments[0] == text.lower().strip()
+    if plain_word:
+        # The server's substring match is already exact for a plain word:
+        # one page, and its total, when it finds anything.
+        body = _assets_page(target, {**base, "name_contains": text, "limit": min(max(limit, 1), 500)})
+        rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
+        if rows:
+            return rows, int(body.get("total") or len(rows)), False
+    else:
+        found = _scan_assets(target, {**base, "name_contains": max(fragments, key=len)}, tokens, limit)
+        if found[1]:
+            return found
+    return _scan_assets(target, base, tokens, limit)
+
+
+def _scan_assets(
+    target, params: dict[str, Any], tokens: list[tuple[str, str]], limit: int
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Page ``/api/assets`` with ``params``, keeping assets whose name or display name passes ``tokens``.
+
+    Returns ``(rows, total, total_is_lower_bound)``: ``rows`` holds at most
+    ``limit`` matches, ``total`` counts every match seen, and the flag is True
+    when the page cap stopped the scan before the server ran out.
+    """
     rows: list[dict[str, Any]] = []
     total = 0
     offset = 0
     for _ in range(_CLOUD_TOKEN_SCAN_MAX_PAGES):
-        body = _assets_page(target, {**base, "limit": _CLOUD_TOKEN_SCAN_PAGE, "offset": offset})
+        body = _assets_page(target, {**params, "limit": _CLOUD_TOKEN_SCAN_PAGE, "offset": offset})
         page = [a for a in body.get("assets") or [] if isinstance(a, dict)]
         for asset in page:
             names = (asset.get("name") or "", asset.get("display_name") or "")
@@ -474,13 +503,13 @@ def _cloud_search(
                     rows.append(_asset_to_row(asset))
         offset += len(page)
         if not page or not body.get("has_more"):
-            break
-    return rows, total
+            return rows, total, False
+    return rows, total, True
 
 
-# The longest word narrows the server query, but every row it returns still has
-# to pass the other words, so the scan pages until the server runs out. Capped
-# so a broad word ("image") cannot page forever: 20 × 500 = 10k assets.
+# A scan pages until the server runs out, because the server's filter (one
+# fragment, or none) returns rows the other words still reject. Capped so a
+# broad query cannot page forever: 20 × 500 = 10k assets per scan.
 _CLOUD_TOKEN_SCAN_PAGE = 500
 _CLOUD_TOKEN_SCAN_MAX_PAGES = 20
 
@@ -712,9 +741,12 @@ def search_cmd(
 
     try:
         if target.is_cloud:
-            rows, total = _cloud_search(target, text=text, type_=type_, limit=limit, include_public=include_public)
+            rows, total, total_is_lower_bound = _cloud_search(
+                target, text=text, type_=type_, limit=limit, include_public=include_public
+            )
         else:
             rows, total = _local_search(target, text=text, type_=type_, limit=limit)
+            total_is_lower_bound = False
     except urllib.error.HTTPError as e:
         _emit_http_error(
             e,
@@ -735,6 +767,9 @@ def search_cmd(
         "mode": "cloud" if target.is_cloud else "local",
         "filters": {"text": text, "type": type_, "include_public": include_public if target.is_cloud else None},
         "total": total,
+        # True when the cloud scan hit its page cap: `total` counts only the
+        # assets it reached, so more matches may exist. Narrow the query.
+        "total_is_lower_bound": total_is_lower_bound,
         "shown": len(rows),
         "rows": rows,
     }
@@ -757,7 +792,11 @@ def search_cmd(
                 sanitize_markup((r["source_url"] or "")[:48]),
             )
         renderer.console().print(tbl)
-        tail = f" (of {total} total)" if total != len(rows) else ""
+        tail = (
+            f" (of {total}{'+' if total_is_lower_bound else ''} total)"
+            if total != len(rows) or total_is_lower_bound
+            else ""
+        )
         rprint(f"[dim]{len(rows)} model(s){tail} ({payload['mode']})[/dim]")
     knowledge.attach(
         payload,
