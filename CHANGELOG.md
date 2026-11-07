@@ -17,6 +17,8 @@ history.
 
 ### Changed
 
+- Release watches poll through `stopping` and report `build_stopped` (exit 1) when a release stops. Log following reads the final lines after `stopped` and exits successfully.
+
 - `comfy deploy status` explains beside its sampled counts that they may lag after workers scale down. The deploy-failure guidance also clarifies that sampled counts cannot establish whether a worker or job is running now.
 - Both `comfy assets library upload` and `comfy model upload` request resumable
   model uploads up to 25 GB. Dropped connections retry from storage's held

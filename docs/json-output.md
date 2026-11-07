@@ -1210,3 +1210,18 @@ per-kind error extras moved under `error.details`; stdout is now UTF-8
 (was ASCII-escaped); `--print-prompt` and `--no-wait` streams now end
 with an explicit `ok: true` envelope instead of ending at
 `prompt_preview` / `queued`.
+
+## Stopped release watches
+
+`comfy build release create --watch` polls through `stopping`. On `stopped`, it
+exits 1 with one terminal error envelope whose code is `build_stopped`, including
+when sibling targets are ready or failed. The error details preserve `releaseId`,
+`status: "stopped"` and the received `artifactCounts`. JSON emits only the terminal
+envelope on stdout; NDJSON may emit events before that envelope. Pretty mode
+prints one stopped error instead of a machine envelope.
+
+`comfy build release logs --follow` reads the final log after either `stopped` or
+`complete` and retains its successful log payload and exit 0. Release list and
+show pass through the received states. Older responses without a stopped count
+keep their existing behavior. Authentication loss, transport recovery and
+unknown-status errors retain their existing results.
