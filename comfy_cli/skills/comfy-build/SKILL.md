@@ -399,10 +399,10 @@ and exit 0 otherwise. JSON and NDJSON each end with one terminal envelope;
 pretty output says the release was stopped.
 
 `release logs --follow` continues through `stopping`, reads the log once more
-after `stopped` or `complete`, and exits 0 after a successful read. An incomplete
-final response retains the last whole log and warns. Transport retries and
-sign-in recovery retain their existing bounds; an unknown status remains an
-explicit error.
+after `stopped` or `complete`, and exits 0 after a successful read. An unreadable
+final response body retains the last whole log and warns. Transport errors
+still retry and exit 1 when the retry limit is reached. Sign-in recovery
+retains its existing bounds; an unknown status remains an explicit error.
 
 Stop after 30 minutes and tell the user the build is still running rather than
 polling on. `--watch` itself polls without a cap.
