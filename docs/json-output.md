@@ -1221,7 +1221,11 @@ envelope on stdout; NDJSON may emit events before that envelope. Pretty mode
 prints one stopped error instead of a machine envelope.
 
 `comfy build release logs --follow` reads the final log after either `stopped` or
-`complete` and retains its successful log payload and exit 0. Release list and
-show pass through the received states. Older responses without a stopped count
-keep their existing behavior. Authentication loss, transport recovery and
-unknown-status errors retain their existing results.
+`complete` and retains its successful log payload and exit 0. If that final
+response is incomplete, it returns the last whole log instead and warns on
+stderr in machine modes. That payload can omit final lines even when its
+`truncated` field is false; exit 0 does not guarantee the log is final.
+
+Release list and show pass through the received states. Older responses without
+a stopped count keep their existing behavior. Authentication loss, transport
+recovery and unknown-status errors retain their existing results.
