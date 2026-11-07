@@ -372,9 +372,11 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   have been created**, and the CLI cannot settle which: no `comfy` command looks
   a job up by the idempotency key it carried (`details.idempotency_key`). Read
   `comfy deploy status` anyway — the deployment's own state may be what caused
-  the timeout, and `serving` plus `jobsInQueue` say whether *something* is
-  running — but it cannot tell you that something is your job. Report what it
-  showed and let the user decide. Never resubmit on your own.
+  the timeout. The `serving` worker counts and `jobsInQueue` describe only the
+  sample time (`sampledAt`) and may lag after workers scale down. They cannot
+  establish whether a worker or job is running now, or identify your job.
+  Report the sample's timestamp and age with the counts, and let the user
+  decide. Never resubmit on your own.
 
 ## Reading a deployment
 
