@@ -94,8 +94,7 @@ idempotency key the submission carried (`details.idempotency_key`). So "I looked
 and found nothing" is not evidence the job was never created, and must never be
 read as permission to resubmit. `comfy deploy status` is still
 the thing to read: the deployment's own state may be what caused the timeout, and
-the `serving` worker counts and `jobsInQueue` say whether *something* is running.
-Report that much, and let the user decide.
+the `serving` worker counts and `jobsInQueue` describe only the sample time (`sampledAt`). Counts may lag after workers scale down and cannot establish whether a worker or job is running now. Report the sample's timestamp and age with the counts, and let the user decide.
 
 ## Endpoint trust refusals
 
