@@ -1535,6 +1535,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check the builder URL and your access; retry, and inspect the message for the specific failure",
     ),
     ErrorCode(
+        "build_stopped",
+        "A watched release ended with status stopped (exit 1), even when sibling targets are ready or failed. "
+        "`details` carries releaseId, status and the received artifactCounts. A successful log read still exits 0.",
+        "inspect the release with `comfy build release show <releaseId>` and read its target logs",
+    ),
+    ErrorCode(
         "build_not_enabled",
         "The builder returned 403 FEATURE_NOT_ENABLED: the developer platform is in limited beta and the "
         "signed-in account is not enabled for it yet.",

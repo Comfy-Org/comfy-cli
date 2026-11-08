@@ -2115,3 +2115,183 @@ def test_a_refused_definition_with_no_reason_is_a_builder_error(
     assert error["code"] == "build_builder_error"
     assert "INVALID_DEFINITION" in error["message"]
     assert error["details"]["status"] == 400
+
+
+@pytest.mark.parametrize("mode", ["pretty", "json", "ndjson"])
+@pytest.mark.parametrize("failed", [0, 1], ids=["ready-sibling", "failed-sibling"])
+def test_stopped_watch_has_one_terminal_error_after_stopping_on_the_wire(
+    workspace: Path,
+    client: ReleaseBuilder,
+    sleeps: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    failed: int,
+) -> None:
+    # Given: controlled builder responses, read by the real HTTP client.
+    from comfy_cli.builder_api import BuilderClient
+
+    counts = {"ready": 1, "failed": failed, "pending": 0, "stopped": 1}
+    monkeypatch.setattr(
+        _CutShortStatus,
+        "bodies",
+        [
+            json.dumps({"id": "release-created", "status": "building"}).encode(),
+            json.dumps({"id": "release-created", "status": "stopping"}).encode(),
+            json.dumps({"id": "release-created", "status": "stopped", "artifactCounts": counts}).encode(),
+        ],
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortStatus)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = BuilderClient(f"http://127.0.0.1:{server.server_address[1]}", "test-token")
+    monkeypatch.setattr(client, "get_release", real.get_release)
+
+    # When
+    try:
+        result = CliRunner().invoke(
+            cli_app,
+            ["build", "release", "create", "--target", "linux/cpu", "--watch"],
+            env={"COMFY_OUTPUT": mode, "NO_COLOR": "1", "AI_AGENT": "1", "COMFY_BUILDER_TOKEN": None},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.exit_code == 1, result.output
+    assert _CutShortStatus.bodies == []
+    assert sleeps == [2.0, 2.0]
+    if mode == "pretty":
+        assert result.output.count("release release-created was stopped.") == 1
+        assert "unknown release status" not in result.output
+        assert "completed with failed targets" not in result.output
+        assert '"type": "envelope"' not in result.stdout
+    else:
+        messages = [json.loads(line) for line in result.stdout.splitlines()]
+        terminals = [message for message in messages if message["type"] == "envelope"]
+        assert len(terminals) == 1
+        assert messages[-1] == terminals[0]
+        if mode == "json":
+            assert len(messages) == 1
+        else:
+            assert all(message["schema"] == "event/1" for message in messages[:-1])
+        terminal = terminals[0]
+        assert terminal["ok"] is False
+        assert terminal["error"]["code"] == "build_stopped"
+        assert terminal["error"]["details"] == {
+            "releaseId": "release-created",
+            "status": "stopped",
+            "artifactCounts": counts,
+        }
+        import jsonschema
+
+        schemas = Path(__file__).resolve().parents[3] / "comfy_cli/schemas"
+        schema = json.loads((schemas / "envelope.json").read_text())
+        error_schema = json.loads((schemas / "error.json").read_text())
+        resolver = jsonschema.RefResolver(
+            base_uri=schemas.as_uri() + "/",
+            referrer=schema,
+            store={"error.json": error_schema, error_schema["$id"]: error_schema},
+        )
+        jsonschema.Draft202012Validator(schema, resolver=resolver).validate(terminal)
+
+
+@pytest.mark.parametrize("mode", ["pretty", "json", "ndjson"])
+@pytest.mark.parametrize("incomplete_final", [False, True], ids=["final-lines", "incomplete-final"])
+def test_stopped_log_follow_reads_after_terminal_status_on_the_wire(
+    client: ReleaseBuilder, sleeps: list[float], monkeypatch: pytest.MonkeyPatch, mode: str, incomplete_final: bool
+) -> None:
+    # Given: the last log becomes available only after the stopped status read.
+    from comfy_cli.builder_api import BuilderClient
+
+    def log_body(log: str) -> bytes:
+        return json.dumps(
+            {"releaseId": "release-1", "os": "linux", "gpu": "cpu", "log": log, "truncated": False}
+        ).encode()
+
+    final = log_body("started\nphase finished\nbuild stopped\n")
+    monkeypatch.setattr(
+        _CutShortStatus,
+        "bodies",
+        [
+            log_body("started\n"),
+            json.dumps({"id": "release-1", "status": "building"}).encode(),
+            log_body("started\nphase finished\n"),
+            json.dumps({"id": "release-1", "status": "stopping"}).encode(),
+            log_body("started\nphase finished\n"),
+            json.dumps({"id": "release-1", "status": "stopped"}).encode(),
+            (final, final[:20]) if incomplete_final else final,
+        ],
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortStatus)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = BuilderClient(f"http://127.0.0.1:{server.server_address[1]}", "test-token")
+    monkeypatch.setattr(client, "get_release", real.get_release)
+    monkeypatch.setattr(client, "get_release_logs", real.get_release_logs)
+
+    # When
+    try:
+        result = CliRunner().invoke(
+            cli_app,
+            ["build", "release", "logs", "release-1", "--target", "linux/cpu", "--follow"],
+            env={"COMFY_OUTPUT": mode, "NO_COLOR": "1", "AI_AGENT": "1", "COMFY_BUILDER_TOKEN": None},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _CutShortStatus.bodies == []
+    assert sleeps == [2.0, 2.0]
+    expected_log = "started\nphase finished\n" if incomplete_final else "started\nphase finished\nbuild stopped\n"
+    if mode == "pretty":
+        assert result.output.count("started") == 1
+        assert result.output.count("phase finished") == 1
+        assert ("build stopped" in result.output) is (not incomplete_final)
+    else:
+        messages = [json.loads(line) for line in result.stdout.splitlines()]
+        terminals = [message for message in messages if message["type"] == "envelope"]
+        assert len(terminals) == 1
+        assert messages[-1] == terminals[0]
+        terminal = terminals[0]
+        assert terminal["ok"] is True
+        assert terminal["data"] == {
+            "releaseId": "release-1",
+            "os": "linux",
+            "gpu": "cpu",
+            "log": expected_log,
+            "truncated": False,
+        }
+        import jsonschema
+
+        schemas = Path(__file__).resolve().parents[3] / "comfy_cli/schemas"
+        error_schema = json.loads((schemas / "error.json").read_text())
+        for name, value in [("envelope.json", terminal), ("build_release_logs.json", terminal["data"])]:
+            schema = json.loads((schemas / name).read_text())
+            resolver = jsonschema.RefResolver(
+                base_uri=schemas.as_uri() + "/",
+                referrer=schema,
+                store={"error.json": error_schema, error_schema["$id"]: error_schema},
+            )
+            jsonschema.Draft202012Validator(schema, resolver=resolver).validate(value)
+    assert ("the final log read came back incomplete" in " ".join(result.output.split())) is incomplete_final
+
+
+@pytest.mark.parametrize("status", ["stopping", "stopped"])
+@pytest.mark.parametrize("verb", ["ls", "show"])
+def test_release_reads_preserve_stop_states(workspace: Path, client: ReleaseBuilder, status: str, verb: str) -> None:
+    # Given: list/show pass through status and count fields without interpreting them.
+    release = {"id": "release-1", "status": status, "artifactCounts": {"ready": 1, "stopped": 1, "pending": 0}}
+    client.releases = [release]
+    client.statuses = [release]
+
+    # When
+    result = invoke_release(verb, *(["release-1"] if verb == "show" else []))
+
+    # Then
+    assert result.exit_code == 0, result.output
+    data = envelope(result)["data"]
+    received = data["releases"][0] if verb == "ls" else data
+    assert received["id"] == "release-1"
+    assert received["status"] == status
+    assert received["artifactCounts"] == {"ready": 1, "stopped": 1, "pending": 0}
