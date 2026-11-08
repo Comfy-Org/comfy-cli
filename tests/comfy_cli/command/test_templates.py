@@ -190,6 +190,55 @@ def test_ls_limit_applies_after_filter(gallery_file):
     assert env["data"]["shown"] == 1
 
 
+# The gallery spells model versions without a space ("Wan2.2") while users and
+# agents write them with one ("Wan 2.2").
+_SEPARATOR_FIXTURE = [
+    {
+        "title": "Video",
+        "type": "video",
+        "templates": [
+            {"name": "video_wan2_2_14B_t2v", "title": "Wan 2.2 Text to Video", "tags": [], "models": ["Wan2.2"]},
+            {"name": "video_wan2_1_vace", "title": "Wan 2.1 VACE", "tags": [], "models": ["Wan2.1 VACE"]},
+            {"name": "image_z_image_turbo", "title": "Z Image Turbo", "tags": [], "models": ["Z-Image-Turbo"]},
+        ],
+    }
+]
+
+
+def _ls_names(tmp_path: Path, *args: str) -> list[str]:
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(_SEPARATOR_FIXTURE))
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", str(path), *args])
+    assert result.exit_code == 0, result.output
+    return [r["name"] for r in _envelope(result.output)["data"]["rows"]]
+
+
+@pytest.mark.parametrize("query", ["Wan 2.2", "wan2.2", "WAN-2.2", "wan_2_2"])
+def test_ls_model_filter_ignores_separators(tmp_path, query):
+    assert _ls_names(tmp_path, "--model", query) == ["video_wan2_2_14B_t2v"]
+
+
+def test_ls_model_filter_still_matches_a_plain_prefix(tmp_path):
+    assert _ls_names(tmp_path, "--model", "Wan") == ["video_wan2_2_14B_t2v", "video_wan2_1_vace"]
+
+
+def test_ls_name_filter_ignores_separators(tmp_path):
+    """`z image` finds `image_z_image_turbo`; the name uses underscores."""
+    assert _ls_names(tmp_path, "--name", "z image turbo") == ["image_z_image_turbo"]
+
+
+def test_get_where_model_ignores_separators(tmp_path, monkeypatch):
+    """`templates get` resolves through the same predicate, so it must agree with `ls`."""
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(_SEPARATOR_FIXTURE))
+    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", lambda name, timeout=15.0: b'{"nodes": []}')
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["get", "--gallery", str(path), "--where", "model=Wan 2.2"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["name"] == "video_wan2_2_14B_t2v"
+
+
 def test_show_returns_full_template(gallery_file):
     _force_json_renderer()
     runner = CliRunner()

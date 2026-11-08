@@ -487,7 +487,7 @@ time. If the callback never arrives, the terminal envelope is an
 {"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
 ```
 
-### `upload_plan`, `upload_progress`, `upload_complete`
+### `upload_plan`, `upload_progress`, `upload_complete`, `upload_storing`
 
 Emitted by `comfy build push` while it uploads model files and packaged custom
 nodes, and by `comfy model upload` and `comfy assets library upload` while they
@@ -511,6 +511,19 @@ when there is nothing to upload. Each file that transfers gets an
 {"schema": "event/1", "type": "upload_plan", "files": 3, "bytes_total": 56908316672, "already_held": 2}
 {"schema": "event/1", "type": "upload_progress", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_done": 1288490188, "bytes_total": 23761671782, "bytes_per_second": 47500000, "eta_seconds": 473, "overall_bytes_done": 1288490188, "overall_bytes_total": 56908316672, "overall_eta_seconds": 1171}
 {"schema": "event/1", "type": "upload_complete", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_total": 23761671782, "seconds": 498.2, "bytes_per_second": 47695045, "deduplicated": false, "overall_bytes_done": 23761671782, "overall_bytes_total": 56908316672}
+```
+
+After transferring the bytes, `comfy model upload` and `comfy assets library
+upload` emit `upload_storing` as soon as Cloud returns a storage task id. It
+arrives before task polling and follows the same stdout/stderr rules above.
+If the wait is interrupted, look up that id at Cloud's
+`GET /api/tasks/<task_id>` endpoint.
+The final success envelope still requires a completed task and a matching
+stored hash. A closed progress pipe mutes progress reporting; task polling and
+the stored-hash check still run.
+
+```json
+{"schema": "event/1", "type": "upload_storing", "task_id": "task-1"}
 ```
 
 `bytes_per_second` on a progress event is measured over the last ten seconds
@@ -1197,3 +1210,23 @@ per-kind error extras moved under `error.details`; stdout is now UTF-8
 (was ASCII-escaped); `--print-prompt` and `--no-wait` streams now end
 with an explicit `ok: true` envelope instead of ending at
 `prompt_preview` / `queued`.
+
+## Stopped release watches
+
+`comfy build release create --watch` polls through `stopping`. On `stopped`, it
+exits 1 with one terminal error envelope whose code is `build_stopped`, including
+when sibling targets are ready or failed. The error details preserve `releaseId`,
+`status: "stopped"` and the received `artifactCounts`. JSON emits only the terminal
+envelope on stdout; NDJSON may emit events before that envelope. Pretty mode
+prints one stopped error instead of a machine envelope.
+
+`comfy build release logs --follow` reads the final log after either `stopped` or
+`complete` and retains its successful log payload and exit 0. If the final
+request returns an unreadable log body, it returns the last whole log instead
+and warns on stderr in machine modes. That payload can omit final lines even
+when its `truncated` field is false; exit 0 does not guarantee the log is final.
+Transport errors still retry and exit 1 when the retry limit is reached.
+
+Release list and show pass through the received states. Older responses without
+a stopped count keep their existing behavior. Authentication loss, transport
+recovery and unknown-status errors retain their existing results.

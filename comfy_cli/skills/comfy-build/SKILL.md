@@ -381,16 +381,28 @@ costs, and wait.
 `comfy build release create --watch` polls every 2 seconds until every target is
 terminal; `comfy build release show` reads it once. Both need the sign-in.
 
-A release `status` is `queued`, `building` or `complete`, and the first two are
-the build running normally. **`complete` means every target is terminal, not that
-any succeeded** — read `deployable` and `artifactCounts`. Per-target artifacts are
-`queued`, `building`, `ready` or `failed`.
+A release `status` is `queued`, `building`, `stopping`, `stopped` or `complete`.
+Watching continues through `stopping` until the release is terminal.
+**`complete` means every target is terminal, not that any succeeded**: read
+`deployable` and `artifactCounts`. Per-target artifacts are
+`queued`, `building`, `stopping`, `stopped`, `ready` or `failed`.
+`artifactCounts.stopped` is separate from ready, failed and pending; pending
+includes stopping. Older responses may omit stopped, meaning zero.
 
 **`deployable: true` is the green build**, and it means specifically that a
 `linux/nvidia` artifact reached `ready` with an image ref. It is an artifact fact,
 not a status fact: a release can be `deployable` while its rolled-up status
 carries a failed target, and a windows-only release reaches `complete` with
-nothing deployable. `--watch` exits 1 when any target failed.
+nothing deployable. `--watch` exits 1 with `build_stopped` when the release is
+`stopped`, even with ready or failed siblings. A `complete` release retains exit 1 for failed targets
+and exit 0 otherwise. JSON and NDJSON each end with one terminal envelope;
+pretty output says the release was stopped.
+
+`release logs --follow` continues through `stopping`, reads the log once more
+after `stopped` or `complete`, and exits 0 after a successful read. An unreadable
+final response body retains the last whole log and warns. Transport errors
+still retry and exit 1 when the retry limit is reached. Sign-in recovery
+retains its existing bounds; an unknown status remains an explicit error.
 
 Stop after 30 minutes and tell the user the build is still running rather than
 polling on. `--watch` itself polls without a cap.

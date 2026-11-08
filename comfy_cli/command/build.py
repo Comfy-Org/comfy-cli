@@ -3267,7 +3267,7 @@ def _watched_release(renderer, client, release_id: str) -> dict:
             code="watch_auth_lost",
             message=f"the builder refused the sign-in (401) after attempting session recovery; "
             f"release {release_id} may still be building on the server",
-            hint=f"read it with `comfy build release show {release_id}` until its status is complete; "
+            hint=f"read it with `comfy build release show {release_id}` until its status is complete or stopped; "
             "the stored sign-in was preserved",
             details={"releaseId": release_id},
             exit_code=_EXIT_WATCH_LOST,
@@ -3344,9 +3344,9 @@ def _poll_release(renderer, client, release_id: str) -> dict:
         if renderer.is_pretty():
             renderer.info(f"release {release_id}: {status}")
         match status:
-            case "complete":
+            case "complete" | "stopped":
                 return release
-            case "queued" | "building":
+            case "queued" | "building" | "stopping":
                 time.sleep(_RELEASE_POLL_SECONDS)
             case _:
                 renderer.error(
@@ -3431,6 +3431,18 @@ def release_create(
     if watch:
         release = _poll_release(renderer, client, release_id)
         payload["release"] = release
+        if release.get("status") == "stopped":
+            renderer.error(
+                code="build_stopped",
+                message=f"release {release_id} was stopped.",
+                hint=f"inspect it with `comfy build release show {release_id}` and read its target logs",
+                details={
+                    "releaseId": release_id,
+                    "status": "stopped",
+                    "artifactCounts": release.get("artifactCounts"),
+                },
+            )
+            raise typer.Exit(code=1)
         if _release_failed(release):
             renderer.error(
                 code="build_builder_error",
@@ -3547,7 +3559,9 @@ def release_logs(
         if _readable_log(read) or not content:
             content = read
         elif complete:
-            renderer.warn("the final log read came back incomplete; showing the log read before the release completed")
+            renderer.warn(
+                "the final log read came back incomplete; showing the log read before the release became terminal"
+            )
         log = content.get("log", "")
         if renderer.is_pretty() and isinstance(log, str) and log:
             renderer.print(log[len(previous_log) :] if log.startswith(previous_log) else log)
@@ -3556,11 +3570,11 @@ def release_logs(
             break
         detail = _poll_status(renderer, client, release_id)
         match detail.get("status"):
-            case "complete":
-                # The log above may predate completion (a retried status read
+            case "complete" | "stopped":
+                # The log above may predate terminal settlement (a retried status read
                 # widens that gap), so read it once more for the final lines.
                 complete = True
-            case "queued" | "building":
+            case "queued" | "building" | "stopping":
                 time.sleep(_RELEASE_POLL_SECONDS)
             case status:
                 renderer.error(

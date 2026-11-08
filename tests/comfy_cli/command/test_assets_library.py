@@ -44,7 +44,12 @@ from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_t
 
 
 @pytest.fixture(autouse=True)
-def reset_singleton():
+def reset_singleton(monkeypatch, tmp_path):
+    from comfy_cli import constants
+
+    monkeypatch.setattr(
+        constants, "DEFAULT_CONFIG", {key: str(tmp_path / "config") for key in constants.DEFAULT_CONFIG}
+    )
     reset_renderer_for_testing()
     yield
     reset_renderer_for_testing()
@@ -969,7 +974,12 @@ class TestUpload:
             "/api/tasks/task-1",
             "/api/assets/asset-9",
         ]
-        assert cloud.calls[2][2] == {"filename": "style.safetensors", "size_bytes": 16, "tags": ["models", "loras"]}
+        assert cloud.calls[2][2] == {
+            "filename": "style.safetensors",
+            "size_bytes": 16,
+            "tags": ["models", "loras"],
+            "resumable": True,
+        }
         assert cloud.calls[3][2] == {"filename": "style.safetensors", "tags": ["models", "loras"]}
         (put,) = storage.puts
         assert put["url"] == f"{_SIGNED}1" and put["headers"] == _PUT_HEADERS and put["allow_redirects"] is False
@@ -986,7 +996,6 @@ class TestUpload:
             ("x" * 250 + ".safetensors", None, "bad_filename"),
             ("style.safetensors", None, "file_not_found"),
             ("style.safetensors", 0, "empty_file"),
-            ("style.safetensors", 2 * 1024**3 + 1, "file_too_large"),
         ],
     )
     def test_a_file_comfy_cloud_would_refuse_is_refused_before_any_request(
@@ -995,7 +1004,7 @@ class TestUpload:
         path = tmp_path / name
         if size is not None:
             with path.open("wb") as f:
-                f.truncate(size)  # sparse: no 2 GB written to disk
+                f.truncate(size)
 
         env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(path), "--type", "loras"], {}, [])
 
@@ -1003,10 +1012,20 @@ class TestUpload:
         assert env["error"]["details"]["reason"] == reason
         assert cloud.calls == [] and storage.puts == []
 
-    def test_exactly_2_gib_is_accepted_locally(self, tmp_path):
+    @pytest.mark.parametrize("size", [2 * 1024**3 + 1, 25 * 1024**3, 25 * 1024**3 + 1])
+    def test_size_limit_is_left_to_the_server(self, tmp_path, monkeypatch, size):
         path = tmp_path / "big.SAFETENSORS"
-        with path.open("wb") as f:
-            f.truncate(2 * 1024**3)
+        path.write_bytes(b"x")
+        real_stat = Path.stat
+
+        def stat_with_large_size(candidate, *args, **kwargs):
+            info = real_stat(candidate, *args, **kwargs)
+            if candidate == path:
+                return os.stat_result((*info[:6], size, *info[7:]))
+            return info
+
+        # Extending a file can allocate its full size on Windows.
+        monkeypatch.setattr(Path, "stat", stat_with_large_size)
         assert assets_library._local_refusal(path) is None
 
     def test_unknown_type_is_refused_listing_the_valid_ones_before_the_upload(
@@ -1137,13 +1156,13 @@ class TestUpload:
 
         assert rc == 1 and cloud.paths().count("/api/tasks/task-1") == 1
 
-    def test_a_task_that_never_ends_times_out(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+    def test_a_task_can_take_longer_than_fifteen_minutes(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
         routes = dict(_UPLOAD_ROUTES)
-        routes[("GET", "/api/tasks/task-1")] = {"id": "task-1", "status": "running"}
+        routes[("GET", "/api/tasks/task-1")] = [{"id": "task-1", "status": "running"}] * 500 + [_DONE]
         env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
 
-        assert rc == 1 and env["error"]["code"] == "asset_upload_timeout"
-        assert env["error"]["details"] == {"task_id": "task-1", "status": "running"}
+        assert rc == 0 and env["data"]["id"] == "asset-9"
+        assert no_wait[0] > 15 * 60
 
     @pytest.mark.parametrize(
         ("route", "answer"),
@@ -1737,8 +1756,9 @@ class TestUploadFileErrors:
         assert "Transfer-Encoding" not in storage.prepared
         assert storage.puts[0]["body"] == model_file.read_bytes()
 
+    @pytest.mark.parametrize("resumable", [False, True], ids=["single-put", "resumable"])
     def test_a_missing_ca_bundle_ends_the_upload_with_a_tls_setup_error(
-        self, cloud_target, monkeypatch, model_file, tmp_path, no_wait
+        self, cloud_target, monkeypatch, model_file, tmp_path, no_wait, resumable
     ):
         # The real Requests adapter: with REQUESTS_CA_BUNDLE naming a removed
         # file, it raises a plain OSError while setting up TLS, before any
@@ -1759,7 +1779,7 @@ class TestUploadFileErrors:
                 return real_put(url, **kw)
 
         monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "removed-ca-bundle.pem"))
-        cloud, storage = _Cloud(dict(_UPLOAD_ROUTES)), _RealPut([])
+        cloud, storage = _Cloud(_resume_routes() if resumable else dict(_UPLOAD_ROUTES)), _RealPut([])
         monkeypatch.setattr("urllib.request.urlopen", cloud)
         monkeypatch.setattr("requests.put", storage)
         result = CliRunner().invoke(
@@ -2348,3 +2368,735 @@ class TestModelUpload:
         assert "upload" in {c.name for c in models.app.registered_commands}
         assert COMMAND_SCHEMAS["comfy model upload"] == "model_upload"
         assert STREAM_EVENT_SCHEMAS["comfy model upload"] == "build_push_event"
+
+
+# --- Resumable uploads through both public commands ----------------------------
+
+
+def _resumable_started(n=1):
+    import time
+    from datetime import datetime, timezone
+
+    return {
+        **_started(n),
+        "upload_mode": "resumable",
+        "chunk_size_bytes": 64 * 1024**2,
+        "expires_at": datetime.fromtimestamp(time.time() + 7 * 24 * 3600, timezone.utc).isoformat(),
+    }
+
+
+def _resume_routes():
+    return {
+        **_UPLOAD_ROUTES,
+        ("POST", "/api/assets/uploads"): [_resumable_started(1), _resumable_started(2)],
+        ("GET", "/api/user"): {"id": "user-1"},
+        ("GET", "/api/workspaces/current"): {"id": "ws-1"},
+    }
+
+
+class _ResumableBucket:
+    def __init__(self, *, crash=False, held=b"", status=None):
+        self.crash, self.held, self.status = crash, held, status
+        self.puts = []
+
+    def __call__(self, url, *, data, headers, **kw):
+        self.puts.append({"url": url, "headers": headers, "body": data, **kw})
+        assert kw["allow_redirects"] is False
+        if self.crash:
+            self.held = data[:5]
+            self.crash = False
+            raise KeyboardInterrupt()
+        if self.status is not None:
+            return SimpleNamespace(status_code=self.status, headers={}, close=lambda: None)
+        if not headers["Content-Range"].startswith("bytes */"):
+            offset = int(headers["Content-Range"].split()[1].split("-")[0])
+            assert offset == len(self.held)
+            self.held += data
+        code = self.status or (200 if len(self.held) == 16 else 308)
+        return SimpleNamespace(
+            status_code=code,
+            headers={"Range": f"bytes=0-{len(self.held) - 1}"} if self.held else {},
+            close=lambda: None,
+        )
+
+
+class TestResumableCommands:
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+    def test_killed_upload_resumes_the_same_session_on_rerun(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model
+    ):
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (
+            ["--yes", "--workspace", "ws-1", "--expected-sha256", _MODEL_SHA256] if model else []
+        )
+        bucket = _ResumableBucket(crash=True)
+        # CliRunner converts KeyboardInterrupt to an exit; the session has already been saved.
+        monkeypatch.setattr("requests.put", bucket)
+        cloud = _Cloud(_resume_routes())
+        monkeypatch.setattr("urllib.request.urlopen", cloud)
+        from comfy_cli.command.models import models
+
+        result = CliRunner().invoke(models.app if model else assets_library.app, ["upload", *args, "--where", "cloud"])
+        assert result.exit_code != 0
+        assert bucket.held == _MODEL_BYTES[:5]
+        capsys.readouterr()
+        bucket.puts.clear()
+        env, rc, cloud, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=bucket)
+        assert rc == 0 and env["data"]["uploaded"] is True
+        assert "/api/assets/uploads" not in cloud.paths()
+        assert bucket.puts[0]["headers"]["Content-Range"] == "bytes */16"
+        assert bucket.puts[1]["headers"]["Content-Range"] == "bytes 5-15/16"
+        assert bucket.held == _MODEL_BYTES
+        assert "SECRETSIG" not in everything
+        from comfy_cli.config_manager import ConfigManager
+
+        assert list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json")) == []
+
+    def test_crash_after_final_piece_completes_without_resending(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = _cloud_error(403, "NO", "try again")
+        bucket = _ResumableBucket()
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=bucket)
+        assert rc == 1 and bucket.held == _MODEL_BYTES
+        bucket.puts.clear()
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], _resume_routes(), [], storage=bucket
+        )
+        assert rc == 0 and "/api/assets/uploads" not in cloud.paths()
+        assert [p["headers"]["Content-Range"] for p in bucket.puts] == ["bytes */16"]
+
+    @pytest.mark.parametrize("expired_at", ["bucket", "complete"])
+    def test_expired_session_starts_fresh(self, cloud_target, monkeypatch, capsys, model_file, no_wait, expired_at):
+        routes = _resume_routes()
+        if expired_at == "complete":
+            routes[("POST", _COMPLETE_1)] = _http_error(404)
+        bucket = _ResumableBucket(status=404 if expired_at == "bucket" else None)
+        original = bucket.__call__
+
+        def put(url, **kw):
+            if url.endswith("2"):
+                bucket.status = None
+                bucket.held = b""
+            return original(url, **kw)
+
+        monkeypatch.setattr("requests.put", put)
+        # _upload accepts a callable in place of its storage fake.
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=put
+        )
+        assert rc == 0 and cloud.paths("POST").count("/api/assets/uploads") == 2
+
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+    @pytest.mark.parametrize("status", [400, 403, 422])
+    @pytest.mark.parametrize("saved", [False, True], ids=["fresh", "saved"])
+    def test_refused_session_is_discarded_and_restarted_once(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model, status, saved
+    ):
+        from comfy_cli.config_manager import ConfigManager
+
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+        directory = Path(ConfigManager().get_config_path()) / "model-uploads"
+        if saved:
+            routes = _resume_routes()
+            routes[("POST", _COMPLETE_1)] = _http_error(403)
+            env, rc, *_ = run(monkeypatch, capsys, args, routes, [], storage=_ResumableBucket())
+            assert rc == 1 and len(list(directory.glob("*.json"))) == 1
+        bucket = _ResumableBucket()
+        refused = []
+
+        def put(url, **kw):
+            if url.endswith("1"):
+                refused.append(kw["headers"]["Content-Range"])
+                return SimpleNamespace(status_code=status, headers={}, close=lambda: None)
+            return bucket(url, **kw)
+
+        routes = _resume_routes()
+        if saved:
+            routes[("POST", "/api/assets/uploads")] = _resumable_started(2)
+        env, rc, cloud, _, everything = run(monkeypatch, capsys, args, routes, [], storage=put)
+        assert rc == 0 and env["data"]["uploaded"] is True
+        assert cloud.paths("POST").count("/api/assets/uploads") == (1 if saved else 2)
+        assert refused == ["bytes */16" if saved else "bytes 0-15/16"]
+        assert bucket.held == _MODEL_BYTES
+        assert not list(directory.glob("*.json"))
+        assert "SECRETSIG" not in everything
+
+    def test_repeated_storage_refusal_is_bounded_and_not_saved_for_the_next_run(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        from comfy_cli.config_manager import ConfigManager
+
+        def refused(*args, **kw):
+            return SimpleNamespace(status_code=403, headers={}, close=lambda: None)
+
+        for _ in range(2):
+            env, rc, cloud, _, _ = _upload(
+                monkeypatch, capsys, [str(model_file), "--type", "loras"], _resume_routes(), [], storage=refused
+            )
+            assert rc == 1 and env["error"]["details"]["status"] == 403
+            assert cloud.paths("POST").count("/api/assets/uploads") == 2
+            assert not list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))
+
+    @pytest.mark.parametrize("change", ["workspace", "account", "same-size-bytes", "folder", "mtime", "size", "server"])
+    def test_rerun_with_a_changed_file_or_identity_starts_fresh(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, change
+    ):
+        from comfy_cli.config_manager import ConfigManager
+
+        bucket = _ResumableBucket()
+        args = [str(model_file), "--type", "loras"]
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = _http_error(403)
+        env, rc, *_ = _upload(monkeypatch, capsys, args, routes, [], storage=bucket)
+        assert rc == 1
+        assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+        bucket.status = 403
+        routes = _resume_routes()
+        if change == "workspace":
+            routes[("GET", "/api/workspaces/current")] = {"id": "ws-2"}
+        elif change == "account":
+            routes[("GET", "/api/user")] = {"id": "user-2"}
+        elif change == "same-size-bytes":
+            info = model_file.stat()
+            model_file.write_bytes(b"X" + _MODEL_BYTES[1:])
+            os.utime(model_file, ns=(info.st_atime_ns, info.st_mtime_ns))
+        elif change == "mtime":
+            info = model_file.stat()
+            os.utime(model_file, ns=(info.st_atime_ns, info.st_mtime_ns + 1000000000))
+        elif change == "size":
+            model_file.write_bytes(_MODEL_BYTES + b"x")
+        elif change == "folder":
+            args[-1] = "checkpoints"
+        else:
+            from dataclasses import replace
+
+            monkeypatch.setattr(
+                "comfy_cli.target.resolve_target", lambda **kw: replace(cloud_target, base_url="https://other.example")
+            )
+        # A refusal at storage is enough to see whether start was called, regardless of stored hash.
+        bucket.held = b""
+        env, rc, cloud, _, _ = _upload(monkeypatch, capsys, args, routes, [], storage=bucket)
+        assert rc == 1 and "/api/assets/uploads" in cloud.paths()
+        assert not bucket.puts[-1]["headers"]["Content-Range"].startswith("bytes */")
+
+    def test_resumable_still_checks_changed_blocks_and_stored_hash(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = _resume_routes()
+        routes[("POST", "/api/assets/uploads")] = _then(
+            lambda: model_file.write_bytes(b"X" + _MODEL_BYTES[1:]), _resumable_started()
+        )
+        bucket = _ResumableBucket()
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=bucket
+        )
+        assert rc == 1 and env["error"]["details"]["reason"] == "file_changed"
+        assert bucket.puts == [] and _COMPLETE_1 not in cloud.paths()
+        model_file.write_bytes(_MODEL_BYTES)
+        routes = _resume_routes()
+        routes[("GET", "/api/tasks/task-1")] = {**_DONE, "result": {**_DONE["result"], "hash": "b" * 64}}
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=bucket)
+        assert rc == 1 and env["error"]["code"] == "asset_upload_unverified"
+
+    def test_complete_retries_transient_errors(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = [_http_error(429), _http_error(503), {"task_id": "task-1"}]
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=_ResumableBucket()
+        )
+        assert rc == 0 and cloud.paths().count(_COMPLETE_1) == 3
+
+
+class TestResumableRefusals:
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+    def test_legacy_single_put_keeps_http_storage_compatibility(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        address = "http://127.0.0.1:9023/bucket/model?signature=SECRETSIG"
+        routes[("POST", "/api/assets/uploads")] = {**_started(), "upload_url": address}
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+        env, rc, _, storage, everything = run(monkeypatch, capsys, args, routes, [200])
+        assert rc == 0 and env["data"]["uploaded"] is True
+        assert storage.puts[0]["url"] == address
+        assert storage.puts[0]["body"] == _MODEL_BYTES
+        assert "SECRETSIG" not in everything
+
+    @pytest.mark.parametrize("quote", ["url", "query"])
+    @pytest.mark.parametrize("saved", [False, True], ids=["piece", "status-query"])
+    def test_certificate_failure_stops_at_once_without_session_credentials(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, quote, saved
+    ):
+        from urllib.parse import urlsplit
+
+        import requests
+
+        args = [str(model_file), "--type", "loras"]
+        if saved:
+            routes = _resume_routes()
+            routes[("POST", _COMPLETE_1)] = _http_error(403)
+            env, rc, *_ = _upload(monkeypatch, capsys, args, routes, [], storage=_ResumableBucket())
+            assert rc == 1
+        attempts = []
+
+        def failed(url, **kw):
+            attempts.append(kw["headers"]["Content-Range"])
+            address = url if quote == "url" else urlsplit(url).query
+            raise requests.exceptions.SSLError(f"[SSL: CERTIFICATE_VERIFY_FAILED] {address}")
+
+        env, rc, cloud, _, everything = _upload(monkeypatch, capsys, args, _resume_routes(), [], storage=failed)
+        assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+        assert attempts == ["bytes */16" if saved else "bytes 0-15/16"]
+        assert no_wait[0] == 0
+        assert _COMPLETE_1 not in cloud.paths()
+        assert "SECRETSIG" not in everything
+
+    @pytest.mark.parametrize("url", [1, True, {}, []])
+    @pytest.mark.parametrize("resumable", [False, True])
+    def test_invalid_start_url_returns_the_cloud_error(
+        self, cloud_target, monkeypatch, capsys, model_file, url, resumable
+    ):
+        routes = _resume_routes()
+        start = _resumable_started() if resumable else _started()
+        routes[("POST", "/api/assets/uploads")] = {**start, "upload_url": url}
+        env, rc, _, storage, everything = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+        assert rc == 1 and env["error"]["code"] == "cloud_http_error"
+        assert storage.puts == []
+        assert "SECRETSIG" not in everything
+
+    @pytest.mark.parametrize("quote", ["url", "query"])
+    def test_tls_setup_error_never_displays_session_credentials(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, quote
+    ):
+        from urllib.parse import urlsplit
+
+        attempts = []
+
+        def failed(url, **kw):
+            attempts.append(url)
+            raise OSError(url if quote == "url" else urlsplit(url).query)
+
+        env, rc, cloud, _, everything = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], _resume_routes(), [], storage=failed
+        )
+        assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+        assert len(attempts) == 1
+        assert _COMPLETE_1 not in cloud.paths()
+        assert "SECRETSIG" not in everything
+
+    def test_server_size_refusal_prints_its_message_before_sending(self, cloud_target, monkeypatch, capsys, model_file):
+        routes = _resume_routes()
+        routes[("POST", "/api/assets/uploads")] = _cloud_error(400, "FILE_TOO_LARGE", "Model files can be up to 25 GB.")
+        env, rc, _, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+        assert rc == 1 and env["error"]["message"] == "Model files can be up to 25 GB."
+        assert storage.puts == []
+
+    @pytest.mark.parametrize("endpoint", ["user", "workspaces/current"])
+    def test_unknown_identity_does_not_save_a_session(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, endpoint
+    ):
+        routes = _resume_routes()
+        routes[("GET", "/api/" + endpoint)] = {}
+        bucket = _ResumableBucket()
+        env, rc, *_ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=bucket)
+        assert rc == 0
+        from comfy_cli.config_manager import ConfigManager
+
+        assert list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json")) == []
+
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+    def test_paused_upload_redacts_the_credential_and_keeps_the_state(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model
+    ):
+        import requests
+
+        def lost(*a, **kw):
+            raise requests.ConnectionError("SECRETSIG")
+
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+        env, rc, _, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=lost)
+        assert rc == 1 and env["error"]["details"]["reason"] == "upload_paused"
+        assert env["error"]["details"]["session_saved"] is True
+        assert "SECRETSIG" not in everything
+        assert "Run the same command again" in env["error"]["message"]
+        from comfy_cli.config_manager import ConfigManager
+
+        assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+
+        env, rc, cloud, _, _ = run(monkeypatch, capsys, args, _resume_routes(), [], storage=lost)
+        assert rc == 1 and env["error"]["details"]["session_saved"] is True
+        assert "/api/assets/uploads" not in cloud.paths()
+
+    @pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+    @pytest.mark.parametrize("unsaved", ["user", "workspaces/current", "write-failed"])
+    def test_paused_upload_without_saved_state_explains_it_must_start_again(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, model, unsaved
+    ):
+        import requests
+
+        from comfy_cli.command.model_upload_resume import SessionStore
+        from comfy_cli.config_manager import ConfigManager
+
+        def lost(*a, **kw):
+            raise requests.ConnectionError("SECRETSIG")
+
+        def cannot_save(self):
+            raise OSError("permission denied")
+
+        routes = _resume_routes()
+        if unsaved == "write-failed":
+            monkeypatch.setattr(SessionStore, "_secure", cannot_save)
+        else:
+            routes[("GET", "/api/" + unsaved)] = {}
+        run = _model_upload if model else _upload
+        args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+        env, rc, cloud, _, everything = run(monkeypatch, capsys, args, routes, [], storage=lost)
+        assert rc == 1 and env["error"]["details"]["reason"] == "upload_paused"
+        assert env["error"]["details"]["session_saved"] is False
+        assert "not saved" in env["error"]["message"]
+        assert "start a new upload" in env["error"]["message"]
+        assert "to continue" not in env["error"]["message"]
+        assert "SECRETSIG" not in everything
+        assert _COMPLETE_1 not in cloud.paths()
+        assert list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json")) == []
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("mode", [OutputMode.JSON, OutputMode.NDJSON])
+def test_storing_task_is_reported_before_waiting(cloud_target, monkeypatch, model_file, model, mode):
+    import jsonschema
+
+    from comfy_cli.command.models import models
+
+    monkeypatch.setattr("urllib.request.urlopen", _Cloud(_resume_routes()))
+    monkeypatch.setattr("requests.put", _ResumableBucket())
+
+    def interrupted(*args, **kw):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(assets_library, "_wait_for_task", interrupted)
+    set_renderer(Renderer(mode=mode))
+    result = CliRunner().invoke(
+        models.app if model else assets_library.app,
+        ["upload", str(model_file), "--type", "loras", "--where", "cloud", *(["--yes"] if model else [])],
+    )
+    assert result.exit_code != 0
+    stream = result.stdout if mode is OutputMode.NDJSON else result.stderr
+    events = [json.loads(line) for line in stream.splitlines() if line.startswith("{")]
+    storing = [event for event in events if event["type"] == "upload_storing"]
+    assert storing == [{"schema": "event/1", "type": "upload_storing", "task_id": "task-1"}]
+    schema = json.loads((Path(assets_library.__file__).parents[1] / "schemas" / "build_push_event.json").read_text())
+    jsonschema.validate(storing[0], schema)
+    if mode is OutputMode.JSON:
+        assert result.stdout == ""
+    assert "SECRETSIG" not in result.output
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("mismatch", [False, True], ids=["verified", "wrong-hash"])
+@pytest.mark.parametrize("mode", [OutputMode.JSON, OutputMode.NDJSON, OutputMode.PRETTY])
+def test_closed_progress_pipe_still_polls_and_verifies(cloud_target, monkeypatch, model_file, model, mismatch, mode):
+    from comfy_cli.command.models import models
+
+    routes = _resume_routes()
+    if mismatch:
+        routes[("GET", "/api/tasks/task-1")] = {**_DONE, "result": {**_DONE["result"], "hash": "b" * 64}}
+    cloud = _Cloud(routes)
+    monkeypatch.setattr("urllib.request.urlopen", cloud)
+    monkeypatch.setattr("requests.put", _ResumableBucket())
+    refused = []
+    original_event = Renderer.progress_event
+    original_info = Renderer.info
+
+    def event(self, type, **fields):
+        if type != "upload_plan":
+            refused.append(type)
+            raise BrokenPipeError()
+        return original_event(self, type, **fields)
+
+    def info(self, message, **kw):
+        if "Task id:" in message:
+            refused.append("storing")
+            raise BrokenPipeError()
+        return original_info(self, message, **kw)
+
+    monkeypatch.setattr(Renderer, "progress_event", event)
+    monkeypatch.setattr(Renderer, "info", info)
+    set_renderer(Renderer(mode=mode))
+    result = CliRunner().invoke(
+        models.app if model else assets_library.app,
+        ["upload", str(model_file), "--type", "loras", "--where", "cloud", *(["--yes"] if model else [])],
+    )
+    assert "/api/tasks/task-1" in cloud.paths(), repr(result.exception)
+    assert result.exit_code == (1 if mismatch else 0), repr(result.exception)
+    assert refused
+    if mode is not OutputMode.PRETTY:
+        env = json.loads(result.stdout.strip().splitlines()[-1])
+        assert env["ok"] is (not mismatch)
+        if mismatch:
+            assert env["error"]["code"] == "asset_upload_unverified"
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("failure", ["tls-eof", "proxy-tls-eof", "proxy-connect", "408"])
+@pytest.mark.parametrize("saved", [False, True], ids=["piece", "status-query"])
+def test_transient_storage_failure_keeps_session_and_queries_offset(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, model, failure, saved
+):
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
+
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    bucket = _ResumableBucket()
+    if saved:
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = _http_error(403)
+        env, rc, *_ = run(monkeypatch, capsys, args, routes, [], storage=bucket)
+        assert rc == 1
+    calls = []
+
+    def put(url, **kw):
+        calls.append((url, kw["headers"]["Content-Range"]))
+        if len(calls) == 1:
+            if failure == "tls-eof":
+                raise requests.exceptions.SSLError(MaxRetryError(None, url, SSLError(ssl.SSLEOFError("TLS EOF"))))
+            if failure.startswith("proxy-"):
+                reason = ssl.SSLEOFError("TLS EOF") if failure == "proxy-tls-eof" else OSError("proxy unavailable")
+                raise requests.exceptions.ProxyError(MaxRetryError(None, url, ProxyError("proxy failed", reason)))
+            return SimpleNamespace(status_code=408, headers={}, close=lambda: None)
+        if len(calls) == 2:
+            assert no_wait[0] == 1
+        return bucket(url, **kw)
+
+    env, rc, cloud, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=put)
+    assert rc == 0 and env["ok"] is True
+    assert calls[1][1] == "bytes */16"
+    assert len({url for url, _ in calls}) == 1
+    assert cloud.paths("POST").count("/api/assets/uploads") == (0 if saved else 1)
+    assert bucket.held == _MODEL_BYTES
+    assert "SECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("failure", ["certificate", "proxy-certificate", "setup"])
+def test_normalized_tls_error_never_exposes_session_credentials(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, model, failure
+):
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
+
+    routes = _resume_routes()
+    start = {**_resumable_started(), "upload_url": "https://bucket.example/?upload_id=%53ECRETSIG"}
+    routes[("POST", "/api/assets/uploads")] = start
+    attempts = []
+
+    def put(url, **kw):
+        prepared = requests.Request("PUT", url).prepare().url
+        attempts.append(prepared)
+        assert "upload_id=SECRETSIG" in prepared
+        if failure in ("certificate", "proxy-certificate"):
+            reason = ssl.SSLCertVerificationError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+            if failure == "proxy-certificate":
+                raise requests.exceptions.ProxyError(MaxRetryError(None, prepared, ProxyError("proxy failed", reason)))
+            raise requests.exceptions.SSLError(MaxRetryError(None, prepared, SSLError(reason)))
+        raise OSError(f"TLS setup failed for {prepared}")
+
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    env, rc, cloud, _, everything = run(monkeypatch, capsys, args, routes, [], storage=put)
+    assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+    assert len(attempts) == 1 and no_wait[0] == 0
+    assert _COMPLETE_1 not in cloud.paths()
+    assert "SECRETSIG" not in everything
+    assert "%53ECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("saved", [False, True], ids=["piece", "status-query"])
+@pytest.mark.parametrize("proxy", [False, True], ids=["direct", "proxy"])
+def test_invalid_ca_contents_stop_without_backoff(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, saved, proxy
+):
+    """Preserve a real OpenSSL loading error through the transport's wrappers."""
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
+
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    if saved:
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = _http_error(403)
+        _, rc, *_ = run(monkeypatch, capsys, args, routes, [], storage=_ResumableBucket())
+        assert rc == 1
+    bundle = tmp_path / "invalid-ca.pem"
+    bundle.write_text("not a certificate\n")
+    with pytest.raises(ssl.SSLError) as native:
+        ssl.create_default_context(cafile=str(bundle))
+    attempts = []
+
+    def put(url, **kw):
+        attempts.append(kw["headers"]["Content-Range"])
+        if proxy:
+            raise requests.exceptions.ProxyError(MaxRetryError(None, url, ProxyError("proxy failed", native.value)))
+        raise requests.exceptions.SSLError(MaxRetryError(None, url, SSLError(native.value)))
+
+    env, rc, cloud, _, everything = run(monkeypatch, capsys, args, _resume_routes(), [], storage=put)
+    assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+    assert len(attempts) == 1 and no_wait[0] == 0
+    assert attempts[0].startswith("bytes */") is saved
+    assert _COMPLETE_1 not in cloud.paths()
+    assert "SECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("failure", ["certificate", "bundle", "flattened"])
+@pytest.mark.parametrize("proxy", [False, True], ids=["direct", "proxy"])
+def test_legacy_tls_certificate_failure_stops_without_a_fresh_upload(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, tmp_path, model, failure, proxy
+):
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
+
+    if failure == "bundle":
+        bundle = tmp_path / "invalid-ca.pem"
+        bundle.write_text("not a certificate\n")
+        with pytest.raises(ssl.SSLError) as native:
+            ssl.create_default_context(cafile=str(bundle))
+        reason = native.value
+    else:
+        reason = ssl.SSLCertVerificationError("certificate verify failed")
+    attempts = []
+
+    def put(url, **kw):
+        prepared = requests.Request("PUT", url).prepare().url
+        attempts.append(prepared)
+        assert "signature=SECRETSIG" in prepared
+        assert "Content-Range" not in kw["headers"]
+        wrapped = MaxRetryError(None, prepared, ProxyError("proxy failed", reason) if proxy else SSLError(reason))
+        error_type = requests.exceptions.ProxyError if proxy else requests.exceptions.SSLError
+        raise error_type(str(wrapped) if failure == "flattened" else wrapped)
+
+    routes = dict(_UPLOAD_ROUTES)
+    routes[("POST", "/api/assets/uploads")] = {
+        **_started(),
+        "upload_url": "https://bucket.example/?signature=%53ECRETSIG",
+    }
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    env, rc, cloud, _, everything = run(monkeypatch, capsys, args, routes, [], storage=put)
+    assert rc == 1 and env["error"]["details"]["reason"] == "tls_setup"
+    assert "CA certificate bundle" in env["error"]["message"]
+    assert env["error"]["details"]["attempts"] == 1
+    assert len(attempts) == 1 and no_wait[0] == 0
+    assert cloud.paths("POST").count("/api/assets/uploads") == 1
+    assert _COMPLETE_1 not in cloud.paths()
+    assert "SECRETSIG" not in everything and "%53ECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("failure_kind", ["tls-eof", "proxy-tls-eof", "proxy-connect"])
+def test_legacy_tls_eof_still_retries_with_a_fresh_upload(
+    cloud_target, monkeypatch, capsys, model_file, no_wait, model, failure_kind
+):
+    import ssl
+
+    import requests
+    from urllib3.exceptions import MaxRetryError, ProxyError, SSLError
+
+    failure = requests.exceptions.SSLError(MaxRetryError(None, "SECRETSIG", SSLError(ssl.SSLEOFError("TLS EOF"))))
+    if failure_kind.startswith("proxy-"):
+        reason = ssl.SSLEOFError("TLS EOF") if failure_kind == "proxy-tls-eof" else OSError("proxy unavailable")
+        failure = requests.exceptions.ProxyError(MaxRetryError(None, "SECRETSIG", ProxyError("proxy failed", reason)))
+    run = _model_upload if model else _upload
+    args = [str(model_file), "--type", "loras"] + (["--yes"] if model else [])
+    env, rc, cloud, storage, everything = run(monkeypatch, capsys, args, dict(_UPLOAD_ROUTES), [failure, 200])
+    assert rc == 0 and env["ok"] is True
+    assert len(storage.puts) == 2
+    assert cloud.paths("POST").count("/api/assets/uploads") == 2
+    assert "/api/tasks/task-1" in cloud.paths()
+    assert "SECRETSIG" not in everything
+
+
+@pytest.mark.parametrize("model", [False, True], ids=["assets-library", "model"])
+@pytest.mark.parametrize("mismatch", [False, True], ids=["verified", "wrong-hash"])
+@pytest.mark.parametrize("failure", ["broken-pipe", "closed-stream"])
+@pytest.mark.parametrize("notice", ["storing", "polling"])
+def test_real_pretty_output_failure_preserves_polling_and_hash_check(
+    cloud_target, monkeypatch, model_file, no_wait, model, mismatch, failure, notice
+):
+    """Run real Rich rendering; isolate only its process-wide stdout redirection."""
+    import rich.console
+
+    from comfy_cli.command.models import models
+
+    # Keep Rich's real BrokenPipeError -> SystemExit conversion, but do not
+    # let on_broken_pipe redirect pytest's stdout file descriptor to /dev/null.
+    redirected = []
+
+    def redirect(fd, target):
+        redirected.append((fd, target))
+        os.close(fd)
+
+    monkeypatch.setattr(rich.console, "os", SimpleNamespace(**{**vars(os), "dup2": redirect}))
+    monkeypatch.setattr(
+        rich.console, "sys", SimpleNamespace(**{**vars(sys), "stdout": SimpleNamespace(fileno=lambda: 1)})
+    )
+    failed_writes = []
+
+    class Output(io.StringIO):
+        def write(self, text):
+            marker = "Task id:" if notice == "storing" else "still checking"
+            if failed_writes or marker in text:
+                failed_writes.append(text)
+                if failure == "broken-pipe":
+                    raise BrokenPipeError()
+                raise ValueError("I/O operation on closed file.")
+            return super().write(text)
+
+    renderer = Renderer(mode=OutputMode.PRETTY)
+    renderer.pretty_stream = Output()
+    routes = _resume_routes()
+    routes[("GET", "/api/tasks/task-1")] = [{"id": "task-1", "status": "running"}] * 40 + [
+        {**_DONE, "result": {"success": True, "asset_id": "asset-9"}}
+    ]
+    verified = []
+    original_stored = assets_library._stored_asset
+    routes[("GET", "/api/assets/asset-9")] = {"id": "asset-9", "hash": "b" * 64 if mismatch else _MODEL_HASH}
+
+    def stored(*args):
+        verified.append(True)
+        # The final result has its own output boundary. Restore that output
+        # only once the task completed and its hash is about to be checked.
+        renderer.pretty_stream = io.StringIO()
+        return original_stored(*args)
+
+    monkeypatch.setattr(assets_library, "_stored_asset", stored)
+    cloud = _Cloud(routes)
+    monkeypatch.setattr("urllib.request.urlopen", cloud)
+    monkeypatch.setattr("requests.put", _ResumableBucket())
+    set_renderer(renderer)
+    result = CliRunner().invoke(
+        models.app if model else assets_library.app,
+        ["upload", str(model_file), "--type", "loras", "--where", "cloud", *(["--yes"] if model else [])],
+    )
+    assert verified, repr(result.exception)
+    assert cloud.paths().count("/api/tasks/task-1") == 41
+    assert result.exit_code == (1 if mismatch else 0), repr(result.exception)
+    assert len(failed_writes) == 1
+    assert bool(redirected) is (failure == "broken-pipe")
+    if mismatch:
+        assert "asset_upload_unverified" in renderer.pretty_stream.getvalue()

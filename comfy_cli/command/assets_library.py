@@ -24,6 +24,7 @@ from comfy_cli.command.cloud_http import (
     handle_cloud_http_error,
     http_request,
 )
+from comfy_cli.command.model_upload_resume import TlsSetupFailed as _TlsSetupFailed
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow, upload).")
@@ -346,9 +347,9 @@ def ensure_cmd(
 
 
 # What Comfy Cloud takes from `upload` (POST /api/assets/uploads): one
-# `.safetensors` file of 1 byte to 2 GiB under a bare name of at most 255 bytes.
+# `.safetensors` file under a bare name of at most 255 bytes. Start enforces
+# the size limit (up to 25 GiB when the server supports resumable uploads).
 # A pickle format (.ckpt, .pt, .bin) is refused: it can run code when loaded.
-_MAX_UPLOAD_BYTES = 2 * 1024**3
 _MAX_FILENAME_BYTES = 255
 # The first upload plus one fresh one after a PUT that got no answer or a 5xx.
 # Fresh, not a second PUT to the same URL: a signed URL lasts 15 minutes, which
@@ -358,9 +359,8 @@ _UPLOAD_STARTS = 2
 # id names a fresh object, so it can only be this upload's: the bytes landed.
 _ALREADY_WRITTEN = 412
 _PUT_TIMEOUT = (10, 600)
-# Storing the file (hashing up to 2 GiB) normally takes a minute or two.
+# Large uploads can take more than fifteen minutes to check and store.
 _TASK_POLL_SECONDS = 2.0
-_TASK_WAIT_SECONDS = 15 * 60.0
 # A task read that gets a 5xx or no answer is retried for this long from the
 # first failure in a row; a 4xx ends the wait at once.
 _UNANSWERED_WINDOW_SECONDS = 60.0
@@ -370,7 +370,7 @@ _REFUSAL_HINTS = {
     "MODEL_STORAGE_LIMIT_REACHED": "delete models you no longer need, or move to a plan with more model storage",
     "UNSUPPORTED_FILE_TYPE": "convert the model to .safetensors",
     "UNSUPPORTED_MODEL_TYPE": "pass a --type from `model_upload_folders` in GET /api/features",
-    "FILE_TOO_LARGE": "files can be up to 2 GB",
+    "FILE_TOO_LARGE": "use a file within the size limit in the server message",
 }
 # Any form Comfy Cloud reports a model's content hash in: bare hex, canonical
 # ``blake3:<hex>`` or the stored ``<hex>.<ext>``, any case.
@@ -401,10 +401,6 @@ class _FileUnreadable(Exception):
     """The file could not be opened or read while it was being sent; ``args[0]`` is the ``OSError``."""
 
 
-class _TlsSetupFailed(Exception):
-    """This machine's TLS settings stopped the PUT before it connected; ``args[0]`` is the message to show."""
-
-
 class _FileChanged(Exception):
     """A block of the file read for the PUT is not the block hashed before it; ``args[0]`` is the block's index."""
 
@@ -423,11 +419,14 @@ class _HashedBytes:
     since are not sent.
     """
 
-    def __init__(self, raw, digests) -> None:
+    def __init__(self, raw, digests, offset: int = 0) -> None:
         self._raw, self._digests = raw, digests
         self._pending = b""
-        self._next_block = 0
-        self._given = 0
+        self._next_block = offset // digests.block_size
+        self._skip = offset % digests.block_size
+        self._given = offset
+        if offset:
+            raw.seek(self._next_block * digests.block_size)
 
     def read(self, size: int = -1) -> bytes:
         from blake3 import blake3
@@ -439,7 +438,8 @@ class _HashedBytes:
             block = self._raw.read(min(d.block_size, d.size - self._next_block * d.block_size))
             if blake3(block).digest() != d.blocks[self._next_block]:
                 raise _BlockChanged(f"block {self._next_block} of the file is not the one hashed")
-            self._pending, self._next_block = block, self._next_block + 1
+            self._pending, self._next_block = block[self._skip :], self._next_block + 1
+            self._skip = 0
         n = len(self._pending) if size is None or size < 0 else size
         out, self._pending = self._pending[:n], self._pending[n:]
         self._given += len(out)
@@ -498,8 +498,6 @@ def _local_refusal(path: Path) -> tuple[str, str] | None:
         return _file_problem(path, e)
     if size < 1:
         return "empty_file", f"{path} is empty"
-    if size > _MAX_UPLOAD_BYTES:
-        return "file_too_large", f"{name} is {size} bytes; files can be up to 2 GB ({_MAX_UPLOAD_BYTES} bytes)"
     return None
 
 
@@ -650,16 +648,15 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
     A transport exception is dropped, never shown: its text quotes the signed
     URL, whose query string is a live credential. A file that cannot be opened
     or read raises ``_FileUnreadable`` instead: a fresh upload would fail
-    the same way, so it is not a transport failure to retry. Any other
-    ``OSError`` comes from setting up TLS (a CA bundle path that no longer
-    exists) and raises ``_TlsSetupFailed`` with its message; a retry would
-    fail the same way too.
+    the same way, so it is not a transport failure to retry. Certificate
+    verification/loading errors and other TLS setup ``OSError`` failures
+    raise ``_TlsSetupFailed`` with fixed TLS guidance; a retry would fail the
+    same way too. Transient TLS errors still permit a fresh upload.
     """
-    import urllib.parse
-
     import requests
 
     from comfy_cli.builder_api import _CountingReader
+    from comfy_cli.command.model_upload_resume import _tls_setup_failure
 
     class _Reader(_CountingReader):
         # urllib3 reports a body that fails to read as a dropped connection,
@@ -704,21 +701,83 @@ def _put(upload_url: str, headers: dict, path: Path, progress, digests) -> None:
                 raise _FileChanged(str(reader.failed)) from None
             if reader.failed is not None:
                 raise _FileUnreadable(reader.failed) from None
+            if isinstance(e, (requests.exceptions.SSLError, requests.exceptions.ProxyError)) and _tls_setup_failure(e):
+                raise _TlsSetupFailed() from None
             if isinstance(e, requests.RequestException):
                 raise _PutFailed(None) from None
             # Neither the file nor the transport (Requests wraps those): the
-            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file. Its
-            # text names a certificate path, but is never shown if it quotes
-            # the signed URL.
-            text, query = str(e) or type(e).__name__, urllib.parse.urlsplit(upload_url).query
-            if upload_url in text or (query and query in text):
-                text = type(e).__name__
-            raise _TlsSetupFailed(text) from None
+            # TLS setup, e.g. REQUESTS_CA_BUNDLE naming a removed file. Never
+            # retain its text: Requests may normalize a credential in the URL.
+            raise _TlsSetupFailed() from None
     if not (200 <= resp.status_code < 300 or resp.status_code == _ALREADY_WRITTEN):
         raise _PutFailed(resp.status_code)
 
 
-def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
+def _read_range(path, digests, offset: int, length: int) -> bytes:
+    try:
+        with path.open("rb") as raw:
+            reader = _HashedBytes(raw, digests, offset)
+            blocks = []
+            while length:
+                block = reader.read(length)
+                if not block:
+                    raise _FileChanged()
+                blocks.append(block)
+                length -= len(block)
+            return b"".join(blocks)
+    except _BlockChanged:
+        raise _FileChanged() from None
+    except OSError as e:
+        raise _FileUnreadable(e) from None
+
+
+def _upload_identity(target, sign_in) -> dict | None:
+    """Only server-confirmed account and workspace ids permit saved-session reuse."""
+    import http.client
+    import urllib.error
+
+    try:
+        _, user = _send(target, sign_in, target.url("user"), strict_json=True)
+        workspace = _current_workspace(target, sign_in)
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ResponseUnparseable):
+        return None
+    account = user.get("id") if isinstance(user, dict) else None
+    if not isinstance(account, str) or not account or not workspace:
+        return None
+    return {"account": account, "workspace": workspace}
+
+
+def _complete_upload(renderer, target, sign_in, upload_id: str, body: dict, *, resumable: bool) -> dict:
+    import http.client
+    import urllib.error
+    import urllib.parse
+
+    from comfy_cli.command.model_upload_resume import STALL_SECONDS, SessionExpired
+
+    parts = ("assets", "uploads", urllib.parse.quote(upload_id, safe=""), "complete")
+    if not resumable:
+        return _call(renderer, target, "complete", parts, body, sign_in=sign_in)
+    started, delay = _clock(), 1
+    while True:
+        try:
+            _, parsed = _send(target, sign_in, target.url(*parts), method="POST", body=body, strict_json=True)
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            code = e.code if isinstance(e, urllib.error.HTTPError) else None
+            if code == 404:
+                raise SessionExpired() from None
+            if (code is not None and code != 429 and code < 500) or _clock() - started >= STALL_SECONDS:
+                raise _http_failure(renderer, e, "complete", sign_in) from None
+            _sleep(min(delay, STALL_SECONDS - (_clock() - started)))
+            delay = min(delay * 2, 60)
+        except ResponseUnparseable:
+            raise _unexpected(renderer, "/api/assets/uploads/complete", "body was not valid JSON") from None
+        else:
+            if not isinstance(parsed, dict):
+                raise _unexpected(renderer, "/api/assets/uploads/complete", "expected a JSON object")
+            return parsed
+
+
+def _wait_for_task(renderer, target, task_id: str, sign_in=None, *, reporter) -> dict:
     """Read the task until it ends, riding out a brief 5xx, 429 or dropped connection."""
     import http.client
     import urllib.error
@@ -727,7 +786,7 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
     from comfy_cli.command._cloud_errors import retry_after_from_headers
 
     url = target.url("tasks", urllib.parse.quote(task_id, safe=""))
-    deadline = _clock() + _TASK_WAIT_SECONDS
+    started, last_notice = _clock(), _clock()
     unanswered_since: float | None = None
     status = None
     while True:
@@ -744,8 +803,8 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
                 raise _http_failure(renderer, e, "task", sign_in) from e
             retry_after = retry_after_from_headers(getattr(e, "headers", None)) if code == 429 else None
             if retry_after is not None:
-                # Never past the end of the window or of the whole wait.
-                left = min(unanswered_since + _UNANSWERED_WINDOW_SECONDS, deadline) - now
+                # Never past the end of the unanswered window.
+                left = unanswered_since + _UNANSWERED_WINDOW_SECONDS - now
                 pause = max(_TASK_POLL_SECONDS, min(retry_after, left))
         except ResponseUnparseable as e:
             raise _unexpected(renderer, "/api/tasks", "body was not valid JSON", task_id=task_id) from e
@@ -756,14 +815,9 @@ def _wait_for_task(renderer, target, task_id: str, sign_in=None) -> dict:
             status = task["status"]
             if status in _TASK_DONE:
                 return task
-        if _clock() >= deadline:
-            renderer.error(
-                code="asset_upload_timeout",
-                message=f"Comfy Cloud was still storing the file after {int(_TASK_WAIT_SECONDS)}s",
-                hint="storing goes on without this command; check `comfy assets library ls --tags models` later",
-                details={"task_id": task_id, "status": status},
-            )
-            raise typer.Exit(code=1)
+        if renderer.is_pretty() and _clock() - last_notice >= 30:
+            reporter.waiting(int(_clock() - started))
+            last_notice = _clock()
         _sleep(pause)
 
 
@@ -859,7 +913,7 @@ def _loader_path(asset: dict | None) -> str | None:
 
 @app.command(
     "upload",
-    help="Upload one named .safetensors model file (up to 2 GB) into your Comfy Cloud model library. "
+    help="Upload one named .safetensors model file (up to 25 GB) into your Comfy Cloud model library. Run the same command again to resume a stopped upload. "
     "Succeeds only once Comfy Cloud's hash of the stored file matches this file's; --dry-run checks without uploading.",
 )
 @tracking.track_command("assets")
@@ -906,9 +960,16 @@ def run_upload(
     the folder; without it the file is uploaded under that name, as a new
     version of it.
     """
-    import urllib.parse
-
     from comfy_cli.command.build_upload_progress import UploadProgressReporter
+    from comfy_cli.command.model_upload_resume import (
+        SessionExpired,
+        SessionStore,
+        TransferFailed,
+        UploadPaused,
+        transfer,
+        valid_start,
+    )
+    from comfy_cli.config_manager import ConfigManager
     from comfy_cli.credentials import DataPlaneToken
     from comfy_cli.hashing import file_digests
     from comfy_cli.interaction import confirm
@@ -987,6 +1048,7 @@ def run_upload(
         # One read gives the hashes, the size and each block's digest; the PUT
         # sends only bytes that match these blocks (`_HashedBytes`).
         digests = file_digests(file)
+        modified_ns = file.stat().st_mtime_ns
     except OSError as e:  # removed or locked since it was checked; nothing is sent yet
         raise refuse(*_file_problem(file, e)) from None
     local_hash, sha256, size = digests.blake3, digests.sha256, digests.size
@@ -1063,31 +1125,85 @@ def run_upload(
     tags = ["models", folder]
     reporter = UploadProgressReporter(renderer)
     reporter.plan([item], already_held=0)
+    store = SessionStore(
+        Path(ConfigManager().get_config_path()) / "model-uploads",
+        {
+            "server": target.url(),
+            "path": str(file.resolve()),
+            "size": size,
+            "mtime_ns": modified_ns,
+            "hash": local_hash,
+            "folder": folder,
+        },
+    )
+    identity = _upload_identity(target, sign_in) if store.has_saved() else None
+    saved = store.load(identity)
     for attempt in range(1, _UPLOAD_STARTS + 1):
-        start = _call(
+        resumed = saved is not None
+        session_saved = resumed
+        start = saved or _call(
             renderer,
             target,
             "start",
             ("assets", "uploads"),
-            {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags},
+            {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags, "resumable": True},
             sign_in=sign_in,
         )
-        upload_id, upload_url, headers = start.get("upload_id"), start.get("upload_url"), start.get("headers")
-        if not (
-            isinstance(upload_id, str)
-            and upload_id
-            and isinstance(upload_url, str)
-            and upload_url
-            and start.get("method") == "PUT"
-            and isinstance(headers, dict)
-            and all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items())
-        ):
-            # Never the URL itself in the error: it is a credential.
+        saved = None
+        if not valid_start(start):
             raise _unexpected(renderer, "/api/assets/uploads", "expected upload_id, upload_url, method PUT and headers")
+        upload_id, upload_url, headers = start["upload_id"], start["upload_url"], start["headers"]
+        resumable = start.get("upload_mode") == "resumable"
+        if resumable and not resumed:
+            identity = identity or _upload_identity(target, sign_in)
+            session_saved = store.save(start, identity)
+            if not session_saved:
+                renderer.warn("This upload cannot be saved for a later run; connection retries still work.")
         try:
             with reporter.uploading(item, 1, 1) as progress:
-                _put(upload_url, headers, file, progress, digests)
+                if resumable:
+                    transfer(
+                        start,
+                        size,
+                        lambda offset, length: _read_range(file, digests, offset, length),
+                        progress,
+                        resumed=resumed,
+                        clock=_clock,
+                        sleep=_sleep,
+                    )
+                else:
+                    _put(upload_url, headers, file, progress, digests)
+            task_id = _complete_upload(
+                renderer,
+                target,
+                sign_in,
+                upload_id,
+                {"filename": item.filename, "tags": tags},
+                resumable=resumable,
+            ).get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                raise _unexpected(renderer, "/api/assets/uploads/complete", "no task_id", upload_id=upload_id)
+            store.clear()
             break
+        except UploadPaused as e:
+            from comfy_cli.output.progress import human_bytes
+
+            next_run = (
+                "Run the same command again to continue while the saved session remains valid."
+                if session_saved
+                else "This session was not saved. Run the same command again to start a new upload."
+            )
+            renderer.error(
+                code="asset_upload_failed",
+                message=f"Upload paused at {human_bytes(e.args[0])} of {human_bytes(size)}. {next_run}",
+                details={
+                    "reason": "upload_paused",
+                    "upload_id": upload_id,
+                    "bytes_held": e.args[0],
+                    "session_saved": session_saved,
+                },
+            )
+            raise typer.Exit(code=1) from None
         except _FileUnreadable as e:
             renderer.error(
                 code="asset_upload_failed",
@@ -1098,6 +1214,7 @@ def run_upload(
             )
             raise typer.Exit(code=1) from None
         except _FileChanged:
+            store.clear()
             # Only the blocks before the changed one were sent, and the
             # upload is never completed, so the staged bytes never become an asset.
             renderer.error(
@@ -1111,14 +1228,27 @@ def run_upload(
             renderer.error(
                 code="asset_upload_failed",
                 message=f"could not set up a secure connection to storage ({e.args[0]})",
-                hint="point REQUESTS_CA_BUNDLE (or CURL_CA_BUNDLE) at a certificate bundle that exists, or unset it, "
-                "then upload again; nothing was added to the library",
+                hint="check the storage certificate and proxy, and point REQUESTS_CA_BUNDLE (or CURL_CA_BUNDLE) "
+                "at a trusted certificate bundle that exists, or unset it; then upload again; "
+                "nothing was added to the library",
                 details={"reason": "tls_setup", "upload_id": upload_id, "attempts": attempt},
             )
             raise typer.Exit(code=1) from None
-        except _PutFailed as e:
-            status = e.args[0]
-            if (status is None or status >= 500) and attempt < _UPLOAD_STARTS:
+        except (_PutFailed, TransferFailed, SessionExpired) as e:
+            expired = isinstance(e, SessionExpired)
+            status = 404 if expired else e.args[0]
+            refused = (
+                resumable
+                and isinstance(e, TransferFailed)
+                and status is not None
+                and 400 <= status < 500
+                and status not in (408, 429)
+            )
+            if expired or refused:
+                store.clear()
+            if (
+                expired or refused or (not resumable and (status is None or status >= 500))
+            ) and attempt < _UPLOAD_STARTS:
                 renderer.warn("The upload to storage did not go through; starting a fresh upload.")
                 continue
             answer = "no response" if status is None else f"HTTP {status}"
@@ -1130,15 +1260,8 @@ def run_upload(
             )
             raise typer.Exit(code=1) from None
 
-    complete = ("assets", "uploads", urllib.parse.quote(upload_id, safe=""), "complete")
-    task_id = _call(
-        renderer, target, "complete", complete, {"filename": item.filename, "tags": tags}, sign_in=sign_in
-    ).get("task_id")
-    if not isinstance(task_id, str) or not task_id:
-        raise _unexpected(renderer, "/api/assets/uploads/complete", "no task_id", upload_id=upload_id)
-    if renderer.is_pretty():
-        renderer.info("Uploaded; Comfy Cloud is checking and storing the file.")
-    task = _wait_for_task(renderer, target, task_id, sign_in)
+    reporter.storing(task_id)
+    task = _wait_for_task(renderer, target, task_id, sign_in, reporter=reporter)
 
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     if task["status"] != "completed" or result.get("success") is False:
