@@ -40,7 +40,7 @@ class TlsSetupFailed(Exception):
 
 
 class UploadPaused(Exception):
-    """The argument is the last byte count acknowledged by storage."""
+    """The arguments are the last byte count acknowledged by storage and its last status, ``None`` for no answer."""
 
 
 def _expiry(start: dict) -> float:
@@ -260,24 +260,27 @@ def _request(start: dict, data: bytes, content_range: str) -> tuple[int | None, 
 
 def transfer(
     start: dict, size: int, read_range, progress, *, resumed: bool, clock=time.monotonic, sleep=time.sleep
-) -> None:
+) -> bool:
     """Query after every uncertain PUT; only acknowledged bytes advance progress.
 
     ``read_range`` checks each whole hashing block before returning a piece.
     It may start inside a block, because a connection can drop at any byte.
+    Returns whether a status query found bytes already stored and the
+    transfer went on from them, rather than sending every byte from 0.
     """
     piece_size = chunk_size(start)
     offset, query, delay, last_progress = 0, resumed, 1, clock()
+    status, recovered = None, False
     while True:
         if clock() - last_progress >= STALL_SECONDS:
-            raise UploadPaused(offset)
+            raise UploadPaused(offset, status)
         end = offset if query else min(offset + piece_size, size)
         body = b"" if query else read_range(offset, end - offset)
         content_range = f"bytes */{size}" if query else f"bytes {offset}-{end - 1}/{size}"
         status, held = _request(start, body, content_range)
         if status in (200, 201, 412):
             progress(size - offset)
-            return
+            return recovered or query
         if status in (404, 410):
             raise SessionExpired()
         if status == 308:
@@ -287,11 +290,12 @@ def transfer(
             acknowledged = int(match.group(1)) + 1 if match else 0
             if acknowledged < offset or acknowledged > size or (not query and acknowledged > end):
                 raise TransferFailed(308)
+            recovered = recovered or (query and acknowledged > 0)
             if acknowledged > offset:
                 progress(acknowledged - offset)
                 offset, last_progress, delay = acknowledged, clock(), 1
                 if offset == size:
-                    return
+                    return recovered
                 query = False
                 continue
             # A fresh empty status is normal; a piece with no progress backs off.

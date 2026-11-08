@@ -979,8 +979,13 @@ class TestUpload:
             "size_bytes": 16,
             "tags": ["models", "loras"],
             "resumable": True,
+            "upload_analytics": {"client": "comfy_cli"},
         }
-        assert cloud.calls[3][2] == {"filename": "style.safetensors", "tags": ["models", "loras"]}
+        assert cloud.calls[3][2] == {
+            "filename": "style.safetensors",
+            "tags": ["models", "loras"],
+            "upload_analytics": {"client": "comfy_cli", "resumed": False},
+        }
         (put,) = storage.puts
         assert put["url"] == f"{_SIGNED}1" and put["headers"] == _PUT_HEADERS and put["allow_redirects"] is False
         assert put["body"] == model_file.read_bytes()
@@ -3214,3 +3219,250 @@ def test_real_pretty_output_failure_preserves_polling_and_hash_check(
     assert bool(redirected) is (failure == "broken-pipe")
     if mismatch:
         assert "asset_upload_unverified" in renderer.pretty_stream.getvalue()
+
+
+# --- Upload analytics: the client, whether bytes recovered, and why a transfer stopped ---
+
+_EVENTS = "/api/assets/uploads/00000000-0000-0000-0000-00000000000{}/events"
+_CLIENT = {"client": "comfy_cli"}
+
+
+def _analytics_routes(resumable: bool, *, version: int | None = 1, events: Any = b"") -> dict:
+    """Upload routes whose start advertises ``upload_analytics_version`` (absent for ``None``)."""
+    started = _resumable_started if resumable else _started
+    extra = {} if version is None else {"upload_analytics_version": version}
+    routes = _resume_routes()
+    routes[("POST", "/api/assets/uploads")] = [{**started(n), **extra} for n in (1, 2)]
+    for n in (1, 2):
+        routes[("POST", _EVENTS.format(n))] = events
+    return routes
+
+
+def _events(cloud: _Cloud) -> list[tuple[str, Any]]:
+    return [(path, body) for _, path, body in cloud.calls if path.endswith("/events")]
+
+
+def _complete_analytics(cloud: _Cloud) -> list:
+    return [body.get("upload_analytics") for _, path, body in cloud.calls if path.endswith("/complete")]
+
+
+def _report(reason: str) -> dict:
+    return {**_CLIENT, "size_bytes": 16, "model_folder": "loras", "reason": reason}
+
+
+def _storage_answer(status: int):
+    return lambda *a, **kw: SimpleNamespace(status_code=status, headers={}, close=lambda: None)
+
+
+def _storage_silent(url, **kw):
+    import requests
+
+    raise requests.ConnectionError(url)
+
+
+# (resumable, what fails, the report's reason, the upload id whose transfer stopped)
+_TERMINAL = {
+    "single-put-no-answer": (False, "no-answer", "network", 2),
+    "single-put-5xx": (False, "5xx", "http", 2),
+    "tls-setup": (False, "tls", "network", 1),
+    "file-removed": (False, "removed", "file_unreadable", 1),
+    "refused": (True, "403", "http", 2),
+    "session-gone": (True, "410", "session_expired", 2),
+    "stalled": (True, "no-answer", "network", 1),
+    "stalled-5xx": (True, "5xx", "http", 1),
+    "file-changed": (True, "changed", "file_changed", 1),
+}
+
+
+def _terminal_storage(resumable: bool, failure: str):
+    import requests
+
+    from comfy_cli.command.model_upload_resume import TlsSetupFailed
+
+    if failure == "tls":
+        return _Storage([TlsSetupFailed()])
+    if failure in ("removed", "changed"):
+        return _ResumableBucket() if resumable else _Storage([200])
+    if not resumable:
+        return _Storage([requests.ConnectionError("lost")] * 2 if failure == "no-answer" else [503, 503])
+    return _storage_silent if failure == "no-answer" else _storage_answer(503 if failure == "5xx" else int(failure))
+
+
+def _failed_upload(monkeypatch, capsys, model_file, case: str, *, version: int | None, events: Any = b""):
+    """One run of a terminal failure from a fresh file and no saved session: envelope, rc, cloud, sessions left, text."""
+    from comfy_cli.config_manager import ConfigManager
+
+    resumable, failure, _, _ = _TERMINAL[case]
+    directory = Path(ConfigManager().get_config_path()) / "model-uploads"
+    for path in directory.glob("*.json"):
+        path.unlink()
+    model_file.write_bytes(_MODEL_BYTES)
+    routes = _analytics_routes(resumable, version=version, events=events)
+    first, second = routes[("POST", "/api/assets/uploads")]
+    if failure == "removed":
+        routes[("POST", "/api/assets/uploads")] = [_then(model_file.unlink, first), second]
+    elif failure == "changed":
+        routes[("POST", "/api/assets/uploads")] = [
+            _then(lambda: model_file.write_bytes(b"X" + _MODEL_BYTES[1:]), first),
+            second,
+        ]
+    cloud = _TimedCloud(routes)
+    env, rc, cloud, _, everything = _upload(
+        monkeypatch,
+        capsys,
+        [str(model_file), "--type", "loras"],
+        routes,
+        [],
+        cloud=cloud,
+        storage=_terminal_storage(resumable, failure),
+    )
+    return env, rc, cloud, len(list(directory.glob("*.json"))), everything
+
+
+class _TimedCloud(_Cloud):
+    def __init__(self, routes: dict):
+        super().__init__(routes)
+        self.timeouts: list = []
+
+    def __call__(self, req, timeout=None):
+        self.timeouts.append(timeout)
+        return super().__call__(req, timeout)
+
+
+def _run_upload_directly(monkeypatch, routes: dict, storage) -> _Cloud:
+    cloud = _Cloud(routes)
+    monkeypatch.setattr("urllib.request.urlopen", cloud)
+    monkeypatch.setattr("requests.put", storage)
+    r = Renderer.resolve(
+        is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
+    )
+    r.mode = OutputMode.JSON
+    set_renderer(r)
+    return cloud
+
+
+class TestUploadAnalytics:
+    @pytest.mark.parametrize("resumable", [False, True], ids=["single-put", "resumable"])
+    def test_start_names_the_client_and_a_fresh_transfer_completes_unresumed(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, resumable
+    ):
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch,
+            capsys,
+            [str(model_file), "--type", "loras"],
+            _analytics_routes(resumable),
+            [200],
+            storage=_ResumableBucket() if resumable else None,
+        )
+
+        assert rc == 0 and env["data"]["uploaded"] is True
+        (start,) = [body for _, path, body in cloud.calls if path == "/api/assets/uploads"]
+        assert start["upload_analytics"] == _CLIENT
+        assert _complete_analytics(cloud) == [{**_CLIENT, "resumed": False}]
+        assert _events(cloud) == []
+
+    @pytest.mark.parametrize("kept", [5, 0], ids=["from-stored-bytes", "from-zero"])
+    def test_a_failed_piece_that_recovers_sends_no_report(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, kept
+    ):
+        import requests
+
+        bucket = _ResumableBucket()
+
+        def put(url, **kw):
+            if not bucket.puts:
+                # Storage keeps the first `kept` bytes; the answer is lost.
+                bucket.puts.append(kw)
+                bucket.held = kw["data"][:kept]
+                raise requests.ConnectionError(url)
+            return bucket(url, **kw)
+
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], _analytics_routes(True), [], storage=put
+        )
+
+        assert rc == 0 and bucket.held == _MODEL_BYTES
+        assert [p["headers"]["Content-Range"] for p in bucket.puts[1:]] == ["bytes */16", f"bytes {kept}-15/16"]
+        # Only a transfer that went on from stored bytes counts as resumed.
+        assert _complete_analytics(cloud) == [{**_CLIENT, "resumed": kept > 0}]
+        assert _events(cloud) == []
+
+    @pytest.mark.parametrize(
+        "events",
+        [b"", _http_error(404), _http_error(429), TimeoutError("timed out"), urllib.error.URLError("refused")],
+        ids=["accepted", "404", "429", "timeout", "connection-error"],
+    )
+    def test_a_cancel_reports_once_still_interrupts_and_its_saved_session_resumes(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, events
+    ):
+        from comfy_cli.config_manager import ConfigManager
+
+        bucket = _ResumableBucket(crash=True)
+        cloud = _run_upload_directly(monkeypatch, _analytics_routes(True, events=events), bucket)
+        with pytest.raises(KeyboardInterrupt):
+            assets_library.run_upload(
+                model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+            )
+
+        assert _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
+        assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+        capsys.readouterr()
+        bucket.puts.clear()
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], _analytics_routes(True), [], storage=bucket
+        )
+        assert rc == 0 and "/api/assets/uploads" not in cloud.paths()
+        assert [p["headers"]["Content-Range"] for p in bucket.puts] == ["bytes */16", "bytes 5-15/16"]
+        assert _complete_analytics(cloud) == [{**_CLIENT, "resumed": True}]
+        assert _events(cloud) == []
+
+    def test_a_saved_session_already_fully_stored_completes_resumed(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = _analytics_routes(True)
+        routes[("POST", _COMPLETE_1)] = _cloud_error(403, "NO", "try again")
+        bucket = _ResumableBucket()
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=bucket
+        )
+        # A refused complete is the server's own failure: no report.
+        assert rc == 1 and _events(cloud) == []
+        bucket.puts.clear()
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], _analytics_routes(True), [], storage=bucket
+        )
+        assert rc == 0 and [p["headers"]["Content-Range"] for p in bucket.puts] == ["bytes */16"]
+        assert _complete_analytics(cloud) == [{**_CLIENT, "resumed": True}]
+
+    @pytest.mark.parametrize("case", list(_TERMINAL))
+    def test_a_terminal_transfer_failure_reports_once_and_changes_nothing_else(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, case
+    ):
+        _, _, reason, upload = _TERMINAL[case]
+        old = _failed_upload(monkeypatch, capsys, model_file, case, version=None)
+        new = _failed_upload(monkeypatch, capsys, model_file, case, version=1)
+
+        # A server that does not advertise the events route gets no report.
+        assert _events(old[2]) == []
+        # Only the closed fields: no file name, URL, hash or error text.
+        assert _events(new[2]) == [(_EVENTS.format(upload), _report(reason))]
+        assert new[1] == old[1] == 1
+        assert new[0] == old[0]
+        assert new[3] == old[3]
+        assert new[4] == old[4]
+
+    @pytest.mark.parametrize("case", ["single-put-5xx", "stalled"])
+    @pytest.mark.parametrize(
+        "events",
+        [_http_error(404), _http_error(429), TimeoutError("timed out"), urllib.error.URLError("refused")],
+        ids=["404", "429", "timeout", "connection-error"],
+    )
+    def test_a_report_that_fails_changes_nothing(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, case, events
+    ):
+        old = _failed_upload(monkeypatch, capsys, model_file, case, version=None)
+        new = _failed_upload(monkeypatch, capsys, model_file, case, version=1, events=events)
+
+        reports = [i for i, (_, path, _) in enumerate(new[2].calls) if path.endswith("/events")]
+        assert len(reports) == 1 and new[2].timeouts[reports[0]] <= 5
+        assert (new[0], new[1], new[3], new[4]) == (old[0], old[1], old[3], old[4])

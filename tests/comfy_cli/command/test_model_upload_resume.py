@@ -171,7 +171,7 @@ def test_thirty_minutes_without_acknowledged_bytes_pauses_without_credentials(se
     monkeypatch.setattr(requests, "put", lost)
     with pytest.raises(resume.UploadPaused) as error:
         send(session, file, clock)
-    assert error.value.args == (0,)
+    assert error.value.args == (0, None)
     assert "SESSION" not in str(error.value)
     assert clock[0]() == resume.STALL_SECONDS
 
