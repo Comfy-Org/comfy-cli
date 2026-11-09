@@ -17,6 +17,13 @@ history.
 
 ### Changed
 
+- `comfy workflow save --where cloud` prints a link that opens only the saved
+  workflow (`?workflowId=<workflow id>`) when Cloud's `/api/features` has
+  `private_saved_file_links_enabled` on. The workflow id is the one record
+  Cloud made from the saved file. With the setting off, or when that record
+  is missing, not unique, or the search for it fails, the link opens the
+  folder as before. The receipt adds `url_opens` (`workflow` or `folder`) and
+  `folder_link_reason`.
 - Release watches poll through `stopping` and report `build_stopped` (exit 1) when a release stops. Log following reads the final lines after `stopped` and exits successfully.
 
 - `comfy deploy status` explains beside its sampled counts that they may lag after workers scale down. The deploy-failure guidance also clarifies that sampled counts cannot establish whether a worker or job is running now.
@@ -64,7 +71,7 @@ history.
   uploads with `--no-upload` and then uploads only the approved files with
   `--allow-upload`, and the agent runs
   one real job before it saves with `comfy workflow save --where cloud` and
-  hands back the folder link (or says there is none for a record-only save).
+  hands back the save's link (or says there is none for a record-only save).
   `comfy_cli/skills/comfy-run-on-cloud/PROMPT-TEMPLATE.md` is the prompt local
   ComfyUI's Copy prompt button gives the agent. `comfy-build` points a
   single-workflow request at the new skill, `comfy-build-failures` says a

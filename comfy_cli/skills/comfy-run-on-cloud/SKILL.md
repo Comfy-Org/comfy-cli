@@ -336,9 +336,21 @@ comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id
 ```
 
 It saves into a new folder in the Cloud Workflows sidebar and never replaces a
-file. `data.url` opens that folder in the person's workspace:
-`?workspace=<id>&workflows=<folder>&deployment=<id or standard>`. If `data.url`
-is missing, the save is a record only: nothing was added to the Workflows
+file. Hand back `data.url` as returned. `data.url_opens` says what it opens in
+the person's workspace:
+
+- `workflow`: only the saved workflow,
+  `?workspace=<id>&workflowId=<data.workflow_id>&deployment=<id or standard>`.
+  If the workflow no longer matches the saved file, Cloud says "Couldn't open
+  this workflow" and opens nothing.
+- `folder`: every workflow in the new folder,
+  `?workspace=<id>&workflows=<folder>&deployment=<id or standard>`.
+  `data.folder_link_reason` says why: `workflow_links_off` (the workspace does
+  not give workflow links), or `record_not_found`, `record_ambiguous` or
+  `record_lookup_failed` (the save could not tell which workflow Cloud made
+  from the file, and `data.warnings[]` carries `workflow_record_unknown`).
+
+If `data.url` is missing, the save is a record only: nothing was added to the Workflows
 sidebar and there is no link. Say that plainly, give `data.workflow_id`, and do
 not point them at a sidebar entry. Then read `data.warnings[]` for the reason:
 

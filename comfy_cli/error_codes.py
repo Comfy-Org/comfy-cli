@@ -1034,16 +1034,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "workspace_unknown",
         "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not say which "
-        "workspace it went to, so `data.url` leaves out the workspace and deployment and opens the folder in "
-        "whatever workspace the browser is on. Surfaced in `data.warnings[]` (not as an error envelope) "
-        "because the save itself succeeded.",
+        "workspace it went to, so `data.url` leaves out the workspace and deployment and opens the workflow or "
+        "folder (`data.url_opens`) in whatever workspace the browser is on. Surfaced in `data.warnings[]` (not "
+        "as an error envelope) because the save itself succeeded.",
         "switch the browser to the workspace `comfy cloud whoami` shows before opening the link",
     ),
     ErrorCode(
         "workflow_record_unknown",
         "`comfy workflow save` wrote to a Comfy Cloud Workflows-sidebar folder, but Cloud did not show the "
         "workflow record it makes from that file, so `data.workflow_id` and `data.latest_version` are null. "
-        "Surfaced in `data.warnings[]` (not as an error envelope) because the file itself was saved.",
+        "`data.folder_link_reason` says why when workflow links are on: `record_not_found` (Cloud's copy "
+        "into its workflow records is best-effort and made none), `record_ambiguous` (more than one record "
+        "has the name) or `record_lookup_failed` (the search failed). The link then opens the folder instead "
+        "of the workflow. Surfaced in `data.warnings[]` (not as an error envelope) because the file itself "
+        "was saved.",
         "find the record with `comfy --json workflow list --name <data.name>`",
     ),
     ErrorCode(

@@ -1408,6 +1408,11 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # userdata file in a folder of its own instead (Cloud mirrors that file into
 # a workflow record by itself) and prints a link that opens the folder. Any
 # other answer, or no answer, keeps the record-only save exactly as before.
+# When ``private_saved_file_links_enabled`` is also true, the link opens the
+# one workflow record Cloud made from the file (``?workflowId=<id>``) instead
+# of the folder; when that record cannot be told, the link stays the folder
+# one and ``folder_link_reason`` says why. That refinement is
+# docs/adr/SIDEBAR-0013-link-a-cloud-save-to-the-workflow-it-made.md.
 # The file is written with ``overwrite=false``, so nothing that exists is
 # ever replaced: a name already taken moves on to ``<name> (2)``, ``(3)``, ...
 # Only a frontend-format workflow goes into a folder, since the sidebar opens
@@ -1421,6 +1426,7 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 _CLI_CLOUD_SAVE_FLAG = "cli_cloud_save_enabled"
+_WORKFLOW_LINKS_FLAG = "private_saved_file_links_enabled"
 
 # How long the flag read may take before ``save`` keeps the record-only path.
 _FEATURES_TIMEOUT_S = 10.0
@@ -1465,18 +1471,24 @@ def _request_errors() -> tuple[type[BaseException], ...]:
     )
 
 
-def _cli_cloud_save_enabled(target) -> bool:
-    """True only when Cloud's ``/api/features`` answers ``cli_cloud_save_enabled: true``.
+def _cloud_save_features(target) -> dict[str, Any]:
+    """Cloud's ``/api/features`` reply, or ``{}`` when it cannot be read.
 
-    A missing key, any other value, or a request that fails in any way reads
-    as off, so ``save`` keeps its record-only path and ``delete`` its
-    record-only delete.
+    A flag counts as on only when its value is a JSON ``true``; a missing
+    key, any other value, or a request that fails in any way reads as off, so
+    ``save`` keeps its record-only path and ``delete`` its record-only delete.
+    ``save`` reads both of its flags from this one reply.
     """
     try:
         _, body = _http_request(target.url("features"), target, timeout=_FEATURES_TIMEOUT_S)
     except _request_errors():
-        return False
-    return isinstance(body, dict) and body.get(_CLI_CLOUD_SAVE_FLAG) is True
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _cli_cloud_save_enabled(target) -> bool:
+    """True only when Cloud's ``/api/features`` answers ``cli_cloud_save_enabled: true``."""
+    return _cloud_save_features(target).get(_CLI_CLOUD_SAVE_FLAG) is True
 
 
 def _cloud_folder_name(name: str) -> str:
@@ -1565,13 +1577,36 @@ def _cloud_records_named(target, name: str) -> list[dict] | None:
     return None
 
 
-def _cloud_saved_record(target, name: str) -> dict | None:
-    """The record Cloud mirrored a new file into, or None when it cannot be told."""
+# The first half of the ``workflow_record_unknown`` message, by the reason
+# ``_cloud_saved_record`` gives.
+_RECORD_UNKNOWN_CLAUSES = {
+    "record_not_found": "Cloud did not show the workflow record it made from it",
+    "record_ambiguous": "Cloud shows more than one workflow record of its name",
+    "record_lookup_failed": "the search for the workflow record Cloud made from it failed",
+}
+
+
+def _cloud_saved_record(target, name: str) -> tuple[dict | None, str | None]:
+    """The record Cloud mirrored a new file into, or None and why it cannot be told.
+
+    The reason is ``record_not_found`` (no live record has the name: Cloud's
+    copy into its workflow records is best-effort), ``record_ambiguous``
+    (more than one has it) or ``record_lookup_failed`` (the search failed,
+    ran past its page cap, or sent a row with no usable id).
+    """
     try:
         rows = _cloud_records_named(target, name)
     except _request_errors():
-        return None
-    return rows[0] if rows and len(rows) == 1 else None
+        return None, "record_lookup_failed"
+    if rows is None:
+        return None, "record_lookup_failed"
+    if not rows:
+        return None, "record_not_found"
+    if len(rows) > 1:
+        return None, "record_ambiguous"
+    if not isinstance(rows[0].get("id"), str) or not rows[0]["id"]:
+        return None, "record_lookup_failed"
+    return rows[0], None
 
 
 def _cloud_link_id(value: Any) -> str | None:
@@ -1587,9 +1622,13 @@ def _cloud_workspace_id(target) -> str | None:
     return _cloud_link_id(body.get("id")) if isinstance(body, dict) else None
 
 
-def _cloud_folder_link(target, *, workspace_id: str | None, folder: str, deployment: str) -> str | None:
-    """The Cloud editor link that opens ``folder``, or None for an unusable base URL.
+def _cloud_save_link(
+    target, *, workspace_id: str | None, folder: str, deployment: str, workflow_id: str | None = None
+) -> str | None:
+    """The Cloud editor link for a sidebar save, or None for an unusable base URL.
 
+    With ``workflow_id`` the link opens that one workflow record
+    (``workflowId=<id>``); without it, every workflow in ``folder``.
     ``deployment`` is a deployment id, or ``standard`` for Comfy Cloud itself.
     It goes in only with the workspace, since the editor reads it only then.
     """
@@ -1601,7 +1640,10 @@ def _cloud_folder_link(target, *, workspace_id: str | None, folder: str, deploym
     query: dict[str, str] = {}
     if workspace_id:
         query["workspace"] = workspace_id
-    query[_WORKFLOWS_DIR] = folder
+    if workflow_id:
+        query["workflowId"] = workflow_id
+    else:
+        query[_WORKFLOWS_DIR] = folder
     if workspace_id:
         query["deployment"] = deployment
     encoded = urllib.parse.urlencode(query, quote_via=urllib.parse.quote)
@@ -1617,6 +1659,7 @@ def _cloud_folder_save(
     name: str,
     description: str | None,
     deployment: str | None,
+    workflow_links: bool = False,
 ) -> None:
     """Write the workflow as ``workflows/<new folder>/<name>.json`` and print its link.
 
@@ -1624,6 +1667,10 @@ def _cloud_folder_save(
     record already has the name the file would mirror into
     (``<folder>/<name>``): Cloud adds a version to a record of that name, so
     writing there would change a workflow that already exists.
+
+    With ``workflow_links`` the link opens the one record of that name found
+    after the write. Cloud's page checks that record against this file before
+    it opens anything.
     """
     import urllib.error
 
@@ -1670,13 +1717,22 @@ def _cloud_folder_save(
     except (ValueError, RecursionError):
         pass
     record_name = key[: -len(".json")]
-    record = _cloud_saved_record(target, record_name)
-    workflow_id = record.get("id") if record and isinstance(record.get("id"), str) else None
-    latest_version = record.get("latest_version") if record and workflow_id else None
+    record, record_unknown = _cloud_saved_record(target, record_name)
+    workflow_id = record["id"] if record else None
+    latest_version = record.get("latest_version") if record else None
     workspace_id = _cloud_workspace_id(target)
-    url = _cloud_folder_link(
-        target, workspace_id=workspace_id, folder=folder, deployment=deployment or _STANDARD_DEPLOYMENT
+    link_workflow_id = workflow_id if workflow_links else None
+    url = _cloud_save_link(
+        target,
+        workspace_id=workspace_id,
+        folder=folder,
+        deployment=deployment or _STANDARD_DEPLOYMENT,
+        workflow_id=link_workflow_id,
     )
+    url_opens = None if url is None else ("workflow" if link_workflow_id else "folder")
+    folder_link_reason = None
+    if url_opens == "folder":
+        folder_link_reason = record_unknown if workflow_links else "workflow_links_off"
     # ``workflow_id``, ``name``, ``latest_version`` and ``source`` keep their
     # record-save meaning: the id is the record Cloud mirrored the file into,
     # which `workflow get` and `workflow delete` take.
@@ -1687,6 +1743,8 @@ def _cloud_folder_save(
         "filename": f"{_WORKFLOWS_DIR}/{key}",
         "folder": folder,
         "url": url,
+        "url_opens": url_opens,
+        "folder_link_reason": folder_link_reason,
         "workspace_id": workspace_id,
         "deployment": deployment or _STANDARD_DEPLOYMENT,
         "source": str(path),
@@ -1706,16 +1764,18 @@ def _cloud_folder_save(
         warnings.append(
             {
                 "code": "workspace_unknown",
-                "message": "Cloud did not say which workspace the save went to, so the link opens the folder in "
-                "the browser's current workspace",
+                "message": f"Cloud did not say which workspace the save went to, so the link opens the {url_opens} "
+                "in the browser's current workspace",
             }
         )
     if workflow_id is None:
+        why = _RECORD_UNKNOWN_CLAUSES.get(record_unknown or "", _RECORD_UNKNOWN_CLAUSES["record_not_found"])
         warnings.append(
             {
                 "code": "workflow_record_unknown",
-                "message": "the file is saved, but Cloud did not show the workflow record it made from it, so "
-                "workflow_id is null; find it with `comfy --json workflow list --name` and the saved name",
+                "message": f"the file is saved, but {why}, so workflow_id is null"
+                + (" and the link opens the folder" if url_opens == "folder" and workflow_links else "")
+                + "; find it with `comfy --json workflow list --name` and the saved name",
             }
         )
     if warnings:
@@ -2043,7 +2103,7 @@ def save_cmd(
             "--deployment",
             show_default=False,
             help="Cloud, when the save goes to a sidebar folder: the deployment id the printed link opens the "
-            "folder on. Default `standard`, Comfy Cloud itself.",
+            "workflow or folder on. Default `standard`, Comfy Cloud itself.",
         ),
     ] = None,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
@@ -2092,10 +2152,18 @@ def save_cmd(
     # ``nodes[]``; an API-format file there would open empty. So only a
     # frontend-format workflow goes into a folder, and an API-format one keeps
     # the record-only save with a warning that says why it has no link.
-    sidebar = _cli_cloud_save_enabled(target)
+    features = _cloud_save_features(target)
+    sidebar = features.get(_CLI_CLOUD_SAVE_FLAG) is True
     if sidebar and _is_frontend_format(workflow_json):
         return _cloud_folder_save(
-            renderer, target, path=path, text=text, name=name, description=description, deployment=deployment
+            renderer,
+            target,
+            path=path,
+            text=text,
+            name=name,
+            description=description,
+            deployment=deployment,
+            workflow_links=features.get(_WORKFLOW_LINKS_FLAG) is True,
         )
 
     body: dict[str, Any] = {"name": name, "workflow_json": workflow_json}

@@ -775,6 +775,9 @@ class TestSave:
 
 _FLAG_OFF = {"cli_cloud_save_enabled": False}
 _FLAG_ON = {"cli_cloud_save_enabled": True}
+# Sidebar saving and workflow-id links both on.
+_LINKS_ON = {"cli_cloud_save_enabled": True, "private_saved_file_links_enabled": True}
+_WORKFLOW_UUID = "2c2fd5e2-c367-48cf-936f-c561f2414c19"
 # An editor-format workflow: the only kind the sidebar can open.
 _UI_DATA = {"nodes": [{"id": 1, "type": "KSampler", "widgets_values": [20]}], "links": [], "version": 0.4}
 # An API-format workflow: saved the record-only way even with the flag on.
@@ -816,6 +819,7 @@ def _sidebar(
     records=(),
     workspace=_WORKSPACE,
     lookup_after_write=None,
+    ids=None,
 ):
     """A fake Cloud.
 
@@ -823,9 +827,11 @@ def _sidebar(
     subfolder (listed only with ``recurse=true``), a POST into a ``conflict``
     folder gets 409, and ``records`` are the names of live workflow records.
     A written file is mirrored into a record named after its path, as Cloud
-    does. ``lookup_after_write``, when set, answers the record search once a
-    file has been written.
+    does; ``ids`` maps a record name to its id (default ``rec-<name>``).
+    ``lookup_after_write``, when set, answers the record search once a file
+    has been written; a callable gets the search's offset.
     """
+    ids = ids or {}
     import urllib.parse
 
     state = {"records": list(records), "written": False}
@@ -856,9 +862,15 @@ def _sidebar(
             return {"path": key, "size": len(body), "modified": 1700000000000}
         if parsed.path == "/api/workflows" and method == "GET":
             if state["written"] and lookup_after_write is not None:
+                if callable(lookup_after_write):
+                    return lookup_after_write(int(query["offset"][0]))
                 return lookup_after_write
             needle = query["name"][0].lower()
-            rows = [{"id": f"rec-{n}", "name": n, "latest_version": 1} for n in state["records"] if needle in n.lower()]
+            rows = [
+                {"id": ids.get(n, f"rec-{n}"), "name": n, "latest_version": 1}
+                for n in state["records"]
+                if needle in n.lower()
+            ]
             return {"data": rows, "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
         if parsed.path == "/api/workflows" and method == "POST":
             return _RECORD_CREATED
@@ -889,6 +901,8 @@ class TestSaveToSidebarFolder:
         assert data["workspace_id"] == "ws_123"
         assert data["deployment"] == "standard"
         assert data["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert data["url_opens"] == "folder"
+        assert data["folder_link_reason"] == "workflow_links_off"
         assert "warnings" not in data
         (post,) = _posts(calls)
         assert post["url"] == "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json?overwrite=false"
@@ -1149,12 +1163,15 @@ class TestSaveToSidebarFolder:
         assert env["ok"] is False
         assert len(_posts(calls)) == 1
 
-    def test_api_format_keeps_the_record_save_with_a_warning(self, cloud_target, tmp_path, monkeypatch, capsys):
+    @pytest.mark.parametrize("features", [pytest.param(_FLAG_ON, id="sidebar"), pytest.param(_LINKS_ON, id="links")])
+    def test_api_format_keeps_the_record_save_with_a_warning(
+        self, cloud_target, tmp_path, monkeypatch, capsys, features
+    ):
         # The sidebar opens a file as an editor graph, which builds nodes only
         # from nodes[]: an API-format file there would open empty.
         wf_path = tmp_path / "api.json"
         wf_path.write_text(json.dumps(_WF_DATA))
-        calls = _patch_cloud(monkeypatch, _sidebar())
+        calls = _patch_cloud(monkeypatch, _sidebar(features=features))
         env = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
         assert env["ok"] is True
         assert env["data"]["workflow_id"] == "new-uuid"
@@ -1166,6 +1183,186 @@ class TestSaveToSidebarFolder:
         assert not any("/api/userdata" in c["url"] for c in calls)
 
 
+class TestSaveLinksTheWorkflow:
+    """With ``private_saved_file_links_enabled`` on, the link opens the one record Cloud made from the file."""
+
+    @pytest.fixture
+    def wf_path(self, tmp_path):
+        p = tmp_path / "wf.json"
+        p.write_text(json.dumps(_UI_DATA, indent=2))
+        return p
+
+    def _save(self, wf_path, capsys, *extra):
+        return _run(["save", str(wf_path), "--name", "flux", "--where", "cloud", *extra], capsys)
+
+    @staticmethod
+    def _record_searches(calls):
+        return [c for c in calls if c["method"] == "GET" and "/api/workflows?name=flux%2Fflux&" in c["url"]]
+
+    def test_one_record_gives_a_workflow_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, ids={"flux/flux": _WORKFLOW_UUID}))
+        env = self._save(wf_path, capsys)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["url"] == (
+            f"https://cloud.example.com/?workspace=ws_123&workflowId={_WORKFLOW_UUID}&deployment=standard"
+        )
+        assert data["url_opens"] == "workflow"
+        assert data["folder_link_reason"] is None
+        # The link's id is the record id `workflow get` and `workflow delete` take.
+        assert data["workflow_id"] == _WORKFLOW_UUID
+        assert data["latest_version"] == 1
+        assert data["filename"] == "workflows/flux/flux.json"
+        assert data["folder"] == "flux"
+        assert "warnings" not in data
+        # One features read decides both flags; the write is unchanged.
+        assert [c["url"] for c in calls].count("https://cloud.example.com/api/features") == 1
+        (post,) = _posts(calls)
+        assert post["url"] == "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json?overwrite=false"
+        assert post["body"] == wf_path.read_bytes()
+        # One search before the write (the free-folder check), one after it.
+        assert len(self._record_searches(calls)) == 2
+
+    def test_a_numbered_folder_links_its_own_record(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, taken={"flux"}, ids={"flux (2)/flux": _WORKFLOW_UUID}))
+        env = self._save(wf_path, capsys)
+        assert env["data"]["folder"] == "flux (2)"
+        assert env["data"]["url_opens"] == "workflow"
+        assert f"workflowId={_WORKFLOW_UUID}" in env["data"]["url"]
+        assert "workflows=" not in env["data"]["url"]
+
+    def test_the_deployment_goes_into_the_workflow_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, ids={"flux/flux": _WORKFLOW_UUID}))
+        env = self._save(wf_path, capsys, "--deployment", "dep_9")
+        assert env["data"]["url"] == (
+            f"https://cloud.example.com/?workspace=ws_123&workflowId={_WORKFLOW_UUID}&deployment=dep_9"
+        )
+
+    def test_an_unknown_workspace_leaves_it_out_of_the_workflow_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, workspace={}, ids={"flux/flux": _WORKFLOW_UUID}))
+        env = self._save(wf_path, capsys)
+        assert env["data"]["url"] == f"https://cloud.example.com/?workflowId={_WORKFLOW_UUID}"
+        (warning,) = env["data"]["warnings"]
+        assert warning["code"] == "workspace_unknown"
+        assert "opens the workflow in" in warning["message"]
+
+    @pytest.mark.parametrize(
+        "features",
+        [
+            pytest.param(_FLAG_ON, id="missing"),
+            pytest.param({**_LINKS_ON, "private_saved_file_links_enabled": False}, id="off"),
+            pytest.param({**_LINKS_ON, "private_saved_file_links_enabled": "true"}, id="string"),
+            pytest.param({**_LINKS_ON, "private_saved_file_links_enabled": 1}, id="number"),
+            pytest.param({**_LINKS_ON, "private_saved_file_links_enabled": None}, id="null"),
+        ],
+    )
+    def test_links_flag_not_true_keeps_the_folder_link(self, cloud_target, wf_path, monkeypatch, capsys, features):
+        _patch_cloud(monkeypatch, _sidebar(features, ids={"flux/flux": _WORKFLOW_UUID}))
+        env = self._save(wf_path, capsys)
+        data = env["data"]
+        assert data["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert data["url_opens"] == "folder"
+        assert data["folder_link_reason"] == "workflow_links_off"
+        # The record is still found and reported as before.
+        assert data["workflow_id"] == _WORKFLOW_UUID
+        assert "warnings" not in data
+
+    @pytest.mark.parametrize(
+        ("lookup", "reason"),
+        [
+            pytest.param({"data": []}, "record_not_found", id="zero"),
+            pytest.param(
+                {"data": [{"id": "x flux", "name": "x flux/flux"}, {"id": "Flux", "name": "Flux/Flux"}]},
+                "record_not_found",
+                id="only-near-names",
+            ),
+            pytest.param(
+                {"data": [{"id": "a", "name": "flux/flux"}, {"id": "b", "name": "flux/flux"}]},
+                "record_ambiguous",
+                id="two",
+            ),
+            pytest.param(_http_error(500), "record_lookup_failed", id="http-500"),
+            pytest.param(urllib.error.URLError("down"), "record_lookup_failed", id="unreachable"),
+            pytest.param(http.client.IncompleteRead(b"{"), "record_lookup_failed", id="truncated"),
+            pytest.param((b"<html>", 200), "record_lookup_failed", id="unparseable"),
+            pytest.param({"rows": []}, "record_lookup_failed", id="no-data"),
+            pytest.param({"data": [{"name": "flux/flux"}]}, "record_lookup_failed", id="no-id"),
+            pytest.param({"data": [{"id": 7, "name": "flux/flux"}]}, "record_lookup_failed", id="number-id"),
+        ],
+    )
+    def test_no_single_record_keeps_the_folder_link_and_says_why(
+        self, cloud_target, wf_path, monkeypatch, capsys, lookup, reason
+    ):
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, lookup_after_write=lookup))
+        env = self._save(wf_path, capsys)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert data["url_opens"] == "folder"
+        assert data["folder_link_reason"] == reason
+        assert data["workflow_id"] is None
+        assert data["latest_version"] is None
+        (warning,) = data["warnings"]
+        assert warning["code"] == "workflow_record_unknown"
+        assert "the link opens the folder" in warning["message"]
+
+    def test_a_record_on_the_second_page_is_found(self, cloud_target, wf_path, monkeypatch, capsys):
+        # The name search is a substring match: a full first page of longer
+        # names does not end it, and the record can sit on the next page.
+        full_page = {
+            "data": [{"id": f"r{i}", "name": f"x flux/flux {i}"} for i in range(100)],
+            "pagination": {"total": 101, "limit": 100, "offset": 0, "has_more": True},
+        }
+        second = {
+            "data": [{"id": _WORKFLOW_UUID, "name": "flux/flux", "latest_version": 1}],
+            "pagination": {"total": 101, "limit": 100, "offset": 100, "has_more": False},
+        }
+        pages = {0: full_page, 100: second}
+        calls = _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, lookup_after_write=pages.__getitem__))
+        env = self._save(wf_path, capsys)
+        assert env["data"]["url_opens"] == "workflow"
+        assert env["data"]["workflow_id"] == _WORKFLOW_UUID
+        assert f"workflowId={_WORKFLOW_UUID}" in env["data"]["url"]
+        offsets = [c["url"].rsplit("offset=", 1)[1].split("&", 1)[0] for c in self._record_searches(calls)]
+        assert offsets == ["0", "0", "100"]
+
+    def test_two_records_split_across_pages_are_ambiguous(self, cloud_target, wf_path, monkeypatch, capsys):
+        first = {
+            "data": [{"id": "a", "name": "flux/flux"}]
+            + [{"id": f"r{i}", "name": f"x flux/flux {i}"} for i in range(99)],
+            "pagination": {"total": 101, "limit": 100, "offset": 0, "has_more": True},
+        }
+        second = {
+            "data": [{"id": "b", "name": "flux/flux"}],
+            "pagination": {"total": 101, "limit": 100, "offset": 100, "has_more": False},
+        }
+        pages = {0: first, 100: second}
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, lookup_after_write=pages.__getitem__))
+        env = self._save(wf_path, capsys)
+        assert env["data"]["url_opens"] == "folder"
+        assert env["data"]["folder_link_reason"] == "record_ambiguous"
+
+    def test_a_search_past_the_page_cap_keeps_the_folder_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        def every_page_full(offset):
+            return {
+                "data": [{"id": f"r{offset + i}", "name": f"x flux/flux {offset + i}"} for i in range(100)],
+                "pagination": {"has_more": True},
+            }
+
+        calls = _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, lookup_after_write=every_page_full))
+        env = self._save(wf_path, capsys)
+        assert env["data"]["url_opens"] == "folder"
+        assert env["data"]["folder_link_reason"] == "record_lookup_failed"
+        # One search before the write, then the page cap after it.
+        assert len(self._record_searches(calls)) == 1 + workflow_cmd._MAX_RECORD_PAGES
+
+    def test_more_to_come_with_no_rows_keeps_the_folder_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        empty = {"data": [], "pagination": {"total": 5, "limit": 100, "offset": 0, "has_more": True}}
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, lookup_after_write=empty))
+        env = self._save(wf_path, capsys)
+        assert env["data"]["folder_link_reason"] == "record_lookup_failed"
+
+
 class TestSaveFlagOffKeepsTheRecordSave:
     """Flag off, missing, or unreadable: the save is the record-only POST, as before the flag."""
 
@@ -1173,6 +1370,7 @@ class TestSaveFlagOffKeepsTheRecordSave:
         "features",
         [
             pytest.param(_FLAG_OFF, id="off"),
+            pytest.param({**_LINKS_ON, "cli_cloud_save_enabled": False}, id="off-with-links-on"),
             pytest.param({}, id="missing"),
             pytest.param({"cli_cloud_save_enabled": "true"}, id="not-a-bool"),
             pytest.param([], id="not-an-object"),
