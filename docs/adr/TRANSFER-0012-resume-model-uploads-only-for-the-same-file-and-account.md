@@ -20,7 +20,9 @@ file into another upload.
 ## Decision
 
 Both model upload commands request resumable uploads. A response without an
-upload mode keeps the existing single-PUT path. The server decides the size
+upload mode keeps the existing single-PUT path. A 403 `FEATURE_DISABLED` to a resumable
+start is retried once as a single-PUT start, and the rest of that run asks for
+single-PUT; a refusal of that retry is shown with the server's message. The server decides the size
 limit; the CLI does not keep a separate upper limit.
 
 The CLI owns saved sessions in a private directory under its configuration
