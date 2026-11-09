@@ -638,7 +638,8 @@ def _call(
     With ``resumable_start``, a 403 ``FEATURE_DISABLED`` raises
     ``_ResumableRefused`` instead: ingest answers so to every resumable start
     while its resumable flag is off, whatever the size, and takes the same
-    file as a single PUT.
+    file as a single PUT. A workspace without the model library gets the same
+    code; its single-PUT start is refused too and shown as the refusal.
     """
     import http.client
     import json
