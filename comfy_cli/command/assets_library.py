@@ -501,11 +501,27 @@ def _local_refusal(path: Path) -> tuple[str, str] | None:
     return None
 
 
-def _http_failure(renderer, e: Exception, operation: str, sign_in=None) -> typer.Exit:
+class _ResumableRefused(Exception):
+    """Ingest answered a resumable start with 403 ``FEATURE_DISABLED``.
+
+    Raised by ``_call`` only for the start that asks for it, so the caller can
+    start once more as a single PUT, as the editor does.
+    """
+
+
+def _error_text(e) -> str:
+    try:
+        return (e.read(1000) or b"").decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 — a failed read must not pre-empt the envelope
+        return ""
+
+
+def _http_failure(renderer, e: Exception, operation: str, sign_in=None, body: str | None = None) -> typer.Exit:
     """Emit the envelope for a failed cloud API call; return the Exit to raise.
 
     A 400/403/404 carrying Comfy Cloud's ``{"code", "message"}`` body is a
     refusal: its message is shown as it is, under ``asset_upload_refused``.
+    ``body`` is the error body when the caller has already read it.
     """
     import json
     import urllib.error
@@ -520,10 +536,8 @@ def _http_failure(renderer, e: Exception, operation: str, sign_in=None) -> typer
             details={"operation": operation},
         )
         return typer.Exit(code=1)
-    try:
-        body = (e.read(1000) or b"").decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001 — a failed read must not pre-empt the envelope
-        body = ""
+    if body is None:
+        body = _error_text(e)
     try:
         parsed = json.loads(body)
     except (ValueError, RecursionError):
@@ -617,9 +631,17 @@ def _call(
     *,
     sign_in=None,
     query: list[tuple[str, Any]] | None = None,
+    resumable_start: bool = False,
 ) -> dict:
-    """One JSON call to the cloud API; anything but a JSON object is a mapped error."""
+    """One JSON call to the cloud API; anything but a JSON object is a mapped error.
+
+    With ``resumable_start``, a 403 ``FEATURE_DISABLED`` raises
+    ``_ResumableRefused`` instead: ingest answers so to every resumable start
+    while its resumable flag is off, whatever the size, and takes the same
+    file as a single PUT.
+    """
     import http.client
+    import json
     import urllib.error
     import urllib.parse
 
@@ -628,6 +650,17 @@ def _call(
     url = target.url(*parts) + ("?" + urllib.parse.urlencode(query) if query else "")
     try:
         _, parsed = _send(target, sign_in, url, method=method, body=body, strict_json=True)
+    except urllib.error.HTTPError as e:
+        if not (resumable_start and e.code == 403):
+            raise _http_failure(renderer, e, operation, sign_in) from e
+        text = _error_text(e)
+        try:
+            server = json.loads(text)
+        except (ValueError, RecursionError):
+            server = None
+        if isinstance(server, dict) and server.get("code") == "FEATURE_DISABLED":
+            raise _ResumableRefused from e
+        raise _http_failure(renderer, e, operation, sign_in, body=text) from e
     # HTTPException: a connection closed partway through the body (IncompleteRead).
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         raise _http_failure(renderer, e, operation, sign_in) from e
@@ -1138,17 +1171,25 @@ def run_upload(
     )
     identity = _upload_identity(target, sign_in) if store.has_saved() else None
     saved = store.load(identity)
+
+    def fresh_start(resumable: bool) -> dict:
+        body = {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags, "resumable": resumable}
+        return _call(renderer, target, "start", ("assets", "uploads"), body, sign_in=sign_in, resumable_start=resumable)
+
+    # Once ingest refuses a resumable start, the rest of the run asks for a single PUT.
+    ask_resumable = True
     for attempt in range(1, _UPLOAD_STARTS + 1):
         resumed = saved is not None
         session_saved = resumed
-        start = saved or _call(
-            renderer,
-            target,
-            "start",
-            ("assets", "uploads"),
-            {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags, "resumable": True},
-            sign_in=sign_in,
-        )
+        start = saved
+        if start is None:
+            try:
+                start = fresh_start(ask_resumable)
+            except _ResumableRefused:
+                # A refusal of this start too, such as ingest's 2 GiB
+                # FILE_TOO_LARGE for a single PUT, is shown as any other.
+                ask_resumable = False
+                start = fresh_start(False)
         saved = None
         if not valid_start(start):
             raise _unexpected(renderer, "/api/assets/uploads", "expected upload_id, upload_url, method PUT and headers")
