@@ -26,7 +26,11 @@ history.
   account, workspace and folder while its session remains valid. Sessions expire
   no later than seven days after creation; the server can expire them earlier.
   A paused upload reports whether its session was saved for a later run. Older
-  servers keep the single-PUT upload. File approval, block checks and the final stored-hash
+  servers keep the single-PUT upload. A server with resumable uploads turned off
+  refuses the resumable start (403 `FEATURE_DISABLED`); the upload then starts
+  once more as a single PUT, as the editor does, and a refusal of that start
+  (such as `FILE_TOO_LARGE` over 2 GiB) is shown as before.
+  File approval, block checks and the final stored-hash
   check still apply. The final storage check no longer stops after fifteen
   minutes. The retired `asset_upload_timeout` error code stays discoverable
   for compatibility with older versions. The task id is reported before the

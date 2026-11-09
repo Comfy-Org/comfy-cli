@@ -1044,9 +1044,11 @@ class TestUpload:
         routes = {
             ("GET", "/api/features"): {"max_upload_size": 1},
             ("GET", "/api/assets"): _NONE_NAMED,
-            ("POST", "/api/assets/uploads"): _cloud_error(
-                403, "FEATURE_DISABLED", "Uploading a model file is not enabled for this workspace"
-            ),
+            # One answer per start: the resumable start, then its single-PUT retry.
+            ("POST", "/api/assets/uploads"): [
+                _cloud_error(403, "FEATURE_DISABLED", "Uploading a model file is not enabled for this workspace")
+                for _ in range(2)
+            ],
         }
         env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
 
@@ -2608,6 +2610,118 @@ class TestResumableCommands:
             monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=_ResumableBucket()
         )
         assert rc == 0 and cloud.paths().count(_COMPLETE_1) == 3
+
+
+_RESUMABLE_OFF = "Resumable model uploads are not enabled"
+
+
+def _start_bodies(cloud: _Cloud) -> list[bool]:
+    return [body["resumable"] for _, path, body in cloud.calls if path == "/api/assets/uploads"]
+
+
+class TestResumableDisabledFallsBackToSinglePut:
+    """Ingest refuses every resumable start with 403 FEATURE_DISABLED while its flag is off."""
+
+    def test_refused_resumable_start_retries_as_a_single_put(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [_cloud_error(403, "FEATURE_DISABLED", _RESUMABLE_OFF), _started(1)]
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [200])
+
+        assert rc == 0 and env["data"]["uploaded"] is True and env["data"]["id"] == "asset-9"
+        assert _start_bodies(cloud) == [True, False]
+        (put,) = storage.puts
+        assert put["url"] == f"{_SIGNED}1" and put["body"] == _MODEL_BYTES
+        assert _COMPLETE_1 in cloud.paths()
+
+    def test_a_fresh_start_later_in_the_run_asks_for_a_single_put(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        import requests
+
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [
+            _cloud_error(403, "FEATURE_DISABLED", _RESUMABLE_OFF),
+            _started(1),
+            _started(2),
+        ]
+        lost = requests.ConnectionError("connection dropped")
+        env, rc, cloud, storage, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [lost, 200]
+        )
+
+        assert rc == 0 and env["data"]["uploaded"] is True
+        assert _start_bodies(cloud) == [True, False, False]
+        assert [p["url"] for p in storage.puts] == [f"{_SIGNED}1", f"{_SIGNED}2"]
+
+    @pytest.mark.parametrize(
+        ("server_code", "message"),
+        [
+            ("FEATURE_DISABLED", "Uploading a model file is not enabled for this workspace"),
+            ("FILE_TOO_LARGE", "File size exceeds the 2 GiB limit for single uploads"),
+        ],
+        ids=["workspace-without-library", "over-2-gib"],
+    )
+    def test_a_refused_retry_is_shown_as_the_refusal(
+        self, cloud_target, monkeypatch, capsys, model_file, server_code, message
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [
+            _cloud_error(403, "FEATURE_DISABLED", _RESUMABLE_OFF),
+            _cloud_error(403, server_code, message),
+        ]
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+
+        assert rc == 1 and env["error"]["code"] == "asset_upload_refused"
+        assert env["error"]["message"] == message
+        assert env["error"]["hint"] == assets_library._REFUSAL_HINTS[server_code]
+        assert env["error"]["details"] == {"status": 403, "server_code": server_code, "operation": "start"}
+        assert _start_bodies(cloud) == [True, False]
+        assert storage.puts == [] and "/complete" not in "".join(cloud.paths())
+
+    @pytest.mark.parametrize(
+        ("refusal", "code", "shown"),
+        [
+            (
+                _cloud_error(403, "MODEL_STORAGE_LIMIT_REACHED", "Your workspace has used its model storage."),
+                "asset_upload_refused",
+                "Your workspace has used its model storage.",
+            ),
+            (_cloud_error(400, "FEATURE_DISABLED", _RESUMABLE_OFF), "asset_upload_refused", _RESUMABLE_OFF),
+            # The body read to look for FEATURE_DISABLED is still the one shown.
+            (_http_error(403, b"forbidden by proxy"), "cloud_http_error", "HTTP 403 during start"),
+        ],
+        ids=["other-code", "not-403", "not-json"],
+    )
+    def test_any_other_start_refusal_is_not_retried(
+        self, cloud_target, monkeypatch, capsys, model_file, refusal, code, shown
+    ):
+        routes = dict(_UPLOAD_ROUTES)
+        routes[("POST", "/api/assets/uploads")] = [refusal, _started(1)]
+        env, rc, cloud, storage, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [])
+
+        assert rc == 1 and env["error"]["code"] == code and env["error"]["message"] == shown
+        if code == "cloud_http_error":
+            assert env["error"]["details"]["body"] == "forbidden by proxy"
+        assert _start_bodies(cloud) == [True] and storage.puts == []
+
+    def test_a_saved_session_continues_without_a_start(self, cloud_target, monkeypatch, capsys, model_file, no_wait):
+        from comfy_cli.config_manager import ConfigManager
+
+        args = [str(model_file), "--type", "loras"]
+        routes = _resume_routes()
+        routes[("POST", _COMPLETE_1)] = _http_error(403)
+        bucket = _ResumableBucket()
+        env, rc, *_ = _upload(monkeypatch, capsys, args, routes, [], storage=bucket)
+        assert rc == 1 and len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+
+        routes = _resume_routes()
+        routes[("POST", "/api/assets/uploads")] = _cloud_error(403, "FEATURE_DISABLED", _RESUMABLE_OFF)
+        env, rc, cloud, _, _ = _upload(monkeypatch, capsys, args, routes, [], storage=bucket)
+
+        assert rc == 0 and env["data"]["uploaded"] is True
+        assert "/api/assets/uploads" not in cloud.paths()
 
 
 class TestResumableRefusals:
