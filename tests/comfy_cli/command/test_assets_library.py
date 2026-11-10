@@ -3466,3 +3466,66 @@ class TestUploadAnalytics:
         reports = [i for i, (_, path, _) in enumerate(new[2].calls) if path.endswith("/events")]
         assert len(reports) == 1 and new[2].timeouts[reports[0]] <= 5
         assert (new[0], new[1], new[3], new[4]) == (old[0], old[1], old[3], old[4])
+
+    # The stop report goes out on Ctrl+C and is promised to take a few seconds
+    # at most, so it must not wait on the credentials lock or a token refresh.
+    @staticmethod
+    def _cancel_then_store(monkeypatch, model_file, store) -> tuple[_Cloud, list]:
+        """A stored-login upload canceled mid-PUT; from the cancel on, ``store`` stands in for the store's read."""
+        import urllib.parse
+
+        bucket = _ResumableBucket(crash=True)
+
+        def put(url, **kw):
+            if bucket.crash:
+                monkeypatch.setattr("comfy_cli.credentials.get_session", store)
+            return bucket(url, **kw)
+
+        cloud = _run_upload_directly(monkeypatch, _analytics_routes(True), put)
+        sent: list = []
+
+        def urlopen(req, timeout=None):
+            sent.append((urllib.parse.urlsplit(req.full_url).path, req.get_header("Authorization")))
+            return cloud(req, timeout)
+
+        monkeypatch.setattr("urllib.request.urlopen", urlopen)
+        with pytest.raises(KeyboardInterrupt):
+            assets_library.run_upload(
+                model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+            )
+        return cloud, sent
+
+    def test_a_cancel_reports_with_the_uploads_token_without_reading_the_store(
+        self, stored_login, monkeypatch, model_file, no_wait
+    ):
+        reads: list = []
+
+        def locked(**kw):
+            # Another process holds the credentials lock: a read here would wait on it.
+            reads.append(kw)
+            raise RuntimeError("the stop report waited on the credentials lock")
+
+        cloud, sent = self._cancel_then_store(monkeypatch, model_file, locked)
+
+        assert reads == []
+        assert _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
+        assert [auth for path, auth in sent if path.endswith("/events")] == [f"Bearer {_jwt('a')}"]
+
+    def test_a_cancel_with_an_expired_stored_token_does_not_refresh_it(
+        self, stored_login, monkeypatch, model_file, no_wait
+    ):
+        refreshes: list = []
+
+        def expired(*, refresh=True, **kw):
+            # The stored token is past its expiry: a refreshing read would call
+            # the token endpoint, which can take up to 70 seconds to give up.
+            if refresh:
+                refreshes.append(kw)
+                return SimpleNamespace(access_token=_jwt("a", 2), base_url="https://cloud.example.com")
+            return SimpleNamespace(access_token=_jwt("a"), base_url="https://cloud.example.com")
+
+        cloud, sent = self._cancel_then_store(monkeypatch, model_file, expired)
+
+        assert refreshes == []
+        assert _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
+        assert [auth for path, auth in sent if path.endswith("/events")] == [f"Bearer {_jwt('a')}"]

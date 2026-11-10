@@ -847,16 +847,20 @@ def _report_stopped(target, sign_in, start: dict, report: dict) -> None:
 
     Best effort: ``report`` holds only the route's fixed fields (no file name,
     URL, hash or error text), and nothing the request raises or answers
-    changes the upload's outcome.
+    changes the upload's outcome. A stored sign-in sends the token the upload
+    already holds: reading the store could wait on its lock or refresh the
+    token, and the report runs on Ctrl+C.
     """
     import urllib.parse
 
     version = start.get("upload_analytics_version")
     if type(version) is not int or version != 1:
         return
+    if sign_in is not None and not sign_in.held:
+        return
     try:
         url = target.url("assets", "uploads", urllib.parse.quote(start["upload_id"], safe=""), "events")
-        authed = target if sign_in is None else replace(target, auth_token=sign_in.current())
+        authed = target if sign_in is None else replace(target, auth_token=sign_in.held)
         http_request(url, authed, method="POST", body={**_UPLOAD_CLIENT, **report}, timeout=_REPORT_TIMEOUT_SECONDS)
     # A second Ctrl+C ends only the report.
     except (Exception, KeyboardInterrupt):
