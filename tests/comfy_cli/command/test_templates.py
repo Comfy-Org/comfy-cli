@@ -291,6 +291,7 @@ _VARIANT_FIXTURE = [
 
 
 def _ls_variant(tmp_path: Path, model: str) -> list[str]:
+    """Names `templates ls --model <model>` returns over `_VARIANT_FIXTURE`."""
     path = tmp_path / "index.json"
     path.write_text(json.dumps(_VARIANT_FIXTURE))
     _force_json_renderer()
@@ -318,6 +319,7 @@ def test_ls_model_variant_words_must_be_whole_words(tmp_path):
 
 
 def _ls_rows(tmp_path: Path, templates: list[dict], model: str) -> list[str]:
+    """Names `templates ls --model <model>` returns over a one-category gallery of ``templates``."""
     path = tmp_path / "index.json"
     path.write_text(json.dumps([{"title": "Image", "type": "image", "templates": templates}]))
     _force_json_renderer()
@@ -353,6 +355,7 @@ def test_ls_model_a_number_in_the_template_name_is_not_a_version(tmp_path):
 
 
 def test_ls_model_a_version_in_the_title_counts(tmp_path):
+    """`2511` is not in the model name "Qwen-Image-Edit", but the title states it."""
     templates = [
         {
             "name": "image_qwen_image_edit_2511",
@@ -370,10 +373,12 @@ def test_ls_model_still_needs_a_word_from_the_model_list(tmp_path):
 
 
 def test_ls_model_with_a_word_no_template_has_finds_nothing(tmp_path):
+    """Every word must be found: no template says `Ultra`."""
     assert _ls_variant(tmp_path, "Seedream 5.0 Ultra") == []
 
 
 def test_ls_model_whole_query_inside_a_model_name_is_unchanged(tmp_path):
+    """A query one model name contains still takes the plain substring path."""
     assert _ls_variant(tmp_path, "Seedream 5.0") == [
         "api_bytedance_seedream_5_0_lite_image_edit",
         "api_bytedance_seedream_5_0_flash_t2i",

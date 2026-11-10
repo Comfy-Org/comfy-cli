@@ -525,12 +525,14 @@ _WORD_BREAKS = re.compile(r"[^a-z0-9.]+")
 
 
 def _word_list(text: Any) -> list[str]:
+    """Lowercase ``text`` and split it into words, in order; a non-string has none."""
     if not isinstance(text, str):
         return []
     return [w for w in (part.strip(".") for part in _WORD_BREAKS.split(text.lower())) if w]
 
 
 def _words(text: Any) -> set[str]:
+    """The set of words in ``text``, as ``_word_list`` splits them."""
     return set(_word_list(text))
 
 
@@ -572,6 +574,7 @@ def _variant_matches(row: dict[str, Any], model: str) -> bool:
 
 
 def _is_number(word: str) -> bool:
+    """True for a version-like word made of digits and dots, such as ``2``, ``5.0`` or ``2511``."""
     return word.replace(".", "").isdigit()
 
 
