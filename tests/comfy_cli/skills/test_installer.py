@@ -631,9 +631,19 @@ def test_run_on_cloud_skill_explains_workflow_and_folder_links():
         "`record_ambiguous`",
         "`record_lookup_failed`",
         "`workflow_record_unknown`",
-        "Couldn't open this workflow",
+        "Cloud checks the link against the saved file when it opens",
+        "not listed here as `folder`",
+        "`data.filename`",
     ):
         assert needle in text, f"comfy-run-on-cloud skill should mention {needle}"
+    # The Cloud page is not part of this repository; the skill does not quote it.
+    assert "Couldn't open this workflow" not in text
+
+
+def test_comfy_skill_reads_an_unknown_link_value_as_folder():
+    text = " ".join(skill_content("comfy").split())
+    assert "`data.url_opens`" in text
+    assert "treat a value not listed here as `folder`" in text
 
 
 def test_run_on_cloud_skill_asks_before_every_upload_and_lossy_swap():

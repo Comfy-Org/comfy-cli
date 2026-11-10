@@ -1223,6 +1223,28 @@ class TestSaveLinksTheWorkflow:
         # One search before the write (the free-folder check), one after it.
         assert len(self._record_searches(calls)) == 2
 
+    def test_pretty_output_prints_the_same_workflow_link(self, cloud_target, wf_path, monkeypatch, capsys):
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, ids={"flux/flux": _WORKFLOW_UUID}))
+        json_url = self._save(wf_path, capsys)["data"]["url"]
+        assert f"workflowId={_WORKFLOW_UUID}" in json_url
+
+        _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, ids={"flux/flux": _WORKFLOW_UUID}))
+        r = Renderer.resolve(
+            is_stdout_tty=True,
+            env={},
+            caller=Caller(kind="user", agentic=False, source_env=None),
+            json_flag=False,
+        )
+        r.mode = OutputMode.PRETTY
+        set_renderer(r)
+        result = CliRunner().invoke(
+            workflow_cmd.app, ["save", str(wf_path), "--name", "flux", "--where", "cloud"], standalone_mode=False
+        )
+        assert result.exception is None
+        out = capsys.readouterr().out + (result.stdout or "")
+        # Rich may wrap the long URL; compare with whitespace removed.
+        assert f"openit:{json_url}" in "".join(out.split())
+
     def test_a_numbered_folder_links_its_own_record(self, cloud_target, wf_path, monkeypatch, capsys):
         _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, taken={"flux"}, ids={"flux (2)/flux": _WORKFLOW_UUID}))
         env = self._save(wf_path, capsys)

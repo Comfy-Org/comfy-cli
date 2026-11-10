@@ -1408,11 +1408,7 @@ def _local_delete(renderer, target, workflow_id: str) -> None:
 # userdata file in a folder of its own instead (Cloud mirrors that file into
 # a workflow record by itself) and prints a link that opens the folder. Any
 # other answer, or no answer, keeps the record-only save exactly as before.
-# When ``private_saved_file_links_enabled`` is also true, the link opens the
-# one workflow record Cloud made from the file (``?workflowId=<id>``) instead
-# of the folder; when that record cannot be told, the link stays the folder
-# one and ``folder_link_reason`` says why. That refinement is
-# docs/adr/SIDEBAR-0013-link-a-cloud-save-to-the-workflow-it-made.md.
+# Workflow-id links: docs/adr/SIDEBAR-0013-link-a-cloud-save-to-the-workflow-it-made.md.
 # The file is written with ``overwrite=false``, so nothing that exists is
 # ever replaced: a name already taken moves on to ``<name> (2)``, ``(3)``, ...
 # Only a frontend-format workflow goes into a folder, since the sidebar opens
@@ -1659,7 +1655,7 @@ def _cloud_folder_save(
     name: str,
     description: str | None,
     deployment: str | None,
-    workflow_links: bool = False,
+    workflow_links: bool,
 ) -> None:
     """Write the workflow as ``workflows/<new folder>/<name>.json`` and print its link.
 
@@ -1667,10 +1663,7 @@ def _cloud_folder_save(
     record already has the name the file would mirror into
     (``<folder>/<name>``): Cloud adds a version to a record of that name, so
     writing there would change a workflow that already exists.
-
-    With ``workflow_links`` the link opens the one record of that name found
-    after the write. Cloud's page checks that record against this file before
-    it opens anything.
+    ``workflow_links``: docs/adr/SIDEBAR-0013-link-a-cloud-save-to-the-workflow-it-made.md.
     """
     import urllib.error
 
@@ -1769,7 +1762,7 @@ def _cloud_folder_save(
             }
         )
     if workflow_id is None:
-        why = _RECORD_UNKNOWN_CLAUSES.get(record_unknown or "", _RECORD_UNKNOWN_CLAUSES["record_not_found"])
+        why = _RECORD_UNKNOWN_CLAUSES[record_unknown]
         warnings.append(
             {
                 "code": "workflow_record_unknown",

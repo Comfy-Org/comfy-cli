@@ -4,7 +4,10 @@ Date: 2026-11-09
 
 ## Status
 
-Proposed
+Accepted
+
+Accepted on 2026-11-10 by the author, after the 2026-11-09 design review chose
+the workflow-id link.
 
 Relation: Refines [ADR-SIDEBAR-0009](SIDEBAR-0009-save-into-a-new-sidebar-folder-and-delete-only-the-record.md).
 It changes one consequence of that record: the printed link opens its folder.
@@ -28,8 +31,8 @@ already searches for that record after the write to report `workflow_id`.
 Cloud's page can open a workflow by its record id. It reads the record, maps
 the record's name back to its one sidebar path, checks that the file there
 holds the record's newest version, and opens that file. Save in the browser
-then writes back to the same file. When any check fails, the page shows
-"Couldn't open this workflow" and opens nothing.
+then writes back to the same file. When any check fails, the page does not
+open the file.
 
 ## Decision
 
@@ -87,15 +90,16 @@ then writes back to the same file. When any check fails, the page shows
 
 - When the file and its record drift apart, the link opens nothing: a record
   that missed a rename, or a version added to the record and not the file. The
-  person sees "Couldn't open this workflow" and opens the sidebar instead.
+  person opens the sidebar instead.
 - The CLI cannot tell whether Cloud's page reads `workflowId`. The flag must
   go on only once the page does.
 
 ## Validation
 
 `tests/comfy_cli/command/test_workflow_saved.py` covers it in
-`TestSaveLinksTheWorkflow`: one record gives a `workflowId` link; a flag that
-is not a JSON `true` keeps the folder link; zero records, two records, records
+`TestSaveLinksTheWorkflow`: one record gives a `workflowId` link, printed the
+same in pretty output; a flag that is not a JSON `true` keeps the folder link;
+zero records, two records, records
 split across pages, a failed or unreadable search and a search past the page
 cap each keep the folder link with their reason; deployment and an unknown
 workspace follow the folder link's rules. `TestSaveFlagOffKeepsTheRecordSave`

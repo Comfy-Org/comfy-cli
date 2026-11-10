@@ -726,7 +726,8 @@ folder. `data.workflow_id` is still the saved workflow's id. When
 workflow (`workflowId=<data.workflow_id>`) instead; `data.url_opens` is
 `workflow` or `folder`, and for a folder link `data.folder_link_reason` says
 why (`workflow_links_off`, `record_not_found`, `record_ambiguous`,
-`record_lookup_failed`). Hand back `data.url` as returned. The link opens
+`record_lookup_failed`); treat a value not listed here as `folder`. Hand back
+`data.url` as returned. The link opens
 Comfy Cloud itself unless `--deployment <id>` names a build. `data.warnings[]`
 may carry `description_ignored`, `workspace_unknown` or
 `workflow_record_unknown`. An API-format workflow keeps the record-only save,
