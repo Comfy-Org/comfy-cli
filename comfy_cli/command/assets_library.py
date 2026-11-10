@@ -359,6 +359,15 @@ _UPLOAD_STARTS = 2
 # id names a fresh object, so it can only be this upload's: the bytes landed.
 _ALREADY_WRITTEN = 412
 _PUT_TIMEOUT = (10, 600)
+# Sent with start and complete; a server without upload analytics ignores it.
+# DO_NOT_TRACK or COMFY_NO_TELEMETRY drops it, `resumed` and the stop report.
+_UPLOAD_CLIENT = {"client": "comfy_cli"}
+# A report that a transfer stopped gets one request and no retry, and the
+# command waits this long at most for all of it, DNS and slow answers included.
+_REPORT_TIMEOUT_SECONDS = 3.0
+# The wait on that report goes in steps this long, so a Ctrl+C lands within one
+# step: on Windows a timed join does not see Ctrl+C until it ends.
+_REPORT_WAIT_STEP_SECONDS = 0.1
 # Large uploads can take more than fifteen minutes to check and store.
 _TASK_POLL_SECONDS = 2.0
 # A task read that gets a 5xx or no answer is retried for this long from the
@@ -811,6 +820,79 @@ def _complete_upload(renderer, target, sign_in, upload_id: str, body: dict, *, r
             return parsed
 
 
+def _upload_analytics(**extra) -> dict:
+    """The ``upload_analytics`` field for a start or complete body.
+
+    Empty under DO_NOT_TRACK or COMFY_NO_TELEMETRY; the server treats a missing
+    value as unknown. It goes to Comfy Cloud with the upload request itself, so
+    the opt-in tracking setting (product analytics) does not gate it.
+    """
+    return {} if tracking._telemetry_disabled_by_env() else {"upload_analytics": {**_UPLOAD_CLIENT, **extra}}
+
+
+def _stop_reason(e: BaseException) -> str:
+    """The events route's ``reason`` for what ended a transfer for good."""
+    from comfy_cli.command.model_upload_resume import SessionExpired, TransferFailed, UploadPaused
+
+    if isinstance(e, KeyboardInterrupt):
+        return "canceled"
+    if isinstance(e, SessionExpired):
+        return "session_expired"
+    if isinstance(e, _FileChanged):
+        return "file_changed"
+    if isinstance(e, _FileUnreadable):
+        return "file_unreadable"
+    if isinstance(e, _TlsSetupFailed):
+        return "network"
+    # Every caller passes one of the types above or _PutFailed or TransferFailed.
+    status = e.args[1] if isinstance(e, UploadPaused) else e.args[0]
+    if status is not None:
+        return "http"
+    # Storage gave no answer; a resumable transfer fails without one only on a
+    # chunk size in the start answer that it cannot use.
+    return "unknown" if isinstance(e, TransferFailed) else "network"
+
+
+def _report_stopped(target, sign_in, start: dict, report: dict, *, canceling: bool = False) -> None:
+    """Tell Comfy Cloud a transfer stopped for good, when start says it takes such reports.
+
+    A stored sign-in sends the token the upload already holds: reading the
+    store could wait on its lock or refresh the token, and the report runs on Ctrl+C.
+    """
+    import threading
+    import urllib.parse
+
+    version = start.get("upload_analytics_version")
+    if type(version) is not int or version != 1 or tracking._telemetry_disabled_by_env():
+        return
+    if sign_in is not None and not sign_in.held:
+        return
+    url = target.url("assets", "uploads", urllib.parse.quote(start["upload_id"], safe=""), "events")
+    authed = target if sign_in is None else replace(target, auth_token=sign_in.held)
+
+    def send() -> None:
+        try:
+            http_request(url, authed, method="POST", body={**_UPLOAD_CLIENT, **report}, timeout=_REPORT_TIMEOUT_SECONDS)
+        except BaseException:  # noqa: BLE001 - nothing the report raises reaches the upload
+            pass
+
+    worker = threading.Thread(target=send, name="comfy-upload-stop-report", daemon=True)
+    try:
+        worker.start()
+        deadline = _clock() + _REPORT_TIMEOUT_SECONDS
+        while worker.is_alive():
+            left = deadline - _clock()
+            if left <= 0:
+                break
+            worker.join(min(_REPORT_WAIT_STEP_SECONDS, left))
+    except KeyboardInterrupt:
+        if not canceling:
+            raise
+    # A thread that cannot start sends nothing.
+    except Exception:
+        pass
+
+
 def _wait_for_task(renderer, target, task_id: str, sign_in=None, *, reporter) -> dict:
     """Read the task until it ends, riding out a brief 5xx, 429 or dropped connection."""
     import http.client
@@ -1174,8 +1256,18 @@ def run_upload(
     saved = store.load(identity)
 
     def fresh_start(resumable: bool) -> dict:
-        body = {"filename": item.filename, "size_bytes": item.size_bytes, "tags": tags, "resumable": resumable}
+        body = {
+            "filename": item.filename,
+            "size_bytes": item.size_bytes,
+            "tags": tags,
+            "resumable": resumable,
+            **_upload_analytics(),
+        }
         return _call(renderer, target, "start", ("assets", "uploads"), body, sign_in=sign_in, resumable_start=resumable)
+
+    def stopped(e: BaseException) -> None:
+        report = {"size_bytes": size, "model_folder": folder, "reason": _stop_reason(e)}
+        _report_stopped(target, sign_in, start, report, canceling=isinstance(e, KeyboardInterrupt))
 
     # Once ingest refuses a resumable start, the rest of the run asks for a single PUT.
     ask_resumable = True
@@ -1201,10 +1293,12 @@ def run_upload(
             session_saved = store.save(start, identity)
             if not session_saved:
                 renderer.warn("This upload cannot be saved for a later run; connection retries still work.")
+        # Whether the bytes went on from a stored offset; None until the transfer ends.
+        recovered = None
         try:
             with reporter.uploading(item, 1, 1) as progress:
                 if resumable:
-                    transfer(
+                    recovered = transfer(
                         start,
                         size,
                         lambda offset, length: _read_range(file, digests, offset, length),
@@ -1215,12 +1309,13 @@ def run_upload(
                     )
                 else:
                     _put(upload_url, headers, file, progress, digests)
+                    recovered = False
             task_id = _complete_upload(
                 renderer,
                 target,
                 sign_in,
                 upload_id,
-                {"filename": item.filename, "tags": tags},
+                {"filename": item.filename, "tags": tags, **_upload_analytics(resumed=recovered)},
                 resumable=resumable,
             ).get("task_id")
             if not isinstance(task_id, str) or not task_id:
@@ -1245,6 +1340,7 @@ def run_upload(
                     "session_saved": session_saved,
                 },
             )
+            stopped(e)
             raise typer.Exit(code=1) from None
         except _FileUnreadable as e:
             renderer.error(
@@ -1254,8 +1350,9 @@ def run_upload(
                 "nothing was added to the library",
                 details={"reason": "file_unreadable", "upload_id": upload_id, "attempts": attempt},
             )
+            stopped(e)
             raise typer.Exit(code=1) from None
-        except _FileChanged:
+        except _FileChanged as e:
             store.clear()
             # Only the blocks before the changed one were sent, and the
             # upload is never completed, so the staged bytes never become an asset.
@@ -1265,6 +1362,7 @@ def run_upload(
                 hint="wait until nothing is writing the file, then upload it again; nothing was added to the library",
                 details={"reason": "file_changed", "upload_id": upload_id, "hash": local_hash, "attempts": attempt},
             )
+            stopped(e)
             raise typer.Exit(code=1) from None
         except _TlsSetupFailed as e:
             renderer.error(
@@ -1275,6 +1373,7 @@ def run_upload(
                 "nothing was added to the library",
                 details={"reason": "tls_setup", "upload_id": upload_id, "attempts": attempt},
             )
+            stopped(e)
             raise typer.Exit(code=1) from None
         except (_PutFailed, TransferFailed, SessionExpired) as e:
             expired = isinstance(e, SessionExpired)
@@ -1292,6 +1391,10 @@ def run_upload(
                 expired or refused or (not resumable and (status is None or status >= 500))
             ) and attempt < _UPLOAD_STARTS:
                 renderer.warn("The upload to storage did not go through; starting a fresh upload.")
+                # Each upload id is one attempt, so the one given up here reports
+                # before the fresh upload; complete's own failures are the server's to see.
+                if recovered is None:
+                    stopped(e)
                 continue
             answer = "no response" if status is None else f"HTTP {status}"
             renderer.error(
@@ -1300,7 +1403,14 @@ def run_upload(
                 hint="retry; nothing was added to the library",
                 details={"status": status, "upload_id": upload_id, "attempts": attempt},
             )
+            # Complete's own failures (a session it no longer knows) are the server's to see.
+            if recovered is None:
+                stopped(e)
             raise typer.Exit(code=1) from None
+        except KeyboardInterrupt as e:
+            if recovered is None:
+                stopped(e)
+            raise
 
     reporter.storing(task_id)
     task = _wait_for_task(renderer, target, task_id, sign_in, reporter=reporter)

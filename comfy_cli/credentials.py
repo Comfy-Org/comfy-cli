@@ -275,6 +275,11 @@ class DataPlaneToken:
         """
         return {"expect": self._same_login} if self._same_account else {}
 
+    @property
+    def held(self) -> str:
+        """The token last sent, from memory: never reads the store, waits on its lock or refreshes."""
+        return self._value
+
     def current(self) -> str:
         """The token to send now; the one already held when the store cannot be read or written."""
         if not self._refreshes:

@@ -45,6 +45,15 @@ history.
   errors on that path also stop immediately with fixed TLS guidance.
   Both paths recognize certificate failures wrapped by an HTTPS proxy while
   retaining retries for temporary proxy failures.
+- `comfy assets library upload` and `comfy model upload` tell Comfy Cloud
+  which client sent an upload and whether its transfer resumed from bytes
+  storage already held. When a transfer stops for good (it gives up, pauses or
+  is canceled), the command sends Comfy Cloud one report with a fixed reason,
+  the size and the folder, if the server asks for such reports. Any stopped
+  upload (one that gives up, pauses, restarts as a fresh upload or gets Ctrl+C)
+  can take up to 3 seconds longer to exit while that report goes out to a slow
+  Comfy Cloud. A second Ctrl+C ends that wait within a tenth of a second.
+  `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns all of it off.
 - `comfy build push` shares the upload progress reporter. A broken pipe or
   closed progress stream now mutes its progress instead of ending the push.
 
