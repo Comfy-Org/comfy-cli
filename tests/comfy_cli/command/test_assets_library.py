@@ -55,6 +55,13 @@ def reset_singleton(monkeypatch, tmp_path):
     reset_renderer_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def telemetry_allowed(monkeypatch):
+    """A shell's DO_NOT_TRACK or COMFY_NO_TELEMETRY would drop the upload analytics these tests assert."""
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("COMFY_NO_TELEMETRY", raising=False)
+
+
 @pytest.fixture(scope="module")
 def root_cli_ready():
     """Load the actual CLI before a test's target fake can bind into lazy modules."""
@@ -3260,7 +3267,8 @@ def _storage_silent(url, **kw):
     raise requests.ConnectionError(url)
 
 
-# (resumable, what fails, the report's reason, the upload id whose transfer stopped)
+# (resumable, what fails, the report's reason, the last upload id whose transfer stopped).
+# Each upload id is one attempt, so every id up to the last one reports.
 _TERMINAL = {
     "single-put-no-answer": (False, "no-answer", "network", 2),
     "single-put-5xx": (False, "5xx", "http", 2),
@@ -3445,7 +3453,7 @@ class TestUploadAnalytics:
         # A server that does not advertise the events route gets no report.
         assert _events(old[2]) == []
         # Only the closed fields: no file name, URL, hash or error text.
-        assert _events(new[2]) == [(_EVENTS.format(upload), _report(reason))]
+        assert _events(new[2]) == [(_EVENTS.format(n), _report(reason)) for n in range(1, upload + 1)]
         assert new[1] == old[1] == 1
         assert new[0] == old[0]
         assert new[3] == old[3]
@@ -3464,7 +3472,9 @@ class TestUploadAnalytics:
         new = _failed_upload(monkeypatch, capsys, model_file, case, version=1, events=events)
 
         reports = [i for i, (_, path, _) in enumerate(new[2].calls) if path.endswith("/events")]
-        assert len(reports) == 1 and new[2].timeouts[reports[0]] <= 5
+        assert len(reports) == _TERMINAL[case][3]
+        # The 3 seconds the stop report is promised to take at most.
+        assert [new[2].timeouts[i] for i in reports] == [3.0] * len(reports)
         assert (new[0], new[1], new[3], new[4]) == (old[0], old[1], old[3], old[4])
 
     # The stop report goes out on Ctrl+C and is promised to take a few seconds
@@ -3529,3 +3539,215 @@ class TestUploadAnalytics:
         assert refreshes == []
         assert _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
         assert [auth for path, auth in sent if path.endswith("/events")] == [f"Bearer {_jwt('a')}"]
+
+    # --- DO_NOT_TRACK / COMFY_NO_TELEMETRY: no upload analytics at all ---
+
+    @pytest.mark.parametrize("opt_out", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    @pytest.mark.parametrize("resumable", [False, True], ids=["single-put", "resumable"])
+    def test_the_env_opt_out_drops_the_analytics_fields(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, resumable, opt_out
+    ):
+        def run():
+            return _upload(
+                monkeypatch,
+                capsys,
+                [str(model_file), "--type", "loras"],
+                _analytics_routes(resumable),
+                [200],
+                storage=_ResumableBucket() if resumable else None,
+            )
+
+        sent = run()
+        monkeypatch.setenv(opt_out, "1")
+        quiet = run()
+
+        bodies = [body for _, path, body in quiet[2].calls if path.startswith("/api/assets/uploads")]
+        assert bodies and all("upload_analytics" not in body for body in bodies)
+        assert (quiet[0], quiet[1]) == (sent[0], sent[1])
+        assert quiet[1] == 0
+
+    @pytest.mark.parametrize("opt_out", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    @pytest.mark.parametrize("case", ["single-put-5xx", "stalled", "session-gone", "file-changed"])
+    def test_the_env_opt_out_sends_no_stop_report(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, case, opt_out
+    ):
+        sent = _failed_upload(monkeypatch, capsys, model_file, case, version=1)
+        monkeypatch.setenv(opt_out, "1")
+        quiet = _failed_upload(monkeypatch, capsys, model_file, case, version=1)
+
+        assert _events(sent[2]) and _events(quiet[2]) == []
+        bodies = [body for _, path, body in quiet[2].calls if path.startswith("/api/assets/uploads")]
+        assert bodies and all("upload_analytics" not in body for body in bodies)
+        assert (quiet[0], quiet[1], quiet[3], quiet[4]) == (sent[0], sent[1], sent[3], sent[4])
+
+    @pytest.mark.parametrize("opt_out", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_the_env_opt_out_sends_no_cancel_report(self, cloud_target, monkeypatch, model_file, no_wait, opt_out):
+        from comfy_cli.config_manager import ConfigManager
+
+        monkeypatch.setenv(opt_out, "1")
+        cloud = _run_upload_directly(monkeypatch, _analytics_routes(True), _ResumableBucket(crash=True))
+        with pytest.raises(KeyboardInterrupt):
+            assets_library.run_upload(
+                model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+            )
+
+        assert _events(cloud) == []
+        assert all("upload_analytics" not in body for _, path, body in cloud.calls if path == "/api/assets/uploads")
+        assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+
+    # --- The whole stop report is bounded, not each network step ---
+
+    def test_a_report_that_hangs_gives_control_back_at_the_bound(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        import threading
+
+        release, answered = threading.Event(), threading.Event()
+
+        def trickle():
+            # A server that keeps the connection busy past every per-step timeout.
+            release.wait(5)
+            answered.set()
+            raise TimeoutError("timed out")
+
+        joins = _watch_report_thread(monkeypatch)
+        try:
+            env, rc, cloud, _, _ = _failed_upload(monkeypatch, capsys, model_file, "stalled", version=1, events=trickle)
+            still_blocked = not answered.is_set()
+        finally:
+            release.set()
+
+        assert rc == 1 and env["error"]["details"]["reason"] == "upload_paused"
+        # The command went on while the report was still waiting on the server.
+        assert still_blocked and _events(cloud) == [(_EVENTS.format(1), _report("network"))]
+        # One daemon thread, joined for the 3 seconds the report is promised to take at most.
+        assert joins == [(3.0, True)]
+
+    def test_a_second_ctrl_c_during_the_report_ends_it_and_raises_the_first(
+        self, cloud_target, monkeypatch, model_file, no_wait
+    ):
+        import threading
+
+        release = threading.Event()
+
+        def trickle():
+            release.wait(5)
+            return b""
+
+        from comfy_cli.config_manager import ConfigManager
+
+        joins = _watch_report_thread(monkeypatch, interrupt=True)
+        cloud = _run_upload_directly(monkeypatch, _analytics_routes(True, events=trickle), _ResumableBucket(crash=True))
+        try:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                assets_library.run_upload(
+                    model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+                )
+        finally:
+            release.set()
+
+        # The upload's own interrupt, not the second one.
+        assert raised.value.args == ()
+        assert joins == [(3.0, True)] and _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
+        assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+
+    # --- A reason with no storage answer ---
+
+    def test_a_resumable_start_with_an_unusable_piece_size_reports_unknown(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        routes = _analytics_routes(True)
+        routes[("POST", "/api/assets/uploads")] = [
+            {**start, "chunk_size_bytes": 1} for start in routes[("POST", "/api/assets/uploads")]
+        ]
+        bucket = _ResumableBucket()
+        env, rc, cloud, _, _ = _upload(
+            monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=bucket
+        )
+
+        # The transfer refuses the start answer before any byte goes to storage.
+        assert rc == 1 and bucket.puts == [] and env["error"]["details"]["status"] is None
+        assert _events(cloud) == [(_EVENTS.format(1), _report("unknown"))]
+
+    # --- An attempt that restarts as a fresh upload ---
+
+    @pytest.mark.parametrize(
+        ("resumable", "first", "reason"),
+        [
+            (False, 503, "http"),
+            (False, "no-answer", "network"),
+            (True, 410, "session_expired"),
+            (True, 403, "http"),
+        ],
+        ids=["single-put-5xx", "single-put-no-answer", "session-gone", "refused"],
+    )
+    def test_an_abandoned_attempt_reports_and_the_fresh_upload_completes(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, resumable, first, reason
+    ):
+        env, rc, cloud = _restart_upload(monkeypatch, capsys, model_file, resumable, first)
+
+        assert rc == 0 and env["data"]["uploaded"] is True
+        assert _events(cloud) == [(_EVENTS.format(1), _report(reason))]
+        assert [p for p in cloud.paths("POST") if p.endswith("/complete")] == [_COMPLETE_1.replace("1/", "2/")]
+        assert _complete_analytics(cloud) == [{**_CLIENT, "resumed": False}]
+
+    def test_an_abandoned_attempt_whose_start_did_not_advertise_reports_sends_nothing(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        env, rc, cloud = _restart_upload(monkeypatch, capsys, model_file, True, 410, first_version=None)
+
+        assert rc == 0 and _events(cloud) == []
+
+    @pytest.mark.parametrize("opt_out", ["DO_NOT_TRACK", "COMFY_NO_TELEMETRY"])
+    def test_an_abandoned_attempt_under_the_env_opt_out_sends_nothing(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait, opt_out
+    ):
+        monkeypatch.setenv(opt_out, "1")
+        env, rc, cloud = _restart_upload(monkeypatch, capsys, model_file, True, 410)
+
+        assert rc == 0 and _events(cloud) == []
+
+
+def _restart_upload(monkeypatch, capsys, model_file, resumable: bool, first, *, first_version: int | None = 1):
+    """An upload whose first attempt storage refuses with ``first`` and whose fresh upload succeeds."""
+    import requests
+
+    routes = _analytics_routes(resumable)
+    starts = routes[("POST", "/api/assets/uploads")]
+    if first_version is None:
+        starts[0] = {k: v for k, v in starts[0].items() if k != "upload_analytics_version"}
+    bucket = _ResumableBucket()
+
+    def put(url, **kw):
+        if url.endswith("SECRETSIG1"):
+            if first == "no-answer":
+                raise requests.ConnectionError("lost")
+            return SimpleNamespace(status_code=first, headers={}, close=lambda: None)
+        if not resumable:
+            while kw["data"].read(4):
+                pass
+            return SimpleNamespace(status_code=200, headers={}, close=lambda: None)
+        return bucket(url, **kw)
+
+    env, rc, cloud, _, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=put)
+    return env, rc, cloud
+
+
+def _watch_report_thread(monkeypatch, *, interrupt: bool = False) -> list:
+    """Records each stop-report thread's join as ``(timeout, daemon)``; ``interrupt`` makes it a second Ctrl+C."""
+    import threading
+
+    joins: list = []
+
+    class Watched(threading.Thread):
+        def join(self, timeout=None):
+            if self.name != "comfy-upload-stop-report":
+                return super().join(timeout)
+            joins.append((timeout, self.daemon))
+            if interrupt:
+                raise KeyboardInterrupt("second")
+            # The bound is checked from the recorded value, so the test does not wait it out.
+            return super().join(0.05)
+
+    monkeypatch.setattr(threading, "Thread", Watched)
+    return joins

@@ -695,6 +695,12 @@ comfy tracking enable
 comfy tracking disable
 ```
 
+Uploads to Comfy Cloud (`comfy assets library upload` and `comfy model upload`)
+send Comfy Cloud an upload status with the upload: which client sent it,
+whether the transfer resumed, and why a transfer stopped. The tracking setting
+does not cover it, because it is part of the upload request to Comfy Cloud,
+not product tracking. `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns it off.
+
 When tracking is on, we use Mixpanel to understand usage patterns and know where
 to prioritize our efforts.
 
