@@ -681,9 +681,9 @@ refreshes during `comfy skills install` and in the background during
 
 ## Analytics
 
-Analytics are **opt-in and off by default**. The first time you run the CLI in an
-interactive terminal it asks whether to enable tracking, and that prompt defaults
-to no. Nothing is sent unless you answer yes. A non-interactive run (a pipe, CI,
+Product analytics (Mixpanel) are **opt-in and off by default**. The first time you
+run the CLI in an interactive terminal it asks whether to enable tracking, and
+that prompt defaults to no. No product analytics are sent unless you answer yes. A non-interactive run (a pipe, CI,
 an agent) never enables it on its own. Setting `DO_NOT_TRACK` or
 `COMFY_NO_TELEMETRY` in the environment overrides the setting and suppresses
 everything.
@@ -696,7 +696,7 @@ comfy tracking disable
 ```
 
 Uploads to Comfy Cloud (`comfy assets library upload` and `comfy model upload`)
-send Comfy Cloud an upload status with the upload: which client sent it,
+send Comfy Cloud an upload status with the upload by default: which client sent it,
 whether the transfer resumed, and why a transfer stopped. The tracking setting
 does not cover it, because it is part of the upload request to Comfy Cloud,
 not product tracking. `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns it off.
