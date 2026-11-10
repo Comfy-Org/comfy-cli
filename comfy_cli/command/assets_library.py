@@ -850,7 +850,7 @@ def _stop_reason(e: BaseException) -> str:
     return "unknown" if isinstance(e, TransferFailed) else "network"
 
 
-def _report_stopped(target, sign_in, start: dict, report: dict) -> None:
+def _report_stopped(target, sign_in, start: dict, report: dict, *, canceling: bool = False) -> None:
     """Tell Comfy Cloud a transfer stopped for good, when start says it takes such reports.
 
     Best effort: ``report`` holds only the route's fixed fields (no file name,
@@ -863,6 +863,9 @@ def _report_stopped(target, sign_in, start: dict, report: dict) -> None:
     the request's own timeout bounds each socket step, not name lookup or a
     server that answers a byte at a time. A thread still running at exit is
     dropped with the process.
+
+    A Ctrl+C during the wait cancels the command, unless ``canceling`` says the
+    report is for a Ctrl+C already on its way out: then it ends only the wait.
     """
     import threading
     import urllib.parse
@@ -885,8 +888,11 @@ def _report_stopped(target, sign_in, start: dict, report: dict) -> None:
     try:
         worker.start()
         worker.join(_REPORT_TIMEOUT_SECONDS)
-    # A second Ctrl+C ends only the wait for the report; a thread that cannot start sends nothing.
-    except (Exception, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        if not canceling:
+            raise
+    # A thread that cannot start sends nothing.
+    except Exception:
         pass
 
 
@@ -1263,7 +1269,8 @@ def run_upload(
         return _call(renderer, target, "start", ("assets", "uploads"), body, sign_in=sign_in, resumable_start=resumable)
 
     def stopped(e: BaseException) -> None:
-        _report_stopped(target, sign_in, start, {"size_bytes": size, "model_folder": folder, "reason": _stop_reason(e)})
+        report = {"size_bytes": size, "model_folder": folder, "reason": _stop_reason(e)}
+        _report_stopped(target, sign_in, start, report, canceling=isinstance(e, KeyboardInterrupt))
 
     # Once ingest refuses a resumable start, the rest of the run asks for a single PUT.
     ask_resumable = True

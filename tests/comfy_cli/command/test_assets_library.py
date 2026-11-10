@@ -3691,6 +3691,25 @@ class TestUploadAnalytics:
         assert [p for p in cloud.paths("POST") if p.endswith("/complete")] == [_COMPLETE_1.replace("1/", "2/")]
         assert _complete_analytics(cloud) == [{**_CLIENT, "resumed": False}]
 
+    @pytest.mark.parametrize(
+        ("resumable", "first"), [(False, 503), (True, 410)], ids=["single-put-5xx", "session-gone"]
+    )
+    def test_a_ctrl_c_during_the_abandoned_attempts_report_cancels_the_upload(
+        self, cloud_target, monkeypatch, model_file, no_wait, resumable, first
+    ):
+        routes, put = _restart_routes(resumable, first)
+        joins = _watch_report_thread(monkeypatch, interrupt=True)
+        cloud = _run_upload_directly(monkeypatch, routes, put)
+        with pytest.raises(KeyboardInterrupt) as raised:
+            assets_library.run_upload(
+                model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+            )
+
+        # The interrupt from the report wait is this run's first Ctrl+C: it escapes, no fresh upload starts.
+        assert raised.value.args == ("second",) and joins == [(3.0, True)]
+        assert cloud.paths("POST").count("/api/assets/uploads") == 1
+        assert not [p for p in cloud.paths("POST") if p.endswith("/complete")]
+
     def test_an_abandoned_attempt_whose_start_did_not_advertise_reports_sends_nothing(
         self, cloud_target, monkeypatch, capsys, model_file, no_wait
     ):
@@ -3710,6 +3729,13 @@ class TestUploadAnalytics:
 
 def _restart_upload(monkeypatch, capsys, model_file, resumable: bool, first, *, first_version: int | None = 1):
     """An upload whose first attempt storage refuses with ``first`` and whose fresh upload succeeds."""
+    routes, put = _restart_routes(resumable, first, first_version=first_version)
+    env, rc, cloud, _, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=put)
+    return env, rc, cloud
+
+
+def _restart_routes(resumable: bool, first, *, first_version: int | None = 1):
+    """The routes and storage for ``_restart_upload``."""
     import requests
 
     routes = _analytics_routes(resumable)
@@ -3729,8 +3755,7 @@ def _restart_upload(monkeypatch, capsys, model_file, resumable: bool, first, *, 
             return SimpleNamespace(status_code=200, headers={}, close=lambda: None)
         return bucket(url, **kw)
 
-    env, rc, cloud, _, _ = _upload(monkeypatch, capsys, [str(model_file), "--type", "loras"], routes, [], storage=put)
-    return env, rc, cloud
+    return routes, put
 
 
 def _watch_report_thread(monkeypatch, *, interrupt: bool = False) -> list:
