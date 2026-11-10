@@ -616,6 +616,36 @@ def test_run_on_cloud_skill_drops_the_later_milestone_links():
         assert gone not in text, f"comfy-run-on-cloud skill should not mention {gone}"
 
 
+def test_run_on_cloud_skill_explains_workflow_and_folder_links():
+    """The save's link opens the one workflow or its folder; the skill hands
+    back `data.url` as it is and reads why a folder link was given."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    for needle in (
+        "Hand back `data.url` as returned",
+        "`data.url_opens`",
+        "workflowId=<data.workflow_id>",
+        "workflows=<folder>",
+        "`data.folder_link_reason`",
+        "`workflow_links_off`",
+        "`record_not_found`",
+        "`record_ambiguous`",
+        "`record_lookup_failed`",
+        "`workflow_record_unknown`",
+        "Cloud checks the link against the saved file when it opens",
+        "not listed here as `folder`",
+        "`data.filename`",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should mention {needle}"
+    # The Cloud page is not part of this repository; the skill does not quote it.
+    assert "Couldn't open this workflow" not in text
+
+
+def test_comfy_skill_reads_an_unknown_link_value_as_folder():
+    text = " ".join(skill_content("comfy").split())
+    assert "`data.url_opens`" in text
+    assert "treat a value not listed here as `folder`" in text
+
+
 def test_run_on_cloud_skill_asks_before_every_upload_and_lossy_swap():
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "uploading any file from this machine" in text
