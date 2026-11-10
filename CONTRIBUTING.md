@@ -114,8 +114,10 @@ Notable user-facing changes should be summarized in
 2. **Create the GitHub release `vX.Y.Z` from `main` and publish it directly,
    never as a draft.** `.github/workflows/publish_package.yml` runs only on the
    `release: created` event, which a draft never fires, and it takes the version
-   from the tag with the `v` stripped. PyPI refuses a second upload of the same
-   version, so a botched publish is fixed with a new patch version, not a retry.
+   from the tag with the `v` stripped. If the publish job failed before PyPI
+   took any file (there is no page at `pypi.org/project/comfy-cli/X.Y.Z/`),
+   re-run the failed job. PyPI never takes the same file name twice, so a file
+   it already took is replaced only by a new patch version.
 3. **Check the workflow run.** Its second job, `test-pip-installation`, installs
    `comfy-cli==X.Y.Z` from PyPI and runs `comfy --help`; that job passing is the
    check that the release shipped.
