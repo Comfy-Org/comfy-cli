@@ -365,6 +365,9 @@ _UPLOAD_CLIENT = {"client": "comfy_cli"}
 # A report that a transfer stopped gets one request and no retry, and the
 # command waits this long at most for all of it, DNS and slow answers included.
 _REPORT_TIMEOUT_SECONDS = 3.0
+# The wait on that report goes in steps this long, so a Ctrl+C lands within one
+# step: on Windows a timed join does not see Ctrl+C until it ends.
+_REPORT_WAIT_STEP_SECONDS = 0.1
 # Large uploads can take more than fifteen minutes to check and store.
 _TASK_POLL_SECONDS = 2.0
 # A task read that gets a 5xx or no answer is retried for this long from the
@@ -853,19 +856,8 @@ def _stop_reason(e: BaseException) -> str:
 def _report_stopped(target, sign_in, start: dict, report: dict, *, canceling: bool = False) -> None:
     """Tell Comfy Cloud a transfer stopped for good, when start says it takes such reports.
 
-    Best effort: ``report`` holds only the route's fixed fields (no file name,
-    URL, hash or error text), and nothing the request raises or answers
-    changes the upload's outcome. A stored sign-in sends the token the upload
-    already holds: reading the store could wait on its lock or refresh the
-    token, and the report runs on Ctrl+C.
-
-    The request runs on a daemon thread joined for ``_REPORT_TIMEOUT_SECONDS``:
-    the request's own timeout bounds each socket step, not name lookup or a
-    server that answers a byte at a time. A thread still running at exit is
-    dropped with the process.
-
-    A Ctrl+C during the wait cancels the command, unless ``canceling`` says the
-    report is for a Ctrl+C already on its way out: then it ends only the wait.
+    A stored sign-in sends the token the upload already holds: reading the
+    store could wait on its lock or refresh the token, and the report runs on Ctrl+C.
     """
     import threading
     import urllib.parse
@@ -887,7 +879,12 @@ def _report_stopped(target, sign_in, start: dict, report: dict, *, canceling: bo
     worker = threading.Thread(target=send, name="comfy-upload-stop-report", daemon=True)
     try:
         worker.start()
-        worker.join(_REPORT_TIMEOUT_SECONDS)
+        deadline = _clock() + _REPORT_TIMEOUT_SECONDS
+        while worker.is_alive():
+            left = deadline - _clock()
+            if left <= 0:
+                break
+            worker.join(min(_REPORT_WAIT_STEP_SECONDS, left))
     except KeyboardInterrupt:
         if not canceling:
             raise

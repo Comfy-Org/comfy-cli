@@ -3610,7 +3610,7 @@ class TestUploadAnalytics:
             answered.set()
             raise TimeoutError("timed out")
 
-        joins = _watch_report_thread(monkeypatch)
+        joins = _watch_report_thread(monkeypatch, no_wait)
         try:
             env, rc, cloud, _, _ = _failed_upload(monkeypatch, capsys, model_file, "stalled", version=1, events=trickle)
             still_blocked = not answered.is_set()
@@ -3620,8 +3620,30 @@ class TestUploadAnalytics:
         assert rc == 1 and env["error"]["details"]["reason"] == "upload_paused"
         # The command went on while the report was still waiting on the server.
         assert still_blocked and _events(cloud) == [(_EVENTS.format(1), _report("network"))]
-        # One daemon thread, joined for the 3 seconds the report is promised to take at most.
-        assert joins == [(3.0, True)]
+        # One daemon thread, waited on for the 3 seconds the report is promised to take at most.
+        assert all(daemon for _, daemon in joins) and sum(t for t, _ in joins) == pytest.approx(3.0)
+
+    def test_the_report_wait_steps_a_tenth_of_a_second_until_the_bound(
+        self, cloud_target, monkeypatch, capsys, model_file, no_wait
+    ):
+        import threading
+
+        release = threading.Event()
+
+        def trickle():
+            release.wait(5)
+            return b""
+
+        joins = _watch_report_thread(monkeypatch, no_wait)
+        try:
+            _, rc, _, _, _ = _failed_upload(monkeypatch, capsys, model_file, "stalled", version=1, events=trickle)
+        finally:
+            release.set()
+
+        # On Windows a timed join sees Ctrl+C only when it ends, so no step may be longer than 0.1 s.
+        assert rc == 1 and len(joins) >= 30 and all(t <= 0.1 for t, _ in joins)
+        # The steps stop at the 3 second bound, the last one cut to fit.
+        assert sum(t for t, _ in joins) == pytest.approx(3.0)
 
     def test_a_second_ctrl_c_during_the_report_ends_it_and_raises_the_first(
         self, cloud_target, monkeypatch, model_file, no_wait
@@ -3636,7 +3658,7 @@ class TestUploadAnalytics:
 
         from comfy_cli.config_manager import ConfigManager
 
-        joins = _watch_report_thread(monkeypatch, interrupt=True)
+        joins = _watch_report_thread(monkeypatch, interrupt_at=1)
         cloud = _run_upload_directly(monkeypatch, _analytics_routes(True, events=trickle), _ResumableBucket(crash=True))
         try:
             with pytest.raises(KeyboardInterrupt) as raised:
@@ -3648,8 +3670,33 @@ class TestUploadAnalytics:
 
         # The upload's own interrupt, not the second one.
         assert raised.value.args == ()
-        assert joins == [(3.0, True)] and _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
+        assert joins == [(0.1, True)] and _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
         assert len(list((Path(ConfigManager().get_config_path()) / "model-uploads").glob("*.json"))) == 1
+
+    def test_a_second_ctrl_c_on_a_later_step_of_the_wait_ends_it_and_raises_the_first(
+        self, cloud_target, monkeypatch, model_file, no_wait
+    ):
+        import threading
+
+        release = threading.Event()
+
+        def trickle():
+            release.wait(5)
+            return b""
+
+        joins = _watch_report_thread(monkeypatch, no_wait, interrupt_at=3)
+        cloud = _run_upload_directly(monkeypatch, _analytics_routes(True, events=trickle), _ResumableBucket(crash=True))
+        try:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                assets_library.run_upload(
+                    model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+                )
+        finally:
+            release.set()
+
+        # The second Ctrl+C lands on the third step, 0.2 s in, and no step runs after it.
+        assert raised.value.args == () and joins == [(0.1, True)] * 3
+        assert _events(cloud) == [(_EVENTS.format(1), _report("canceled"))]
 
     # --- A reason with no storage answer ---
 
@@ -3697,16 +3744,27 @@ class TestUploadAnalytics:
     def test_a_ctrl_c_during_the_abandoned_attempts_report_cancels_the_upload(
         self, cloud_target, monkeypatch, model_file, no_wait, resumable, first
     ):
-        routes, put = _restart_routes(resumable, first)
-        joins = _watch_report_thread(monkeypatch, interrupt=True)
+        import threading
+
+        release = threading.Event()
+
+        def trickle():
+            release.wait(5)
+            return b""
+
+        routes, put = _restart_routes(resumable, first, events=trickle)
+        joins = _watch_report_thread(monkeypatch, interrupt_at=1)
         cloud = _run_upload_directly(monkeypatch, routes, put)
-        with pytest.raises(KeyboardInterrupt) as raised:
-            assets_library.run_upload(
-                model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
-            )
+        try:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                assets_library.run_upload(
+                    model_file, "loras", where="cloud", dry_run=False, command="assets library upload"
+                )
+        finally:
+            release.set()
 
         # The interrupt from the report wait is this run's first Ctrl+C: it escapes, no fresh upload starts.
-        assert raised.value.args == ("second",) and joins == [(3.0, True)]
+        assert raised.value.args == ("second",) and joins == [(0.1, True)]
         assert cloud.paths("POST").count("/api/assets/uploads") == 1
         assert not [p for p in cloud.paths("POST") if p.endswith("/complete")]
 
@@ -3734,11 +3792,11 @@ def _restart_upload(monkeypatch, capsys, model_file, resumable: bool, first, *, 
     return env, rc, cloud
 
 
-def _restart_routes(resumable: bool, first, *, first_version: int | None = 1):
+def _restart_routes(resumable: bool, first, *, first_version: int | None = 1, events: Any = b""):
     """The routes and storage for ``_restart_upload``."""
     import requests
 
-    routes = _analytics_routes(resumable)
+    routes = _analytics_routes(resumable, events=events)
     starts = routes[("POST", "/api/assets/uploads")]
     if first_version is None:
         starts[0] = {k: v for k, v in starts[0].items() if k != "upload_analytics_version"}
@@ -3758,8 +3816,12 @@ def _restart_routes(resumable: bool, first, *, first_version: int | None = 1):
     return routes, put
 
 
-def _watch_report_thread(monkeypatch, *, interrupt: bool = False) -> list:
-    """Records each stop-report thread's join as ``(timeout, daemon)``; ``interrupt`` makes it a second Ctrl+C."""
+def _watch_report_thread(monkeypatch, now: list | None = None, *, interrupt_at: int | None = None) -> list:
+    """Records each stop-report thread's join as ``(timeout, daemon)``.
+
+    Each join moves the ``no_wait`` clock ``now`` by its timeout; join number
+    ``interrupt_at`` raises a second Ctrl+C.
+    """
     import threading
 
     joins: list = []
@@ -3769,10 +3831,12 @@ def _watch_report_thread(monkeypatch, *, interrupt: bool = False) -> list:
             if self.name != "comfy-upload-stop-report":
                 return super().join(timeout)
             joins.append((timeout, self.daemon))
-            if interrupt:
+            if len(joins) == interrupt_at:
                 raise KeyboardInterrupt("second")
-            # The bound is checked from the recorded value, so the test does not wait it out.
-            return super().join(0.05)
+            if now is not None:
+                now[0] += timeout
+            # The bound is checked from the recorded values, so the test does not wait it out.
+            return super().join(0.01)
 
     monkeypatch.setattr(threading, "Thread", Watched)
     return joins
