@@ -239,6 +239,147 @@ def test_get_where_model_ignores_separators(tmp_path, monkeypatch):
     assert _envelope(result.output)["data"]["name"] == "video_wan2_2_14B_t2v"
 
 
+# The gallery names the base model in `models` and the variant ("Lite",
+# "Turbo", "ControlNet") only in the title, tags or template name. Entries are
+# copied from the live gallery's shape.
+_VARIANT_FIXTURE = [
+    {
+        "title": "Image",
+        "type": "image",
+        "templates": [
+            {
+                "name": "api_bytedance_seedream_5_0_lite_image_edit",
+                "title": "Seedream 5.0 Lite: Image Edit",
+                "tags": ["API", "Image Edit"],
+                "models": ["Seedream 5.0"],
+            },
+            {
+                "name": "api_bytedance_seedream_5_0_flash_t2i",
+                "title": "Seedream 5.0 Flash: Text to Image",
+                "tags": ["API", "Text to Image"],
+                "models": ["Seedream 5.0"],
+            },
+            {"name": "image_krea2_turbo_t2i", "title": "Krea-2: Text to Image", "tags": [], "models": ["Krea 2"]},
+            {"name": "api_krea3_t2i", "title": "Krea 3: Text to Image", "tags": ["API"], "models": ["Krea 3"]},
+            {
+                "name": "image_qwen_image_instantx_controlnet",
+                "title": "Qwen-Image InstantX Union ControlNet",
+                "tags": ["Image", "ControlNet"],
+                "models": ["Qwen-Image"],
+            },
+            {
+                "name": "image_qwen_image_2_1_t2i",
+                "title": "Qwen Image 2.1: Text to Image",
+                "tags": ["Text to Image"],
+                "models": ["Qwen Image 2.1"],
+            },
+            {
+                "name": "api_nano_banana_pro_t2i",
+                "title": "Nano Banana Pro: Text to Image",
+                "tags": ["API"],
+                "models": ["Nano Banana Pro"],
+            },
+            {
+                "name": "api_nano_banana_2_t2i",
+                "title": "Nano Banana 2: Text to Image",
+                "tags": ["API"],
+                "models": ["Nano Banana 2"],
+            },
+        ],
+    }
+]
+
+
+def _ls_variant(tmp_path: Path, model: str) -> list[str]:
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps(_VARIANT_FIXTURE))
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", str(path), "--model", model])
+    assert result.exit_code == 0, result.output
+    return [r["name"] for r in _envelope(result.output)["data"]["rows"]]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("Seedream 5.0 Lite", ["api_bytedance_seedream_5_0_lite_image_edit"]),
+        ("krea 2 turbo", ["image_krea2_turbo_t2i"]),
+        ("Qwen Image ControlNet", ["image_qwen_image_instantx_controlnet"]),
+    ],
+)
+def test_ls_model_finds_a_variant_named_outside_the_model_list(tmp_path, query, expected):
+    """The base model is in `models`; the variant word is only in the title, tags or name."""
+    assert _ls_variant(tmp_path, query) == expected
+
+
+def test_ls_model_variant_words_must_be_whole_words(tmp_path):
+    """`Nano Banana 2` must not match `nano_banana_pro_t2i` through the `2` in `t2i`."""
+    assert _ls_variant(tmp_path, "Nano Banana 2") == ["api_nano_banana_2_t2i"]
+
+
+def _ls_rows(tmp_path: Path, templates: list[dict], model: str) -> list[str]:
+    path = tmp_path / "index.json"
+    path.write_text(json.dumps([{"title": "Image", "type": "image", "templates": templates}]))
+    _force_json_renderer()
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", str(path), "--model", model])
+    assert result.exit_code == 0, result.output
+    return [r["name"] for r in _envelope(result.output)["data"]["rows"]]
+
+
+def test_ls_model_variant_words_come_from_one_model(tmp_path):
+    """`Nano Banana Pro` must not pool "Nano Banana 2" and "Gemini-3.1-Pro" from one template."""
+    templates = [
+        {
+            "name": "template_product_placement",
+            "title": "Product Placement",
+            "tags": [],
+            "models": ["Gemini-3.1-Pro", "Nano Banana 2"],
+        },
+    ]
+    assert _ls_rows(tmp_path, templates, "Nano Banana Pro") == []
+
+
+def test_ls_model_a_number_in_the_template_name_is_not_a_version(tmp_path):
+    """`Nano Banana 2` must not match a Nano Banana Pro template through the `2` in `photo_2`."""
+    templates = [
+        {
+            "name": "api_from_photo_2_miniature",
+            "title": "Photo to Blueprint",
+            "tags": [],
+            "models": ["Nano Banana Pro"],
+        },
+    ]
+    assert _ls_rows(tmp_path, templates, "Nano Banana 2") == []
+
+
+def test_ls_model_a_version_in_the_title_counts(tmp_path):
+    templates = [
+        {
+            "name": "image_qwen_image_edit_2511",
+            "title": "Qwen Image Edit 2511 - Material Replacement",
+            "tags": [],
+            "models": ["Qwen-Image-Edit"],
+        },
+    ]
+    assert _ls_rows(tmp_path, templates, "Qwen Image Edit 2511") == ["image_qwen_image_edit_2511"]
+
+
+def test_ls_model_still_needs_a_word_from_the_model_list(tmp_path):
+    """Words found only in titles are not a model filter: `Text Image` names no model."""
+    assert _ls_variant(tmp_path, "Text Image") == []
+
+
+def test_ls_model_with_a_word_no_template_has_finds_nothing(tmp_path):
+    assert _ls_variant(tmp_path, "Seedream 5.0 Ultra") == []
+
+
+def test_ls_model_whole_query_inside_a_model_name_is_unchanged(tmp_path):
+    assert _ls_variant(tmp_path, "Seedream 5.0") == [
+        "api_bytedance_seedream_5_0_lite_image_edit",
+        "api_bytedance_seedream_5_0_flash_t2i",
+    ]
+
+
 def test_show_returns_full_template(gallery_file):
     _force_json_renderer()
     runner = CliRunner()
