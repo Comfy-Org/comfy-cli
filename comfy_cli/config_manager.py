@@ -89,15 +89,20 @@ class ConfigManager:
         os.makedirs(tmp_path, exist_ok=True)
 
         if constants.CONFIG_KEY_BACKGROUND in self.config["DEFAULT"]:
-            bg_info = self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND].strip("()").split(",")
-            bg_info = [item.strip().strip("'") for item in bg_info]
-            self.background = bg_info[0], int(bg_info[1]), int(bg_info[2])
-
-            if not is_running(self.background[2]):
-                # The recorded pid is gone — but the logfile it points at is the
-                # ONLY pointer to a crash log, so clear the process record and
-                # keep CONFIG_KEY_BACKGROUND_LOG.
+            try:
+                bg_info = self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND].strip("()").split(",")
+                bg_info = [item.strip().strip("'") for item in bg_info]
+                self.background = bg_info[0], int(bg_info[1]), int(bg_info[2])
+            except (IndexError, ValueError):
+                # Hand-edited or truncated record: drop it like a stale pid,
+                # but keep CONFIG_KEY_BACKGROUND_LOG (see clear_background_process).
                 self.clear_background_process()
+            else:
+                if not is_running(self.background[2]):
+                    # The recorded pid is gone — but the logfile it points at is the
+                    # ONLY pointer to a crash log, so clear the process record and
+                    # keep CONFIG_KEY_BACKGROUND_LOG.
+                    self.clear_background_process()
 
     def get_env_data(self):
         """
