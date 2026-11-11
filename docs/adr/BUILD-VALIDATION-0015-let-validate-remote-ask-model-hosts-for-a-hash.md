@@ -1,4 +1,4 @@
-# ADR-BUILD-VALIDATION-0009: Let `validate --remote` Ask Model Hosts for a Hash
+# ADR-BUILD-VALIDATION-0015: Let `validate --remote` Ask Model Hosts for a Hash
 
 Date: 2026-11-11
 

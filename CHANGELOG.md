@@ -41,7 +41,7 @@ history.
   `sourceSha256`. Each HEAD, from connect to its last header, may take 5
   seconds and all of them 15 seconds
   together; a link past that budget, or one that states no hash or does not
-  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0009
+  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0015
   records that `validate --remote` now contacts the model hosts.
 
 ### Changed
