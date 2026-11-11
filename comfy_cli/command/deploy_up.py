@@ -243,7 +243,7 @@ def _name_active_deployments(
     else:
         limits = build_quota.best_effort(client.get_limits)
         limit = limits.get("maxActiveDeployments") if isinstance(limits, dict) else None
-        at_cap = isinstance(limit, int) and not isinstance(limit, bool) and len(active) >= limit
+        at_cap = _is_count(limit) and len(active) >= limit
     if not at_cap or not active:
         return
     build_quota.label_builds(builder, active)

@@ -167,3 +167,20 @@ def test_pretty_output_says_when_the_release_count_skipped_builds(monkeypatch: p
     assert f"first {build_quota.MAX_BUILDS} Builds" in release_line
     active_line = next(line for line in output.splitlines() if line.strip().startswith("Active deployments:"))
     assert "at least 2 of 3" in active_line
+
+
+def test_a_failed_best_effort_read_returns_none_and_logs_it_at_debug(caplog: pytest.LogCaptureFixture) -> None:
+    # Given a read that raises
+    def broken() -> JsonObject:
+        raise RuntimeError("limits broke")
+
+    # When
+    with caplog.at_level("DEBUG", logger=build_quota.__name__):
+        result = build_quota.best_effort(broken)
+
+    # Then
+    assert result is None
+    record = next(r for r in caplog.records if r.name == build_quota.__name__)
+    assert record.levelname == "DEBUG"
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], RuntimeError)

@@ -11,12 +11,15 @@ answer, and a read that fails leaves its envelope as it was.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Final, TypeVar
 
 from comfy_cli.utils import parse_rfc3339
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -43,6 +46,7 @@ def best_effort(call: Callable[[], T]) -> T | None:
     try:
         return call()
     except Exception:
+        logger.debug("best-effort read failed", exc_info=True)
         return None
 
 

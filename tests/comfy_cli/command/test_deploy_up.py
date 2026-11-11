@@ -1845,6 +1845,18 @@ def test_a_create_over_the_worker_cap_names_no_deployment() -> None:
     assert error.hint is None
 
 
+def test_a_negative_limit_does_not_read_as_the_active_cap() -> None:
+    # Given a refusal not worded as the active cap, and a limit no count can be under
+    client = _RefusedDeploy(_slot_rows(), _OVER_WORKER_CAP, {"maxActiveDeployments": -1, "maxModelStorageGb": 100})
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then
+    assert "activeDeployments" not in error.details
+    assert error.hint is None
+
+
 @pytest.mark.parametrize(
     ("message", "listed"),
     [pytest.param(_AT_ACTIVE_CAP, True, id="active-cap-words"), pytest.param(_OVER_WORKER_CAP, False, id="worker")],
