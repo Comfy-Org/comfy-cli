@@ -3572,7 +3572,65 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
     return resolve_ref(node_part, aliases), slot
 
 
+def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -> None:
+    """Refuse producer batches that destroy an earlier child register.
+
+    This is admission only; raw-op replay and consumer hidden values are unchanged.
+    Minted ops supply canonical targets and normalized old/new values.
+    """
+    target = _write_target(op)
+    widget = target[2]
+    if op.get("path"):
+        node = _navigate_subgraph_path(workflow, op["path"])
+    else:
+        node = _find_by_str(workflow, str(op["node_id"]))
+    class_type = node.get("type", "") if node else ""
+    combos = graph.dynamic_combo_options(class_type)
+    destroyed: set[str] = set()
+    if widget in combos and op.get("old") != op["value"]:
+        # Follow declared ownership, including nested selectors, rather than
+        # treating every dotted scalar as a structural child.
+        pending = [widget]
+        seen = set()
+        while pending:
+            owner = pending.pop()
+            if owner in seen:
+                continue
+            seen.add(owner)
+            for option in combos[owner]["options"].values():
+                for child in option["widgets"]:
+                    destroyed.add(child)
+                    if child in combos:
+                        pending.append(child)
+    m = graph.node(class_type)
+    group = next((p for p in m.inputs if p.name == widget and p.is_dynamic_group), None) if m else None
+    for earlier in written:
+        if earlier[:2] != target[:2]:
+            continue
+        removed_row = False
+        if group is not None and earlier[2].startswith(widget + "."):
+            row, dot, field = earlier[2][len(widget) + 1 :].partition(".")
+            if dot and row.isdecimal() and int(row) >= op["value"]:
+                removed_row = any(p.name == earlier[2] for p in _dynamic_group_widgets(group, f"{widget}.{row}"))
+        if earlier[2] in destroyed or removed_row:
+            raise ValueError(
+                f"destructive structural rebuild of {widget!r} would erase earlier batch write "
+                f"to {earlier[2]!r} on {target[1]}; put the selector/count before child writes "
+                "or split the edits into separate batches"
+            )
+    written.add(target)
+
+
 def apply_specs(
+    workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
+) -> tuple[dict, list, dict]:
+    """Validate atomically, then apply successful edits to the caller in place."""
+    if len(specs) <= _MAX_OPS_PER_BATCH:
+        _apply_specs_impl(copy.deepcopy(workflow), graph, copy.deepcopy(specs), actor=actor, base_version=base_version)
+    return _apply_specs_impl(workflow, graph, specs, actor=actor, base_version=base_version)
+
+
+def _apply_specs_impl(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases).
@@ -3621,6 +3679,7 @@ def apply_specs(
     ops: list[dict] = []
     replaced: dict[tuple, bool] = {}
     input_targets: set[str] = set()
+    widget_writes: set[tuple] = set()
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:
@@ -3693,6 +3752,8 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                    for row_op in row_ops:
+                        _admit_rebuild_write(workflow, graph, row_op, widget_writes)
                     ops.extend(row_ops)
                     replaced.update({_write_target(row_op): row_op is row_ops[0] for row_op in row_ops})
                     continue
@@ -3718,6 +3779,8 @@ def apply_specs(
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            if op.get("op") == "set_widget":
+                _admit_rebuild_write(workflow, graph, op, widget_writes)
             # A later write at the batch's stamp would tie with the replacement
             # on the op_id tiebreak. Amendment v1.14 keeps this refusal.
             target = _write_target(op) if op.get("op") == "set_widget" else None
