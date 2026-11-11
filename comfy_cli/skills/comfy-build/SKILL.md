@@ -190,8 +190,8 @@ left out, the message counts each cause: disabled, or the importer's own
 advisory line for that cause (a pack still being published on the Comfy
 Registry means import again later), and gives no cause where the report has
 none. Those advisory lines come inside this one warning, not again on their own.
-A newer snapshot will not help. `--from-snapshot` and `--from-workflow` also
-refuse each other.
+A newer snapshot helps only after a disabled pack is enabled in the install.
+`--from-snapshot` and `--from-workflow` also refuse each other.
 
 ## Path B — from a workflow file
 
