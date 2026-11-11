@@ -3908,13 +3908,9 @@ _SOURCE_PROBE_BUDGET = 15.0
 
 
 def _https_link(uri: str) -> bool:
-    """Whether a model link may be opened: https, with a host, and no user or
-    password before the host. Through an HTTP proxy urllib puts that userinfo in
-    its ``CONNECT`` line, which is sent in the clear before TLS starts.
-
-    urllib percent-decodes the authority first, so ``TOKEN%40host`` goes out as
-    ``TOKEN@host``. A model host's name never needs a ``%``, so an authority with
-    an ``@`` or a ``%`` in it is refused, however the userinfo is spelled."""
+    """Through an HTTP proxy urllib sends a link's userinfo, percent-decoded, in its
+    clear-text ``CONNECT`` line, so an ``@`` or ``%`` before the path is refused
+    (ADR-BUILD-VALIDATION-0015)."""
     try:
         parts = urlsplit(uri)
     except ValueError:
@@ -3970,13 +3966,8 @@ class _SourceProbe:
 
 
 def _source_sha256(uri: str, *, timeout: float = _SOURCE_HEAD_TIMEOUT) -> str | None:
-    """The sha256 a model link's host states for its file, or None on any failure.
-
-    Https only, no userinfo, one HEAD, redirect not followed: a link can carry a
-    credential (a Civitai ``?token=``) that must not travel without TLS, to a
-    proxy, or on to another host.
-    Only ``X-Linked-Etag`` (Hugging Face's, on that redirect) counts, as in the
-    builder's verifier: a plain ``ETag`` can be 64 hex characters and not a sha256."""
+    """Only ``X-Linked-Etag`` counts, as in the builder's verifier: a plain ``ETag``
+    can be 64 hex characters and not a sha256 (ADR-BUILD-VALIDATION-0015)."""
     import urllib.request
 
     from comfy_cli.http import no_redirect_urlopen
