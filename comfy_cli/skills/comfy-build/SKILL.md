@@ -41,6 +41,8 @@ hash, so the next cut is genuinely a new release.
   `comfy-build.yaml` next to the install. That file is the working copy: it is
   what you edit, what the user commits, and what every later command reads. The
   platform holds a copy, and `comfy build status` says how far apart they are.
+  Before the first push it says `remote: not pushed` (`remote.state:
+  "not_pushed"` under `--json`) and still compares the spec with the install.
 - **A cut names its targets explicitly.** `--target <os>/<gpu>` is repeatable
   and required, so nothing is built that nobody asked for. Read
   `comfy build refs build-targets` rather than promising an artifact from memory.
@@ -154,8 +156,10 @@ falls to `0` means the connection stalled, not that the upload is slow.
   `--python <install>/.venv/bin/python` for split and Desktop layouts, where the
   code lives apart from the data dir. Neither is a warning you can push past.
 - **A missing ComfyUI version *is* only a warning.** `init` says so and writes a
-  spec without `baseComfyVersion`, and the cut is the first thing to refuse it.
-  Re-run with `--comfy-version <ref>`, or set it in the spec.
+  spec without `baseComfyVersion`; under `--json` it is the
+  `build_comfy_version_missing` entry in `data.warnings[]`, and `validate`
+  reports the same. `release create` refuses to cut from that spec with the same
+  code. Set it with `comfy build update <dir> --comfy-version <ref>`.
 - **It collects `.ckpt`, `.pt`, `.bin`, `.pth` and `.safetensors`**, and only
   from a folder under `models/`. It follows symlinks (and breaks cycles), so a
   `models/loras` pointed at a shared drive is scanned. A dotfile, a weight loose
@@ -181,7 +185,9 @@ The import goes through the builder, so it needs the sign-in, and it cannot be
 combined with `--models-dir`, `--custom-nodes-dir`, `--python` or `--comfy-url`
 — it is a different source for the same definition, not a scan you steer. It
 carries **no models**, so use the scan whenever private weights have to travel.
-`--from-snapshot` and `--from-workflow` also refuse each other.
+A snapshot that lists no custom nodes either is usually older than the install;
+`init` warns (`build_snapshot_empty` in `data.warnings[]`), and a newer snapshot
+is the fix. `--from-snapshot` and `--from-workflow` also refuse each other.
 
 ## Path B — from a workflow file
 
@@ -209,6 +215,7 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
   which the builder will not place, so run `push --dry-run` before you disclose.
 - **A workflow names no ComfyUI version either**, so set one before cutting:
   `comfy build update <dir> --comfy-version <ref>`, or edit `baseComfyVersion`.
+  With no install beside the spec, that sets only the version; it does not rescan.
 - **`unresolvedClasses` is the list to take to the user.** Those node classes are
   ones nothing installable provides, so the graph will not run. Cutting anyway
   ships an environment that cannot execute the workflow it was built for.

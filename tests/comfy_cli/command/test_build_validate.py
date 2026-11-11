@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 import jsonschema
@@ -934,3 +937,141 @@ def test_remote_validate_treats_a_list_naming_no_folder_as_unread(
     assert said.count(_FOLDER_CASE_UNCHECKED) == 1, pretty.output
     assert agent.exit_code == 0, agent.output
     assert _envelope(agent)["data"]["folder_case_checked"] is False
+
+
+def test_a_spec_written_apart_from_its_install_names_the_flags_that_point_at_it(
+    workspace: Path, tmp_path: Path
+) -> None:
+    # Given: `init -o` put the spec in another folder
+    elsewhere = tmp_path / "elsewhere"
+    output = elsewhere / "comfy-build.yaml"
+    args = ["--name", "Apart", "--python", sys.executable, "--comfy-version", "0.3.40", "-o", str(output)]
+    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"}
+    initialized = CliRunner().invoke(cli_app, ["build", "init", *args, str(workspace)], env=env)
+    assert initialized.exit_code == 0, initialized.output
+
+    # When
+    refused = _invoke(elsewhere)
+    pointed = _invoke(
+        elsewhere, "--models-dir", str(workspace / "models"), "--custom-nodes-dir", str(workspace / "custom_nodes")
+    )
+
+    # Then
+    assert refused.exit_code == 1
+    error = _envelope(refused)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert str(elsewhere / "models") in error["hint"]
+    assert "--models-dir <install>/models" in error["hint"]
+    assert "--custom-nodes-dir <install>/custom_nodes" in error["hint"]
+    assert pointed.exit_code == 0, pointed.output
+
+
+def test_validate_warns_by_code_when_the_spec_sets_no_comfy_version(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[local_model()], nodes=[local_node()])
+
+    # When
+    agent = _invoke(workspace)
+    pretty = _invoke(workspace, output="pretty")
+
+    # Then
+    assert agent.exit_code == 0, agent.output
+    data = _envelope(agent)["data"]
+    assert [warning["code"] for warning in data["warnings"]] == ["build_comfy_version_missing"]
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+    assert pretty.exit_code == 0, pretty.output
+    assert "sets no ComfyUI version" in " ".join(pretty.output.split())
+
+
+_SHA_A = "a" * 64
+_SHA_B = "b" * 64
+#: What each link's host states on its redirect, as Hugging Face does; a link
+#: missing here does not answer.
+_STATED = {
+    "https://huggingface.co/org/repo/resolve/main/match.safetensors": f'"{_SHA_A}"',
+    "https://huggingface.co/org/repo/resolve/main/differs.safetensors": f'"{_SHA_B}"',
+}
+
+
+def _head(sent: list[tuple[str, str]]):
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append((request.get_method(), request.full_url))
+        stated = _STATED.get(request.full_url)
+        if stated is None:
+            raise urllib.error.URLError("unreachable")
+        headers = Message()
+        headers["X-Linked-Etag"] = stated
+        raise urllib.error.HTTPError(request.full_url, 302, "redirect refused", headers, io.BytesIO())
+
+    return no_redirect_urlopen
+
+
+def test_remote_checks_a_declared_link_against_its_sha256_before_the_filename(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    base = "https://huggingface.co/org/repo/resolve/main"
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"{base}/{name}", "sha256": _SHA_A}
+        for name in ("match.safetensors", "differs.safetensors", "silent.safetensors")
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    by_file = {lookup["filename"]: lookup for lookup in data["model_lookups"]}
+    assert by_file["match.safetensors"]["state"] == "declared_ok"
+    assert by_file["differs.safetensors"]["state"] == "declared_mismatch"
+    assert by_file["differs.safetensors"]["sourceSha256"] == _SHA_B
+    assert by_file["silent.safetensors"]["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["silent.safetensors"]}}]
+    assert {method for method, _ in sent} == {"HEAD"}
+    assert len(sent) == 3
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        pytest.param(302, {"X-Linked-Etag": f'"{_SHA_A.upper()}"'}, _SHA_A, id="hugging-face-redirect"),
+        pytest.param(200, {"ETag": f'W/"{_SHA_B}"'}, _SHA_B, id="weak-etag-sha256"),
+        pytest.param(200, {"ETag": '"d41d8cd98f00b204e9800998ecf8427e"'}, None, id="md5-etag"),
+        pytest.param(404, {"X-Linked-Etag": f'"{_SHA_A}"'}, None, id="not-found"),
+    ],
+)
+def test_a_links_stated_hash_is_read_only_when_it_is_a_sha256(
+    monkeypatch: pytest.MonkeyPatch, status: int, headers: dict[str, str], expected: str | None
+) -> None:
+    # Given
+    message = Message()
+    for name, value in headers.items():
+        message[name] = value
+
+    class Response:
+        def __init__(self) -> None:
+            self.headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        assert request.get_method() == "HEAD"
+        if status == 200:
+            return Response()
+        raise urllib.error.HTTPError(request.full_url, status, "refused", message, io.BytesIO())
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256("https://huggingface.co/org/repo/resolve/main/x.safetensors") == expected

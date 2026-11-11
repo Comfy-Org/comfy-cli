@@ -912,12 +912,19 @@ A warning is an object in `data.warnings[]` of a successful envelope
 (`ok: true`, exit `0`), with its own `code` and `message`. Registered error
 codes are failure categories, so a code a command only emits as a warning is
 not registered and is not listed in `comfy --json discover` under
-`data.error_codes`. `comfy which` and `comfy env` emit two such codes:
+`data.error_codes`. `comfy which` and `comfy env` emit two such codes, and
+`comfy build init` and `update` one more:
 
 | `code`                      | Emitted when                                                                                                   |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `workspace_not_found`       | The selected workspace does not exist on disk (`exists: false`); the message names the missing directory      |
 | `desktop_config_unreadable` | A Comfy Desktop record, settings file or path could not be read or checked; Desktop discovery may be incomplete |
+| `build_snapshot_empty`      | A `--from-snapshot` import found no custom nodes or models; the snapshot is likely older than the install      |
+
+`build_comfy_version_missing` (the spec sets no `baseComfyVersion`) appears in
+`data.warnings[]` of `comfy build init`, `update` and `validate`. It is also
+the error code `comfy build release create` refuses that spec with, so it is
+registered.
 
 Some warning codes registered before this rule, such as `partial_execution`,
 are still listed under `data.error_codes`, because registered codes are never

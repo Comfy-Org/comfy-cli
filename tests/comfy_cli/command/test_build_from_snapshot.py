@@ -492,3 +492,45 @@ def test_the_update_payload_validates_against_its_registered_schema(
     # Then
     schema = json.loads((SCHEMAS_DIR / "build_update.json").read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(envelope["data"])
+
+
+def _empty_import(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    """The importer's answer for a snapshot taken before any pack was installed."""
+    return 200, {"definition": {"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}, "report": {}}
+
+
+def test_init_from_a_snapshot_with_nothing_in_it_says_to_take_a_newer_one(
+    install: Path, snapshot: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
+
+    # When
+    agent = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400", "COMFY_BUILDER_TOKEN": "tok_test"}
+    pretty = CliRunner().invoke(
+        cli_app,
+        ["build", "init", "--force", "--name", "Foo", "--from-snapshot", str(snapshot), str(install)],
+        env=env,
+    )
+
+    # Then
+    assert agent.exit_code == 0, agent.stderr
+    assert len([line for line in agent.stdout.splitlines() if line.strip()]) == 1
+    data = _envelope(agent)["data"]
+    assert [warning["code"] for warning in data["warnings"]] == ["build_snapshot_empty"]
+    assert "older than the install" in _flat(agent.stderr)
+    jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
+    assert pretty.exit_code == 0, pretty.output
+    assert "take a newer one" in _flat(pretty.stdout)
+
+
+def test_init_from_a_snapshot_with_packs_carries_no_empty_snapshot_warning(
+    install: Path, snapshot: Path, recorder: _Recorder
+) -> None:
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["warnings"] == []

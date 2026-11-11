@@ -96,7 +96,14 @@ def stable_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = make_workspace(tmp_path / "install")
-    write_spec(root, build_id="build-1", revision="revision-1", models=[], nodes=[])
+    write_spec(
+        root,
+        build_id="build-1",
+        revision="revision-1",
+        models=[],
+        nodes=[],
+        definition_extra={"baseComfyVersion": "v0.3.40"},
+    )
     monkeypatch.chdir(root)
     return root
 
@@ -2452,3 +2459,33 @@ def test_release_limit_refusal_keeps_todays_details_when_the_builds_cannot_be_re
     # Then
     assert set(error["details"]) == {"buildId", "status", "body"}
     assert error["message"] == AT_THE_LIMIT
+
+
+def test_create_refuses_a_spec_with_no_comfy_version_before_the_builder(
+    workspace: Path, client: ReleaseBuilder
+) -> None:
+    # Given: a pushed spec that never set baseComfyVersion
+    write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_comfy_version_missing"
+    assert "comfy build update --comfy-version" in error["hint"]
+    assert Path(error["details"]["path"]).name == "comfy-build.yaml"
+    assert client.calls == []
+
+
+def test_create_with_an_id_leaves_the_comfy_version_to_the_builder(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given: `--id` names the Build, so the spec beside it is not what is cut
+    write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
+
+    # When
+    result = invoke_release("create", "--id", "build-9", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [("create_release", "build-9")]

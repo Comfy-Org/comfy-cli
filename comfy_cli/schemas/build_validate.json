@@ -6,6 +6,31 @@
   "type": "object",
   "additionalProperties": true,
   "properties": {
+    "warnings": {
+      "description": "Gaps in the definition that do not stop this command but stop a later one, as `{code, message}`: `build_comfy_version_missing` (no `baseComfyVersion`, which `release create` refuses). Empty when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": false,
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
+      }
+    },
+    "model_lookups": {
+      "description": "Present always; filled only with `--remote`. One entry per model, in spec order. `state` is `candidate_found`, `none_found`, `lookup_error` or `not_lookupable` from the filename lookup, or, for a model whose own `sourceUri` states a sha256 (Hugging Face's `X-Linked-Etag`), `declared_ok` when it equals the model's `sha256` and `declared_mismatch` when it does not, with the link's hash in `sourceSha256`. A link that states no hash or does not answer gets the filename lookup.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entry", "filename", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "entry": {"type": "string"},
+          "filename": {"type": ["string", "null"]},
+          "state": {"enum": ["candidate_found", "none_found", "lookup_error", "not_lookupable", "declared_ok", "declared_mismatch"]},
+          "sourceSha256": {"type": "string"}
+        }
+      }
+    },
     "folder_case_checked": {
       "description": "Present only when the spec has models. False when no usable folder list was read from the builder (offline, without `--remote`; a read that failed or named no folder), so a case variant of a folder (`Loras` for `loras`) passed unchecked; the builder refuses it at the release.",
       "type": "boolean"

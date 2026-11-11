@@ -15,7 +15,7 @@ from deploy_up_support import FakeBuilder, option_names, write_spec
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app
-from comfy_cli.command.build_spec import JsonObject, JsonValue
+from comfy_cli.command.build_spec import JsonObject, JsonValue, write_build_spec
 from comfy_cli.deploy_api import DeployClient
 
 
@@ -420,3 +420,76 @@ def test_rows_carry_and_print_the_editor_value_and_blank_where_none_was_sent(tmp
     assert "dep-a1  ready  v5  editor on" in pretty.stdout
     assert "dep-b2  ready  v5  editor off" in pretty.stdout
     assert "dep-c3  ready  v5\n" in pretty.stdout
+
+
+def _two_builds() -> PagedDeploy:
+    return PagedDeploy([[_summary("build-live", "release-5"), _summary("other-live", "release-other")]])
+
+
+def _spec_here(root: Path, build_id: str | None) -> None:
+    """The spec a bare `deploy ls` finds: `comfy-build.yaml` in the current folder."""
+    spec: JsonObject = {
+        "schema": "comfy-build/1",
+        "id": build_id,
+        "name": "example",
+        "description": "",
+        "syncedRevision": None,
+        "definition": {},
+    }
+    write_build_spec(root / "comfy-build.yaml", spec)
+
+
+def test_bare_ls_with_no_spec_here_lists_the_workspace(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    builder = FakeBuilder()
+    _install_clients(monkeypatch, builder, _two_builds())
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls"])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert len([line for line in result.stdout.splitlines() if line.strip()]) == 1
+    assert [row["id"] for row in _deployments(result)] == ["build-live", "other-live"]
+    assert builder.calls == []
+
+
+def test_bare_ls_inside_a_pushed_spec_lists_only_that_builds_deployments(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    _spec_here(tmp_path, "build-1")
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls"])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert [row["id"] for row in _deployments(result)] == ["build-live"]
+
+
+def test_bare_ls_inside_a_spec_that_was_never_pushed_still_refuses(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    _spec_here(tmp_path, None)
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls"])
+
+    # Then
+    assert result.exit_code == 1
+    assert json.loads(result.stdout.splitlines()[-1])["error"]["code"] == "deploy_build_not_pushed"
+
+
+def test_a_named_path_with_no_spec_still_refuses(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+
+    # When
+    result = _invoke_json(tmp_path / "typo")
+
+    # Then
+    assert result.exit_code == 1
+    assert json.loads(result.stdout.splitlines()[-1])["error"]["code"] == "build_spec_not_found"

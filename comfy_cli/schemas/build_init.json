@@ -82,6 +82,16 @@
         }
       }
     },
+    "warnings": {
+      "description": "Gaps in the definition that do not stop this command but stop a later one, as `{code, message}`: `build_comfy_version_missing` (no `baseComfyVersion`, which `release create` refuses), and for a snapshot import `build_snapshot_empty` (the snapshot lists no custom nodes or models, so it is likely older than the install). Empty when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": false,
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
+      }
+    },
     "definition": {"type": "object"}
   },
   "allOf": [

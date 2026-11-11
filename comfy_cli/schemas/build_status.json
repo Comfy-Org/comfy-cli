@@ -46,8 +46,12 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "type": "string",
-          "minLength": 1
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "The Build compared against: `--id`, else the spec's id. Null when neither names one, so the spec was never pushed (`remote.state` is `not_pushed`)."
         },
         "name": {
           "type": [
@@ -79,11 +83,19 @@
     "remote": {
       "type": "object",
       "required": [
+        "state",
         "revision",
         "behind"
       ],
       "additionalProperties": false,
       "properties": {
+        "state": {
+          "enum": [
+            "pushed",
+            "not_pushed"
+          ],
+          "description": "`not_pushed` when no Build id was found: nothing was read from the builder, `revision` is null, `behind` is false and `hint` names `comfy build push`. The local half is still reported."
+        },
         "revision": {
           "type": [
             "string",
