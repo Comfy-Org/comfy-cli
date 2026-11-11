@@ -52,6 +52,12 @@ _IMPORT_REPORT = {
 _SCAN_ONLY_FLAGS = ("--models-dir", "--custom-nodes-dir", "--python", "--comfy-url")
 
 
+def _advisories(report: dict) -> list[str]:
+    """Every advisory line an import carries under ``advisories``: the packs it
+    left out, then everything else."""
+    return [*build._pack_lines(report)[0], *build.report_advisories(report)]
+
+
 class _Recorder:
     """Stands in for the shared ``request_json`` seam, recording each request."""
 
@@ -213,7 +219,7 @@ def test_init_renders_every_advisory_on_stderr_and_one_envelope_on_stdout(
     install: Path, snapshot: Path, recorder: _Recorder
 ) -> None:
     # Given
-    expected = build.report_advisories(_IMPORT_REPORT)
+    expected = _advisories(_IMPORT_REPORT)
     assert expected, "the fixture report must produce advisories or this passes vacuously"
 
     # When
@@ -376,7 +382,7 @@ def test_update_reports_the_import_through_the_ordinary_diff(
     diff = envelope["data"]["diff"]
     assert envelope["data"]["source"] == "snapshot"
     assert envelope["data"]["snapshot"] == str(snapshot)
-    assert envelope["data"]["advisories"] == build.report_advisories(_IMPORT_REPORT)
+    assert envelope["data"]["advisories"] == _advisories(_IMPORT_REPORT)
     assert envelope["changed"] is True
     assert envelope["data"]["written"] is True
     # A snapshot describes no models, so the scanned one is dropped and both
@@ -434,7 +440,7 @@ def test_update_renders_every_advisory_on_stderr_and_one_envelope_on_stdout(
     install: Path, spec_file: Path, snapshot: Path, recorder: _Recorder
 ) -> None:
     # Given
-    expected = build.report_advisories(_IMPORT_REPORT)
+    expected = _advisories(_IMPORT_REPORT)
 
     # When
     result = _run("update", install, "-y", "--from-snapshot", str(snapshot))
@@ -655,9 +661,10 @@ def test_a_pending_registry_pack_in_an_empty_import_prints_one_cause_line(
     assert result.exit_code == 0, result.output
     naming = [line for line in result.output.splitlines() if "comfyui-essentials" in line]
     assert len(naming) == 1, result.output
-    pending = dict(build._REPORT_ADVISORIES)["registryPending"]
+    pending = dict(build._PACK_ADVISORIES)["registryPending"]
     assert pending in naming[0]
-    others = [meaning for key, meaning in build._REPORT_ADVISORIES if key != "registryPending"]
+    table = (*build._PACK_ADVISORIES, *build._OTHER_ADVISORIES)
+    others = [meaning for key, meaning in table if key != "registryPending"]
     assert not any(meaning in result.output for meaning in others), result.output
 
 
@@ -671,9 +678,10 @@ def test_a_pack_the_report_names_under_a_registry_cause_is_not_named_again_as_un
     }
 
     # When
-    lines = build.report_advisories(report)
+    lines, named = build._pack_lines(report)
 
     # Then
+    assert named == 3
     assert len([line for line in lines if "pending" in line]) == 1
     assert len([line for line in lines if "disowned" in line]) == 1
     assert "1 named nothing the builder can install from: loose" in lines

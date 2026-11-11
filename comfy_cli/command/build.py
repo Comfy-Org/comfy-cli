@@ -758,9 +758,9 @@ def snapshot_from_definition(definition: dict) -> dict:
     }
 
 
-# Each entry is (report key, what it means to the reader). These first four name
-# custom node packs the import left out; an empty snapshot import folds their
-# lines into its one warning.
+# Each entry is (report key, what it means to the reader). These name custom
+# node packs the import left out; an empty snapshot import folds their lines
+# into its one warning, and `_pack_lines` renders them.
 _PACK_ADVISORIES = (
     ("notInRegistry", "pinned to something the Comfy Registry does not publish"),
     ("collidingNodes", "left out: another pack already claimed the folder they install into"),
@@ -768,8 +768,8 @@ _PACK_ADVISORIES = (
     ("registryPending", "left out until the Comfy Registry finishes publishing them, so import again then"),
     ("unresolvedNodes", "named nothing the builder can install from"),
 )
-_REPORT_ADVISORIES = (
-    *_PACK_ADVISORIES,
+# Every other report key `report_advisories` renders from a list of names.
+_OTHER_ADVISORIES = (
     ("unverifiedPins", "left unchecked because the registry did not answer"),
     ("skippedPins", "dropped: the build owns these packages"),
     ("unpinnablePins", "dropped: not a public PyPI release"),
@@ -873,9 +873,7 @@ _REPORT_ENTRY_ADVISORIES = (
 
 def _table_lines(report: dict, table: tuple[tuple[str, str], ...]) -> tuple[list[str], int]:
     """The advisory line for each key of *table* the report fills, and how many
-    names those lines carry. The builder lists a disowned or pending Registry pin
-    under ``unresolvedNodes`` too, so that line leaves those names out: each pack
-    gets one cause."""
+    names those lines carry."""
     lines, named = [], 0
     for key, meaning in table:
         entries = report.get(key)
@@ -886,24 +884,31 @@ def _table_lines(report: dict, table: tuple[tuple[str, str], ...]) -> tuple[list
             lines.append(_unrenderable(key, entries))
             continue
         names = [_from_server(e) for e in entries]
-        if key == "unresolvedNodes":
-            given = {
-                _from_server(e)
-                for other in ("notInRegistry", "registryPending")
-                if isinstance(report.get(other), list | tuple)
-                for e in report[other]
-            }
-            names = [name for name in names if name not in given]
-            if not names:
-                continue
         lines.append(_advisory_line(len(names), meaning, names))
         named += len(names)
     return lines, named
 
 
-def report_advisories(report: dict, *, packs: bool = True) -> list[str]:
-    """One line per thing the importer could not carry, in reader's terms.
-    ``packs=False`` leaves out the `_PACK_ADVISORIES` lines."""
+def _pack_lines(report: dict) -> tuple[list[str], int]:
+    """The advisory line for each `_PACK_ADVISORIES` key the report fills, and
+    how many packs those lines name. The builder lists a disowned or pending
+    Registry pin under ``unresolvedNodes`` too, so that line leaves those names
+    out: each pack gets one cause."""
+    unresolved = report.get("unresolvedNodes")
+    if isinstance(unresolved, list | tuple):
+        given = {
+            _from_server(e)
+            for other in ("notInRegistry", "registryPending")
+            if isinstance(report.get(other), list | tuple)
+            for e in report[other]
+        }
+        report = {**report, "unresolvedNodes": [e for e in unresolved if _from_server(e) not in given]}
+    return _table_lines(report, _PACK_ADVISORIES)
+
+
+def report_advisories(report: dict) -> list[str]:
+    """One line per thing the importer could not carry, in reader's terms, other
+    than the packs it left out: `_pack_lines` names those."""
     lines = []
     # Present and false is the finding; absent means the importer did not say.
     if report.get("pythonSatisfied") is False:
@@ -920,7 +925,7 @@ def report_advisories(report: dict, *, packs: bool = True) -> list[str]:
             "the importer pinned every pack the workflow named without a version to the registry's newest "
             "published one, so importing the same file later can build something different"
         )
-    lines.extend(_table_lines(report, _REPORT_ADVISORIES if packs else _REPORT_ADVISORIES[len(_PACK_ADVISORIES) :])[0])
+    lines.extend(_table_lines(report, _OTHER_ADVISORIES)[0])
     for key, render in _REPORT_ENTRY_ADVISORIES:
         entries = report.get(key)
         if not entries:
@@ -1327,12 +1332,14 @@ def _import_definition(renderer, source: ImportSource, value: str, *, comfy_vers
     # through `renderer.warn`, which writes to stderr in JSON mode, so stdout
     # still carries exactly one envelope.
     report = imported.get("report") if isinstance(imported.get("report"), dict) else {}
-    advisories = report_advisories(report)
+    others = report_advisories(report)
+    # `--json` carries every line under `advisories`, the pack lines included.
+    advisories = [*_pack_lines(report)[0], *others]
     empty_reason = _snapshot_empty_message(data, report) if _empty_snapshot(definition, source.name) else None
     # An empty import that listed packs gives their causes inside its one
-    # warning, so each pack is said once.
+    # warning, so stderr names each pack once.
     folded = empty_reason is not None and bool(_snapshot_packs(data))
-    for line in report_advisories(report, packs=False) if folded else advisories:
+    for line in others if folded else advisories:
         renderer.warn(line)
     if empty_reason is not None:
         renderer.warn(empty_reason)
@@ -1376,7 +1383,7 @@ def _snapshot_empty_message(snapshot: dict, report: dict) -> str:
     if not packs:
         return _SNAPSHOT_EMPTY
     disabled = sum(1 for pack in packs if pack.get("enabled") is False)
-    causes, named = _table_lines(report, _PACK_ADVISORIES)
+    causes, named = _pack_lines(report)
     parts = [f"{disabled} disabled"] if disabled else []
     parts.extend(causes)
     remaining = len(packs) - disabled - named
