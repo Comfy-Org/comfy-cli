@@ -70,13 +70,15 @@ def _build_paths_or_workspace(path: str | None) -> BuildPaths | None:
 
     A bare `deploy ls` with no spec in the current directory lists the
     workspace, as `--workspace` does. A PATH the caller named still has to hold
-    a spec, so a typo is not read as "every Build"."""
+    a spec, so a typo is not read as "every Build". The note goes to stderr in
+    every mode, so a piped listing holds only the rows."""
     try:
         return resolve_build_paths(path)
     except BuildSpecNotFoundError:
         if path:
             raise
-        get_renderer().info("No build spec here, so this lists every Build's deployments (as --workspace).")
+        note = "No build spec here, so this lists every Build's deployments (as --workspace)."
+        get_renderer().stderr_console().print(note)
         return None
 
 
@@ -90,7 +92,7 @@ def run_ls(request: ListRequest) -> None:
         # The Build's own releases, each with its version where it has one;
         # under `--workspace` rows span Builds, so each keeps only its release id.
         versions: dict[str, int | None] | None = None
-        # What was listed, in the payload: the fallback notice is stderr only.
+        # What was listed, in the payload: the fallback note is on stderr only.
         scope: JsonObject = {"scope": "workspace"}
         paths = None if request.workspace else _build_paths_or_workspace(request.path)
         if paths is not None:

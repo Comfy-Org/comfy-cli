@@ -422,6 +422,9 @@ def test_rows_carry_and_print_the_editor_value_and_blank_where_none_was_sent(tmp
     assert "dep-c3  ready  v5\n" in pretty.stdout
 
 
+_FALLBACK_NOTE = "No build spec here, so this lists every Build's deployments"
+
+
 def _two_builds() -> PagedDeploy:
     return PagedDeploy([[_summary("build-live", "release-5"), _summary("other-live", "release-other")]])
 
@@ -453,6 +456,24 @@ def test_bare_ls_with_no_spec_here_lists_the_workspace(tmp_path: Path, monkeypat
     assert len([line for line in result.stdout.splitlines() if line.strip()]) == 1
     assert [row["id"] for row in _deployments(result)] == ["build-live", "other-live"]
     assert builder.calls == []
+    assert _FALLBACK_NOTE in result.stderr
+    assert _FALLBACK_NOTE not in result.stdout
+
+
+def test_bare_ls_with_no_spec_here_puts_the_note_on_stderr_in_pretty_mode(tmp_path: Path, monkeypatch) -> None:
+    # Given: a piped pretty listing must hold only the rows
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = _invoke_pretty()
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert "build-live  ready  release-5" in result.stdout
+    assert "other-live  ready  release-other" in result.stdout
+    assert _FALLBACK_NOTE in result.stderr
+    assert _FALLBACK_NOTE not in result.stdout
 
 
 def test_bare_ls_inside_a_pushed_spec_lists_only_that_builds_deployments(tmp_path: Path, monkeypatch) -> None:
