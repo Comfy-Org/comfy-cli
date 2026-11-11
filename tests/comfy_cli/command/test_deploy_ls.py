@@ -493,3 +493,32 @@ def test_a_named_path_with_no_spec_still_refuses(tmp_path: Path, monkeypatch) ->
     # Then
     assert result.exit_code == 1
     assert json.loads(result.stdout.splitlines()[-1])["error"]["code"] == "build_spec_not_found"
+
+
+@pytest.mark.parametrize(
+    ("setup", "args", "expected"),
+    [
+        pytest.param("spec", (), {"scope": "build", "buildId": "build-1"}, id="spec-here"),
+        pytest.param("none", (), {"scope": "workspace"}, id="no-spec-falls-back"),
+        pytest.param("spec", ("--workspace",), {"scope": "workspace"}, id="workspace-flag"),
+    ],
+)
+def test_the_payload_says_which_scope_was_listed(
+    tmp_path: Path, monkeypatch, setup: str, args: tuple[str, ...], expected: JsonObject
+) -> None:
+    # Given: under --json the fallback notice goes to stderr only, so the payload
+    # itself must tell one Build's listing from a workspace listing
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    if setup == "spec":
+        _spec_here(tmp_path, "build-1")
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls", *args])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    payload = _payload(result)
+    assert {key: payload[key] for key in ("scope", "buildId") if key in payload} == expected
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(payload)

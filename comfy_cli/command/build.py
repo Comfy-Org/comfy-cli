@@ -3901,12 +3901,20 @@ def _source_sha256(uri: str) -> str | None:
     credential (a Civitai ``?token=``) that must not travel on to another host.
     Only ``X-Linked-Etag`` counts, as in the builder's own verifier: a plain
     ``ETag`` can be an md5, an opaque CDN token or a Xet root even when it is 64
-    hex characters, so it reads as no hash. Any failure is None: the filename
-    lookup answers."""
+    hex characters, so it reads as no hash. A link that is not https is never
+    opened, so a credential in it does not travel without TLS: a ``source: local``
+    entry keeps its link on the wire and the link rules skip it. Any failure is
+    None: the filename lookup answers."""
     import urllib.request
 
     from comfy_cli.http import no_redirect_urlopen
 
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return None
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        return None
     try:
         with no_redirect_urlopen(urllib.request.Request(uri, method="HEAD"), timeout=_SOURCE_HEAD_TIMEOUT) as response:
             headers = response.headers

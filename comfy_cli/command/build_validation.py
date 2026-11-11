@@ -579,7 +579,8 @@ def _declared_lookup(index: int, model: JsonObject, source_hash: SourceHasher | 
 def lookup_public_model_sources(
     definition: JsonObject, resolver: ModelResolver, source_hash: SourceHasher | None = None
 ) -> list[ModelLookup]:
-    """Resolve lookupable model filenames in 32-item batches and restore spec order.
+    """Resolve lookupable model filenames in 32-item batches and restore the order of
+    *definition*'s models (the canonical, sorted order, not the spec file's).
 
     With *source_hash*, a model that declares its ``sourceUri`` and ``sha256`` is
     checked against that link first; the filename lookup answers only when the link

@@ -90,12 +90,15 @@ def run_ls(request: ListRequest) -> None:
         # The Build's own releases, each with its version where it has one;
         # under `--workspace` rows span Builds, so each keeps only its release id.
         versions: dict[str, int | None] | None = None
+        # What was listed, in the payload: the fallback notice is stderr only.
+        scope: JsonObject = {"scope": "workspace"}
         paths = None if request.workspace else _build_paths_or_workspace(request.path)
         if paths is not None:
             spec = read_build_spec(paths.spec_file)
             build_id = spec.get("id")
             if not isinstance(build_id, str) or not build_id:
                 raise BuildNotPushedError
+            scope = {"scope": "build", "buildId": build_id}
             versions = {
                 required_string(release, "id"): _version_of(release) for release in builder.list_releases(build_id)
             }
@@ -134,7 +137,7 @@ def run_ls(request: ListRequest) -> None:
                     f"{_editor_column(deployment)}{marker}"
                 )
         payload_rows: list[JsonValue] = [*deployments]
-        renderer.emit({"deployments": payload_rows}, command="deploy ls", changed=False)
+        renderer.emit({"deployments": payload_rows, **scope}, command="deploy ls", changed=False)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)
         raise typer.Exit(code=1) from error

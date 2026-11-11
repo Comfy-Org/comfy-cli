@@ -32,7 +32,8 @@ history.
   `--id` the spec is not read.
 - `comfy build validate --remote` asks a model's own `sourceUri` for its hash
   when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
-  HEAD that does not follow redirects). The lookup reads `declared_ok` or
+  HEAD that does not follow redirects). Only an https link is asked, so a
+  credential in its query never goes out without TLS. The lookup reads `declared_ok` or
   `declared_mismatch`, with the link's hash in `sourceSha256`. A link that
   states no hash or does not answer gets the filename lookup as before.
 
@@ -60,7 +61,9 @@ history.
   install (`init -o`) needs on `validate` and `push`.
 - A bare `comfy deploy ls` with no spec in the current folder lists the
   workspace, as `--workspace` does, instead of failing with
-  `build_spec_not_found`. A PATH that holds no spec still fails.
+  `build_spec_not_found`. A PATH that holds no spec still fails. Under `--json`
+  the payload says what was listed: `scope: "build"` with the `buildId`, or
+  `scope: "workspace"`.
 
 ## [1.26.0] - 2026-11-11
 

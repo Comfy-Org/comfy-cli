@@ -1075,6 +1075,53 @@ def test_remote_takes_no_verdict_from_a_plain_etag_that_looks_like_a_sha256(
     assert recorder.calls == [{"method": "POST", "body": {"filenames": ["model.safetensors"]}}]
 
 
+def test_remote_never_sends_a_declared_link_that_is_not_https(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: a source: local model keeps its sourceUri on the wire (no blobId), and
+    # the link rules skip a local entry, so a plain http link with a credential in
+    # its query reaches the hash probe
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    uri = "http://civitai.example/api/download/models/1?token=secret"
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link; the filename lookup answers
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("http://huggingface.co/org/repo/resolve/main/x.safetensors?token=secret", id="http"),
+        pytest.param("HTTP://huggingface.co/org/repo/resolve/main/x.safetensors", id="http-upper"),
+        pytest.param("ftp://files.example/x.safetensors", id="ftp"),
+        pytest.param("file:///etc/passwd", id="file"),
+        pytest.param("huggingface.co/org/repo/x.safetensors", id="no-scheme"),
+    ],
+)
+def test_a_link_that_is_not_https_is_never_opened(monkeypatch: pytest.MonkeyPatch, uri: str) -> None:
+    # Given
+    sent: list[str] = []
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append(request.full_url)
+        raise AssertionError("opened a non-https link")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256(uri) is None
+    assert sent == []
+
+
 @pytest.mark.parametrize(
     ("status", "headers", "expected"),
     [

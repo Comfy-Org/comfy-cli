@@ -3,9 +3,21 @@
   "$id": "https://comfy.org/schemas/deploy_ls.json",
   "title": "comfy deploy ls --json data payload",
   "type": "object",
-  "required": ["deployments"],
+  "required": ["deployments", "scope"],
   "additionalProperties": false,
+  "if": {"properties": {"scope": {"const": "build"}}},
+  "then": {"required": ["buildId"]},
+  "else": {"not": {"required": ["buildId"]}},
   "properties": {
+    "scope": {
+      "enum": ["build", "workspace"],
+      "description": "What was listed: `build` for one Build's deployments (the spec at PATH or in the current folder), `workspace` for every Build's (`--workspace`, or a bare `deploy ls` with no spec in the current folder)."
+    },
+    "buildId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The Build whose deployments were listed. Present only when `scope` is `build`."
+    },
     "deployments": {
       "type": "array",
       "items": {
