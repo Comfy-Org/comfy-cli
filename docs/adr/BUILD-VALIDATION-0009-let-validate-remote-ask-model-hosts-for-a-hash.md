@@ -39,8 +39,10 @@ that is recorded here.
 - **No userinfo.** A link with a user or password before its host
   (`https://TOKEN@host/...`) is never opened either. Through an HTTP proxy,
   urllib puts that userinfo in its `CONNECT` line, which goes to the proxy in
-  the clear before TLS starts. The model gets the filename lookup, and no
-  message names the link.
+  the clear before TLS starts. urllib percent-decodes the host first, so
+  `TOKEN%40host` would go out as `TOKEN@host`: a host with any `@` or `%` in
+  it is refused. The model gets the filename lookup, and no message names the
+  link.
 - **What is sent.** The `HEAD` for the URL as written, with urllib's default
   headers. No builder token, Cloud key, cookie or other credential is added;
   the only credential that travels is one the URL itself carries (a Civitai
@@ -90,7 +92,8 @@ The `--remote` help says the `HEAD`s go to the model hosts and share the
 
 - Adding any credential the URL does not carry.
 - Following a redirect from a model host.
-- Opening a link that is not https, or one with userinfo before its host.
+- Opening a link that is not https, or one with userinfo before its host,
+  written out or percent-encoded.
 - Reading a plain `ETag` as a sha256.
 - Letting a link check that fails or runs out of time fail `validate`.
 
@@ -115,7 +118,8 @@ The `--remote` help says the `HEAD`s go to the model hosts and share the
 - `tests/comfy_cli/command/test_build_validate.py`: a matching and a differing
   `X-Linked-Etag` read `declared_ok` and `declared_mismatch`; a link that does
   not answer gets the filename lookup; a plain `ETag` gives no verdict; a link
-  that is not https, or that has userinfo before its host, is never opened;
+  that is not https, or that has userinfo before its host, written out or
+  percent-encoded, is never opened;
   40 links on hosts that never answer stop at the budget and every model gets
   the filename lookup; hosts that trickle their headers past each read's
   timeout are cut off at the budget.

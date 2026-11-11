@@ -3910,12 +3910,16 @@ _SOURCE_PROBE_BUDGET = 15.0
 def _https_link(uri: str) -> bool:
     """Whether a model link may be opened: https, with a host, and no user or
     password before the host. Through an HTTP proxy urllib puts that userinfo in
-    its ``CONNECT`` line, which is sent in the clear before TLS starts."""
+    its ``CONNECT`` line, which is sent in the clear before TLS starts.
+
+    urllib percent-decodes the authority first, so ``TOKEN%40host`` goes out as
+    ``TOKEN@host``. A model host's name never needs a ``%``, so an authority with
+    an ``@`` or a ``%`` in it is refused, however the userinfo is spelled."""
     try:
         parts = urlsplit(uri)
     except ValueError:
         return False
-    return parts.scheme.lower() == "https" and bool(parts.hostname) and "@" not in parts.netloc
+    return parts.scheme.lower() == "https" and bool(parts.hostname) and not any(c in parts.netloc for c in "@%")
 
 
 def _within(seconds: float, call: Callable[[], str | None]) -> str | None:

@@ -34,8 +34,9 @@ history.
 - `comfy build validate --remote` asks a model's own `sourceUri` for its hash
   when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
   HEAD that does not follow redirects). Only an https link with no user or
-  password before its host is asked, so a credential in the link never goes
-  out without TLS or to a proxy. The lookup reads
+  password before its host, written out or percent-encoded (`TOKEN%40host`),
+  is asked, so a credential in the link never goes out without TLS or to a
+  proxy. The lookup reads
   `declared_ok` or `declared_mismatch`, with the link's hash in
   `sourceSha256`. Each HEAD, from connect to its last header, may take 5
   seconds and all of them 15 seconds
