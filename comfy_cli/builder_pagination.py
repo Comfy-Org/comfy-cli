@@ -52,7 +52,7 @@ def cursor_pages(
     A repeated cursor and an exceeded page cap raise rather than returning what
     was collected so far: a short listing presented as complete is the silent
     truncation this pagination was added to fix. ``before_page`` runs before each
-    request and stops the walk by raising.
+    page and stops the walk by raising; ``fetch`` also runs it before a sign-in retry.
     """
     cursor: str | None = None
     seen: set[str] = set()

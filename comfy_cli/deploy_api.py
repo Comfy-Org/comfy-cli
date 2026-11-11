@@ -45,6 +45,7 @@ class _Request:
     params: dict | None = None
     headers: dict[str, str] | None = None
     max_bytes: int = _MAX_JSON
+    before_retry: Callable[[], None] | None = None
 
 
 def _resolved_base_url(base_url: str | None) -> str:
@@ -172,6 +173,8 @@ class DeployClient:
             if token is None:
                 raise
             self.target = replace(self.target, auth_token=token)
+            if request.before_retry is not None:
+                request.before_retry()
             return send()
 
     def _get(self, operation: str, parts: tuple[str, ...], params: dict | None = None) -> dict:
@@ -223,13 +226,20 @@ class DeployClient:
     def iter_deployments(
         self, *, status: str | None = None, limit: int | None = None, before_page: Callable[[], None] | None = None
     ) -> Iterator[dict]:
-        """``before_page`` runs before each request and stops the walk by raising."""
+        """``before_page`` runs before each request, a sign-in retry included, and stops the walk by raising."""
         after: str | None = None
         seen: set[str] = set()
         for _ in range(_MAX_PAGES):
             if before_page is not None:
                 before_page()
-            page = self._get("list", ("deployments",), {"status": status, "limit": limit, "after": after})
+            page = self._request(
+                _Request(
+                    operation="list",
+                    parts=("deployments",),
+                    params={"status": status, "limit": limit, "after": after},
+                    before_retry=before_page,
+                )
+            )
             yield page
             next_cursor = page.get("nextCursor")
             if not isinstance(next_cursor, str) or not next_cursor:

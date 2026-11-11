@@ -413,6 +413,61 @@ def test_a_slow_deployment_list_leaves_out_use_but_keeps_the_builds(monkeypatch:
     assert "buildsTruncated" not in details
 
 
+def _details_after_a_slow_sign_in_refresh(monkeypatch: pytest.MonkeyPatch, refused: str) -> tuple[dict, list[str]]:
+    """release_limit_details over stored-sign-in clients, where ``refused`` answers 401 and the refresh takes 11 s."""
+    clock = [0.0]
+    pages = _pages(builds=0, releases=0, deployments=0)
+    requested: list[str] = []
+
+    def transport(url: str, target, **_: object) -> tuple[int, JsonObject]:
+        parts = urlsplit(url)
+        requested.append(parts.path)
+        if parts.path == refused:
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", None, None)  # type: ignore[arg-type]
+        query = parse_qs(parts.query)
+        return 200, pages[parts.path][1 if "cursor" in query or "after" in query else 0][0]
+
+    def refresh(token: str) -> str:
+        clock[0] += 11
+        return "fresh-jwt"
+
+    def signed_in(client):
+        client._refreshes_on_401 = True
+        return client
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", transport)
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", transport)
+    monkeypatch.setattr("comfy_cli.credentials.refreshed_access_token", refresh)
+    monkeypatch.setattr(
+        deploy_runtime, "deploy_client", lambda: signed_in(DeployClient("https://platform.test", "cloud-jwt"))
+    )
+    builder = signed_in(BuilderClient("https://platform.test", "cloud-jwt"))
+    return build_quota.release_limit_details(builder, now=lambda: clock[0]), requested
+
+
+def test_a_builder_page_refused_with_401_is_not_retried_once_the_refresh_ends_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the first Builds page answers 401 and the sign-in refresh ends after the deadline
+    details, requested = _details_after_a_slow_sign_in_refresh(monkeypatch, "/v1/builds")
+
+    # Then the page is not sent again, and the refusal adds nothing
+    assert requested == ["/v1/builds"]
+    assert details == {}
+
+
+def test_a_deployment_page_refused_with_401_is_not_retried_once_the_refresh_ends_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the first deployments page answers 401 and the sign-in refresh ends after the deadline
+    details, requested = _details_after_a_slow_sign_in_refresh(monkeypatch, "/v1/deployments")
+
+    # Then the page is not sent again, and the Builds are listed without their use
+    assert requested.count("/v1/deployments") == 1
+    assert requested[-1] == "/v1/deployments"
+    assert details["builds"] == [{"id": "build-0", "releases": 1}, {"id": "build-1", "releases": 1}]
+
+
 def test_reads_inside_the_deadline_are_not_marked_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
     # When every page answers at once
     details, started = _paged_details(monkeypatch, [0.0], ticks=False)

@@ -187,12 +187,15 @@ class BuilderClient:
         """The environment of the stored sign-in this client's token came from; None for a key or a handed token."""
         return self._sign_in_base_url if self._refreshes_on_401 else None
 
-    def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:
+    def _send(
+        self, url: str, *, before_retry: Callable[[], None] | None = None, **kwargs
+    ) -> tuple[int, dict | list | None]:
         """Every builder request goes through here, so a long wait survives its token expiring.
 
         The access token lasts fifteen minutes. After a 401 a client built from
         the stored sign-in forces the shared refresh and sends the request once
         more; the server refuses before acting, so that is safe for every method.
+        ``before_retry`` runs before that second request and stops it by raising.
         """
         try:
             return request_json(url, self.target, **kwargs)
@@ -203,6 +206,8 @@ class BuilderClient:
             if token is None:
                 raise BuilderCredentialRefused(error, self._refused_hint) from error
         self.target = replace(self.target, auth_token=token)
+        if before_retry is not None:
+            before_retry()
         try:
             return request_json(url, self.target, **kwargs)
         except urllib.error.HTTPError as error:
@@ -323,13 +328,20 @@ class BuilderClient:
         the definition. That registry sweep is what earns the raised timeout."""
         return self._post(("workflows", "resolve"), {"workflow": workflow}, timeout=_WORKFLOW_IMPORT_TIMEOUT)
 
-    def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
+    def _get(
+        self,
+        parts: tuple[str, ...],
+        params: dict | None = None,
+        *,
+        max_bytes: int = _MAX_JSON,
+        before_retry: Callable[[], None] | None = None,
+    ) -> dict:
         url = self.target.url(*parts)
         if params:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
             if query:
                 url = f"{url}?{query}"
-        _, parsed = self._send(url, method="GET", max_bytes=max_bytes)
+        _, parsed = self._send(url, method="GET", max_bytes=max_bytes, before_retry=before_retry)
         return parsed or {}
 
     def list_builds(self, *, before_page: Callable[[], None] | None = None) -> list[dict]:
@@ -339,7 +351,9 @@ class BuilderClient:
         its tail when only the first was taken."""
         builds: list[dict] = []
         for page in cursor_pages(
-            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}), "builds", before_page
+            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}, before_retry=before_page),
+            "builds",
+            before_page,
         ):
             builds.extend(page.get("builds", []))
         return builds
@@ -369,7 +383,9 @@ class BuilderClient:
         pages = cursor_pages(
             # A Build id a person typed reaches here unchecked, so it goes as one segment.
             lambda cursor: self._get(
-                ("builds", urllib.parse.quote(build_id, safe=""), "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}
+                ("builds", urllib.parse.quote(build_id, safe=""), "releases"),
+                {"cursor": cursor, "limit": PAGE_LIMIT},
+                before_retry=before_page,
             ),
             "releases",
             before_page,
