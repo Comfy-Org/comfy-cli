@@ -507,7 +507,13 @@ def test_init_from_a_snapshot_with_nothing_in_it_says_to_take_a_newer_one(
 
     # When
     agent = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
-    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400", "COMFY_BUILDER_TOKEN": "tok_test"}
+    env = {
+        "AI_AGENT": "1",
+        "COMFY_OUTPUT": "pretty",
+        "NO_COLOR": "1",
+        "COLUMNS": "400",
+        "COMFY_BUILDER_TOKEN": "tok_test",
+    }
     pretty = CliRunner().invoke(
         cli_app,
         ["build", "init", "--force", "--name", "Foo", "--from-snapshot", str(snapshot), str(install)],
