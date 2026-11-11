@@ -5,6 +5,7 @@ import urllib.error
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
+from functools import partial
 from typing import Final
 
 import typer
@@ -736,7 +737,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         try:
             snapshot = _create_live_deployment(client, request, compute, deployments, made)
         except DeployAPIError as error:
-            build_quota.best_effort(lambda: _name_active_deployments(builder, client, error, deployments))
+            build_quota.best_effort(partial(_name_active_deployments, builder, client, error, deployments))
             raise
         result = UpResult(
             snapshot,
