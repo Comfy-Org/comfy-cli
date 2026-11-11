@@ -3830,8 +3830,9 @@ def validate_cmd(
         bool,
         typer.Option(
             "--remote",
-            help="Also look up public model-source candidates, and check each model's sourceUri against its "
-            "sha256 where the link states one. Requires sign-in.",
+            help="Also look up public model-source candidates on the builder (requires sign-in), and send one "
+            "HEAD to each model's https sourceUri that has a sha256, to compare the hash its host states. "
+            "Those HEADs go to the model hosts and share a 15-second budget.",
         ),
     ] = False,
     models_dir: Annotated[
@@ -3871,11 +3872,17 @@ def validate_cmd(
     if _has_models(spec):
         result["folder_case_checked"] = directories is not None
     if client is not None:
+        probe = _SourceProbe()
         lookups = _builder_call(
             renderer,
-            lambda: lookup_public_model_sources(wire_definition, client.resolve_models, _source_sha256),
+            lambda: lookup_public_model_sources(wire_definition, client.resolve_models, probe),
         )
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
+        if probe.skipped:
+            renderer.info(
+                f"the link checks used their {_SOURCE_PROBE_BUDGET:g}-second budget, so {probe.skipped} "
+                f"model{'s' if probe.skipped != 1 else ''} got the filename lookup without one"
+            )
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
         for warning in result["warnings"]:
@@ -3894,33 +3901,53 @@ def validate_cmd(
 
 
 #: How long one model link may take to answer the HEAD that reads its hash.
-_SOURCE_HEAD_TIMEOUT = 10.0
+_SOURCE_HEAD_TIMEOUT = 5.0
+#: How long all the link HEADs of one `validate --remote` may take together.
+_SOURCE_PROBE_BUDGET = 15.0
 
 
-def _source_sha256(uri: str) -> str | None:
-    """The sha256 a model link's host states for its file, or None.
+def _https_link(uri: str) -> bool:
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return False
+    return parts.scheme.lower() == "https" and bool(parts.hostname)
 
-    One HEAD, redirects not followed: Hugging Face states the hash of an LFS file
-    as ``X-Linked-Etag`` on the redirect to its CDN, and a link may carry a
-    credential (a Civitai ``?token=``) that must not travel on to another host.
-    Only ``X-Linked-Etag`` counts, as in the builder's own verifier: a plain
-    ``ETag`` can be an md5, an opaque CDN token or a Xet root even when it is 64
-    hex characters, so it reads as no hash. A link that is not https is never
-    opened, so a credential in it does not travel without TLS: a ``source: local``
-    entry keeps its link on the wire and the link rules skip it. Any failure is
-    None: the filename lookup answers."""
+
+class _SourceProbe:
+    """``_source_sha256`` under one time budget shared by every link in a spec.
+    Each HEAD gets what is left, up to its own timeout; once the budget is spent a
+    link is not asked, is counted in ``skipped``, and gets the filename lookup."""
+
+    def __init__(self, budget: float = _SOURCE_PROBE_BUDGET) -> None:
+        self._deadline = time.monotonic() + budget
+        self.skipped = 0
+
+    def __call__(self, uri: str) -> str | None:
+        if not _https_link(uri):
+            return None
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            self.skipped += 1
+            return None
+        return _source_sha256(uri, timeout=min(_SOURCE_HEAD_TIMEOUT, remaining))
+
+
+def _source_sha256(uri: str, *, timeout: float = _SOURCE_HEAD_TIMEOUT) -> str | None:
+    """The sha256 a model link's host states for its file, or None on any failure.
+
+    Https only, one HEAD, redirect not followed: a link can carry a credential (a
+    Civitai ``?token=``) that must not travel without TLS or on to another host.
+    Only ``X-Linked-Etag`` (Hugging Face's, on that redirect) counts, as in the
+    builder's verifier: a plain ``ETag`` can be 64 hex characters and not a sha256."""
     import urllib.request
 
     from comfy_cli.http import no_redirect_urlopen
 
-    try:
-        parts = urlsplit(uri)
-    except ValueError:
-        return None
-    if parts.scheme.lower() != "https" or not parts.hostname:
+    if not _https_link(uri):
         return None
     try:
-        with no_redirect_urlopen(urllib.request.Request(uri, method="HEAD"), timeout=_SOURCE_HEAD_TIMEOUT) as response:
+        with no_redirect_urlopen(urllib.request.Request(uri, method="HEAD"), timeout=timeout) as response:
             headers = response.headers
     except urllib.error.HTTPError as error:
         # The redirect the opener refused, which is where the hash is stated.

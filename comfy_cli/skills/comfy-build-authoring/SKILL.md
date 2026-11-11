@@ -309,7 +309,11 @@ one, at `push`. `--remote` additionally looks up public model-source candidates
 and needs the sign-in. For a model with both an https `sourceUri` and a `sha256`, it first
 asks that link for its hash (Hugging Face states it on the download link): the
 lookup reads `declared_ok` when the hash matches and `declared_mismatch`, with
-the link's `sourceSha256`, when it does not. A link that states no hash, or does
+the link's `sourceSha256`, when it does not. That one HEAD goes to the model's
+host, not the builder. It carries no credential beyond what the link itself
+holds and does not follow a redirect. All of them share a 15-second budget
+(5 seconds each); models past it get the filename lookup, and the command says
+how many. A link that states no hash, or does
 not answer, gets the filename lookup instead, unless the model has no `filename`:
 that one reads `not_lookupable`, with no lookup. Lookups follow
 `wire_definition.models`, which `validate` sorts by `type`, `filename` and

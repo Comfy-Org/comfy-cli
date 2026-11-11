@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 import urllib.error
 from email.message import Message
 from pathlib import Path
@@ -1132,3 +1133,41 @@ def test_a_links_stated_hash_is_read_only_when_it_is_a_sha256(
 
     # When / Then
     assert build._source_sha256("https://huggingface.co/org/repo/resolve/main/x.safetensors") == expected
+
+
+def test_link_checks_stop_at_their_time_budget_and_the_rest_get_the_filename_lookup(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: 40 models whose links all name hosts that never answer, each HEAD
+    # using its whole timeout on a fake clock
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    sent: list[float] = []
+
+    def dead_host(request, *, timeout: float):
+        sent.append(timeout)
+        clock[0] += timeout
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", dead_host)
+    names = [f"model-{index:02}.safetensors" for index in range(40)]
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"https://dead-{index}.example/{name}", "sha256": _SHA_A}
+        for index, name in enumerate(names)
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: the HEADs together took at most 20 seconds, the probes stopped
+    # once that was spent, and every model got the filename lookup
+    assert result.exit_code == 0, result.stderr
+    assert sum(sent) <= 20.0, sent
+    assert 0 < len(sent) < len(names)
+    assert sorted(name for call in recorder.calls for name in call["body"]["filenames"]) == names
+    lookups = _envelope(result)["data"]["model_lookups"]
+    assert {lookup["state"] for lookup in lookups} == {"none_found"}
+    assert f"{len(names) - len(sent)} models" in " ".join(result.stderr.split())

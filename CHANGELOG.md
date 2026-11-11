@@ -36,8 +36,10 @@ history.
   HEAD that does not follow redirects). Only an https link is asked, so a
   credential in its query never goes out without TLS. The lookup reads
   `declared_ok` or `declared_mismatch`, with the link's hash in
-  `sourceSha256`. A link that states no hash or does not answer gets the
-  filename lookup as before.
+  `sourceSha256`. Each HEAD may take 5 seconds and all of them 15 seconds
+  together; a link past that budget, or one that states no hash or does not
+  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0009
+  records that `validate --remote` now contacts the model hosts.
 
 ### Changed
 
