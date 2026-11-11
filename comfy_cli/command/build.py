@@ -34,7 +34,6 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
 import time
 import urllib.error
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -3907,42 +3906,6 @@ _SOURCE_HEAD_TIMEOUT = 5.0
 _SOURCE_PROBE_BUDGET = 15.0
 
 
-def _https_link(uri: str) -> bool:
-    """Through an HTTP proxy urllib sends a link's userinfo, percent-decoded, in its
-    clear-text ``CONNECT`` line, so an ``@`` or ``%`` before the path is refused
-    (ADR-BUILD-VALIDATION-0015)."""
-    try:
-        parts = urlsplit(uri)
-    except ValueError:
-        return False
-    return parts.scheme.lower() == "https" and bool(parts.hostname) and not any(c in parts.netloc for c in "@%")
-
-
-def _within(seconds: float, call: Callable[[], str | None]) -> str | None:
-    """*call* in a daemon thread, or None when it has not returned in *seconds*.
-
-    urllib's timeout bounds each socket operation, not the request: a host that
-    sends its headers a little at a time can hold a HEAD open indefinitely. The
-    thread left behind is a daemon, so it never keeps the command from exiting."""
-    outcome: list[tuple[bool, Any]] = []
-
-    def run() -> None:
-        try:
-            outcome.append((True, call()))
-        except BaseException as error:  # handed back to the caller below
-            outcome.append((False, error))
-
-    worker = threading.Thread(target=run, name="comfy-build-link-check", daemon=True)
-    worker.start()
-    worker.join(seconds)
-    if not outcome:
-        return None
-    returned, value = outcome[0]
-    if not returned:
-        raise value
-    return value
-
-
 class _SourceProbe:
     """``_source_sha256`` under one time budget shared by every link in a spec.
     Each HEAD gets what is left, up to its own timeout, measured over the whole
@@ -3955,34 +3918,23 @@ class _SourceProbe:
         self.skipped = 0
 
     def __call__(self, uri: str) -> str | None:
-        if not _https_link(uri):
+        from comfy_cli.http import https_without_userinfo
+
+        if not https_without_userinfo(uri):
             return None
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
             self.skipped += 1
             return None
-        timeout = min(_SOURCE_HEAD_TIMEOUT, remaining)
-        return _within(timeout, lambda: _source_sha256(uri, timeout=timeout))
+        return _source_sha256(uri, timeout=min(_SOURCE_HEAD_TIMEOUT, remaining))
 
 
 def _source_sha256(uri: str, *, timeout: float = _SOURCE_HEAD_TIMEOUT) -> str | None:
     """Only ``X-Linked-Etag`` counts, as in the builder's verifier: a plain ``ETag``
     can be 64 hex characters and not a sha256 (ADR-BUILD-VALIDATION-0015)."""
-    import urllib.request
+    from comfy_cli.http import head_headers
 
-    from comfy_cli.http import no_redirect_urlopen
-
-    if not _https_link(uri):
-        return None
-    try:
-        with no_redirect_urlopen(urllib.request.Request(uri, method="HEAD"), timeout=timeout) as response:
-            headers = response.headers
-    except urllib.error.HTTPError as error:
-        # The redirect the opener refused, which is where the hash is stated.
-        headers = error.headers if 300 <= error.code < 400 else None
-        error.close()
-    except (OSError, ValueError, http.client.HTTPException):
-        return None
+    headers = head_headers(uri, timeout=timeout)
     if headers is None:
         return None
     value = (headers.get("X-Linked-Etag") or "").strip().removeprefix("W/").strip('"').lower()
