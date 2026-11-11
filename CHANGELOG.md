@@ -24,8 +24,9 @@ history.
   whether the snapshot lists none (likely older than the install) or counts
   the listed packs left out by cause: disabled, or the importer's own advisory
   line for each cause its report gives, with no cause guessed where the report
-  gives none. Those advisory lines appear only inside this warning, so each
-  pack is named once (also warned in pretty output).
+  gives none. On stderr those advisory lines appear only inside this warning,
+  so each pack is named once (also warned in pretty output); `--json` still
+  carries them under `advisories` as well.
 - `comfy build release create` refuses a spec with no `baseComfyVersion` with
   `build_comfy_version_missing` when the Build it names has none either, before
   the cut, and the hint names `comfy build update --comfy-version <ref>`. With

@@ -189,7 +189,8 @@ install, and a newer snapshot is the fix. If it lists packs but every one was
 left out, the message counts each cause: disabled, or the importer's own
 advisory line for that cause (a pack still being published on the Comfy
 Registry means import again later), and gives no cause where the report has
-none. Those advisory lines come inside this one warning, not again on their own.
+none. On stderr those advisory lines come inside this one warning, so each pack
+is named once; `--json` still carries them under `advisories` as well.
 A newer snapshot helps only after a disabled pack is enabled in the install.
 `--from-snapshot` and `--from-workflow` also refuse each other.
 
