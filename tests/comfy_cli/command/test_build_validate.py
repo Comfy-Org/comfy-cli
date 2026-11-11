@@ -1214,22 +1214,24 @@ def test_a_link_that_trickles_its_headers_is_cut_off_at_the_time_budget(monkeypa
         pytest.param("https://user:secret@models.example/x.safetensors", id="user-and-password"),
         pytest.param("https://:secret@models.example/x.safetensors", id="password-only"),
         pytest.param("https://@models.example/x.safetensors", id="empty-userinfo"),
+        pytest.param("https://TOKEN%40models.example/x.safetensors", id="encoded-at"),
+        pytest.param("https://user%3Asecret%40models.example/x.safetensors", id="encoded-user-and-password"),
+        pytest.param("https://user:secret%40models.example/x.safetensors", id="encoded-at-after-password"),
+        pytest.param("https://TOKEN%2540models.example/x.safetensors", id="double-encoded-at"),
     ],
 )
 def test_a_link_with_a_credential_before_its_host_is_never_opened(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, uri: str
 ) -> None:
-    # Given: through an HTTP proxy, urllib would send the userinfo in the clear in
-    # its CONNECT line, before TLS starts
+    # Given: through an HTTP proxy, urllib sends the userinfo in the clear in its
+    # CONNECT line, before TLS starts, and percent-decodes it first, so
+    # TOKEN%40host goes out as TOKEN@host. A source: local model keeps its link
+    # on the wire and skips the link rules, so every form reaches the hash probe
     recorder = ResolveRecorder()
     monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
     sent: list[tuple[str, str]] = []
     monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
-    write_spec(
-        workspace,
-        models=[{"type": "loras", "filename": "x.safetensors", "sourceUri": uri, "sha256": _SHA_A}],
-        nodes=[],
-    )
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
 
     # When
     result = _invoke(workspace, "--remote", token="tok_test")
@@ -1240,48 +1242,7 @@ def test_a_link_with_a_credential_before_its_host_is_never_opened(
     assert sent == []
     (lookup,) = _envelope(result)["data"]["model_lookups"]
     assert lookup["state"] == "none_found"
-    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["x.safetensors"]}}]
-    for credential in ("secret", "TOKEN"):
-        assert credential not in result.stderr
-        assert credential not in json.dumps(lookup)
-    assert build._source_sha256(uri) is None
-    assert sent == []
-
-
-@pytest.mark.parametrize(
-    "uri",
-    [
-        pytest.param("https://TOKEN%40models.example/x.safetensors", id="encoded-at"),
-        pytest.param("https://user%3Asecret%40models.example/x.safetensors", id="encoded-user-and-password"),
-        pytest.param("https://user:secret%40models.example/x.safetensors", id="encoded-at-after-password"),
-        pytest.param("https://TOKEN%2540models.example/x.safetensors", id="double-encoded-at"),
-    ],
-)
-def test_a_link_with_an_encoded_credential_before_its_host_is_never_opened(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch, uri: str
-) -> None:
-    # Given: urllib percent-decodes the authority before it writes its CONNECT
-    # line, so TOKEN%40host reaches an HTTP proxy as TOKEN@host, in the clear. A
-    # source: local model keeps its link on the wire and skips the link rules,
-    # so this link reaches the hash probe
-    recorder = ResolveRecorder()
-    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
-    sent: list[tuple[str, str]] = []
-    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
-    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
-
-    # When
-    result = _invoke(workspace, "--remote", token="tok_test")
-
-    # Then: as for a written-out credential, no request is opened for the link
-    # and the filename lookup answers
-    assert result.exit_code == 0, result.stderr
-    assert sent == []
-    (lookup,) = _envelope(result)["data"]["model_lookups"]
-    assert lookup["state"] == "none_found"
     assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
     for credential in ("secret", "TOKEN"):
         assert credential not in result.stderr
         assert credential not in json.dumps(lookup)
-    assert build._source_sha256(uri) is None
-    assert sent == []
