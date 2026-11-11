@@ -1163,10 +1163,10 @@ def test_link_checks_stop_at_their_time_budget_and_the_rest_get_the_filename_loo
     # When
     result = _invoke(workspace, "--remote", token="tok_test")
 
-    # Then: the HEADs together took at most 20 seconds, the probes stopped
+    # Then: the HEADs together took at most 15 seconds, the probes stopped
     # once that was spent, and every model got the filename lookup
     assert result.exit_code == 0, result.stderr
-    assert sum(sent) <= 20.0, sent
+    assert sum(sent) <= 15.0, sent
     assert 0 < len(sent) < len(names)
     assert sorted(name for call in recorder.calls for name in call["body"]["filenames"]) == names
     lookups = _envelope(result)["data"]["model_lookups"]
