@@ -332,14 +332,14 @@ class BuilderClient:
         _, parsed = self._send(url, method="GET", max_bytes=max_bytes)
         return parsed or {}
 
-    def list_builds(self) -> list[dict]:
+    def list_builds(self, *, before_page: Callable[[], None] | None = None) -> list[dict]:
         """GET every cursor page from /v1/builds -> the caller's builds (summaries).
 
         The builder pages this read, so a workspace past one page silently lost
         its tail when only the first was taken."""
         builds: list[dict] = []
         for page in cursor_pages(
-            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}), "builds"
+            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}), "builds", before_page
         ):
             builds.extend(page.get("builds", []))
         return builds
@@ -361,7 +361,7 @@ class BuilderClient:
         """GET /v1/builds/{id} -> a build with its full definition."""
         return self._get(("builds", build_id))
 
-    def list_releases(self, build_id: str) -> list[dict]:
+    def list_releases(self, build_id: str, *, before_page: Callable[[], None] | None = None) -> list[dict]:
         """GET every cursor page from /v1/builds/{id}/releases -> the build's
         releases. A server that predates the version-to-release rename keys the
         list ``versions``, so both spellings parse."""
@@ -372,6 +372,7 @@ class BuilderClient:
                 ("builds", urllib.parse.quote(build_id, safe=""), "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}
             ),
             "releases",
+            before_page,
         )
         for page in pages:
             releases.extend(page.get("releases") or page.get("versions") or [])

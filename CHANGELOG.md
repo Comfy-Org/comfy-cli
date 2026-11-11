@@ -75,11 +75,14 @@ history.
   held by a stopped deployment's queued replacement, so it is marked
   `exact: false` and printed as "at least". Deployments are read the way the
   deploy commands read them; when `--builder-url` or `COMFY_BUILDER_URL`
-  points the builder elsewhere, `note` says so.
+  points the builder elsewhere, or `COMFY_BUILDER_TOKEN` signs the builder
+  reads with another credential, `note` says so.
 - A release cut refused at the release limit (`build_release_limit`) lists, under
   `--json`, each visible Build's release count, newest release and whether a
-  deployment uses it in `details.builds`; those reads stop after 10 seconds,
-  and `details.buildsTruncated` marks a list cut short. A `comfy deploy up`
+  deployment uses it in `details.builds` (left out when `COMFY_BUILDER_TOKEN`
+  signs the builder reads with another credential than the deployments'); no
+  page request of those reads starts after 10 seconds, and
+  `details.buildsTruncated` marks a list cut short. A `comfy deploy up`
   create, restart or move refused at the active-deployment limit
   (`deploy_quota_exceeded`) lists the deployments holding a slot in
   `details.activeDeployments`, whenever the refusal names that limit, and says

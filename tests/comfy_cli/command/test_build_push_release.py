@@ -495,10 +495,10 @@ class ReleaseLimitBuilder(RecordingBuilder):
             "https://builder.test/v1/builds/build-1/releases", 409, "Conflict", {}, io.BytesIO(body.encode())
         )
 
-    def list_builds(self) -> list[JsonObject]:
+    def list_builds(self, **_: object) -> list[JsonObject]:
         return [{"id": "build-1", "name": "portraits"}]
 
-    def list_releases(self, build_id: str) -> list[JsonObject]:
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
         return [{"id": "rel-1a", "createdAt": "2026-08-20T00:00:00Z"}]
 
 
@@ -506,7 +506,7 @@ class OneDeploymentOn:
     def __init__(self, release_id: str) -> None:
         self.release_id = release_id
 
-    def list_all_deployments(self) -> list[JsonObject]:
+    def list_all_deployments(self, **_: object) -> list[JsonObject]:
         return [{"id": "dep-1", "releaseId": self.release_id, "status": "stopped", "deletedAt": None}]
 
 

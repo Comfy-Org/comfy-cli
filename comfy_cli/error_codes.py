@@ -1608,9 +1608,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "push already landed, so the build was created or updated, its blobs were stored, and its id was "
         "written into the spec on disk before the refusal. Under `--json` `details.builds` lists each Build "
         "the caller can see (`id`, `name`, `releases`, `newestReleaseAt`, and, when the deployments could be "
-        "read, `deployments` and `inUse`: how many undeleted deployments, stopped ones included, reference "
+        "read with the credential the Builds were read with, `deployments` and `inUse`: how many undeleted "
+        "deployments, stopped ones included, reference "
         "its releases), and `details.buildsTruncated` is true when the list stopped short of the visible Builds: "
-        "past the first 100, or when those reads passed their 10-second deadline. A member "
+        "past the first 100, or when those reads reached their 10-second deadline, past which no page request "
+        "starts. A member "
         "outside the enterprise plan sees only their own Builds while the limit counts every member's, so "
         "the list can hold fewer releases than the limit. When those reads fail, `details` is as before.",
         "see which Builds hold releases in `details.builds`, or list one Build's with `comfy build release ls "

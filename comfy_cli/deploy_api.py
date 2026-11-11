@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import urllib.error
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -220,10 +220,15 @@ class DeployClient:
     def list_deployments(self, *, status: str | None = None, limit: int | None = None) -> dict:
         return self._get("list", ("deployments",), {"status": status, "limit": limit})
 
-    def iter_deployments(self, *, status: str | None = None, limit: int | None = None) -> Iterator[dict]:
+    def iter_deployments(
+        self, *, status: str | None = None, limit: int | None = None, before_page: Callable[[], None] | None = None
+    ) -> Iterator[dict]:
+        """``before_page`` runs before each request and stops the walk by raising."""
         after: str | None = None
         seen: set[str] = set()
         for _ in range(_MAX_PAGES):
+            if before_page is not None:
+                before_page()
             page = self._get("list", ("deployments",), {"status": status, "limit": limit, "after": after})
             yield page
             next_cursor = page.get("nextCursor")
@@ -243,9 +248,11 @@ class DeployClient:
             details={"operation": "list", "pages": _MAX_PAGES},
         )
 
-    def list_all_deployments(self, *, status: str | None = None, limit: int | None = None) -> list[dict]:
+    def list_all_deployments(
+        self, *, status: str | None = None, limit: int | None = None, before_page: Callable[[], None] | None = None
+    ) -> list[dict]:
         deployments: list[dict] = []
-        for page in self.iter_deployments(status=status, limit=limit):
+        for page in self.iter_deployments(status=status, limit=limit, before_page=before_page):
             deployments.extend(page.get("deployments", []))
         return deployments
 

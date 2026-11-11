@@ -4,15 +4,17 @@ import json
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import jsonschema
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli.builder_api import BuilderClient
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build, build_quota, deploy_runtime
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.deploy_api import DeployClient
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 SCHEMA = Path(__file__).resolve().parents[3] / "comfy_cli" / "schemas" / "build_quota.json"
@@ -22,10 +24,10 @@ class Builder:
     def __init__(self, limits: JsonObject | Exception) -> None:
         self.limits = limits
 
-    def list_builds(self) -> list[JsonObject]:
+    def list_builds(self, **_: object) -> list[JsonObject]:
         return [{"id": "build-1", "name": "portraits"}, {"id": "build-2", "name": "upscale"}]
 
-    def list_releases(self, build_id: str) -> list[JsonObject]:
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
         count = {"build-1": 3, "build-2": 1}[build_id]
         return [{"id": f"{build_id}-r{n}", "version": n, "createdAt": "2026-08-20T00:00:00Z"} for n in range(count)]
 
@@ -38,9 +40,9 @@ class Builder:
 class Deploy:
     def __init__(self, limits: JsonObject | Exception) -> None:
         self.limits = limits
-        self.target = SimpleNamespace(base_url="https://control.test")
+        self.target = SimpleNamespace(base_url="https://control.test", auth_token="cloud-jwt")
 
-    def list_all_deployments(self) -> list[JsonObject]:
+    def list_all_deployments(self, **_: object) -> list[JsonObject]:
         return [
             {"id": "dep-1", "releaseId": "build-1-r0", "status": "ready", "deletedAt": None},
             {"id": "dep-2", "releaseId": "build-1-r1", "status": "stopping", "deletedAt": None},
@@ -151,10 +153,10 @@ def test_the_active_deployment_count_is_marked_a_lower_bound(monkeypatch: pytest
 
 
 class ManyBuilds(Builder):
-    def list_builds(self) -> list[JsonObject]:
+    def list_builds(self, **_: object) -> list[JsonObject]:
         return [{"id": f"build-{n}"} for n in range(build_quota.MAX_BUILDS + 1)]
 
-    def list_releases(self, build_id: str) -> list[JsonObject]:
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
         return []
 
 
@@ -237,6 +239,41 @@ def test_without_an_override_the_note_says_nothing_of_the_builder_url(monkeypatc
 
     # Then
     assert "builder URL" not in data["note"]
+    assert "COMFY_BUILDER_TOKEN" not in data["note"]
+
+
+def test_a_builder_token_apart_from_the_deploy_sign_in_is_named_in_the_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given a builder token that is not the credential the deploy reads send
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "builder-jwt")
+
+    # When
+    data = _quota(monkeypatch, Builder({"maxRunningBuilds": 5}), Deploy({"maxActiveDeployments": 3}))
+    output = " ".join(
+        _pretty_quota(monkeypatch, Builder({"maxRunningBuilds": 5}), Deploy({"maxActiveDeployments": 3})).split()
+    )
+
+    # Then
+    assert "releases were read with COMFY_BUILDER_TOKEN" in data["note"]
+    assert "Note: releases were read with COMFY_BUILDER_TOKEN" in output
+
+
+@pytest.mark.parametrize(
+    ("token", "known"),
+    [pytest.param("builder-jwt", False, id="another-sign-in"), pytest.param("cloud-jwt", True, id="same-token")],
+)
+def test_a_release_refusal_says_nothing_of_deployments_read_with_another_sign_in(
+    monkeypatch: pytest.MonkeyPatch, token: str, known: bool
+) -> None:
+    # Given a builder token beside the Cloud token the deploy reads send
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", token)
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: Deploy({"maxActiveDeployments": 3}))
+
+    # When
+    details = build_quota.release_limit_details(Builder({"maxRunningBuilds": 5}))
+
+    # Then the Builds are listed either way, and inUse only when both reads share the credential
+    assert [row["id"] for row in details["builds"]] == ["build-1", "build-2"]
+    assert all(("inUse" in row) is known for row in details["builds"])
 
 
 def test_quota_reads_deployments_with_the_deploy_commands_credential_not_the_builder_token(
@@ -272,62 +309,59 @@ def test_quota_reads_deployments_with_the_deploy_commands_credential_not_the_bui
     assert sent and {token for _, token in sent} == {"cloud-jwt"}
 
 
-class TimedBuilds(Builder):
-    """Five visible Builds, each releases read taking four seconds on ``clock``."""
-
-    def __init__(self, clock: list[float]) -> None:
-        super().__init__({"maxRunningBuilds": 5})
-        self.clock = clock
-        self.read: list[str] = []
-
-    def list_builds(self) -> list[JsonObject]:
-        return [{"id": f"build-{n}"} for n in range(5)]
-
-    def list_releases(self, build_id: str) -> list[JsonObject]:
-        self.read.append(build_id)
-        self.clock[0] += 4
-        return [{"id": f"{build_id}-r0", "createdAt": "2026-08-20T00:00:00Z"}]
+#: Each listing's pages, by path, with what each request costs on the fake clock.
+_PAGES: dict[str, list[tuple[JsonObject, float]]] = {
+    "/v1/deployments": [
+        ({"deployments": [{"id": "dep-1", "releaseId": "build-0-r0", "status": "stopped"}], "nextCursor": "d1"}, 1),
+        ({"deployments": []}, 1),
+    ],
+    "/v1/builds": [({"builds": [{"id": "build-0"}], "nextCursor": "b1"}, 1), ({"builds": [{"id": "build-1"}]}, 1)],
+    "/v1/builds/build-0/releases": [({"releases": [{"id": "build-0-r0"}], "nextCursor": "r1"}, 2), ({}, 2)],
+    "/v1/builds/build-1/releases": [({"releases": [{"id": "build-1-r0"}], "nextCursor": "r1"}, 2), ({}, 2)],
+}
 
 
-class TimedDeploy(Deploy):
-    def __init__(self, clock: list[float]) -> None:
-        super().__init__({"maxActiveDeployments": 3})
-        self.clock = clock
+def _paged_details(monkeypatch: pytest.MonkeyPatch, clock: list[float], *, ticks: bool) -> tuple[dict, list[float]]:
+    """release_limit_details over the real clients, with each page request costing its time on ``clock``."""
+    started: list[float] = []
 
-    def list_all_deployments(self) -> list[JsonObject]:
-        self.clock[0] += 1
-        return [{"id": "dep-1", "releaseId": "build-0-r0", "status": "stopped", "deletedAt": None}]
+    def transport(url: str, target, **_: object) -> tuple[int, JsonObject]:
+        parts = urlsplit(url)
+        query = parse_qs(parts.query)
+        body, seconds = _PAGES[parts.path][1 if "cursor" in query or "after" in query else 0]
+        started.append(clock[0])
+        clock[0] += seconds if ticks else 0
+        return 200, body
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", transport)
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", transport)
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: DeployClient("https://control.test", "cloud-jwt"))
+    builder = BuilderClient("https://builder.test", "cloud-jwt")
+    return build_quota.release_limit_details(builder, now=lambda: clock[0]), started
 
 
-def test_the_reads_after_a_refusal_stop_at_one_deadline_and_return_what_was_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Given a deploy read of one second and Build reads of four each, on a fake clock
+def test_no_page_request_after_a_refusal_starts_once_the_deadline_has_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given two-page listings whose pages take one or two seconds each, on a fake clock:
+    # the deadline falls between build-1's two releases pages
     clock = [0.0]
-    builder = TimedBuilds(clock)
-    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: TimedDeploy(clock))
 
     # When
-    details = build_quota.release_limit_details(builder, now=lambda: clock[0])
+    details, started = _paged_details(monkeypatch, clock, ticks=True)
 
-    # Then the Builds begun before the deadline are listed, and the list says it is cut short
+    # Then no request starts at or past the deadline, and a Build read in part is left out
     assert build_quota.FOLLOW_UP_DEADLINE_SECONDS == 10
-    assert builder.read == ["build-0", "build-1", "build-2"]
-    assert [row["id"] for row in details["builds"]] == ["build-0", "build-1", "build-2"]
-    assert details["builds"][0]["inUse"] is True
+    assert started == [0, 1, 2, 3, 4, 6, 8]
+    assert details["builds"] == [{"id": "build-0", "releases": 1, "deployments": 1, "inUse": True}]
     assert details["buildsTruncated"] is True
 
 
 def test_reads_inside_the_deadline_are_not_marked_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Given a clock that never moves
-    builder = TimedBuilds([0.0])
-    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: TimedDeploy([0.0]))
+    # When every page answers at once
+    details, started = _paged_details(monkeypatch, [0.0], ticks=False)
 
-    # When
-    details = build_quota.release_limit_details(builder, now=lambda: 0.0)
-
-    # Then
-    assert len(details["builds"]) == 5
+    # Then every page is read
+    assert len(started) == 8
+    assert [row["id"] for row in details["builds"]] == ["build-0", "build-1"]
     assert "buildsTruncated" not in details
 
 

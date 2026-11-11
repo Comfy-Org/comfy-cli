@@ -345,8 +345,10 @@ Each is cleared by deleting something, and each exits 1:
 - **`build_release_limit`** — the cut was refused because the workspace already
   holds as many releases as its limit allows. Under `--json`, `details.builds`
   names each Build you can see with its release count, its newest release, and
-  `inUse` when a deployment references one of its releases. Free a slot, then
-  cut again.
+  `inUse` when a deployment references one of its releases. `inUse` is left out
+  when the deployments could not be read, or when `COMFY_BUILDER_TOKEN` signs the
+  builder reads with another credential than the deploy commands'. Free a slot,
+  then cut again.
 - **`build_release_in_use`** — `comfy build release delete` was refused because a
   deployment still references that release. The `message` is the builder's own
   wording and names the blocking deployments, though on a long list it may name

@@ -2306,12 +2306,12 @@ class FullWorkspaceBuilder:
     def create_release(self, build_id: str, targets: list[JsonObject] | None = None) -> tuple[str, str]:
         raise refusal(409, {"error": "RELEASE_LIMIT", "message": AT_THE_LIMIT}, "https://builder.test/v1/releases")
 
-    def list_builds(self) -> list[JsonObject]:
+    def list_builds(self, **_: object) -> list[JsonObject]:
         if isinstance(self.builds, Exception):
             raise self.builds
         return self.builds or [{"id": "build-1", "name": "portraits"}, {"id": "build-2", "name": "upscale"}]
 
-    def list_releases(self, build_id: str) -> list[JsonObject]:
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
         return {
             "build-1": [
                 {"id": "rel-1a", "version": 2, "createdAt": "2026-08-28T03:26:16Z"},
@@ -2325,7 +2325,7 @@ class DeploymentsOf:
     def __init__(self, rows: list[JsonObject] | Exception) -> None:
         self.rows = rows
 
-    def list_all_deployments(self) -> list[JsonObject]:
+    def list_all_deployments(self, **_: object) -> list[JsonObject]:
         if isinstance(self.rows, Exception):
             raise self.rows
         return self.rows
@@ -2398,10 +2398,10 @@ def test_the_release_limit_hint_names_release_ls_for_the_holders_and_quota_for_t
 class ManyFullBuilds(FullWorkspaceBuilder):
     """One Build more than the refusal reads releases for, each holding one release."""
 
-    def list_builds(self) -> list[JsonObject]:
+    def list_builds(self, **_: object) -> list[JsonObject]:
         return [{"id": f"build-{n:03}"} for n in range(101)]
 
-    def list_releases(self, build_id: str) -> list[JsonObject]:
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
         return [{"id": f"{build_id}-r0", "createdAt": "2026-08-20T00:00:00Z"}]
 
 

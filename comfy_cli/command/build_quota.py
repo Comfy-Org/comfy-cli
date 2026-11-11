@@ -1,10 +1,13 @@
 """Count what holds the workspace's release and active-deployment slots, from the
-builder's and comfy-deploy's listings. Reads made after a refusal are best effort
-and bounded by ``FOLLOW_UP_DEADLINE_SECONDS``; a failed one leaves the refusal as it was."""
+builder's and comfy-deploy's listings. Reads made after a refusal are best effort:
+no page request starts past ``FOLLOW_UP_DEADLINE_SECONDS``, though the one in
+flight then can run on to its socket timeout, and a failed read leaves the
+refusal as it was."""
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -19,8 +22,8 @@ T = TypeVar("T")
 #: Builds whose releases are read, one call each. Every plan's build cap sits well
 #: under this, so it bounds a listing that runs away rather than a real workspace.
 MAX_BUILDS: Final = 100
-#: How long all the reads after one refusal may take together, in seconds. The
-#: refusal is the answer; past this the Builds read so far are what it carries.
+#: Seconds after a refusal past which no further page request starts. The refusal
+#: is the answer; past this the Builds read in full so far are what it carries.
 FOLLOW_UP_DEADLINE_SECONDS: Final = 10
 #: What one release-labels call takes.
 _MAX_LABELS: Final = 100
@@ -52,6 +55,16 @@ def deploy_client():
     from comfy_cli.command import deploy_runtime
 
     return deploy_runtime.deploy_client()
+
+
+def signed_in_apart(deploy) -> bool:
+    """Whether ``COMFY_BUILDER_TOKEN`` signs the builder reads, so they may be another workspace's than ``deploy``'s."""
+    token = (os.environ.get("COMFY_BUILDER_TOKEN") or "").strip()
+    return bool(token) and token != deploy.target.auth_token
+
+
+class _OutOfTime(Exception):
+    pass
 
 
 def _instant(value: object) -> datetime:
@@ -92,22 +105,23 @@ def release_holders(
     builder,
     live: Mapping[str, int] | None,
     *,
-    deadline: float | None = None,
-    now: Callable[[], float] = time.monotonic,
+    before_page: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Each visible Build, up to ``MAX_BUILDS``, with its release count and newest
     release; and how many Builds are visible.
 
     ``live`` counts the undeleted deployments on each release id; with it, each
-    Build also says how many reference its releases. Once ``now()`` reaches
-    ``deadline`` no further Build is read. Raises on a failed read.
+    Build also says how many reference its releases. ``before_page`` runs before
+    each page request; a Build whose releases it stops is left out, with the rest.
+    Raises on any other failed read.
     """
-    builds = builder.list_builds()
+    builds = builder.list_builds(before_page=before_page)
     holders = []
     for build in builds[:MAX_BUILDS]:
-        if deadline is not None and now() >= deadline:
+        try:
+            releases = builder.list_releases(build["id"], before_page=before_page)
+        except _OutOfTime:
             break
-        releases = builder.list_releases(build["id"])
         newest = max(releases, key=lambda release: _instant(release.get("createdAt")), default=None)
         holder: dict[str, Any] = {"id": build["id"], "releases": len(releases)}
         if isinstance(build.get("name"), str):
@@ -134,14 +148,25 @@ def live_by_release(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 def release_limit_details(builder, *, now: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """What a release-limit refusal adds to ``details``: the Builds holding releases, or nothing.
 
-    The deployment read is the lesser half: when it fails the Builds are still
-    listed, without ``deployments`` and ``inUse``. ``buildsTruncated`` marks a
-    list that stopped short of the visible Builds, at ``MAX_BUILDS`` or at the
-    deadline.
+    The deployment read is the lesser half: when it fails, stops at the deadline
+    or would read with another credential than the Builds', the Builds are still
+    listed, without ``deployments`` and ``inUse``. ``buildsTruncated`` marks a list that
+    stopped short of the visible Builds, at ``MAX_BUILDS`` or at the deadline.
     """
     deadline = now() + FOLLOW_UP_DEADLINE_SECONDS
-    live = best_effort(lambda: live_by_release(deploy_client().list_all_deployments()))
-    found = best_effort(lambda: release_holders(builder, live, deadline=deadline, now=now))
+
+    def before_page() -> None:
+        if now() >= deadline:
+            raise _OutOfTime
+
+    def live() -> dict[str, int] | None:
+        deploy = deploy_client()
+        if signed_in_apart(deploy):
+            return None
+        return live_by_release(deploy.list_all_deployments(before_page=before_page))
+
+    deployments = best_effort(live)
+    found = best_effort(lambda: release_holders(builder, deployments, before_page=before_page))
     if found is None:
         return {}
     holders, visible = found
@@ -164,6 +189,13 @@ def builder_url_note(deploy_url: str) -> str:
         f"deployments were read from {deploy_url}, the deploy commands' environment (COMFY_DEPLOY_URL), "
         "not the overridden builder URL"
     )
+
+
+#: Said when ``signed_in_apart``: the two counts may be two workspaces'.
+SIGN_IN_NOTE: Final = (
+    "releases were read with COMFY_BUILDER_TOKEN and deployments with the deploy commands' sign-in, "
+    "so the two counts may come from different sign-ins"
+)
 
 
 def _usage(used: int, limits: object, key: str, *, shape: str) -> dict[str, Any]:
@@ -190,7 +222,7 @@ def quota_payload(
     build_limits: object,
     deploy_limits: object,
     *,
-    url_note: str | None = None,
+    notes: Sequence[str] = (),
 ) -> dict[str, Any]:
     releases = _usage(
         sum(holder["releases"] for holder in holders), build_limits, "maxTotalReleases", shape=_BUILDER_SHAPE
@@ -202,7 +234,7 @@ def quota_payload(
     return {
         "releases": releases,
         "activeDeployments": deployments,
-        "note": NOTE if url_note is None else f"{NOTE}; {url_note}",
+        "note": "; ".join((NOTE, *notes)),
     }
 
 

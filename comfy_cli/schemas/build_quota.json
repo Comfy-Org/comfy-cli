@@ -35,6 +35,6 @@
         "exact": {"const": false, "description": "Always false: used is counted from the deploy list, not read from the service, and can be lower than the count the limit is held to."}
       }
     },
-    "note": {"type": "string", "description": "Says which counts cover only the Builds the caller can see. When --builder-url or COMFY_BUILDER_URL overrode the builder URL, it also says the deployments were read from the deploy commands' environment (COMFY_DEPLOY_URL), not that URL."}
+    "note": {"type": "string", "description": "Says which counts cover only the Builds the caller can see. When --builder-url or COMFY_BUILDER_URL overrode the builder URL, it also says the deployments were read from the deploy commands' environment (COMFY_DEPLOY_URL), not that URL. When COMFY_BUILDER_TOKEN signs the builder reads with another credential than the deploy commands' sign-in, it also says the two counts may come from different sign-ins."}
   }
 }

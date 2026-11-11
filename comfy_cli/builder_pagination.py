@@ -38,7 +38,9 @@ class BuilderPaginationError(requests.RequestException):
     """
 
 
-def cursor_pages(fetch: Callable[[str | None], dict], listing: str) -> Iterator[dict]:
+def cursor_pages(
+    fetch: Callable[[str | None], dict], listing: str, before_page: Callable[[], None] | None = None
+) -> Iterator[dict]:
     """Yield every page of a builder cursor listing, or refuse to keep asking.
 
     A cursor is followed only when the server returns it as a non-empty **str**.
@@ -49,11 +51,14 @@ def cursor_pages(fetch: Callable[[str | None], dict], listing: str) -> Iterator[
 
     A repeated cursor and an exceeded page cap raise rather than returning what
     was collected so far: a short listing presented as complete is the silent
-    truncation this pagination was added to fix.
+    truncation this pagination was added to fix. ``before_page`` runs before each
+    request and stops the walk by raising.
     """
     cursor: str | None = None
     seen: set[str] = set()
     for _ in range(_MAX_LIST_PAGES):
+        if before_page is not None:
+            before_page()
         page = fetch(cursor)
         yield page
         next_cursor = page.get("nextCursor")
