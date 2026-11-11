@@ -3587,11 +3587,11 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -
     class_type = node.get("type", "") if node else ""
     combos = graph.dynamic_combo_options(class_type)
     destroyed: set[str] = set()
+    seen: set[str] = set()
     if widget in combos and op.get("old") != op["value"]:
         # Follow declared ownership, including nested selectors, rather than
         # treating every dotted scalar as a structural child.
         pending = [widget]
-        seen = set()
         while pending:
             owner = pending.pop()
             if owner in seen:
@@ -3603,6 +3603,19 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -
                     if child in combos:
                         pending.append(child)
     m = graph.node(class_type)
+    marker_owner = None
+    if widget == "control_after_generate" and m is not None:
+        from comfy_cli.cql import engine as _engine
+
+        # This writable marker name may occur several times. Like the native
+        # writer, resolve its FIRST saved slot, whose owner may be unrelated
+        # to another same-named marker under a dynamic combo.
+        entries = _engine._expand_widget_entries(
+            m,
+            node.get("widgets_values") or [],
+            saved_widget_names=_engine.saved_widget_order(node, graph, class_type),
+        )
+        marker_owner = next((entry.owner for entry in entries if entry.name == widget), None)
     group = next((p for p in m.inputs if p.name == widget and p.is_dynamic_group), None) if m else None
     for earlier in written:
         if earlier[:2] != target[:2]:
@@ -3612,22 +3625,51 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -
             row, dot, field = earlier[2][len(widget) + 1 :].partition(".")
             if dot and row.isdecimal() and int(row) >= op["value"]:
                 removed_row = any(p.name == earlier[2] for p in _dynamic_group_widgets(group, f"{widget}.{row}"))
-        if earlier[2] in destroyed or removed_row:
+        child_destroyed = earlier[3] in seen if earlier[2] == "control_after_generate" else earlier[2] in destroyed
+        if child_destroyed or removed_row:
             raise ValueError(
                 f"destructive structural rebuild of {widget!r} would erase earlier batch write "
                 f"to {earlier[2]!r} on {target[1]}; put the selector/count before child writes "
                 "or split the edits into separate batches"
             )
-    written.add(target)
+    written.add((*target, marker_owner))
 
 
 def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
-    """Validate atomically, then apply successful edits to the caller in place."""
-    if len(specs) <= _MAX_OPS_PER_BATCH:
-        _apply_specs_impl(copy.deepcopy(workflow), graph, copy.deepcopy(specs), actor=actor, base_version=base_version)
-    return _apply_specs_impl(workflow, graph, specs, actor=actor, base_version=base_version)
+    """Apply once in place, restoring original containers if the batch fails."""
+    if len(specs) > _MAX_OPS_PER_BATCH:
+        return _apply_specs_impl(workflow, graph, specs, actor=actor, base_version=base_version)
+    snapshots: list[tuple[dict | list, dict | list]] = []
+    pending = [workflow]
+    seen: set[int] = set()
+    container_types = (dict, list, tuple)
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, container_types) or id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, dict):
+            snapshots.append((value, value.copy()))
+            pending.extend(value.values())
+        else:
+            if isinstance(value, list):
+                snapshots.append((value, value.copy()))
+            pending.extend(value)
+    try:
+        return _apply_specs_impl(workflow, graph, specs, actor=actor, base_version=base_version)
+    except BaseException:
+        # Saved child references point to the ORIGINAL containers, including
+        # any detached by deletion/rebuild. Restore those objects too so an
+        # external node/widget reference cannot retain a refused mutation.
+        for original, before in snapshots:
+            if isinstance(original, dict):
+                original.clear()
+                original.update(before)
+            else:
+                original[:] = before
+        raise
 
 
 def _apply_specs_impl(

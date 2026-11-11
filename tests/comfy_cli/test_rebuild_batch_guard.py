@@ -65,6 +65,150 @@ def test_successful_batch_preserves_in_place_workflow_and_node():
     assert node["widgets_values"] != fresh()[1]["nodes"][0]["widgets_values"]
 
 
+def test_batch_allocates_once_so_execution_cannot_remint_a_colliding_id(monkeypatch):
+    g, wf, nid = fresh()
+    allocations = []
+
+    def allocate():
+        value = nid + 1 if not allocations else nid
+        allocations.append(value)
+        return value
+
+    monkeypatch.setattr(ops, "mint_id", allocate)
+    _, stream, aliases = ops.apply_specs(
+        wf,
+        g,
+        [
+            {"op": "add_node", "class_type": "Gen", "as": "new"},
+            write(nid, "model.mode", "quality"),
+            write("$new", "model", "base"),
+        ],
+    )
+    assert allocations == [nid + 1]
+    assert aliases["new"] == nid + 1
+    assert len(wf["nodes"]) == 2
+    assert len(stream) == 3
+    assert "quality" in wf["nodes"][0]["widgets_values"]
+
+
+def test_refusal_restores_held_container_references():
+    g, wf, nid = fresh()
+    before = copy.deepcopy(wf)
+    nodes, node = wf["nodes"], wf["nodes"][0]
+    widgets, stamps = node["widgets_values"], wf["_widget_stamps"]
+    with pytest.raises(ValueError, match="destructive.*rebuild"):
+        ops.apply_specs(
+            wf,
+            g,
+            [
+                {"op": "add_node", "class_type": "Gen"},
+                write(nid, "model.mode", "quality"),
+                write(nid, "model", "base"),
+            ],
+        )
+    assert wf == before
+    assert wf["nodes"] is nodes
+    assert nodes[0] is node
+    assert node["widgets_values"] is widgets
+    assert wf["_widget_stamps"] is stamps
+    assert node == before["nodes"][0]
+
+
+def test_collision_refusal_restores_the_actual_execution(monkeypatch):
+    g, wf, nid = fresh()
+    before = copy.deepcopy(wf)
+    node = wf["nodes"][0]
+    monkeypatch.setattr(ops, "mint_id", lambda: nid)
+    with pytest.raises(ValueError, match="destructive.*rebuild"):
+        ops.apply_specs(
+            wf,
+            g,
+            [
+                {"op": "add_node", "class_type": "Gen", "as": "new"},
+                write(nid, "model.mode", "quality"),
+                write("$new", "model", "base"),
+            ],
+        )
+    assert wf == before
+    assert wf["nodes"][0] is node
+
+
+def test_success_mints_only_the_returned_op_ids(monkeypatch):
+    g, wf, nid = fresh()
+    mint = ops._new_op_id
+    issued = []
+
+    def issue():
+        value = mint()
+        issued.append(value)
+        return value
+
+    monkeypatch.setattr(ops, "_new_op_id", issue)
+    _, stream, _ = ops.apply_specs(wf, g, [write(nid, "axis", "one"), write(nid, "axis", "two")])
+    assert issued == [op["op_id"] for op in stream]
+
+
+@pytest.mark.parametrize("unrelated_first", [True, False])
+def test_duplicate_control_marker_uses_the_first_slots_actual_owner(unrelated_first):
+    marker = ["INT", {"default": 1, "control_after_generate": True}]
+    model = [
+        "COMFY_DYNAMICCOMBO_V3",
+        {
+            "options": [
+                {"key": "base", "inputs": {"required": {}}},
+                {"key": "max", "inputs": {"required": {"child": marker}}},
+            ]
+        },
+    ]
+    order = ["aseed", "model"] if unrelated_first else ["model", "aseed"]
+    g = Graph.from_object_info(
+        {"Gen": {"input": {"required": {"aseed": marker, "model": model}}, "input_order": {"required": order}}}
+    )
+    wf, added = ops.add_node({"nodes": [], "links": []}, g, "Gen")
+    nid = added["node_id"]
+    ops.set_widget(wf, g, nid, "model", "max")
+    before = copy.deepcopy(wf)
+    specs = [write(nid, "control_after_generate", "randomize"), write(nid, "model", "base")]
+    if unrelated_first:
+        ops.apply_specs(wf, g, specs)
+        assert wf["nodes"][0]["widgets_values"] == [1, "randomize", "base"]
+    else:
+        with pytest.raises(ValueError, match="destructive.*rebuild"):
+            ops.apply_specs(wf, g, specs)
+        assert wf == before
+
+
+def test_failure_restores_modified_then_detached_node():
+    g, wf, nid = fresh()
+    before = copy.deepcopy(wf)
+    node, widgets = wf["nodes"][0], wf["nodes"][0]["widgets_values"]
+    with pytest.raises(ValueError, match="unknown op") as caught:
+        ops.apply_specs(wf, g, [write(nid, "axis", "changed"), {"op": "delete_node", "node": nid}, {"op": "bad"}])
+    assert caught.value.applied_count == 0
+    assert wf == before
+    assert wf["nodes"][0] is node
+    assert node["widgets_values"] is widgets
+    assert node == before["nodes"][0]
+
+
+def test_interruption_rolls_back_without_replacing_the_exception(monkeypatch):
+    g, wf, nid = fresh()
+    before = copy.deepcopy(wf)
+    node, widgets = wf["nodes"][0], wf["nodes"][0]["widgets_values"]
+    interrupted = KeyboardInterrupt("interrupted after mutation")
+
+    def interrupt(*args):
+        raise interrupted
+
+    monkeypatch.setattr(ops, "_admit_rebuild_write", interrupt)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        ops.apply_specs(wf, g, [write(nid, "axis", "changed")])
+    assert caught.value is interrupted
+    assert wf == before
+    assert wf["nodes"][0] is node
+    assert node["widgets_values"] is widgets
+
+
 @pytest.mark.parametrize("alias", [False, True])
 def test_child_then_selector_refuses_atomically(alias):
     g, wf, nid = fresh()

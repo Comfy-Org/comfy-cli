@@ -1679,6 +1679,12 @@ preserving written rows, unrelated targets, ordinary scalar edits, and
 selector/count-before-child sequences remain accepted, subject to existing
 validation and batch guards.
 
+Repeated `control_after_generate` names resolve to the native writer's first
+saved slot. Admission tracks that slot's actual selector owner, so an unrelated
+same-named marker does not make a rebuild destructive. Batches execute once;
+failure restores the original workflow containers in place, including references
+held by callers. Failed attempts still consume generated identity/op nonces.
+
 This narrows the CLI producer's accepted spec surface only. The historical
 raw-op #1101 apply-order exception above remains: replay semantics, stamps,
 and the TypeScript shared consumer's intentional preservation of hidden values

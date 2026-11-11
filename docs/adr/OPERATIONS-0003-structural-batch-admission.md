@@ -20,11 +20,16 @@ the frozen vocabulary and consumer compatibility contract remain binding.
 Narrow `apply_specs` admission to refuse a destructive rebuild after a write
 to a schema-owned child on the same resolved target. Follow nested combo
 ownership; only removed DynamicGroup rows conflict with a shrink. Use resolved
-op identity rather than textual prefixes. Validate on an isolated graph and
-spec list so refusal returns no ops and preserves caller state even after an
-alias-producing add. After successful validation, execute the existing producer
-path on the caller, retaining its in-place workflow and node behavior.
+op identity rather than textual prefixes. Snapshot original workflow containers,
+execute the producer once in place, and restore those containers on failure.
+Shallow snapshots retain original child references, including containers detached
+by deletion or rebuild. Refusal returns no ops and preserves caller state even
+after an alias-producing add; successful work retains existing in-place behavior.
 Report the failing spec and zero applied count.
+
+Repeated `control_after_generate` marker names use the native writer's first
+saved slot and its actual combo owner. Another same-named marker elsewhere in
+the node does not establish a destructive dependency.
 
 ## Alternatives considered
 
@@ -45,20 +50,22 @@ Refused work is atomic, with a useful reordering/separate-batch hint. Successful
 work retains ordinary validation and existing guards, but admission proves
 only absence of this destructive within-batch ordering. It does not establish
 arbitrary replay-order convergence, repair earlier batches, or reconcile CLI
-reset behavior with the consumer's hidden-value preservation. Copying the
-workflow costs memory proportional to its size. Successful batches also execute
-the producer twice, including private dry-run nonce allocation; no performance
-or lifetime-cost improvement is claimed.
+reset behavior with the consumer's hidden-value preservation. Snapshot storage
+and traversal cost scale with the workflow's containers and references. Identity
+and op nonces are minted once per attempted producer operation; failed attempts
+still consume nonces, which are not rolled back or reused. No lifetime-cost
+improvement is claimed.
 
 ## Validation
 
 `test_rebuild_batch_guard.py` covers unsafe success regressions, aliases,
-rollback after add_node, CLI file bytes, nested owners, interior target identity,
-no-ops, scalar dotted names, growth and shrink/regrowth. Existing batch-order
+rollback after add_node and deletion, held container identities, generated-ID
+collisions, single op-ID allocation, interruption, CLI file bytes, nested owners,
+interior target identity, no-ops, scalar dotted names, growth and shrink/regrowth. Existing batch-order
 and DynamicGroup tests retain coverage of ordinary successful work.
 
 ## Revisit triggers
 
 Revisit when a coordinated shared-consumer replay contract resolves #1101,
 when schema ownership introduces new structural families, or when workflow
-copy costs require measured optimization without weakening atomic refusal.
+snapshot costs require measured optimization without weakening atomic refusal.
