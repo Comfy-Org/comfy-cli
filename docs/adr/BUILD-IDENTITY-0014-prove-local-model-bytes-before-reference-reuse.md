@@ -1,4 +1,4 @@
-# ADR-BUILD-0014: Prove local model bytes before reference reuse
+# ADR-BUILD-IDENTITY-0014: Prove local model bytes before reference reuse
 
 Date: 2026-11-11
 
