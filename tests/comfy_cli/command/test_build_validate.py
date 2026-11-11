@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 import time
 import urllib.error
 from email.message import Message
@@ -1171,3 +1172,77 @@ def test_link_checks_stop_at_their_time_budget_and_the_rest_get_the_filename_loo
     lookups = _envelope(result)["data"]["model_lookups"]
     assert {lookup["state"] for lookup in lookups} == {"none_found"}
     assert f"{len(names) - len(sent)} models" in " ".join(result.stderr.split())
+
+
+def test_a_link_that_trickles_its_headers_is_cut_off_at_the_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: hosts that keep each socket read inside its timeout but never finish
+    # the headers, so a per-read timeout alone would never fire; the budget is
+    # shrunk so the test runs fast
+    monkeypatch.setattr(build, "_SOURCE_HEAD_TIMEOUT", 0.2)
+    released = threading.Event()
+    opened: list[str] = []
+
+    def trickling_host(request, *, timeout: float):
+        opened.append(request.full_url)
+        released.wait(3.0)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", trickling_host)
+    probe = build._SourceProbe(budget=0.5)
+    links = [f"https://slow-{index}.example/model.safetensors" for index in range(10)]
+
+    # When
+    started = time.monotonic()
+    try:
+        stated = [probe(link) for link in links]
+        elapsed = time.monotonic() - started
+    finally:
+        released.set()
+
+    # Then: the whole run stops near the budget, no link states a hash, and the
+    # links not asked are counted for the filename lookup
+    assert elapsed < 1.5, elapsed
+    assert stated == [None] * len(links)
+    assert 0 < len(opened) < len(links)
+    assert probe.skipped == len(links) - len(opened)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("https://TOKEN@models.example/x.safetensors", id="user"),
+        pytest.param("https://user:secret@models.example/x.safetensors", id="user-and-password"),
+        pytest.param("https://:secret@models.example/x.safetensors", id="password-only"),
+        pytest.param("https://@models.example/x.safetensors", id="empty-userinfo"),
+    ],
+)
+def test_a_link_with_a_credential_before_its_host_is_never_opened(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, uri: str
+) -> None:
+    # Given: through an HTTP proxy, urllib would send the userinfo in the clear in
+    # its CONNECT line, before TLS starts
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "filename": "x.safetensors", "sourceUri": uri, "sha256": _SHA_A}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link, the filename lookup answers, and
+    # no message or lookup names the credential
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["x.safetensors"]}}]
+    for credential in ("secret", "TOKEN"):
+        assert credential not in result.stderr
+        assert credential not in json.dumps(lookup)
+    assert build._source_sha256(uri) is None
+    assert sent == []

@@ -36,6 +36,11 @@ that is recorded here.
 - **Https only.** A link that is not `https://` with a host is never opened. A
   `source: local` entry keeps its link on the wire, so this check is what keeps
   a credential in an `http://` link off the network.
+- **No userinfo.** A link with a user or password before its host
+  (`https://TOKEN@host/...`) is never opened either. Through an HTTP proxy,
+  urllib puts that userinfo in its `CONNECT` line, which goes to the proxy in
+  the clear before TLS starts. The model gets the filename lookup, and no
+  message names the link.
 - **What is sent.** The `HEAD` for the URL as written, with urllib's default
   headers. No builder token, Cloud key, cookie or other credential is added;
   the only credential that travels is one the URL itself carries (a Civitai
@@ -48,9 +53,14 @@ that is recorded here.
   verifier. The entry reads `declared_ok` or `declared_mismatch`, with the
   host's hash in `sourceSha256`.
 - **Time budget.** Each `HEAD` may take 5 seconds. All of them together may take
-  15 seconds; each gets what is left of that, up to its own 5. Once the budget
-  is spent, no more links are asked, and the command says how many models got
-  the filename lookup without a link check.
+  15 seconds; each gets what is left of that, up to its own 5. The limit counts
+  the whole request, from connect to the last header, not each socket read:
+  urllib's timeout applies per read, so a host that sends its headers a little
+  at a time would never trip it. Each `HEAD` runs in a daemon thread that
+  `validate` waits on for its share of the budget; one still running then is
+  abandoned as timed out, and cannot keep the command from exiting. Once the
+  budget is spent, no more links are asked, and the command says how many
+  models got the filename lookup without a link check.
 - **Fallback.** A link that is not asked, states no hash, refuses, times out or
   fails in any other way gets the filename lookup, as before this record. A
   link check never fails the command.
@@ -70,12 +80,17 @@ The `--remote` help says the `HEAD`s go to the model hosts and share the
   hang.
 - **Probe in parallel.** It would cut the wait, but still contacts every host,
   and the budget alone keeps the command short.
+- **Check the budget only between `HEAD`s.** A host that trickles its headers
+  keeps one `HEAD` open well past the budget, since urllib's timeout is per read.
+- **Strip the userinfo and ask anyway.** The host would then answer for a
+  different request than the one the builder makes, and the user or password is
+  dropped silently; the filename lookup is the honest fallback.
 
 ## What we reject
 
 - Adding any credential the URL does not carry.
 - Following a redirect from a model host.
-- Opening a link that is not https.
+- Opening a link that is not https, or one with userinfo before its host.
 - Reading a plain `ETag` as a sha256.
 - Letting a link check that fails or runs out of time fail `validate`.
 
@@ -100,8 +115,10 @@ The `--remote` help says the `HEAD`s go to the model hosts and share the
 - `tests/comfy_cli/command/test_build_validate.py`: a matching and a differing
   `X-Linked-Etag` read `declared_ok` and `declared_mismatch`; a link that does
   not answer gets the filename lookup; a plain `ETag` gives no verdict; a link
-  that is not https is never opened; 40 links on hosts that never answer stop
-  at the budget and every model gets the filename lookup.
+  that is not https, or that has userinfo before its host, is never opened;
+  40 links on hosts that never answer stop at the budget and every model gets
+  the filename lookup; hosts that trickle their headers past each read's
+  timeout are cut off at the budget.
 
 ## Revisit triggers
 

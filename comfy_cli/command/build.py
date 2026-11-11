@@ -34,6 +34,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -3907,17 +3908,47 @@ _SOURCE_PROBE_BUDGET = 15.0
 
 
 def _https_link(uri: str) -> bool:
+    """Whether a model link may be opened: https, with a host, and no user or
+    password before the host. Through an HTTP proxy urllib puts that userinfo in
+    its ``CONNECT`` line, which is sent in the clear before TLS starts."""
     try:
         parts = urlsplit(uri)
     except ValueError:
         return False
-    return parts.scheme.lower() == "https" and bool(parts.hostname)
+    return parts.scheme.lower() == "https" and bool(parts.hostname) and "@" not in parts.netloc
+
+
+def _within(seconds: float, call: Callable[[], str | None]) -> str | None:
+    """*call* in a daemon thread, or None when it has not returned in *seconds*.
+
+    urllib's timeout bounds each socket operation, not the request: a host that
+    sends its headers a little at a time can hold a HEAD open indefinitely. The
+    thread left behind is a daemon, so it never keeps the command from exiting."""
+    outcome: list[tuple[bool, Any]] = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, call()))
+        except BaseException as error:  # handed back to the caller below
+            outcome.append((False, error))
+
+    worker = threading.Thread(target=run, name="comfy-build-link-check", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if not outcome:
+        return None
+    returned, value = outcome[0]
+    if not returned:
+        raise value
+    return value
 
 
 class _SourceProbe:
     """``_source_sha256`` under one time budget shared by every link in a spec.
-    Each HEAD gets what is left, up to its own timeout; once the budget is spent a
-    link is not asked, is counted in ``skipped``, and gets the filename lookup."""
+    Each HEAD gets what is left, up to its own timeout, measured over the whole
+    request (connect, TLS and headers) rather than per socket read; a HEAD still
+    running then is abandoned. Once the budget is spent a link is not asked, is
+    counted in ``skipped``, and gets the filename lookup."""
 
     def __init__(self, budget: float = _SOURCE_PROBE_BUDGET) -> None:
         self._deadline = time.monotonic() + budget
@@ -3930,14 +3961,16 @@ class _SourceProbe:
         if remaining <= 0:
             self.skipped += 1
             return None
-        return _source_sha256(uri, timeout=min(_SOURCE_HEAD_TIMEOUT, remaining))
+        timeout = min(_SOURCE_HEAD_TIMEOUT, remaining)
+        return _within(timeout, lambda: _source_sha256(uri, timeout=timeout))
 
 
 def _source_sha256(uri: str, *, timeout: float = _SOURCE_HEAD_TIMEOUT) -> str | None:
     """The sha256 a model link's host states for its file, or None on any failure.
 
-    Https only, one HEAD, redirect not followed: a link can carry a credential (a
-    Civitai ``?token=``) that must not travel without TLS or on to another host.
+    Https only, no userinfo, one HEAD, redirect not followed: a link can carry a
+    credential (a Civitai ``?token=``) that must not travel without TLS, to a
+    proxy, or on to another host.
     Only ``X-Linked-Etag`` (Hugging Face's, on that redirect) counts, as in the
     builder's verifier: a plain ``ETag`` can be 64 hex characters and not a sha256."""
     import urllib.request
