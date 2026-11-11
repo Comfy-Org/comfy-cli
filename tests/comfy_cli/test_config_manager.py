@@ -63,6 +63,32 @@ class TestLoad:
         assert mgr.background is None
         assert constants.CONFIG_KEY_BACKGROUND not in mgr.config["DEFAULT"]
 
+    def test_drops_corrupt_background_record(self, tmp_path):
+        # A hand-edited or truncated background record must not brick every
+        # CLI invocation; it is dropped like a stale pid while the logfile
+        # pointer is preserved for post-mortem `comfy logs`.
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        (config_dir / "config.ini").write_text(
+            f"[DEFAULT]\n"
+            f"{constants.CONFIG_KEY_BACKGROUND} = ('localhost', notaport)\n"
+            f"{constants.CONFIG_KEY_BACKGROUND_LOG} = /ws/user/comfyui_8188.log\n"
+        )
+        mgr = _make_config_manager(config_dir)
+        assert mgr.background is None
+        assert constants.CONFIG_KEY_BACKGROUND not in mgr.config["DEFAULT"]
+        assert mgr.get(constants.CONFIG_KEY_BACKGROUND_LOG) == "/ws/user/comfyui_8188.log"
+
+    def test_drops_truncated_background_record(self, tmp_path):
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        (config_dir / "config.ini").write_text(
+            f"[DEFAULT]\n{constants.CONFIG_KEY_BACKGROUND} = ('localhost', 8188)\n"
+        )
+        mgr = _make_config_manager(config_dir)
+        assert mgr.background is None
+        assert constants.CONFIG_KEY_BACKGROUND not in mgr.config["DEFAULT"]
+
     def test_keeps_background_log_path_when_stale_pid(self, tmp_path):
         # A dead pid usually means a CRASH — the recorded logfile is the pointer
         # to the crash log, so init must not throw it away with the pid record.
