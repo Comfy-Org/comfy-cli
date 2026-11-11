@@ -1246,3 +1246,47 @@ def test_a_link_with_a_credential_before_its_host_is_never_opened(
     for credential in ("secret", "TOKEN"):
         assert credential not in result.stderr
         assert credential not in json.dumps(lookup)
+
+
+def test_a_spec_written_apart_from_its_install_names_the_flags_that_point_at_it(
+    workspace: Path, tmp_path: Path
+) -> None:
+    # Given: `init -o` put the spec in another folder
+    elsewhere = tmp_path / "elsewhere"
+    output = elsewhere / "comfy-build.yaml"
+    args = ["--name", "Apart", "--python", sys.executable, "--comfy-version", "0.3.40", "-o", str(output)]
+    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"}
+    initialized = CliRunner().invoke(cli_app, ["build", "init", *args, str(workspace)], env=env)
+    assert initialized.exit_code == 0, initialized.output
+
+    # When
+    refused = _invoke(elsewhere)
+    pointed = _invoke(
+        elsewhere, "--models-dir", str(workspace / "models"), "--custom-nodes-dir", str(workspace / "custom_nodes")
+    )
+
+    # Then
+    assert refused.exit_code == 1
+    error = _envelope(refused)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert str(elsewhere / "models") in error["hint"]
+    assert "--models-dir <install>/models" in error["hint"]
+    assert "--custom-nodes-dir <install>/custom_nodes" in error["hint"]
+    assert pointed.exit_code == 0, pointed.output
+
+
+def test_a_spec_error_that_is_not_a_path_names_no_scan_folders(workspace: Path) -> None:
+    # Given: a spec whose only problem has nothing to do with where the install is
+    spec = write_spec(workspace, models=[local_model()], nodes=[local_node()])
+    spec.write_text(spec.read_text(encoding="utf-8").replace("description: ''", "description: 7"), encoding="utf-8")
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "description must be a string" in error["message"]
+    assert "--models-dir" not in error["hint"]
+    assert "--custom-nodes-dir" not in error["hint"]

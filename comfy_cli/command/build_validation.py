@@ -216,7 +216,13 @@ def _validate_local_path(entry: JsonObject, context: LocalPathContext) -> None:
         case unreachable:
             assert_never(unreachable)
     if not correct_kind:
-        raise BuildSpecInvalidError(f"{context.location}.localPath must resolve to a {expected}: {local_path!r}")
+        # Most often the spec was written apart from its install (`init -o`), so
+        # every localPath is read under the spec's folder instead.
+        raise BuildSpecInvalidError(
+            f"{context.location}.localPath must resolve to a {expected}: {local_path!r}",
+            hint=f"localPath is read under {context.root}. If the install is elsewhere, pass "
+            "`--models-dir <install>/models` and `--custom-nodes-dir <install>/custom_nodes`",
+        )
 
 
 def _validate_authoring_definition(definition: JsonObject, paths: BuildPaths) -> None:
