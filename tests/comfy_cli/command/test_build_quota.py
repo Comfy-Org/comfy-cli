@@ -195,6 +195,116 @@ def test_pretty_output_says_when_the_release_count_skipped_builds(monkeypatch: p
     assert not any(line.strip().startswith("Builds:") for line in output.splitlines())
 
 
+#: The low-count note as every release before the services sent their own counts printed it.
+_ESTIMATED_NOTE = (
+    "releases are counted over the Builds you can see, your own outside the enterprise plan, while the limit "
+    "counts the whole workspace, so that count can read low; active deployments are counted from the deploy "
+    "list, which can miss a slot held by a deployment moving to another release, so that count is at least "
+    "the number shown"
+)
+
+
+def test_without_used_counts_the_note_says_both_counts_can_read_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When neither limits body carries used
+    data = _quota(monkeypatch, Builder({"maxRunningBuilds": 5}), Deploy({"maxActiveDeployments": 3}))
+    output = " ".join(
+        _pretty_quota(monkeypatch, Builder({"maxRunningBuilds": 5}), Deploy({"maxActiveDeployments": 3})).split()
+    )
+
+    # Then the note is the one both counts were always estimated under
+    assert data["note"] == _ESTIMATED_NOTE
+    assert f"Note: {_ESTIMATED_NOTE}." in output
+
+
+def test_the_builders_release_count_replaces_the_estimate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given more visible Builds than the command reads, and the builder's own count
+    builder = ManyBuilds({"maxRunningBuilds": 5, "maxTotalReleases": 5, "used": {"builds": 2, "totalReleases": 4}})
+
+    # When
+    data = _quota(monkeypatch, builder, Deploy({"maxActiveDeployments": 3}))
+    output = " ".join(_pretty_quota(monkeypatch, builder, Deploy({"maxActiveDeployments": 3})).split())
+
+    # Then the count is the builder's, not truncated, and only the deployment half of the note is left
+    assert data["releases"] == {"used": 4, "limit": 5, "limitKnown": True}
+    assert data["note"] == build_quota.DEPLOY_NOTE
+    assert "Releases: 4 of 5 Active deployments:" in output
+    assert "Builds you can see" not in output
+    assert "at least 2 of 3" in output
+
+
+def test_comfy_deploys_active_count_is_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given comfy-deploy's own count, above what the deploy list shows
+    deploy = Deploy({"maxActiveDeployments": 3, "used": {"activeDeployments": 3}})
+
+    # When
+    data = _quota(monkeypatch, Builder({"maxRunningBuilds": 5}), deploy)
+    output = " ".join(_pretty_quota(monkeypatch, Builder({"maxRunningBuilds": 5}), deploy).split())
+
+    # Then
+    assert data["activeDeployments"] == {"used": 3, "limit": 3, "limitKnown": True, "exact": True}
+    assert data["releases"] == {"used": 4, "limit": None, "limitKnown": True}
+    assert data["note"] == build_quota.RELEASE_NOTE
+    assert "Active deployments: 3 of 3" in output
+    assert "at least" not in output
+
+
+def test_with_both_counts_exact_there_is_no_low_count_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    builder = Builder({"maxRunningBuilds": 5, "maxTotalReleases": 5, "used": {"totalReleases": 4}})
+    deploy = Deploy({"maxActiveDeployments": 3, "used": {"activeDeployments": 0}})
+
+    # When
+    data = _quota(monkeypatch, builder, deploy)
+    output = _pretty_quota(monkeypatch, builder, deploy)
+
+    # Then the note is present and empty, and nothing is printed for it
+    assert data["releases"] == {"used": 4, "limit": 5, "limitKnown": True}
+    assert data["activeDeployments"] == {"used": 0, "limit": 3, "limitKnown": True, "exact": True}
+    assert data["note"] == ""
+    assert "Note:" not in output
+
+
+def test_with_both_counts_exact_an_override_is_the_whole_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given exact counts and the builder pointed elsewhere
+    builder = Builder({"maxRunningBuilds": 5, "used": {"totalReleases": 4}})
+    deploy = Deploy({"maxActiveDeployments": 3, "used": {"activeDeployments": 1}})
+
+    # When
+    data = _quota(monkeypatch, builder, deploy, "--builder-url", "https://staging.test/builder")
+
+    # Then
+    assert data["note"] == build_quota.builder_url_note("https://control.test")
+
+
+@pytest.mark.parametrize(
+    "used",
+    [
+        pytest.param(None, id="null"),
+        pytest.param("4", id="string"),
+        pytest.param(True, id="bool"),
+        pytest.param([4], id="list"),
+        pytest.param({}, id="no-keys"),
+        pytest.param({"totalReleases": True, "activeDeployments": False}, id="bool-counts"),
+        pytest.param({"totalReleases": "4", "activeDeployments": "1"}, id="string-counts"),
+        pytest.param({"totalReleases": 4.0, "activeDeployments": 1.0}, id="float-counts"),
+        pytest.param({"totalReleases": -1, "activeDeployments": -1}, id="negative-counts"),
+        pytest.param({"totalReleases": None, "activeDeployments": None}, id="null-counts"),
+    ],
+)
+def test_a_used_without_a_count_falls_back_to_the_estimates(monkeypatch: pytest.MonkeyPatch, used: object) -> None:
+    # Given limits bodies whose used carries no usable count
+    builder = ManyBuilds({"maxRunningBuilds": 5, "maxTotalReleases": 10, "used": used})
+    deploy = Deploy({"maxActiveDeployments": 3, "used": used})
+
+    # When
+    data = _quota(monkeypatch, builder, deploy)
+
+    # Then both counts read as they do without used
+    assert data["releases"] == {"used": 0, "limit": 10, "limitKnown": True, "truncated": True}
+    assert data["activeDeployments"] == {"used": 2, "limit": 3, "limitKnown": True, "exact": False}
+    assert data["note"] == _ESTIMATED_NOTE
+
+
 _OVERRIDES = [
     pytest.param(("--builder-url", "https://staging.test/builder"), {}, id="flag"),
     pytest.param((), {"COMFY_BUILDER_URL": "https://staging.test/builder"}, id="env"),

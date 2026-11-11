@@ -3101,20 +3101,17 @@ def quota_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     if build_quota.signed_in_apart(deploy):
         notes.append(build_quota.SIGN_IN_NOTE)
     # A limit that cannot be read is unknown, and the counts still stand.
+    build_limits = build_quota.best_effort(client.get_limits)
+    deploy_limits = build_quota.best_effort(deploy.get_limits)
     payload = build_quota.quota_payload(
-        holders,
-        visible,
-        len(build_quota.active_deployments(rows)),
-        build_quota.best_effort(client.get_limits),
-        build_quota.best_effort(deploy.get_limits),
-        notes=notes,
+        holders, visible, len(build_quota.active_deployments(rows)), build_limits, deploy_limits, notes=notes
     )
     if renderer.is_pretty():
         renderer.info(build_quota.usage_line("Releases", payload["releases"]))
         renderer.info(build_quota.usage_line("Active deployments", payload["activeDeployments"]))
-        renderer.info(f"Note: {build_quota.NOTE}.")
-        for note in notes:
-            renderer.info(f"Note: {note}.")
+        for note in (build_quota.count_note(build_limits, deploy_limits), *notes):
+            if note:
+                renderer.info(f"Note: {note}.")
     renderer.emit(payload, command="build quota")
 
 

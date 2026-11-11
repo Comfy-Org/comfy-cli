@@ -445,8 +445,8 @@ compute charge; only one is undoable.
 deployment that is not `failed`, `stopped` or `stop_failed` takes a slot, and a
 create, restart or move past the limit is `deploy_quota_exceeded` with the
 holders in `details.activeDeployments`. A stopped deployment moving to another release can
-still hold a slot through its queued replacement, so that list, and the count
-`comfy build quota` prints as "at least", can come up short of the limit; the
+still hold a slot through its queued replacement, so that list, and a count
+`comfy build quota` prints as "at least" (`exact: false`), can come up short of the limit; the
 refusal itself is the answer. `stop` frees a slot. The number comes from the plan,
 so read it with `comfy build quota` rather than quoting one; that command also
 counts the workspace's releases against its release limit, which

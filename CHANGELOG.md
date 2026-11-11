@@ -15,6 +15,13 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- `comfy build quota` uses the release and active-deployment counts the builder
+  and comfy-deploy send with their limits, when they do: such a count is exact
+  (`exact: true` for deployments, no `truncated` for releases), and the note
+  saying it can read low is left out. `note` is empty when nothing is left to say.
+
 ## [1.26.0] - 2026-11-11
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.26.0) · 29 commits since v1.25.0.

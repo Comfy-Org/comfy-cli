@@ -23,18 +23,18 @@
   "properties": {
     "releases": {
       "allOf": [{"$ref": "#/$defs/usage"}],
-      "description": "Releases held, summed over the Builds the caller can see, against maxTotalReleases. Outside the enterprise plan a member sees only their own Builds while the cap counts every member's, so used can read low.",
+      "description": "Releases held against maxTotalReleases: the builder's own count (used.totalReleases from its /v1/limits) when it sends one, else summed over the Builds the caller can see. Outside the enterprise plan a member sees only their own Builds while the cap counts every member's, so a summed used can read low.",
       "properties": {
-        "truncated": {"type": "boolean", "description": "Present and true when more Builds are visible than the command reads releases for, so used counts only some of them."}
+        "truncated": {"type": "boolean", "description": "Present and true when used is summed over the Builds and more are visible than the command reads releases for, so it counts only some of them. Never present on the builder's own count."}
       }
     },
     "activeDeployments": {
       "allOf": [{"$ref": "#/$defs/usage"}],
-      "description": "The workspace's undeleted deployments the deploy list shows in any status but failed, stopped and stop_failed, against maxActiveDeployments. A lower bound: the list shows each deployment's serving copy, while the limit counts a deployment with any undeleted copy, so a stopped deployment whose replacement copy is queued holds a slot the list does not show.",
+      "description": "Active deployments against maxActiveDeployments: comfy-deploy's own count (used.activeDeployments from its /v1/limits) when it sends one, else the workspace's undeleted deployments the deploy list shows in any status but failed, stopped and stop_failed. That list count is a lower bound: the list shows each deployment's serving copy, while the limit counts a deployment with any undeleted copy, so a stopped deployment whose replacement copy is queued holds a slot the list does not show.",
       "properties": {
-        "exact": {"const": false, "description": "Always false: used is counted from the deploy list, not read from the service, and can be lower than the count the limit is held to."}
+        "exact": {"type": "boolean", "description": "True when used is comfy-deploy's own count. False when it is counted from the deploy list, and can be lower than the count the limit is held to."}
       }
     },
-    "note": {"type": "string", "description": "Says which counts cover only the Builds the caller can see. When --builder-url or COMFY_BUILDER_URL overrode the builder URL, it also says the deployments were read from the deploy commands' environment (COMFY_DEPLOY_URL), not that URL. When COMFY_BUILDER_TOKEN signs the builder reads with another credential than the deploy commands' sign-in, it also says the two counts may come from different sign-ins."}
+    "note": {"type": "string", "description": "Says, for each count not sent by its service, why it can read low: the release count covers only the Builds the caller can see, and the active-deployment count is a lower bound. Empty when there is nothing to say: both counts came from their services and neither case below applies. When --builder-url or COMFY_BUILDER_URL overrode the builder URL, it also says the deployments were read from the deploy commands' environment (COMFY_DEPLOY_URL), not that URL. When COMFY_BUILDER_TOKEN signs the builder reads with another credential than the deploy commands' sign-in, it also says the two counts may come from different sign-ins."}
   }
 }
