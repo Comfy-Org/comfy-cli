@@ -1905,3 +1905,20 @@ def test_the_active_cap_envelope_carries_the_list_and_names_deploy_stop(tmp_path
     assert error["code"] == "deploy_quota_exceeded"
     assert [row["id"] for row in error["details"]["activeDeployments"]] == ["dep-1", "dep-2"]
     assert "comfy deploy stop" in error["hint"]
+
+
+def test_an_active_cap_refusal_lists_the_holders_even_when_the_list_counts_fewer_than_the_limit() -> None:
+    """The deploy list shows each deployment's serving copy; the limit counts every
+    undeleted copy, so a stopped deployment whose replacement is queued holds a slot
+    the list reads as free. The refusal is the answer, so the count never hides the list."""
+    # Given a refusal at the active cap, with two listed slot holders under a limit of three
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP, {"maxActiveDeployments": 3, "maxModelStorageGb": 100})
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then
+    assert error.code == "deploy_quota_exceeded"
+    assert [row["id"] for row in error.details["activeDeployments"]] == ["dep-1", "dep-2"]
+    assert error.details["server_code"] == "CONCURRENCY_LIMIT"
+    assert "comfy deploy stop" in error.hint

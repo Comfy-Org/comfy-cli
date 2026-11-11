@@ -1831,9 +1831,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "deploy_quota_exceeded",
         "The workspace reached its active-deployment limit, or the request asked one deployment for more "
         "workers than the workspace's per-deployment worker limit allows. When `comfy deploy up` was refused "
-        "at the active-deployment limit, `details.activeDeployments` lists each deployment holding a slot "
-        "(`id`, `name`, `releaseId`, `buildId` where the builder names it, `status`, `createdAt`). Every "
-        "undeleted deployment not failed, stopped or stop_failed holds one.",
+        "at the active-deployment limit, `details.activeDeployments` lists the deployments the deploy list shows "
+        "holding a slot (`id`, `name`, `releaseId`, `buildId` where the builder names it, `status`, `createdAt`): "
+        "every undeleted deployment not failed, stopped or stop_failed. A stopped deployment moving to another "
+        "release can also hold one through its queued replacement, so the list can be shorter than the limit.",
         "at the active-deployment limit, `comfy deploy stop` one deployment to free a slot (`comfy build quota` "
         "shows the limit); at the worker limit, lower `--max`; then retry",
     ),

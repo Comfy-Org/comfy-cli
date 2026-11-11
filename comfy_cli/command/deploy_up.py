@@ -217,9 +217,9 @@ def _deployments_made(deployments: Sequence[JsonObject], releases: Sequence[Json
     return sum(row.get("releaseId") in build_release_ids for row in deployments)
 
 
-#: The words comfy-deploy refuses a create with at its active-deployment cap,
-#: read only when the limit itself cannot be: the same 429 CONCURRENCY_LIMIT
-#: also refuses a create asking more workers than one deployment may have.
+#: The words comfy-deploy refuses a create with at its active-deployment cap:
+#: the same 429 CONCURRENCY_LIMIT also refuses a create asking more workers
+#: than one deployment may have.
 _ACTIVE_CAP_WORDS: Final = "active deployment limit"
 
 
@@ -228,19 +228,22 @@ def _name_active_deployments(
 ) -> None:
     """Add ``details.activeDeployments`` to a create refused at the workspace's active-deployment cap.
 
-    The cap is judged against the list the create was keyed from, read just
-    before it. Its caller runs it best effort, and ``error`` changes only at
-    the end, so a read that fails leaves the refusal as it was.
+    A refusal worded as the active cap always gets the list: the list the
+    create was keyed from can count fewer holders than the service does (a
+    stopped deployment's queued replacement copy holds a slot), so its count
+    never overrides the refusal. Otherwise that count, against the limit,
+    decides. Its caller runs it best effort, and ``error`` changes only at the
+    end, so a read that fails leaves the refusal as it was.
     """
     if error.status != 429 or (error.details or {}).get("server_code") != "CONCURRENCY_LIMIT":
         return
     active = build_quota.active_deployments(deployments)
-    limits = build_quota.best_effort(client.get_limits)
-    limit = limits.get("maxActiveDeployments") if isinstance(limits, dict) else None
-    if isinstance(limit, int) and not isinstance(limit, bool):
-        at_cap = len(active) >= limit
+    if _ACTIVE_CAP_WORDS in str(error).lower():
+        at_cap = True
     else:
-        at_cap = _ACTIVE_CAP_WORDS in str(error).lower()
+        limits = build_quota.best_effort(client.get_limits)
+        limit = limits.get("maxActiveDeployments") if isinstance(limits, dict) else None
+        at_cap = isinstance(limit, int) and not isinstance(limit, bool) and len(active) >= limit
     if not at_cap or not active:
         return
     build_quota.label_builds(builder, active)

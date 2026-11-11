@@ -80,7 +80,7 @@ def test_quota_reports_releases_and_active_deployments_against_their_limits(monk
 
     # Then a stopping deployment holds a slot; a stopped or deleted one does not
     assert data["releases"] == {"used": 4, "limit": 10, "limitKnown": True}
-    assert data["activeDeployments"] == {"used": 2, "limit": 3, "limitKnown": True}
+    assert data["activeDeployments"] == {"used": 2, "limit": 3, "limitKnown": True, "exact": False}
     assert data["builds"] == {"used": 2, "limit": 50, "limitKnown": True}
     assert "Builds you can see" in data["note"]
 
@@ -92,15 +92,13 @@ def test_quota_reports_releases_and_active_deployments_against_their_limits(monk
         pytest.param(DeployAPIError("deploy_payment_required", "no credit", status=402), id="refused"),
     ],
 )
-def test_quota_still_counts_when_the_limits_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch, failure: Exception
-) -> None:
+def test_quota_still_counts_when_the_limits_cannot_be_read(monkeypatch: pytest.MonkeyPatch, failure: Exception) -> None:
     # When
     data = _quota(monkeypatch, Builder(failure), Deploy(failure))
 
     # Then
     assert data["releases"] == {"used": 4, "limit": None, "limitKnown": False}
-    assert data["activeDeployments"] == {"used": 2, "limit": None, "limitKnown": False}
+    assert data["activeDeployments"] == {"used": 2, "limit": None, "limitKnown": False, "exact": False}
     assert data["builds"] == {"used": 2, "limit": None, "limitKnown": False}
 
 
@@ -110,3 +108,62 @@ def test_a_cap_the_limits_leave_out_is_no_limit_rather_than_unknown(monkeypatch:
 
     # Then
     assert data["releases"] == {"used": 4, "limit": None, "limitKnown": True}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [pytest.param({}, id="empty-body"), pytest.param({"unexpected": True}, id="other-shape")],
+)
+def test_a_limits_body_without_its_expected_shape_is_unknown_rather_than_no_limit(
+    monkeypatch: pytest.MonkeyPatch, body: JsonObject
+) -> None:
+    # Given limits reads that succeed but carry neither maxRunningBuilds nor maxActiveDeployments,
+    # as an empty or unparsable body reaches the command
+    data = _quota(monkeypatch, Builder(body), Deploy(body))
+
+    # Then no count claims the workspace is uncapped
+    assert data["releases"] == {"used": 4, "limit": None, "limitKnown": False}
+    assert data["activeDeployments"]["limit"] is None
+    assert data["activeDeployments"]["limitKnown"] is False
+    assert data["builds"] == {"used": 2, "limit": None, "limitKnown": False}
+
+
+def test_the_active_deployment_count_is_marked_a_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deploy list shows each deployment's serving copy, while the limit counts
+    every undeleted copy, so a stopped deployment whose replacement is queued holds
+    a slot the list does not show."""
+    # When
+    data = _quota(monkeypatch, Builder({"maxRunningBuilds": 5}), Deploy({"maxActiveDeployments": 3}))
+
+    # Then
+    assert data["activeDeployments"] == {"used": 2, "limit": 3, "limitKnown": True, "exact": False}
+
+
+class ManyBuilds(Builder):
+    def list_builds(self) -> list[JsonObject]:
+        return [{"id": f"build-{n}"} for n in range(build_quota.MAX_BUILDS + 1)]
+
+    def list_releases(self, build_id: str) -> list[JsonObject]:
+        return []
+
+
+def _pretty_quota(monkeypatch: pytest.MonkeyPatch, builder: Builder, deploy: Deploy) -> str:
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, builder_url: builder)
+    monkeypatch.setattr(build_quota, "deploy_client", lambda: deploy)
+    result = CliRunner().invoke(cli_app, ["build", "quota"], env={"COMFY_OUTPUT": "pretty", "NO_COLOR": "1"})
+    assert result.exit_code == 0, result.stderr
+    return result.stdout + result.stderr
+
+
+def test_pretty_output_says_when_the_release_count_skipped_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given more visible Builds than the command reads releases for
+    builder = ManyBuilds({"maxRunningBuilds": 5, "maxTotalReleases": 10})
+
+    # When
+    output = _pretty_quota(monkeypatch, builder, Deploy({"maxActiveDeployments": 3}))
+
+    # Then the release line carries the truncation, and the active count reads as a lower bound
+    release_line = next(line for line in output.splitlines() if line.strip().startswith("Releases:"))
+    assert f"first {build_quota.MAX_BUILDS} Builds" in release_line
+    active_line = next(line for line in output.splitlines() if line.strip().startswith("Active deployments:"))
+    assert "at least 2 of 3" in active_line

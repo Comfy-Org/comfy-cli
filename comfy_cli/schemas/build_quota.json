@@ -14,9 +14,9 @@
         "used": {"type": "integer", "minimum": 0},
         "limit": {
           "type": ["integer", "null"],
-          "description": "The workspace's cap, read from the service's /v1/limits. Null either when that read failed (limitKnown false) or when no cap of this kind applies (limitKnown true)."
+          "description": "The workspace's cap, read from the service's /v1/limits. Null either when that read failed or returned a body without the service's shape (limitKnown false), or when no cap of this kind applies (limitKnown true)."
         },
-        "limitKnown": {"type": "boolean", "description": "False when the limits read failed, so the limit is unknown."}
+        "limitKnown": {"type": "boolean", "description": "False when the limits read failed or its body lacked the field the service always sends (maxRunningBuilds from the builder, maxActiveDeployments from comfy-deploy), so the limit is unknown."}
       }
     }
   },
@@ -30,7 +30,10 @@
     },
     "activeDeployments": {
       "allOf": [{"$ref": "#/$defs/usage"}],
-      "description": "The workspace's undeleted deployments in any status but failed, stopped and stop_failed, against maxActiveDeployments."
+      "description": "The workspace's undeleted deployments the deploy list shows in any status but failed, stopped and stop_failed, against maxActiveDeployments. A lower bound: the list shows each deployment's serving copy, while the limit counts a deployment with any undeleted copy, so a stopped deployment whose replacement copy is queued holds a slot the list does not show.",
+      "properties": {
+        "exact": {"const": false, "description": "Always false: used is counted from the deploy list, not read from the service, and can be lower than the count the limit is held to."}
+      }
     },
     "builds": {
       "allOf": [{"$ref": "#/$defs/usage"}],

@@ -2,7 +2,10 @@
 
 Neither service reports a used count, so both are counted here from listings:
 releases by walking the Builds the caller can see, active deployments from the
-deploy list. Every read made after a refusal is best effort: the refusal is the
+deploy list. The deploy list shows each deployment's serving copy, while
+comfy-deploy's limit counts a deployment with any undeleted copy, so a stopped
+deployment whose replacement copy is queued holds a slot the list reads as free:
+the active count is a lower bound, never the service's own count. Every read made after a refusal is best effort: the refusal is the
 answer, and a read that fails leaves its envelope as it was.
 """
 
@@ -26,6 +29,9 @@ _MAX_LABELS: Final = 100
 #: holds none either.
 _NO_SLOT: Final = frozenset({"failed", "stopped", "stop_failed"})
 _UNDATED: Final = datetime.min.replace(tzinfo=timezone.utc)
+#: The field each service's GET /v1/limits always carries; a body without it is unread.
+_BUILDER_SHAPE: Final = "maxRunningBuilds"
+_DEPLOY_SHAPE: Final = "maxActiveDeployments"
 
 
 def best_effort(call: Callable[[], T]) -> T | None:
@@ -61,7 +67,12 @@ def _instant(value: object) -> datetime:
 
 
 def active_deployments(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """The deployments that hold an active slot: undeleted, in no status that frees one."""
+    """The deployments the list shows holding an active slot: undeleted, in no status that frees one.
+
+    A lower bound on the slot holders: the list's status is the serving copy's,
+    and a deployment whose serving copy is stopped can still hold a slot through
+    a queued replacement copy.
+    """
     active = []
     for row in rows:
         if not isinstance(row, Mapping) or row.get("deletedAt") is not None or str(row.get("status")) in _NO_SLOT:
@@ -134,28 +145,43 @@ def release_limit_details(builder) -> dict[str, Any]:
 #: plan only their own Builds, while the caps count every member's.
 NOTE: Final = (
     "releases and builds are counted over the Builds you can see, your own outside the enterprise plan, "
-    "while both limits count the whole workspace, so those two can read low"
+    "while both limits count the whole workspace, so those two can read low; active deployments are counted "
+    "from the deploy list, which can miss a slot held by a deployment moving to another release, so that count "
+    "is at least the number shown"
 )
 
 
-def _usage(used: int, limits: object, key: str) -> dict[str, Any]:
-    """``used`` against ``limits[key]``. ``limitKnown`` false: the limits read failed.
-    A null limit that is known: no cap of that kind applies."""
-    limit = limits.get(key) if isinstance(limits, dict) else None
-    valid = isinstance(limit, int) and not isinstance(limit, bool)
-    return {"used": used, "limit": limit if valid else None, "limitKnown": isinstance(limits, dict)}
+def _usage(used: int, limits: object, key: str, *, shape: str) -> dict[str, Any]:
+    """``used`` against ``limits[key]``.
+
+    ``limitKnown`` is true only when ``limits`` has the service's shape, its
+    always-present ``shape`` field an integer: an empty or unparsable body reaches
+    here as ``{}``, and must not read as no limit. A null limit that is known: no
+    cap of that kind applies.
+    """
+    known = isinstance(limits, dict) and _is_count(limits.get(shape))
+    limit = limits.get(key) if known else None
+    return {"used": used, "limit": limit if _is_count(limit) else None, "limitKnown": known}
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def quota_payload(
     holders: Sequence[Mapping[str, Any]], visible: int, active: int, build_limits: object, deploy_limits: object
 ) -> dict[str, Any]:
-    releases = _usage(sum(holder["releases"] for holder in holders), build_limits, "maxTotalReleases")
+    releases = _usage(
+        sum(holder["releases"] for holder in holders), build_limits, "maxTotalReleases", shape=_BUILDER_SHAPE
+    )
     if visible > len(holders):
         releases["truncated"] = True
+    # Counted from the deploy list, which can miss a slot held by a queued copy.
+    deployments = {**_usage(active, deploy_limits, "maxActiveDeployments", shape=_DEPLOY_SHAPE), "exact": False}
     return {
         "releases": releases,
-        "activeDeployments": _usage(active, deploy_limits, "maxActiveDeployments"),
-        "builds": _usage(visible, build_limits, "maxBuilds"),
+        "activeDeployments": deployments,
+        "builds": _usage(visible, build_limits, "maxBuilds", shape=_BUILDER_SHAPE),
         "note": NOTE,
     }
 
@@ -165,4 +191,8 @@ def usage_line(label: str, usage: Mapping[str, Any]) -> str:
         limit = "an unknown limit"
     else:
         limit = "no limit" if usage["limit"] is None else str(usage["limit"])
-    return f"{label}: {usage['used']} of {limit}"
+    used = f"at least {usage['used']}" if usage.get("exact") is False else str(usage["used"])
+    line = f"{label}: {used} of {limit}"
+    if usage.get("truncated") is True:
+        line += f" (counted over the first {MAX_BUILDS} Builds only; more are visible)"
+    return line

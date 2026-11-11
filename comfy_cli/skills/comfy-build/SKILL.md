@@ -365,7 +365,11 @@ are active at once** per workspace; `comfy deploy stop` frees one of those slots
 The numbers come from the workspace's plan and can be raised for one workspace,
 so never quote one from memory: **`comfy build quota`** reads each limit and how
 much of it is used. Its release and build counts cover only the Builds you can
-see (your own outside the enterprise plan), so they can read low. The release and
+see (your own outside the enterprise plan), so they can read low. Its active
+deployment count comes from the deploy list (`exact: false`, printed as "at
+least"): a stopped deployment moving to another release can hold a slot through
+its queued replacement. Past 100 Builds the release count covers only the first
+100 (`truncated: true`, said beside the count). The release and
 build ceilings are cleared the same way, by deleting:
 
 - **`comfy build release delete RELEASE`** gives up one release slot. RELEASE is
