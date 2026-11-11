@@ -15,6 +15,146 @@ history.
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-11-11
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.26.0) · 29 commits since v1.25.0.
+
+### Added
+
+- `comfy build quota` shows the releases and active deployments the workspace
+  holds against its limits. A limit that cannot be read, or whose body lacks
+  the service's shape, is `null` with `limitKnown: false`, and the counts still
+  print. The release count covers only the Builds the caller can see, and past
+  100 Builds only the first 100 (`truncated`, said beside the count). The
+  active-deployment count comes from the deploy list, which can miss a slot
+  held by a stopped deployment's queued replacement, so it is marked
+  `exact: false` and printed as "at least". Deployments are read the way the
+  deploy commands read them; when `--builder-url` or `COMFY_BUILDER_URL`
+  points the builder elsewhere, or `COMFY_BUILDER_TOKEN` signs the builder
+  reads with another credential, `note` says so.
+
+- A release cut refused at the release limit (`build_release_limit`) lists, under
+  `--json`, each visible Build in `details.builds`: its release count, its
+  newest release, and how many deployments use it (`deployments` and `inUse`).
+  No page request of those reads starts after 10 seconds, and
+  `details.buildsTruncated` marks a list cut short. The Builds are read before
+  the deployments. The Build list stays, and only each Build's `deployments`
+  and `inUse` are left out, in three cases: the deployment read fails or is
+  still running at 10 seconds; `COMFY_BUILDER_TOKEN` signs the builder reads
+  with another credential than the deploy commands'; or the builder URL
+  (`--builder-url` or `COMFY_BUILDER_URL`) is on another host than the deploy
+  URL. A `comfy deploy up`
+  create, restart or move refused at the active-deployment limit
+  (`deploy_quota_exceeded`) lists the deployments holding a slot in
+  `details.activeDeployments`, whenever the refusal names that limit, and says
+  `comfy deploy stop` frees one; a refusal over the per-deployment worker limit
+  lists none. When the extra reads fail, both envelopes are as before.
+
+- The `comfy-run-on-cloud` agent skill, installed with the other bundled
+  skills and read with `comfy skills show comfy-run-on-cloud`. It takes one
+  workflow from a running local ComfyUI (read through the server's
+  `/api/userdata`, so no folder path is needed) to Comfy Cloud: it checks the
+  workflow with `comfy workflow check --where cloud --models-dir` (the
+  install's model folders, so a local model that differs from Cloud's copy
+  blocks), then runs it on Comfy Cloud as is, on an existing build in the workspace, with a lossless node swap
+  made on a copy, with a lossy swap the person agreed to, or on a custom build.
+  A model the check cannot prove the same runs on Cloud's copy and is named in
+  the report. Every local file upload is asked by name, models go through
+  `comfy model upload` after a dry run, a deployment run holds its automatic
+  uploads with `--no-upload` and then uploads only the approved files with
+  `--allow-upload`, and the agent runs
+  one real job before it saves with `comfy workflow save --where cloud` and
+  hands back the save's link (or says there is none for a record-only save).
+  `comfy_cli/skills/comfy-run-on-cloud/PROMPT-TEMPLATE.md` is the prompt local
+  ComfyUI's Copy prompt button gives the agent. `comfy-build` points a
+  single-workflow request at the new skill, `comfy-build-failures` says a
+  missing import needs a way to install it before another cut, and
+  `comfy-deploy` and `comfy-deploy-failures` read a deployment with
+  `deploy show` outside a Build folder, since `deploy status` needs one.
+  Builds on #1008.
+
+- `comfy deploy run --allow-upload <hash>` (repeatable) uploads a local file
+  the deployment lacks only if its hash is listed; any other file fails with
+  `deploy_asset_missing` and is not sent. A file Cloud already holds is reused
+  by hash with no copy. A file it must upload is copied once to a private
+  temporary file, checked against the approved hash and sent from that copy,
+  so a file rewritten in between cannot send bytes nobody approved. A temp
+  folder without room for the whole file is refused before any byte is
+  copied, with `deploy_asset_upload_failed`. That file is not uploaded;
+  approved files before it may already be, and a retry reuses them. The
+  `--allow-upload` refusal, and the one from
+  `--no-upload`, now lists every such file in `details.missing[]` (absolute
+  `local_path`, `bytes`, `hash`) rather than stopping at the first, so a person
+  can approve the exact files the scanner picked. When two asset folders hold
+  files of the same name, this shows which one it picked.
+
+- `comfy workflow check <file> --where cloud` says whether Comfy Cloud runs a
+  workflow with no custom build. Signed in, it reads Cloud's node list and your
+  uploaded models, and answers `covered`, `covered_with_remaps` (a model sits in
+  another folder on Cloud), `covered_needs_check` (a model is not proven the
+  same file) or `needs_build`, with each blocking node type or model, its models
+  folder and any local copy. `--models-dir` hashes local copies against Cloud's;
+  `--apply-remaps --out <file>` writes a remapped copy and leaves the original
+  alone.
+
+- `comfy workflow save` on Comfy Cloud, when the workspace's
+  `cli_cloud_save_enabled` flag is on, writes an editor-format workflow into a
+  new folder in the Cloud Workflows sidebar (`<name>`, then `<name> (2)` and so
+  on; it never replaces a file or adds to an existing workflow) and prints a
+  link that opens the folder, on Comfy Cloud itself or on the build
+  `--deployment <id>` names. The output keeps `workflow_id` and
+  `latest_version`. An API-format workflow keeps the record-only save.
+  `comfy workflow delete` still deletes only the record; with the flag on it
+  warns (`sidebar_file_kept`) when the workflow's sidebar file stays, naming
+  the file to remove in Comfy Cloud. A file counts as the workflow's only when
+  no other live workflow has its name and it matches the workflow's latest
+  version, so a same-named file of another workflow is never named. With the
+  flag off, or when Cloud's
+  features cannot be read, save and delete are unchanged.
+
+- `comfy knowledge pick` includes authored discovery-only routes in a separate
+  `discovery` list, marks every route `ranking: "unranked"`, and carries the
+  capability's `failure_policy` without promoting or reordering ranked picks.
+  `--check-local` reports `discovery_not_checked` when ranked-pick checks pass
+  but discovery routes are present.
+
+- `comfy model upload <file> --type <folder> --where cloud` uploads one local
+  model file into your Comfy Cloud model library, so a workflow run on Comfy
+  Cloud can load it, e.g. `comfy model upload my_style.safetensors --type loras
+  --where cloud`. Run it with `--dry-run` first: it checks the file, the folder
+  and the library, uploads nothing, and prints the file's sha256. Check that
+  sha256 with `shasum -a 256` before you approve. The real upload asks before it
+  starts. An agent (or any `--json` caller the CLI takes for one) must pass
+  `--yes`, or it gets `model_upload_needs_confirm` and nothing is sent.
+  `--expected-sha256 <sha>` uploads nothing unless the file still has the bytes
+  the dry run reported. `--workspace <id>` uploads nothing unless this sign-in
+  uploads into that workspace (`asset_upload_wrong_workspace`). The `--json`
+  output (the `model_upload` schema) carries `loader_path`, the value a
+  workflow's loader node takes to load the file on Comfy Cloud. It is Comfy
+  Cloud's own value from its record of the model, and null when Comfy Cloud
+  gives none or when a dry run would upload. Builds on #1008.
+
+- `comfy model upload` and `comfy assets library upload` upload only the file
+  named, and succeed only once Comfy Cloud's hash of the stored file equals the
+  local file's. Before anything is sent they look the name up in that folder of
+  the workspace's model library: every member's models, the ones a run on Comfy
+  Cloud loads, and no public ones.
+  The same bytes under that name are reported as `already_present` and not sent
+  again (for `comfy assets library upload`, only when they are the only model of
+  that name). `comfy model upload` refuses other bytes under that name
+  (`asset_upload_invalid`, `details.reason` `name_in_use`), because a second
+  file would change what that name loads for every workflow in the workspace.
+  `comfy assets library upload` still uploads them, as a new version of the
+  name, so a script that replaces a model that way keeps working. The upload sends only bytes
+  that were hashed: each 1 MiB block is checked against its hash before any of
+  it is sent. A file that changed after it was hashed stops the upload before
+  the changed bytes are sent, and is never completed (`asset_upload_failed`,
+  `file_changed`). A stored
+  hash that differs, or that Comfy Cloud does not report, ends as
+  `asset_upload_unverified`. `comfy assets library upload` gains `--dry-run`,
+  and its `--json` output gains `loader_path`, `sha256`, `workspace_id`,
+  `uploaded`, `already_present` and `dry_run`.
+
 ### Changed
 
 - `comfy workflow save --where cloud` prints a link that opens only the saved
@@ -24,9 +164,11 @@ history.
   is missing, not unique, or the search for it fails, the link opens the
   folder as before. The receipt adds `url_opens` (`workflow` or `folder`) and
   `folder_link_reason`.
+
 - Release watches poll through `stopping` and report `build_stopped` (exit 1) when a release stops. Log following reads the final lines after `stopped` and exits successfully.
 
 - `comfy deploy status` explains beside its sampled counts that they may lag after workers scale down. The deploy-failure guidance also clarifies that sampled counts cannot establish whether a worker or job is running now.
+
 - Both `comfy assets library upload` and `comfy model upload` request resumable
   model uploads up to 25 GB. Dropped connections retry from storage's held
   bytes. Running the command again continues a saved upload for the same file,
@@ -52,6 +194,7 @@ history.
   errors on that path also stop immediately with fixed TLS guidance.
   Both paths recognize certificate failures wrapped by an HTTPS proxy while
   retaining retries for temporary proxy failures.
+
 - `comfy assets library upload` and `comfy model upload` tell Comfy Cloud
   which client sent an upload and whether its transfer resumed from bytes
   storage already held. When a transfer stops for good (it gives up, pauses or
@@ -61,176 +204,10 @@ history.
   can take up to 3 seconds longer to exit while that report goes out to a slow
   Comfy Cloud. A second Ctrl+C ends that wait within a tenth of a second.
   `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns all of it off.
+
 - `comfy build push` shares the upload progress reporter. A broken pipe or
   closed progress stream now mutes its progress instead of ending the push.
 
-### Added
-
-- `comfy build quota` shows the releases and active deployments the workspace
-  holds against its limits. A limit that cannot be read, or whose body lacks
-  the service's shape, is `null` with `limitKnown: false`, and the counts still
-  print. The release count covers only the Builds the caller can see, and past
-  100 Builds only the first 100 (`truncated`, said beside the count). The
-  active-deployment count comes from the deploy list, which can miss a slot
-  held by a stopped deployment's queued replacement, so it is marked
-  `exact: false` and printed as "at least". Deployments are read the way the
-  deploy commands read them; when `--builder-url` or `COMFY_BUILDER_URL`
-  points the builder elsewhere, or `COMFY_BUILDER_TOKEN` signs the builder
-  reads with another credential, `note` says so.
-- A release cut refused at the release limit (`build_release_limit`) lists, under
-  `--json`, each visible Build in `details.builds`: its release count, its
-  newest release, and how many deployments use it (`deployments` and `inUse`).
-  No page request of those reads starts after 10 seconds, and
-  `details.buildsTruncated` marks a list cut short. The Builds are read before
-  the deployments. The Build list stays, and only each Build's `deployments`
-  and `inUse` are left out, in three cases: the deployment read fails or is
-  still running at 10 seconds; `COMFY_BUILDER_TOKEN` signs the builder reads
-  with another credential than the deploy commands'; or the builder URL
-  (`--builder-url` or `COMFY_BUILDER_URL`) is on another host than the deploy
-  URL. A `comfy deploy up`
-  create, restart or move refused at the active-deployment limit
-  (`deploy_quota_exceeded`) lists the deployments holding a slot in
-  `details.activeDeployments`, whenever the refusal names that limit, and says
-  `comfy deploy stop` frees one; a refusal over the per-deployment worker limit
-  lists none. When the extra reads fail, both envelopes are as before.
-- The `comfy-run-on-cloud` agent skill, installed with the other bundled
-  skills and read with `comfy skills show comfy-run-on-cloud`. It takes one
-  workflow from a running local ComfyUI (read through the server's
-  `/api/userdata`, so no folder path is needed) to Comfy Cloud: it checks the
-  workflow with `comfy workflow check --where cloud --models-dir` (the
-  install's model folders, so a local model that differs from Cloud's copy
-  blocks), then runs it on Comfy Cloud as is, on an existing build in the workspace, with a lossless node swap
-  made on a copy, with a lossy swap the person agreed to, or on a custom build.
-  A model the check cannot prove the same runs on Cloud's copy and is named in
-  the report. Every local file upload is asked by name, models go through
-  `comfy model upload` after a dry run, a deployment run holds its automatic
-  uploads with `--no-upload` and then uploads only the approved files with
-  `--allow-upload`, and the agent runs
-  one real job before it saves with `comfy workflow save --where cloud` and
-  hands back the save's link (or says there is none for a record-only save).
-  `comfy_cli/skills/comfy-run-on-cloud/PROMPT-TEMPLATE.md` is the prompt local
-  ComfyUI's Copy prompt button gives the agent. `comfy-build` points a
-  single-workflow request at the new skill, `comfy-build-failures` says a
-  missing import needs a way to install it before another cut, and
-  `comfy-deploy` and `comfy-deploy-failures` read a deployment with
-  `deploy show` outside a Build folder, since `deploy status` needs one.
-  Builds on #1008.
-- `comfy deploy run --allow-upload <hash>` (repeatable) uploads a local file
-  the deployment lacks only if its hash is listed; any other file fails with
-  `deploy_asset_missing` and is not sent. A file Cloud already holds is reused
-  by hash with no copy. A file it must upload is copied once to a private
-  temporary file, checked against the approved hash and sent from that copy,
-  so a file rewritten in between cannot send bytes nobody approved. A temp
-  folder without room for the whole file is refused before any byte is
-  copied, with `deploy_asset_upload_failed`. That file is not uploaded;
-  approved files before it may already be, and a retry reuses them. The
-  `--allow-upload` refusal, and the one from
-  `--no-upload`, now lists every such file in `details.missing[]` (absolute
-  `local_path`, `bytes`, `hash`) rather than stopping at the first, so a person
-  can approve the exact files the scanner picked. When two asset folders hold
-  files of the same name, this shows which one it picked.
-- `comfy workflow check <file> --where cloud` says whether Comfy Cloud runs a
-  workflow with no custom build. Signed in, it reads Cloud's node list and your
-  uploaded models, and answers `covered`, `covered_with_remaps` (a model sits in
-  another folder on Cloud), `covered_needs_check` (a model is not proven the
-  same file) or `needs_build`, with each blocking node type or model, its models
-  folder and any local copy. `--models-dir` hashes local copies against Cloud's;
-  `--apply-remaps --out <file>` writes a remapped copy and leaves the original
-  alone.
-- `comfy workflow save` on Comfy Cloud, when the workspace's
-  `cli_cloud_save_enabled` flag is on, writes an editor-format workflow into a
-  new folder in the Cloud Workflows sidebar (`<name>`, then `<name> (2)` and so
-  on; it never replaces a file or adds to an existing workflow) and prints a
-  link that opens the folder, on Comfy Cloud itself or on the build
-  `--deployment <id>` names. The output keeps `workflow_id` and
-  `latest_version`. An API-format workflow keeps the record-only save.
-  `comfy workflow delete` still deletes only the record; with the flag on it
-  warns (`sidebar_file_kept`) when the workflow's sidebar file stays, naming
-  the file to remove in Comfy Cloud. A file counts as the workflow's only when
-  no other live workflow has its name and it matches the workflow's latest
-  version, so a same-named file of another workflow is never named. With the
-  flag off, or when Cloud's
-  features cannot be read, save and delete are unchanged.
-- `comfy knowledge pick` includes authored discovery-only routes in a separate
-  `discovery` list, marks every route `ranking: "unranked"`, and carries the
-  capability's `failure_policy` without promoting or reordering ranked picks.
-  `--check-local` reports `discovery_not_checked` when ranked-pick checks pass
-  but discovery routes are present.
-- `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
-  model file of up to 2 GB into your Comfy Cloud workspace's model library,
-  e.g. `comfy assets library upload my_style.safetensors --type loras`. The
-  file name, size, that the file can be read, and `--type` are checked before
-  anything is sent (`--type` against the folders the workspace takes); a file
-  that cannot be read mid-transfer ends as `asset_upload_failed` with
-  `details.reason` `file_unreadable`, and a TLS setting that stops the transfer
-  (e.g. `REQUESTS_CA_BUNDLE` naming a missing file) with `details.reason`
-  `tls_setup` and its message; neither is retried. The bytes stream straight to
-  storage with the same progress line and events as `comfy build push`, and
-  the command waits for Comfy Cloud to store the file, then prints the asset
-  id, name, folder and hash (`--json`: the `assets_library` schema). A
-  refusal from Comfy Cloud, such as uploads being off for the workspace or the
-  model storage cap being reached, is shown with the server's message as
-  `asset_upload_refused`; new codes `asset_upload_invalid`,
-  `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
-  can end.
-- `comfy model upload <file> --type <folder> --where cloud` uploads one local
-  model file into your Comfy Cloud model library, so a workflow run on Comfy
-  Cloud can load it, e.g. `comfy model upload my_style.safetensors --type loras
-  --where cloud`. Run it with `--dry-run` first: it checks the file, the folder
-  and the library, uploads nothing, and prints the file's sha256. Check that
-  sha256 with `shasum -a 256` before you approve. The real upload asks before it
-  starts. An agent (or any `--json` caller the CLI takes for one) must pass
-  `--yes`, or it gets `model_upload_needs_confirm` and nothing is sent.
-  `--expected-sha256 <sha>` uploads nothing unless the file still has the bytes
-  the dry run reported. `--workspace <id>` uploads nothing unless this sign-in
-  uploads into that workspace (`asset_upload_wrong_workspace`). The `--json`
-  output (the `model_upload` schema) carries `loader_path`, the value a
-  workflow's loader node takes to load the file on Comfy Cloud. It is Comfy
-  Cloud's own value from its record of the model, and null when Comfy Cloud
-  gives none or when a dry run would upload. Builds on #1008.
-- `comfy model upload` and `comfy assets library upload` upload only the file
-  named, and succeed only once Comfy Cloud's hash of the stored file equals the
-  local file's. Before anything is sent they look the name up in that folder of
-  the workspace's model library: every member's models, the ones a run on Comfy
-  Cloud loads, and no public ones.
-  The same bytes under that name are reported as `already_present` and not sent
-  again (for `comfy assets library upload`, only when they are the only model of
-  that name). `comfy model upload` refuses other bytes under that name
-  (`asset_upload_invalid`, `details.reason` `name_in_use`), because a second
-  file would change what that name loads for every workflow in the workspace.
-  `comfy assets library upload` still uploads them, as a new version of the
-  name, so a script that replaces a model that way keeps working. The upload sends only bytes
-  that were hashed: each 1 MiB block is checked against its hash before any of
-  it is sent. A file that changed after it was hashed stops the upload before
-  the changed bytes are sent, and is never completed (`asset_upload_failed`,
-  `file_changed`). A stored
-  hash that differs, or that Comfy Cloud does not report, ends as
-  `asset_upload_unverified`. `comfy assets library upload` gains `--dry-run`,
-  and its `--json` output gains `loader_path`, `sha256`, `workspace_id`,
-  `uploaded`, `already_present` and `dry_run`.
-- `comfy knowledge resolve` suggests canonical model ids for an incomplete
-  family/version name such as `Qwen 2.1`. The command still fails with
-  `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
-  up to five sorted, distinct ids whose id or alias has the same family word
-  and the same numeric components in order, and the hint names them and asks
-  which model is intended before retrying `comfy knowledge resolve <exact-id>`.
-  A single candidate is still only a suggestion: nothing is auto-resolved,
-  downloaded or run. Substituted family words, different versions and names
-  with non-ASCII letters or digits get no candidates. Exact id and alias
-  resolution, `close_matches` and the hint for a name with no candidates are
-  unchanged.
-
-### Changed
-
-- A `connect` into a widget input of an agent-built node is now type-checked.
-  `comfy workflow add-node` gives every widget input a socket entry (see Fixed
-  below), so a link into one is an ordinary connect to an existing slot rather
-  than a `grow` that minted a new slot and took the source's type unchecked. A
-  mismatched scalar — `INT` into a `FLOAT` widget such as `force_rate`, or
-  `IMAGE` into a `COMBO` — now fails the existing type check instead of being
-  accepted silently. A `COMBO` widget socket still accepts `COMBO`, `STRING`,
-  `INT` and `FLOAT`, because that is how a computed file name or a numeric
-  option reaches a combo; every other source type is refused.
 - Commands that load a node catalog but read only a few classes (`workflow
   print`, `workflow validate`, `workflow slots`, `nodes show`) no longer parse
   every class in it: a class is parsed when first looked up, and the type
@@ -263,6 +240,7 @@ history.
   stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
 
 - Desktop discovery reads both modern and legacy registries and keeps each registry's shared model roots with its own installs. The selected Desktop install is a registry-derived candidate (the only usable install, or the most recently launched); it is not matched to a running server.
+
 - `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. On Linux, shared model roots are read from `settings.json` under `XDG_CONFIG_HOME`, where Desktop keeps it. A nonexistent selected workspace still exits 0 but reports `exists: false` and a `workspace_not_found` warning; discovery reports malformed or unreadable Desktop configuration, and Desktop paths that cannot be checked (permission denied, a symlink loop, no home directory), as `desktop_config_unreadable` warnings and marks inferred data roots as unverified. Both codes appear only in `data.warnings[]`; they are not error codes and `comfy discover` does not list them under `data.error_codes`.
 
 - `comfy node deps` reports malformed installed package versions as `unknown`
@@ -281,6 +259,7 @@ history.
   boolean, so fixing only the seed still submitted the wrong graph. A sub-input
   the save never carried now takes no slot, and a save that names one the
   option no longer declares falls back to the current expansion untouched.
+
 - UI→API conversion no longer synthesizes an input for an optional widget the
   saved node never carried. `graphToPrompt()` serializes the widgets a node
   actually has, so padding one from its schema default attached inputs the
@@ -295,9 +274,61 @@ history.
   frontend wrote when it marked only the widgets converted to a socket. A dict
   widget declared as one input but marked per leaf (`regions.face_oval`) counts
   as marked, so its default survives too.
+
+## [1.25.0] - 2026-11-03
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.25.0) · 17 commits since v1.24.0.
+
+### Added
+
+- `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
+  model file of up to 2 GB into your Comfy Cloud workspace's model library,
+  e.g. `comfy assets library upload my_style.safetensors --type loras`. The
+  file name, size, that the file can be read, and `--type` are checked before
+  anything is sent (`--type` against the folders the workspace takes); a file
+  that cannot be read mid-transfer ends as `asset_upload_failed` with
+  `details.reason` `file_unreadable`, and a TLS setting that stops the transfer
+  (e.g. `REQUESTS_CA_BUNDLE` naming a missing file) with `details.reason`
+  `tls_setup` and its message; neither is retried. The bytes stream straight to
+  storage with the same progress line and events as `comfy build push`, and
+  the command waits for Comfy Cloud to store the file, then prints the asset
+  id, name, folder and hash (`--json`: the `assets_library` schema). A
+  refusal from Comfy Cloud, such as uploads being off for the workspace or the
+  model storage cap being reached, is shown with the server's message as
+  `asset_upload_refused`; new codes `asset_upload_invalid`,
+  `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
+  can end.
+
+- `comfy knowledge resolve` suggests canonical model ids for an incomplete
+  family/version name such as `Qwen 2.1`. The command still fails with
+  `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
+  up to five sorted, distinct ids whose id or alias has the same family word
+  and the same numeric components in order, and the hint names them and asks
+  which model is intended before retrying `comfy knowledge resolve <exact-id>`.
+  A single candidate is still only a suggestion: nothing is auto-resolved,
+  downloaded or run. Substituted family words, different versions and names
+  with non-ASCII letters or digits get no candidates. Exact id and alias
+  resolution, `close_matches` and the hint for a name with no candidates are
+  unchanged.
+
+### Changed
+
+- A `connect` into a widget input of an agent-built node is now type-checked.
+  `comfy workflow add-node` gives every widget input a socket entry (see Fixed
+  below), so a link into one is an ordinary connect to an existing slot rather
+  than a `grow` that minted a new slot and took the source's type unchecked. A
+  mismatched scalar — `INT` into a `FLOAT` widget such as `force_rate`, or
+  `IMAGE` into a `COMBO` — now fails the existing type check instead of being
+  accepted silently. A `COMBO` widget socket still accepts `COMBO`, `STRING`,
+  `INT` and `FLOAT`, because that is how a computed file name or a numeric
+  option reaches a combo; every other source type is refused.
+
+### Fixed
+
 - `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
   when the server drops the connection partway through its error body, instead
   of crashing with `IncompleteRead`.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
@@ -1487,7 +1518,9 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...HEAD
+[1.26.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.25.0...v1.26.0
+[1.25.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...v1.25.0
 [1.24.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...v1.24.0
 [1.23.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...v1.22.0
