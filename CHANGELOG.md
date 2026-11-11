@@ -78,11 +78,16 @@ history.
   points the builder elsewhere, or `COMFY_BUILDER_TOKEN` signs the builder
   reads with another credential, `note` says so.
 - A release cut refused at the release limit (`build_release_limit`) lists, under
-  `--json`, each visible Build's release count, newest release and whether a
-  deployment uses it in `details.builds` (left out when `COMFY_BUILDER_TOKEN`
-  signs the builder reads with another credential than the deployments'); no
-  page request of those reads starts after 10 seconds, and
-  `details.buildsTruncated` marks a list cut short. A `comfy deploy up`
+  `--json`, each visible Build in `details.builds`: its release count, its
+  newest release, and how many deployments use it (`deployments` and `inUse`).
+  No page request of those reads starts after 10 seconds, and
+  `details.buildsTruncated` marks a list cut short. The Builds are read before
+  the deployments. The Build list stays, and only each Build's `deployments`
+  and `inUse` are left out, in three cases: the deployment read fails or is
+  still running at 10 seconds; `COMFY_BUILDER_TOKEN` signs the builder reads
+  with another credential than the deploy commands'; or the builder URL
+  (`--builder-url` or `COMFY_BUILDER_URL`) is on another host than the deploy
+  URL. A `comfy deploy up`
   create, restart or move refused at the active-deployment limit
   (`deploy_quota_exceeded`) lists the deployments holding a slot in
   `details.activeDeployments`, whenever the refusal names that limit, and says

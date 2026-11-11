@@ -3085,7 +3085,7 @@ def quota_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
 
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    holders, visible = _builder_call(renderer, lambda: build_quota.release_holders(client, None))
+    holders, visible = _builder_call(renderer, lambda: build_quota.release_holders(client))
     try:
         deploy = build_quota.deploy_client()
         rows = deploy.list_all_deployments()

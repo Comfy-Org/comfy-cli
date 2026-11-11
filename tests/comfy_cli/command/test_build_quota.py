@@ -21,8 +21,9 @@ SCHEMA = Path(__file__).resolve().parents[3] / "comfy_cli" / "schemas" / "build_
 
 
 class Builder:
-    def __init__(self, limits: JsonObject | Exception) -> None:
+    def __init__(self, limits: JsonObject | Exception, base_url: str = "https://control.test/builder") -> None:
         self.limits = limits
+        self.target = SimpleNamespace(base_url=base_url)
 
     def list_builds(self, **_: object) -> list[JsonObject]:
         return [{"id": "build-1", "name": "portraits"}, {"id": "build-2", "name": "upscale"}]
@@ -276,6 +277,27 @@ def test_a_release_refusal_says_nothing_of_deployments_read_with_another_sign_in
     assert all(("inUse" in row) is known for row in details["builds"])
 
 
+@pytest.mark.parametrize(
+    ("builder_url", "known"),
+    [
+        pytest.param("https://staging.test/builder", False, id="another-host"),
+        pytest.param("https://CONTROL.test/builder", True, id="the-deploy-host"),
+    ],
+)
+def test_a_release_refusal_says_nothing_of_deployments_read_from_another_host(
+    monkeypatch: pytest.MonkeyPatch, builder_url: str, known: bool
+) -> None:
+    # Given the builder URL moved off the host the deploy reads go to, or onto it
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: Deploy({"maxActiveDeployments": 3}))
+
+    # When
+    details = build_quota.release_limit_details(Builder({"maxRunningBuilds": 5}, base_url=builder_url))
+
+    # Then the Builds are listed either way, and inUse only when both reads go to one host
+    assert [row["id"] for row in details["builds"]] == ["build-1", "build-2"]
+    assert all(("inUse" in row) is known for row in details["builds"])
+
+
 def test_quota_reads_deployments_with_the_deploy_commands_credential_not_the_builder_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -309,59 +331,95 @@ def test_quota_reads_deployments_with_the_deploy_commands_credential_not_the_bui
     assert sent and {token for _, token in sent} == {"cloud-jwt"}
 
 
-#: Each listing's pages, by path, with what each request costs on the fake clock.
-_PAGES: dict[str, list[tuple[JsonObject, float]]] = {
-    "/v1/deployments": [
-        ({"deployments": [{"id": "dep-1", "releaseId": "build-0-r0", "status": "stopped"}], "nextCursor": "d1"}, 1),
-        ({"deployments": []}, 1),
-    ],
-    "/v1/builds": [({"builds": [{"id": "build-0"}], "nextCursor": "b1"}, 1), ({"builds": [{"id": "build-1"}]}, 1)],
-    "/v1/builds/build-0/releases": [({"releases": [{"id": "build-0-r0"}], "nextCursor": "r1"}, 2), ({}, 2)],
-    "/v1/builds/build-1/releases": [({"releases": [{"id": "build-1-r0"}], "nextCursor": "r1"}, 2), ({}, 2)],
-}
+def _pages(
+    *, builds: float = 1, releases: float = 3, deployments: float = 1
+) -> dict[str, list[tuple[JsonObject, float]]]:
+    """Each listing's two pages, by path, with what each request to that listing costs on the fake clock."""
+    return {
+        "/v1/deployments": [
+            (
+                {"deployments": [{"id": "dep-1", "releaseId": "build-0-r0", "status": "stopped"}], "nextCursor": "d1"},
+                deployments,
+            ),
+            ({"deployments": []}, deployments),
+        ],
+        "/v1/builds": [
+            ({"builds": [{"id": "build-0"}], "nextCursor": "b1"}, builds),
+            ({"builds": [{"id": "build-1"}]}, builds),
+        ],
+        "/v1/builds/build-0/releases": [
+            ({"releases": [{"id": "build-0-r0"}], "nextCursor": "r1"}, releases),
+            ({}, releases),
+        ],
+        "/v1/builds/build-1/releases": [
+            ({"releases": [{"id": "build-1-r0"}], "nextCursor": "r1"}, releases),
+            ({}, releases),
+        ],
+    }
 
 
-def _paged_details(monkeypatch: pytest.MonkeyPatch, clock: list[float], *, ticks: bool) -> tuple[dict, list[float]]:
+def _paged_details(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: list[float],
+    *,
+    ticks: bool,
+    pages: dict[str, list[tuple[JsonObject, float]]] | None = None,
+) -> tuple[dict, list[float]]:
     """release_limit_details over the real clients, with each page request costing its time on ``clock``."""
+    pages = pages or _pages()
     started: list[float] = []
 
     def transport(url: str, target, **_: object) -> tuple[int, JsonObject]:
         parts = urlsplit(url)
         query = parse_qs(parts.query)
-        body, seconds = _PAGES[parts.path][1 if "cursor" in query or "after" in query else 0]
+        body, seconds = pages[parts.path][1 if "cursor" in query or "after" in query else 0]
         started.append(clock[0])
         clock[0] += seconds if ticks else 0
         return 200, body
 
     monkeypatch.setattr("comfy_cli.builder_api.request_json", transport)
     monkeypatch.setattr("comfy_cli.deploy_api.request_json", transport)
-    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: DeployClient("https://control.test", "cloud-jwt"))
-    builder = BuilderClient("https://builder.test", "cloud-jwt")
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: DeployClient("https://platform.test", "cloud-jwt"))
+    builder = BuilderClient("https://platform.test", "cloud-jwt")
     return build_quota.release_limit_details(builder, now=lambda: clock[0]), started
 
 
 def test_no_page_request_after_a_refusal_starts_once_the_deadline_has_passed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Given two-page listings whose pages take one or two seconds each, on a fake clock:
+    # Given two-page listings whose pages take one or three seconds each, on a fake clock:
     # the deadline falls between build-1's two releases pages
     clock = [0.0]
 
     # When
     details, started = _paged_details(monkeypatch, clock, ticks=True)
 
-    # Then no request starts at or past the deadline, and a Build read in part is left out
+    # Then no request starts at or past the deadline, a Build read in part is left out,
+    # and the deployments, read after the Builds, are left out with no time to read them
     assert build_quota.FOLLOW_UP_DEADLINE_SECONDS == 10
-    assert started == [0, 1, 2, 3, 4, 6, 8]
-    assert details["builds"] == [{"id": "build-0", "releases": 1, "deployments": 1, "inUse": True}]
+    assert started == [0, 1, 2, 5, 8]
+    assert details["builds"] == [{"id": "build-0", "releases": 1}]
     assert details["buildsTruncated"] is True
+
+
+def test_a_slow_deployment_list_leaves_out_use_but_keeps_the_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given a deployment list whose pages take six seconds each, past the deadline in all
+    clock = [0.0]
+
+    # When
+    details, started = _paged_details(monkeypatch, clock, ticks=True, pages=_pages(builds=1, releases=1, deployments=6))
+
+    # Then every Build is listed, and the deployments read stops at its second page
+    assert started == [0, 1, 2, 3, 4, 5, 6]
+    assert details["builds"] == [{"id": "build-0", "releases": 1}, {"id": "build-1", "releases": 1}]
+    assert "buildsTruncated" not in details
 
 
 def test_reads_inside_the_deadline_are_not_marked_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
     # When every page answers at once
     details, started = _paged_details(monkeypatch, [0.0], ticks=False)
 
-    # Then every page is read
+    # Then every page is read, and each Build says whether a deployment uses it
     assert len(started) == 8
-    assert [row["id"] for row in details["builds"]] == ["build-0", "build-1"]
+    assert [(row["id"], row["inUse"]) for row in details["builds"]] == [("build-0", True), ("build-1", False)]
     assert "buildsTruncated" not in details
 
 

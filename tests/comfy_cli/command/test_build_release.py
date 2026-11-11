@@ -9,6 +9,7 @@ import threading
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -2300,6 +2301,9 @@ def test_release_reads_preserve_stop_states(workspace: Path, client: ReleaseBuil
 class FullWorkspaceBuilder:
     """A builder refusing every cut at the release limit, with two visible Builds holding releases."""
 
+    #: The host the deployments are read from too, so the two reads join.
+    target = SimpleNamespace(base_url="https://platform.test/builder")
+
     def __init__(self, builds: list[JsonObject] | Exception | None = None) -> None:
         self.builds = builds
 
@@ -2322,6 +2326,8 @@ class FullWorkspaceBuilder:
 
 
 class DeploymentsOf:
+    target = SimpleNamespace(base_url="https://platform.test/deploy")
+
     def __init__(self, rows: list[JsonObject] | Exception) -> None:
         self.rows = rows
 

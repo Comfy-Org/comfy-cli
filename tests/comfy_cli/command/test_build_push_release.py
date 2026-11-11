@@ -11,6 +11,7 @@ import io
 import json
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -489,6 +490,8 @@ def test_only_a_model_link_field_holds_a_release(workspace: Path, client: Record
 class ReleaseLimitBuilder(RecordingBuilder):
     """Saves the push, then refuses its cut at the workspace's release limit."""
 
+    target = SimpleNamespace(base_url="https://platform.test/builder")
+
     def create_release(self, build_id: str, targets: list[JsonObject] | None = None) -> tuple[str, str]:
         body = json.dumps({"error": "RELEASE_LIMIT", "message": "this workspace already holds 20 releases"})
         raise urllib.error.HTTPError(
@@ -503,6 +506,8 @@ class ReleaseLimitBuilder(RecordingBuilder):
 
 
 class OneDeploymentOn:
+    target = SimpleNamespace(base_url="https://platform.test/deploy")
+
     def __init__(self, release_id: str) -> None:
         self.release_id = release_id
 

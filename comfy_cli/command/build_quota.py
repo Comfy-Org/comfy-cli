@@ -1,8 +1,6 @@
 """Count what holds the workspace's release and active-deployment slots, from the
-builder's and comfy-deploy's listings. Reads made after a refusal are best effort:
-no page request starts past ``FOLLOW_UP_DEADLINE_SECONDS``, though the one in
-flight then can run on to its socket timeout, and a failed read leaves the
-refusal as it was."""
+builder's and comfy-deploy's listings. Reads after a refusal are best effort: no
+page request starts past ``FOLLOW_UP_DEADLINE_SECONDS``, and a failed one adds nothing."""
 
 from __future__ import annotations
 
@@ -12,6 +10,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Final, TypeVar
+from urllib.parse import urlsplit
 
 from comfy_cli.utils import parse_rfc3339
 
@@ -63,6 +62,16 @@ def signed_in_apart(deploy) -> bool:
     return bool(token) and token != deploy.target.auth_token
 
 
+def _origin(url: str) -> tuple[str, str]:
+    parts = urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+def read_apart(builder, deploy) -> bool:
+    """Whether the builder and ``deploy`` reads may be two workspaces' or two environments': another sign-in or host."""
+    return signed_in_apart(deploy) or _origin(builder.target.base_url) != _origin(deploy.target.base_url)
+
+
 class _OutOfTime(Exception):
     pass
 
@@ -101,38 +110,41 @@ def label_builds(builder, active: list[dict[str, Any]]) -> None:
             row["buildId"] = build_id
 
 
-def release_holders(
-    builder,
-    live: Mapping[str, int] | None,
-    *,
-    before_page: Callable[[], None] | None = None,
-) -> tuple[list[dict[str, Any]], int]:
-    """Each visible Build, up to ``MAX_BUILDS``, with its release count and newest
-    release; and how many Builds are visible.
+def _read_releases(
+    builder, before_page: Callable[[], None] | None
+) -> tuple[list[tuple[Mapping[str, Any], list[dict[str, Any]]]], int]:
+    """Each visible Build, up to ``MAX_BUILDS``, with its releases; and how many Builds are visible.
 
-    ``live`` counts the undeleted deployments on each release id; with it, each
-    Build also says how many reference its releases. ``before_page`` runs before
-    each page request; a Build whose releases it stops is left out, with the rest.
-    Raises on any other failed read.
+    A Build whose releases ``before_page`` stops is left out, with the rest.
     """
     builds = builder.list_builds(before_page=before_page)
-    holders = []
+    read = []
     for build in builds[:MAX_BUILDS]:
         try:
-            releases = builder.list_releases(build["id"], before_page=before_page)
+            read.append((build, builder.list_releases(build["id"], before_page=before_page)))
         except _OutOfTime:
             break
-        newest = max(releases, key=lambda release: _instant(release.get("createdAt")), default=None)
-        holder: dict[str, Any] = {"id": build["id"], "releases": len(releases)}
-        if isinstance(build.get("name"), str):
-            holder["name"] = build["name"]
-        if newest is not None and isinstance(newest.get("createdAt"), str):
-            holder["newestReleaseAt"] = newest["createdAt"]
-        if live is not None:
-            holder["deployments"] = sum(live.get(release.get("id"), 0) for release in releases)
-            holder["inUse"] = holder["deployments"] > 0
-        holders.append(holder)
-    return holders, len(builds)
+    return read, len(builds)
+
+
+def _holder(build: Mapping[str, Any], releases: list[dict[str, Any]], live: Mapping[str, int] | None) -> dict[str, Any]:
+    newest = max(releases, key=lambda release: _instant(release.get("createdAt")), default=None)
+    holder: dict[str, Any] = {"id": build["id"], "releases": len(releases)}
+    if isinstance(build.get("name"), str):
+        holder["name"] = build["name"]
+    if newest is not None and isinstance(newest.get("createdAt"), str):
+        holder["newestReleaseAt"] = newest["createdAt"]
+    if live is not None:
+        holder["deployments"] = sum(live.get(release.get("id"), 0) for release in releases)
+        holder["inUse"] = holder["deployments"] > 0
+    return holder
+
+
+def release_holders(builder) -> tuple[list[dict[str, Any]], int]:
+    """Each visible Build, up to ``MAX_BUILDS``, with its release count and newest
+    release; and how many Builds are visible. Raises on any failed read."""
+    read, visible = _read_releases(builder, None)
+    return [_holder(build, releases, None) for build, releases in read], visible
 
 
 def live_by_release(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -148,9 +160,10 @@ def live_by_release(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 def release_limit_details(builder, *, now: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """What a release-limit refusal adds to ``details``: the Builds holding releases, or nothing.
 
-    The deployment read is the lesser half: when it fails, stops at the deadline
-    or would read with another credential than the Builds', the Builds are still
-    listed, without ``deployments`` and ``inUse``. ``buildsTruncated`` marks a list that
+    The deployment read is the lesser half, so it runs second on what is left of
+    the deadline: when it fails, runs out of time, or would read with another
+    credential or from another host than the Builds', the Builds are still listed,
+    without ``deployments`` and ``inUse``. ``buildsTruncated`` marks a list that
     stopped short of the visible Builds, at ``MAX_BUILDS`` or at the deadline.
     """
     deadline = now() + FOLLOW_UP_DEADLINE_SECONDS
@@ -161,15 +174,18 @@ def release_limit_details(builder, *, now: Callable[[], float] = time.monotonic)
 
     def live() -> dict[str, int] | None:
         deploy = deploy_client()
-        if signed_in_apart(deploy):
+        if read_apart(builder, deploy):
             return None
         return live_by_release(deploy.list_all_deployments(before_page=before_page))
 
-    deployments = best_effort(live)
-    found = best_effort(lambda: release_holders(builder, deployments, before_page=before_page))
+    found = best_effort(lambda: _read_releases(builder, before_page))
     if found is None:
         return {}
-    holders, visible = found
+    read, visible = found
+    deployments = best_effort(live)
+    holders = best_effort(lambda: [_holder(build, releases, deployments) for build, releases in read])
+    if holders is None:
+        return {}
     return {"builds": holders, **({"buildsTruncated": True} if visible > len(holders) else {})}
 
 
