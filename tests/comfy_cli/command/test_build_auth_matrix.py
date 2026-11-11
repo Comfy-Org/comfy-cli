@@ -256,7 +256,7 @@ def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: p
     # Given
     recorder = RecordingTransport()
     monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
-    # `quota` also reads comfy-deploy, on the same handed-in token.
+    # `quota` also reads comfy-deploy, with the deploy commands' credential.
     control = DeployRecordingTransport()
     monkeypatch.setattr("comfy_cli.deploy_api.request_json", control)
 
@@ -270,12 +270,18 @@ def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: p
         assert recorder.calls == []
         assert control.calls == []
 
+    if case.fixture is FixtureKind.QUOTA:
+        # COMFY_BUILDER_TOKEN reaches the builder only; the deploy read signs in as `comfy deploy` does.
+        monkeypatch.setattr("comfy_cli.credentials.get_session", lambda *args, **kwargs: session("tok_test"))
+
     # When
     result = _invoke(_prepare(case.fixture, tmp_path / "signed-in"), "tok_test" if case.requires_session else None)
 
     # Then
     assert result.exit_code == 0, result.stderr
     _assert_call_expectation(case.calls, len(recorder.calls))
+    if case.fixture is FixtureKind.QUOTA:
+        assert control.calls
     if case.exercised_calls is not None:
         assert len(recorder.calls) == case.exercised_calls
 

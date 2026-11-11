@@ -2332,10 +2332,10 @@ class DeploymentsOf:
 
 
 def _cut_refused(monkeypatch: pytest.MonkeyPatch, builder: FullWorkspaceBuilder, deployments: DeploymentsOf) -> dict:
-    from comfy_cli.command import build_quota
+    from comfy_cli.command import deploy_runtime
 
     monkeypatch.setattr(build, "_builder_client", lambda renderer, builder_url: builder)
-    monkeypatch.setattr(build_quota, "deploy_client", lambda: deployments)
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: deployments)
     result = invoke_release("create", "--target", "linux/nvidia")
     assert result.exit_code == 1
     error = envelope(result)["error"]
@@ -2378,7 +2378,44 @@ def test_release_limit_refusal_lists_each_visible_build_and_whether_a_deployment
     ]
     assert error["details"]["buildId"] == "build-1"
     assert error["details"]["status"] == 409
+    assert "buildsTruncated" not in error["details"]
     assert "comfy build release delete" in error["hint"]
+
+
+def test_the_release_limit_hint_names_release_ls_for_the_holders_and_quota_for_the_numbers(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When
+    error = _cut_refused(monkeypatch, FullWorkspaceBuilder(), DeploymentsOf([]))
+
+    # Then
+    hint = error["hint"]
+    assert "`comfy build release ls --id <build>`" in hint
+    assert "Builds hold releases" in hint.split("`comfy build release ls")[0]
+    assert "`comfy build quota` shows how many releases are used against the limit" in hint
+
+
+class ManyFullBuilds(FullWorkspaceBuilder):
+    """One Build more than the refusal reads releases for, each holding one release."""
+
+    def list_builds(self) -> list[JsonObject]:
+        return [{"id": f"build-{n:03}"} for n in range(101)]
+
+    def list_releases(self, build_id: str) -> list[JsonObject]:
+        return [{"id": f"{build_id}-r0", "createdAt": "2026-08-20T00:00:00Z"}]
+
+
+def test_a_release_limit_refusal_past_100_builds_lists_the_first_100_and_says_it_was_cut_short(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When
+    error = _cut_refused(monkeypatch, ManyFullBuilds(), DeploymentsOf([]))
+
+    # Then
+    builds = error["details"]["builds"]
+    assert len(builds) == 100
+    assert builds[-1]["id"] == "build-099"
+    assert error["details"]["buildsTruncated"] is True
 
 
 def test_release_limit_refusal_lists_builds_without_use_when_deployments_cannot_be_read(

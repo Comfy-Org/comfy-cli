@@ -128,7 +128,8 @@ and none is fixed by editing anything:
   `comfy skills show comfy-build` carries the rules for it.
 - **`build_release_limit`** — the workspace holds its maximum number of releases.
   A retry does not clear it; deleting one does. Under `--json`, `details.builds`
-  says which Builds hold releases and whether a deployment uses them, and
+  says which Builds hold releases and whether a deployment uses them,
+  `comfy build release ls --id <build>` lists one Build's, and
   `comfy build quota` reads the limit, which comes from the plan. `comfy build
   release delete` is the procedure, and `comfy skills show comfy-build` carries
   the rules for it.

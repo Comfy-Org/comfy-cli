@@ -83,8 +83,13 @@ def _refusal_as_deploy_error(call: Callable[[], T]) -> T:
         ) from error
 
 
+def deploy_client() -> DeployClient:
+    """The comfy-deploy client every deploy command, and `comfy build quota`, reads with."""
+    return DeployClient.from_credentials()
+
+
 def command_clients() -> tuple[BuilderReleaseClient, DeployUpClient]:
-    deploy = DeployClient.from_credentials()
+    deploy = deploy_client()
     builder_url = os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
     return _BuilderReleaseAdapter(BuilderClient.from_credentials(builder_url)), deploy
 

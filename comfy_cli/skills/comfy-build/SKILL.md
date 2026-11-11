@@ -363,10 +363,11 @@ status and whether or not anything deploys them, and a separate ceiling on **how
 many builds it may keep**. Beside them, comfy-deploy caps **how many deployments
 are active at once** per workspace; `comfy deploy stop` frees one of those slots.
 The numbers come from the workspace's plan and can be raised for one workspace,
-so never quote one from memory: **`comfy build quota`** reads each limit and how
-much of it is used. Its release and build counts cover only the Builds you can
-see (your own outside the enterprise plan), so they can read low. Its active
-deployment count comes from the deploy list (`exact: false`, printed as "at
+so never quote one from memory: **`comfy build quota`** reads the release and
+active-deployment limits and how much of each is used. Its release count covers
+only the Builds you can see (your own outside the enterprise plan), so it can
+read low; `comfy build release ls --id <build>` lists one Build's releases. Its
+active deployment count comes from the deploy list (`exact: false`, printed as "at
 least"): a stopped deployment moving to another release can hold a slot through
 its queued replacement. Past 100 Builds the release count covers only the first
 100 (`truncated: true`, said beside the count). The release and

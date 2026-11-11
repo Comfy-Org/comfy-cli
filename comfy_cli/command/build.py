@@ -3095,6 +3095,9 @@ def quota_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     except (ResponseTooLarge, OSError, http.client.HTTPException) as error:
         renderer.error(code="deploy_server_error", message=str(error))
         raise typer.Exit(code=1) from error
+    # The deploy read takes the deploy commands' URL, whatever moved the builder's.
+    overridden = bool(builder_url or os.environ.get("COMFY_BUILDER_URL"))
+    url_note = build_quota.builder_url_note(deploy.target.base_url) if overridden else None
     # A limit that cannot be read is unknown, and the counts still stand.
     payload = build_quota.quota_payload(
         holders,
@@ -3102,12 +3105,14 @@ def quota_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
         len(build_quota.active_deployments(rows)),
         build_quota.best_effort(client.get_limits),
         build_quota.best_effort(deploy.get_limits),
+        url_note=url_note,
     )
     if renderer.is_pretty():
         renderer.info(build_quota.usage_line("Releases", payload["releases"]))
         renderer.info(build_quota.usage_line("Active deployments", payload["activeDeployments"]))
-        renderer.info(build_quota.usage_line("Builds", payload["builds"]))
-        renderer.info(f"Note: {payload['note']}.")
+        renderer.info(f"Note: {build_quota.NOTE}.")
+        if url_note is not None:
+            renderer.info(f"Note: {url_note}.")
     renderer.emit(payload, command="build quota")
 
 

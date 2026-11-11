@@ -1,18 +1,11 @@
-"""What holds the workspace's release and active-deployment slots.
-
-Neither service reports a used count, so both are counted here from listings:
-releases by walking the Builds the caller can see, active deployments from the
-deploy list. The deploy list shows each deployment's serving copy, while
-comfy-deploy's limit counts a deployment with any undeleted copy, so a stopped
-deployment whose replacement copy is queued holds a slot the list reads as free:
-the active count is a lower bound, never the service's own count. Every read made after a refusal is best effort: the refusal is the
-answer, and a read that fails leaves its envelope as it was.
-"""
+"""Count what holds the workspace's release and active-deployment slots, from the
+builder's and comfy-deploy's listings. Reads made after a refusal are best effort
+and bounded by ``FOLLOW_UP_DEADLINE_SECONDS``; a failed one leaves the refusal as it was."""
 
 from __future__ import annotations
 
 import logging
-import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Final, TypeVar
@@ -26,6 +19,9 @@ T = TypeVar("T")
 #: Builds whose releases are read, one call each. Every plan's build cap sits well
 #: under this, so it bounds a listing that runs away rather than a real workspace.
 MAX_BUILDS: Final = 100
+#: How long all the reads after one refusal may take together, in seconds. The
+#: refusal is the answer; past this the Builds read so far are what it carries.
+FOLLOW_UP_DEADLINE_SECONDS: Final = 10
 #: What one release-labels call takes.
 _MAX_LABELS: Final = 100
 #: comfy-deploy's rule for a deployment that holds no active slot. A deleted one
@@ -51,16 +47,11 @@ def best_effort(call: Callable[[], T]) -> T | None:
 
 
 def deploy_client():
-    """The deploy client a build command reads deployments with.
+    """The deploy client the deploy commands build, from their URL and credential; never ``COMFY_BUILDER_TOKEN``."""
+    # Imported here: deploy_runtime imports `build`, which imports this module.
+    from comfy_cli.command import deploy_runtime
 
-    Its credential comes in the order ``build._builder_client`` takes one: a
-    Cloud JWT handed in as ``COMFY_BUILDER_TOKEN`` first, which comfy-deploy
-    accepts as well, then the deploy commands' own order.
-    """
-    from comfy_cli.deploy_api import DeployClient
-
-    token = (os.environ.get("COMFY_BUILDER_TOKEN") or "").strip()
-    return DeployClient(None, token) if token else DeployClient.from_credentials()
+    return deploy_runtime.deploy_client()
 
 
 def _instant(value: object) -> datetime:
@@ -97,16 +88,25 @@ def label_builds(builder, active: list[dict[str, Any]]) -> None:
             row["buildId"] = build_id
 
 
-def release_holders(builder, live: Mapping[str, int] | None) -> tuple[list[dict[str, Any]], int]:
+def release_holders(
+    builder,
+    live: Mapping[str, int] | None,
+    *,
+    deadline: float | None = None,
+    now: Callable[[], float] = time.monotonic,
+) -> tuple[list[dict[str, Any]], int]:
     """Each visible Build, up to ``MAX_BUILDS``, with its release count and newest
     release; and how many Builds are visible.
 
     ``live`` counts the undeleted deployments on each release id; with it, each
-    Build also says how many reference its releases. Raises on a failed read.
+    Build also says how many reference its releases. Once ``now()`` reaches
+    ``deadline`` no further Build is read. Raises on a failed read.
     """
     builds = builder.list_builds()
     holders = []
     for build in builds[:MAX_BUILDS]:
+        if deadline is not None and now() >= deadline:
+            break
         releases = builder.list_releases(build["id"])
         newest = max(releases, key=lambda release: _instant(release.get("createdAt")), default=None)
         holder: dict[str, Any] = {"id": build["id"], "releases": len(releases)}
@@ -131,14 +131,17 @@ def live_by_release(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def release_limit_details(builder) -> dict[str, Any]:
+def release_limit_details(builder, *, now: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """What a release-limit refusal adds to ``details``: the Builds holding releases, or nothing.
 
     The deployment read is the lesser half: when it fails the Builds are still
-    listed, without ``deployments`` and ``inUse``.
+    listed, without ``deployments`` and ``inUse``. ``buildsTruncated`` marks a
+    list that stopped short of the visible Builds, at ``MAX_BUILDS`` or at the
+    deadline.
     """
+    deadline = now() + FOLLOW_UP_DEADLINE_SECONDS
     live = best_effort(lambda: live_by_release(deploy_client().list_all_deployments()))
-    found = best_effort(lambda: release_holders(builder, live))
+    found = best_effort(lambda: release_holders(builder, live, deadline=deadline, now=now))
     if found is None:
         return {}
     holders, visible = found
@@ -146,13 +149,21 @@ def release_limit_details(builder) -> dict[str, Any]:
 
 
 #: Said beside every count: GET /v1/builds shows a member outside the enterprise
-#: plan only their own Builds, while the caps count every member's.
+#: plan only their own Builds, while the release cap counts every member's.
 NOTE: Final = (
-    "releases and builds are counted over the Builds you can see, your own outside the enterprise plan, "
-    "while both limits count the whole workspace, so those two can read low; active deployments are counted "
-    "from the deploy list, which can miss a slot held by a deployment moving to another release, so that count "
-    "is at least the number shown"
+    "releases are counted over the Builds you can see, your own outside the enterprise plan, while the limit "
+    "counts the whole workspace, so that count can read low; active deployments are counted from the deploy "
+    "list, which can miss a slot held by a deployment moving to another release, so that count is at least "
+    "the number shown"
 )
+
+
+def builder_url_note(deploy_url: str) -> str:
+    """Said when ``--builder-url`` or ``COMFY_BUILDER_URL`` moved the builder reads elsewhere."""
+    return (
+        f"deployments were read from {deploy_url}, the deploy commands' environment (COMFY_DEPLOY_URL), "
+        "not the overridden builder URL"
+    )
 
 
 def _usage(used: int, limits: object, key: str, *, shape: str) -> dict[str, Any]:
@@ -173,7 +184,13 @@ def _is_count(value: object) -> bool:
 
 
 def quota_payload(
-    holders: Sequence[Mapping[str, Any]], visible: int, active: int, build_limits: object, deploy_limits: object
+    holders: Sequence[Mapping[str, Any]],
+    visible: int,
+    active: int,
+    build_limits: object,
+    deploy_limits: object,
+    *,
+    url_note: str | None = None,
 ) -> dict[str, Any]:
     releases = _usage(
         sum(holder["releases"] for holder in holders), build_limits, "maxTotalReleases", shape=_BUILDER_SHAPE
@@ -185,8 +202,7 @@ def quota_payload(
     return {
         "releases": releases,
         "activeDeployments": deployments,
-        "builds": _usage(visible, build_limits, "maxBuilds", shape=_BUILDER_SHAPE),
-        "note": NOTE,
+        "note": NOTE if url_note is None else f"{NOTE}; {url_note}",
     }
 
 

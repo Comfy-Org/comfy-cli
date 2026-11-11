@@ -3,7 +3,7 @@
   "$id": "https://comfy.org/schemas/build_quota.json",
   "title": "comfy build quota --json data payload",
   "type": "object",
-  "required": ["releases", "activeDeployments", "builds", "note"],
+  "required": ["releases", "activeDeployments", "note"],
   "additionalProperties": true,
   "$defs": {
     "usage": {
@@ -35,10 +35,6 @@
         "exact": {"const": false, "description": "Always false: used is counted from the deploy list, not read from the service, and can be lower than the count the limit is held to."}
       }
     },
-    "builds": {
-      "allOf": [{"$ref": "#/$defs/usage"}],
-      "description": "Builds the caller can see, against maxBuilds; can read low the same way releases does."
-    },
-    "note": {"type": "string", "description": "Says which counts cover only the Builds the caller can see."}
+    "note": {"type": "string", "description": "Says which counts cover only the Builds the caller can see. When --builder-url or COMFY_BUILDER_URL overrode the builder URL, it also says the deployments were read from the deploy commands' environment (COMFY_DEPLOY_URL), not that URL."}
   }
 }

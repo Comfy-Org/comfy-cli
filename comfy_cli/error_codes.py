@@ -1609,11 +1609,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "written into the spec on disk before the refusal. Under `--json` `details.builds` lists each Build "
         "the caller can see (`id`, `name`, `releases`, `newestReleaseAt`, and, when the deployments could be "
         "read, `deployments` and `inUse`: how many undeleted deployments, stopped ones included, reference "
-        "its releases), and `details.buildsTruncated` is true when only the first 100 were read. A member "
+        "its releases), and `details.buildsTruncated` is true when the list stopped short of the visible Builds: "
+        "past the first 100, or when those reads passed their 10-second deadline. A member "
         "outside the enterprise plan sees only their own Builds while the limit counts every member's, so "
         "the list can hold fewer releases than the limit. When those reads fail, `details` is as before.",
-        "see which Builds hold releases in `details.builds` or with `comfy build quota`; delete a release with "
-        "`comfy build release delete`, or delete a whole build to give up every release it holds, then cut again",
+        "see which Builds hold releases in `details.builds`, or list one Build's with `comfy build release ls "
+        "--id <build>`; `comfy build quota` shows how many releases are used against the limit. Delete a release "
+        "with `comfy build release delete`, or delete a whole build to give up every release it holds, then cut "
+        "again",
     ),
     ErrorCode(
         "build_limit",
@@ -1831,7 +1834,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "deploy_quota_exceeded",
         "The workspace reached its active-deployment limit, or the request asked one deployment for more "
         "workers than the workspace's per-deployment worker limit allows. When `comfy deploy up` was refused "
-        "at the active-deployment limit, `details.activeDeployments` lists the deployments the deploy list shows "
+        "at the active-deployment limit, creating, restarting or moving a deployment, `details.activeDeployments` lists the deployments the deploy list shows "
         "holding a slot (`id`, `name`, `releaseId`, `buildId` where the builder names it, `status`, `createdAt`): "
         "every undeleted deployment not failed, stopped or stop_failed. A stopped deployment moving to another "
         "release can also hold one through its queued replacement, so the list can be shorter than the limit.",

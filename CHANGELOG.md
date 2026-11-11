@@ -67,20 +67,24 @@ history.
 ### Added
 
 - `comfy build quota` shows the releases and active deployments the workspace
-  holds against its limits, and its Builds against the build limit. A limit
-  that cannot be read, or whose body lacks the service's shape, is `null` with
-  `limitKnown: false`, and the counts still print. Release and build counts
-  cover only the Builds the caller can see, and past 100 Builds only the first
-  100 (`truncated`, said beside the count). The active-deployment count comes
-  from the deploy list, which can miss a slot held by a stopped deployment's
-  queued replacement, so it is marked `exact: false` and printed as "at least".
+  holds against its limits. A limit that cannot be read, or whose body lacks
+  the service's shape, is `null` with `limitKnown: false`, and the counts still
+  print. The release count covers only the Builds the caller can see, and past
+  100 Builds only the first 100 (`truncated`, said beside the count). The
+  active-deployment count comes from the deploy list, which can miss a slot
+  held by a stopped deployment's queued replacement, so it is marked
+  `exact: false` and printed as "at least". Deployments are read the way the
+  deploy commands read them; when `--builder-url` or `COMFY_BUILDER_URL`
+  points the builder elsewhere, `note` says so.
 - A release cut refused at the release limit (`build_release_limit`) lists, under
   `--json`, each visible Build's release count, newest release and whether a
-  deployment uses it in `details.builds`. A `comfy deploy up` create refused at
-  the active-deployment limit (`deploy_quota_exceeded`) lists the deployments
-  holding a slot in `details.activeDeployments`, whenever the refusal names that
-  limit, and says `comfy deploy stop` frees one; a refusal over the per-deployment worker limit lists none. When the
-  extra reads fail, both envelopes are as before.
+  deployment uses it in `details.builds`; those reads stop after 10 seconds,
+  and `details.buildsTruncated` marks a list cut short. A `comfy deploy up`
+  create, restart or move refused at the active-deployment limit
+  (`deploy_quota_exceeded`) lists the deployments holding a slot in
+  `details.activeDeployments`, whenever the refusal names that limit, and says
+  `comfy deploy stop` frees one; a refusal over the per-deployment worker limit
+  lists none. When the extra reads fail, both envelopes are as before.
 - The `comfy-run-on-cloud` agent skill, installed with the other bundled
   skills and read with `comfy skills show comfy-run-on-cloud`. It takes one
   workflow from a running local ComfyUI (read through the server's

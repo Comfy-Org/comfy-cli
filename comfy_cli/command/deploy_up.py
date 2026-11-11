@@ -3,10 +3,10 @@
 import http.client
 import urllib.error
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import partial
-from typing import Final
+from typing import Final, TypeVar
 
 import typer
 
@@ -217,34 +217,29 @@ def _deployments_made(deployments: Sequence[JsonObject], releases: Sequence[Json
     return sum(row.get("releaseId") in build_release_ids for row in deployments)
 
 
-#: The words comfy-deploy refuses a create with at its active-deployment cap:
-#: the same 429 CONCURRENCY_LIMIT also refuses a create asking more workers
-#: than one deployment may have.
+#: The words comfy-deploy gives every refusal at its active-deployment cap, a
+#: create, a start or a move; the same 429 CONCURRENCY_LIMIT also refuses a
+#: create asking more workers than one deployment may have, worded otherwise.
 _ACTIVE_CAP_WORDS: Final = "active deployment limit"
+
+T = TypeVar("T")
 
 
 def _name_active_deployments(
-    builder: BuilderReleaseClient, client: DeployUpClient, error: DeployAPIError, deployments: Sequence[JsonObject]
+    builder: BuilderReleaseClient, error: DeployAPIError, deployments: Sequence[JsonObject]
 ) -> None:
-    """Add ``details.activeDeployments`` to a create refused at the workspace's active-deployment cap.
+    """Add ``details.activeDeployments`` and a stop hint to a refusal at the active-deployment cap.
 
-    A refusal worded as the active cap always gets the list: the list the
-    create was keyed from can count fewer holders than the service does (a
-    stopped deployment's queued replacement copy holds a slot), so its count
-    never overrides the refusal. Otherwise that count, against the limit,
-    decides. Its caller runs it best effort, and ``error`` changes only at the
-    end, so a read that fails leaves the refusal as it was.
+    The refusal's wording alone says it is that cap. ``deployments`` is the list
+    `up` read; it can count fewer holders than the service does. ``error``
+    changes only at the end, so a failed read leaves it as it was.
     """
     if error.status != 429 or (error.details or {}).get("server_code") != "CONCURRENCY_LIMIT":
         return
+    if _ACTIVE_CAP_WORDS not in str(error).lower():
+        return
     active = build_quota.active_deployments(deployments)
-    if _ACTIVE_CAP_WORDS in str(error).lower():
-        at_cap = True
-    else:
-        limits = build_quota.best_effort(client.get_limits)
-        limit = limits.get("maxActiveDeployments") if isinstance(limits, dict) else None
-        at_cap = _is_count(limit) and len(active) >= limit
-    if not at_cap or not active:
+    if not active:
         return
     build_quota.label_builds(builder, active)
     error.details = {**(error.details or {}), "activeDeployments": active}
@@ -252,6 +247,18 @@ def _name_active_deployments(
         "stop one of `details.activeDeployments` with `comfy deploy stop --deployment <id>` to free a slot, "
         "then retry; `comfy build quota` shows the limit"
     )
+
+
+def _naming_active_deployments(
+    builder: BuilderReleaseClient, deployments: Sequence[JsonObject], call: Callable[[], T]
+) -> T:
+    """``call()``: a create, start or move. A refusal at the active-deployment cap is
+    re-raised naming the deployments holding a slot, read best effort."""
+    try:
+        return call()
+    except DeployAPIError as error:
+        build_quota.best_effort(partial(_name_active_deployments, builder, error, deployments))
+        raise
 
 
 def _create_live_deployment(
@@ -580,6 +587,7 @@ def _move(
     base_revision: int,
     releases: Sequence[JsonObject],
     supersedes: list[JsonObject],
+    deployments: Sequence[JsonObject],
 ) -> UpResult:
     release_id = _required_string(request.release, "id")
     deployment_id = _required_string(target, "id")
@@ -596,7 +604,11 @@ def _move(
             hint="drop --no-watch, or run `comfy deploy scale` once the update lands",
         )
     previous = _release_of(builder, releases, _required_string(target, "releaseId"))
-    moved = client.move_deployment(deployment_id, base_revision, release_id, editor=request.editor)
+    moved = _naming_active_deployments(
+        builder,
+        deployments,
+        partial(client.move_deployment, deployment_id, base_revision, release_id, editor=request.editor),
+    )
     changed = _move_changed(moved, base_revision, release_id, previous["id"])
     result = UpResult(
         moved,
@@ -701,7 +713,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         if target is not None:
             _refuse_name_on_update(request, target[0])
         if target is not None and target[0].get("releaseId") != release_id:
-            return _move(builder, client, request, *target, releases, supersedes)
+            return _move(builder, client, request, *target, releases, supersedes, deployments)
         if target is not None:
             # Another change moved it onto the release after the list was read.
             existing = target[0]
@@ -737,11 +749,9 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         }
         estimate = _deploy_estimate(client, release_id, compute)
         made = _deployments_made(deployments, releases)
-        try:
-            snapshot = _create_live_deployment(client, request, compute, deployments, made)
-        except DeployAPIError as error:
-            build_quota.best_effort(partial(_name_active_deployments, builder, client, error, deployments))
-            raise
+        snapshot = _naming_active_deployments(
+            builder, deployments, partial(_create_live_deployment, client, request, compute, deployments, made)
+        )
         result = UpResult(
             snapshot,
             _release_summary(request.release),
@@ -779,7 +789,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     # answer to a request made after them is observed on top.
     if status in {"stopped", "failed"}:
         try:
-            started = client.start_deployment(deployment_id)
+            started = _naming_active_deployments(builder, deployments, partial(client.start_deployment, deployment_id))
         except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException) as error:
             if not edited:
                 raise
