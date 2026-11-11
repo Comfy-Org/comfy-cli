@@ -55,7 +55,6 @@ from comfy_cli.command.build_diff import (
     render_definition_diff,
     summarize_definition_diff,
 )
-from comfy_cli.command.build_digest_cache import ModelDigestCache
 from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import (
     SPEC_SUFFIXES,
@@ -2081,7 +2080,7 @@ def push_cmd(
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
             validate_local_build_spec(spec, paths, model_directories=directories)
-            preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
+            preparation = prepare_push(spec, paths, _sha256_file, package_dir=Path(package_dir))
             validate_kept_links(preparation.definition)
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)
@@ -2380,7 +2379,7 @@ def pull_cmd(
     try:
         # No `package_dir`: pull wants only the reconciled spec and the skip
         # report, never `prepared.uploads`, so it materializes no archive.
-        prepared = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=None)
+        prepared = prepare_push(spec, paths, _sha256_file, package_dir=None)
         pulled = merge_pulled_spec(prepared.spec, remote, target_id)
     except NodePackageError as error:
         _raise_node_package_error(renderer, error)
