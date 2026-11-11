@@ -154,8 +154,10 @@ falls to `0` means the connection stalled, not that the upload is slow.
   `--python <install>/.venv/bin/python` for split and Desktop layouts, where the
   code lives apart from the data dir. Neither is a warning you can push past.
 - **A missing ComfyUI version *is* only a warning.** `init` says so and writes a
-  spec without `baseComfyVersion`, and the cut is the first thing to refuse it.
-  Re-run with `--comfy-version <ref>`, or set it in the spec.
+  spec without `baseComfyVersion`; under `--json` it is the
+  `build_comfy_version_missing` entry in `data.warnings[]`, and `validate`
+  reports the same. `release create` refuses to cut from that spec with the same
+  code. Set it with `comfy build update <dir> --comfy-version <ref>`.
 - **It collects `.ckpt`, `.pt`, `.bin`, `.pth` and `.safetensors`**, and only
   from a folder under `models/`. It follows symlinks (and breaks cycles), so a
   `models/loras` pointed at a shared drive is scanned. A dotfile, a weight loose
@@ -181,6 +183,15 @@ The import goes through the builder, so it needs the sign-in, and it cannot be
 combined with `--models-dir`, `--custom-nodes-dir`, `--python` or `--comfy-url`
 — it is a different source for the same definition, not a scan you steer. It
 carries **no models**, so use the scan whenever private weights have to travel.
+An import with no custom nodes gets a warning (`build_snapshot_empty` in
+`data.warnings[]`). If the snapshot lists none, it is usually older than the
+install, and a newer snapshot is the fix. If it lists packs but every one was
+left out, the message counts each cause: disabled, or the importer's own
+advisory line for that cause (a pack still being published on the Comfy
+Registry means import again later), and gives no cause where the report has
+none. On stderr those advisory lines come inside this one warning, so each pack
+is named once; `--json` still carries them under `advisories` as well.
+A newer snapshot helps only after a disabled pack is enabled in the install.
 `--from-snapshot` and `--from-workflow` also refuse each other.
 
 ## Path B — from a workflow file
@@ -209,6 +220,7 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
   which the builder will not place, so run `push --dry-run` before you disclose.
 - **A workflow names no ComfyUI version either**, so set one before cutting:
   `comfy build update <dir> --comfy-version <ref>`, or edit `baseComfyVersion`.
+  With no install beside the spec, that sets only the version; it does not rescan.
 - **`unresolvedClasses` is the list to take to the user.** Those node classes are
   ones nothing installable provides, so the graph will not run. Cutting anyway
   ships an environment that cannot execute the workflow it was built for.

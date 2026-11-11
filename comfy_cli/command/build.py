@@ -25,6 +25,7 @@ scan/hash logic is kept in pure helpers so it stays unit-testable.
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import http.client
 import io
@@ -757,12 +758,18 @@ def snapshot_from_definition(definition: dict) -> dict:
     }
 
 
-# Each entry is (report key, what it means to the reader).
-_REPORT_ADVISORIES = (
+# Each entry is (report key, what it means to the reader). These name custom
+# node packs the import left out; an empty snapshot import folds their lines
+# into its one warning, and `_pack_lines` renders them.
+_PACK_ADVISORIES = (
     ("notInRegistry", "pinned to something the Comfy Registry does not publish"),
     ("collidingNodes", "left out: another pack already claimed the folder they install into"),
-    ("registryPending", "published but not yet servable; the build will wait or fail on it"),
+    # The importer drops a pending pin, so the pack waits on a new import, not on the build.
+    ("registryPending", "left out until the Comfy Registry finishes publishing them, so import again then"),
     ("unresolvedNodes", "named nothing the builder can install from"),
+)
+# Every other report key `report_advisories` renders from a list of names.
+_OTHER_ADVISORIES = (
     ("unverifiedPins", "left unchecked because the registry did not answer"),
     ("skippedPins", "dropped: the build owns these packages"),
     ("unpinnablePins", "dropped: not a public PyPI release"),
@@ -864,8 +871,44 @@ _REPORT_ENTRY_ADVISORIES = (
 )
 
 
+def _table_lines(report: dict, table: tuple[tuple[str, str], ...]) -> tuple[list[str], int]:
+    """The advisory line for each key of *table* the report fills, and how many
+    names those lines carry."""
+    lines, named = [], 0
+    for key, meaning in table:
+        entries = report.get(key)
+        if not entries:
+            continue
+        # A scalar here would otherwise render one line per character.
+        if not isinstance(entries, list | tuple):
+            lines.append(_unrenderable(key, entries))
+            continue
+        names = [_from_server(e) for e in entries]
+        lines.append(_advisory_line(len(names), meaning, names))
+        named += len(names)
+    return lines, named
+
+
+def _pack_lines(report: dict) -> tuple[list[str], int]:
+    """The advisory line for each `_PACK_ADVISORIES` key the report fills, and
+    how many packs those lines name. The builder lists a disowned or pending
+    Registry pin under ``unresolvedNodes`` too, so that line leaves those names
+    out: each pack gets one cause."""
+    unresolved = report.get("unresolvedNodes")
+    if isinstance(unresolved, list | tuple):
+        given = {
+            _from_server(e)
+            for other in ("notInRegistry", "registryPending")
+            if isinstance(report.get(other), list | tuple)
+            for e in report[other]
+        }
+        report = {**report, "unresolvedNodes": [e for e in unresolved if _from_server(e) not in given]}
+    return _table_lines(report, _PACK_ADVISORIES)
+
+
 def report_advisories(report: dict) -> list[str]:
-    """One line per thing the importer could not carry, in reader's terms."""
+    """One line per thing the importer could not carry, in reader's terms, other
+    than the packs it left out: `_pack_lines` names those."""
     lines = []
     # Present and false is the finding; absent means the importer did not say.
     if report.get("pythonSatisfied") is False:
@@ -882,15 +925,7 @@ def report_advisories(report: dict) -> list[str]:
             "the importer pinned every pack the workflow named without a version to the registry's newest "
             "published one, so importing the same file later can build something different"
         )
-    for key, meaning in _REPORT_ADVISORIES:
-        entries = report.get(key)
-        if not entries:
-            continue
-        # A scalar here would otherwise render one line per character.
-        if not isinstance(entries, list | tuple):
-            lines.append(_unrenderable(key, entries))
-            continue
-        lines.append(_advisory_line(len(entries), meaning, [_from_server(e) for e in entries]))
+    lines.extend(_table_lines(report, _OTHER_ADVISORIES)[0])
     for key, render in _REPORT_ENTRY_ADVISORIES:
         entries = report.get(key)
         if not entries:
@@ -1129,12 +1164,14 @@ def _scan_install(renderer, ctx, request: ScanRequest, *, optional: bool = False
     )
 
 
-def _require_scan(renderer, ctx, request: ScanRequest) -> ScanResult:
-    """Scan, or render the reason and exit — for the commands a scan IS."""
+def _require_scan(renderer, ctx, request: ScanRequest, *, no_install_hint: str | None = None) -> ScanResult:
+    """Scan, or render the reason and exit — for the commands a scan IS.
+    *no_install_hint* replaces the hint when there is no models/ folder at all."""
     try:
         return _scan_install(renderer, ctx, request)
     except ScanUnavailableError as error:
-        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        hint = no_install_hint if error.code == "build_models_dir_missing" and no_install_hint else error.hint
+        renderer.error(code=error.code, message=str(error), hint=hint, details=error.details)
         raise typer.Exit(code=1) from error
 
 
@@ -1241,6 +1278,8 @@ class DefinitionImport:
     advisories: list[str]
     path: Path
     source: ImportSource
+    #: For a snapshot, why an empty import came out empty, read from the input.
+    empty_reason: str | None = None
 
 
 def _import_definition(renderer, source: ImportSource, value: str, *, comfy_version: str | None) -> DefinitionImport:
@@ -1292,16 +1331,85 @@ def _import_definition(renderer, source: ImportSource, value: str, *, comfy_vers
     # not carry so it is visible now rather than inside a build. Every line goes
     # through `renderer.warn`, which writes to stderr in JSON mode, so stdout
     # still carries exactly one envelope.
-    advisories = report_advisories(imported.get("report") or {})
-    for line in advisories:
+    report = imported.get("report") if isinstance(imported.get("report"), dict) else {}
+    others = report_advisories(report)
+    # `--json` carries every line under `advisories`, the pack lines included.
+    advisories = [*_pack_lines(report)[0], *others]
+    empty_reason = _snapshot_empty_message(data, report) if _empty_snapshot(definition, source.name) else None
+    # An empty import that listed packs gives their causes inside its one
+    # warning, so stderr names each pack once.
+    folded = empty_reason is not None and bool(_snapshot_packs(data))
+    for line in others if folded else advisories:
         renderer.warn(line)
+    if empty_reason is not None:
+        renderer.warn(empty_reason)
 
     # `--comfy-version` overrides a value in the definition rather than steering
     # a scan, so it is honoured here too; ignoring it on this path would leave a
     # flag that reads as accepted and does nothing.
     if comfy_version:
         definition["baseComfyVersion"] = as_comfy_git_ref(comfy_version)
-    return DefinitionImport(definition=definition, advisories=advisories, path=path, source=source)
+    return DefinitionImport(
+        definition=definition, advisories=advisories, path=path, source=source, empty_reason=empty_reason
+    )
+
+
+#: Said wherever a spec has no ``baseComfyVersion``, which a release cut needs.
+_COMFY_VERSION_MISSING = (
+    "the spec sets no ComfyUI version (baseComfyVersion), and a release needs one; "
+    "set it with `comfy build update --comfy-version <ref>`"
+)
+_SNAPSHOT_EMPTY = (
+    "the snapshot lists no custom nodes or models, so the spec has none; it may be older than the install, "
+    "so take a newer one from .launcher/snapshots/ and pass it to --from-snapshot"
+)
+
+
+def _snapshot_packs(snapshot: dict) -> list[dict]:
+    snapshots = as_snapshot_envelope(snapshot).get("snapshots")
+    first = snapshots[0] if isinstance(snapshots, list) and snapshots and isinstance(snapshots[0], dict) else {}
+    packs = first.get("customNodes")
+    return [pack for pack in packs if isinstance(pack, dict)] if isinstance(packs, list) else []
+
+
+def _snapshot_empty_message(snapshot: dict, report: dict) -> str:
+    """What to say when a snapshot imports no custom nodes.
+
+    A current snapshot can list packs and still import none, so a newer snapshot
+    fixes only one that really lists none. A disabled pack is read off the input;
+    every other cause is the importer's own advisory line, and a pack its report
+    gives no cause for is said to be left out without a guess at why."""
+    packs = _snapshot_packs(snapshot)
+    if not packs:
+        return _SNAPSHOT_EMPTY
+    disabled = sum(1 for pack in packs if pack.get("enabled") is False)
+    causes, named = _pack_lines(report)
+    parts = [f"{disabled} disabled"] if disabled else []
+    parts.extend(causes)
+    remaining = len(packs) - disabled - named
+    if remaining > 0:
+        parts.append(f"{remaining} left out with no reason in the importer's report")
+    return (
+        f"the snapshot lists {len(packs)} custom node pack{'s' if len(packs) != 1 else ''} and the spec has none "
+        f"of them: {'; '.join(parts)}"
+    )
+
+
+def _empty_snapshot(definition: dict, source: str) -> bool:
+    return (
+        source == "snapshot" and not _entry_count(definition, "customNodes") and not _entry_count(definition, "models")
+    )
+
+
+def _definition_warnings(definition: dict, source: str, empty_reason: str | None = None) -> list[dict[str, str]]:
+    """The ``warnings`` a written definition carries: ``{code, message}`` objects,
+    so a ``--json`` caller branches on ``code`` rather than reading prose."""
+    warnings: list[dict[str, str]] = []
+    if not definition.get("baseComfyVersion"):
+        warnings.append({"code": "build_comfy_version_missing", "message": _COMFY_VERSION_MISSING})
+    if _empty_snapshot(definition, source):
+        warnings.append({"code": "build_snapshot_empty", "message": empty_reason or _SNAPSHOT_EMPTY})
+    return warnings
 
 
 def _entry_count(definition: dict, collection: str) -> int:
@@ -1359,7 +1467,7 @@ def _render_scan_summary(renderer, paths: BuildPaths, scan: ScanResult) -> None:
     else:
         renderer.warn(
             "ComfyUI version not detected — a build requires it. "
-            "Re-run with --comfy-version <ref>, or set baseComfyVersion before `create`."
+            "Re-run with --comfy-version <ref>, or set baseComfyVersion before `comfy build release create`."
         )
     environment = scan.environment
     torch = f", torch {environment['torch']}" if environment["torch"] else ""
@@ -1571,7 +1679,15 @@ def init_cmd(
         renderer.success(f"Wrote build spec → {spec_path}")
 
     renderer.emit(
-        {"spec_file": str(spec_path), "name": build_name, **payload, "definition": definition},
+        {
+            "spec_file": str(spec_path),
+            "name": build_name,
+            **payload,
+            "warnings": _definition_warnings(
+                definition, payload["source"], imported.empty_reason if imported is not None else None
+            ),
+            "definition": definition,
+        },
         command="build init",
         changed=True,
     )
@@ -1675,7 +1791,11 @@ def update_cmd(
     ] = None,
     comfy_version: Annotated[
         str | None,
-        typer.Option("--comfy-version", help="Override the detected ComfyUI version (baseComfyVersion)."),
+        typer.Option(
+            "--comfy-version",
+            help="Override the detected ComfyUI version (baseComfyVersion). With no install beside the spec "
+            "(one imported from a workflow or snapshot), sets only the version, without a rescan.",
+        ),
     ] = None,
     base_image: Annotated[
         str | None,
@@ -1693,6 +1813,8 @@ def update_cmd(
     ] = None,
 ):
     renderer = get_renderer()
+    # Every envelope, failures included, names the subcommand rather than "build".
+    renderer.command = "build update"
     _reject_rival_import(renderer, from_snapshot, from_workflow)
     import_source = _SNAPSHOT_SOURCE if from_snapshot else _WORKFLOW_SOURCE if from_workflow else None
     if import_source is not None:
@@ -1721,15 +1843,32 @@ def update_cmd(
     # the one path, so an imported update can never drift from a rescanned one.
     imported: DefinitionImport | None = None
     scanned: ScanResult | None = None
+    # A spec with no install beside it (one imported from a workflow or a
+    # snapshot) cannot be rescanned, so `--comfy-version` alone sets the version
+    # in the stored definition. A steered scan or an install to scan still rescans.
+    version_only = (
+        import_source is None
+        and bool(comfy_version)
+        and not (models_dir or custom_nodes_dir or python or comfy_url)
+        and not paths.models_dir.is_dir()
+    )
     if import_source is not None:
         imported = _import_definition(
             renderer, import_source, from_snapshot or from_workflow or "", comfy_version=comfy_version
         )
-        incoming = imported.definition
+        definition = merge_definition(stored, imported.definition)
+    elif version_only:
+        definition = {**copy.deepcopy(stored), "baseComfyVersion": as_comfy_git_ref(comfy_version or "")}
     else:
-        scanned = _require_scan(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
-        incoming = scanned.definition
-    definition = merge_definition(stored, incoming)
+        scanned = _require_scan(
+            renderer,
+            ctx,
+            ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url),
+            no_install_hint="there is no install here to rescan. To set only the version, run "
+            "`comfy build update --comfy-version <ref>`; to re-import a workflow, run "
+            "`comfy build update --from-workflow <file> --comfy-version <ref>`",
+        )
+        definition = merge_definition(stored, scanned.definition)
     # After the merge, never before: a scan reports no base image, so the merge
     # carries the stored one forward and would overwrite an incoming value.
     if base_image:
@@ -1740,14 +1879,16 @@ def update_cmd(
     if renderer.is_pretty():
         render_definition_diff(renderer, diff)
 
+    source = imported.source.name if imported is not None else "spec" if version_only else "scan"
     payload = {
         "spec_file": str(paths.spec_file),
-        "source": imported.source.name if imported is not None else "scan",
+        "source": source,
         "models_dir": str(paths.models_dir),
         "custom_nodes_dir": str(paths.custom_nodes_dir) if paths.custom_nodes_dir.is_dir() else None,
         "dry_run": dry_run,
         "summary": summary,
         "diff": diff.as_json(),
+        "warnings": _definition_warnings(definition, source, imported.empty_reason if imported is not None else None),
         "definition": definition,
     }
     if imported is not None:
@@ -3429,6 +3570,32 @@ _CUT_RETRY_HINT = (
 )
 
 
+def _refuse_cut_without_comfy_version(renderer, client, path: str | None, build_id: str) -> None:
+    """Refuse a cut from a spec that sets no ``baseComfyVersion`` when the Build
+    it names has none either. The builder cuts its own definition, which another
+    writer may have given a version the local spec lacks, so a spec without one
+    is checked against the Build before refusing. With ``--id`` there may be no
+    spec, and the builder answers for the Build it names."""
+    try:
+        paths = resolve_build_paths(path)
+    except BuildSpecNotFoundError:
+        return
+    spec = _read_spec(renderer, paths.spec_file)
+    if not spec.get("id") or spec["definition"].get("baseComfyVersion"):
+        return
+    remote = _builder_call(renderer, lambda: client.get_build(build_id))
+    definition = remote.get("definition") if isinstance(remote, dict) else None
+    if isinstance(definition, dict) and definition.get("baseComfyVersion"):
+        return
+    renderer.error(
+        code="build_comfy_version_missing",
+        message=f"the spec at {paths.spec_file} sets no ComfyUI version (baseComfyVersion), and a release needs one.",
+        hint="run `comfy build update --comfy-version <ref>`, then `comfy build push`, then cut again",
+        details={"path": str(paths.spec_file)},
+    )
+    raise typer.Exit(code=1)
+
+
 @release_app.command("create", help="Cut a release from the current Build.")
 @tracking.track_command("build")
 def release_create(
@@ -3465,6 +3632,8 @@ def release_create(
         )
     client = _builder_client(renderer, builder_url)
     selected_build_id = _resolve_build_id(renderer, client, _BuildScope(ctx, path, build_id))
+    if build_id is None:
+        _refuse_cut_without_comfy_version(renderer, client, path, selected_build_id)
     requested = [item.as_wire() for item in targets]
     release_id, status_url = _builder_call(
         renderer,
@@ -3693,6 +3862,7 @@ def validate_cmd(
         "remote": remote,
         "wire_definition": wire_definition,
         "model_lookups": [],
+        "warnings": _definition_warnings(wire_definition, "spec"),
     }
     if _has_models(spec):
         result["folder_case_checked"] = directories is not None
@@ -3701,6 +3871,8 @@ def validate_cmd(
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
+        for warning in result["warnings"]:
+            renderer.warn(warning["message"])
         # A failed read of the list has already said so.
         if client is None and _has_models(spec):
             renderer.info(f"validate reads the builder's folder list only with --remote, so {_FOLDER_CASE_UNCHECKED}.")

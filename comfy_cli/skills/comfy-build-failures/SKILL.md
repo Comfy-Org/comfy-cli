@@ -26,8 +26,8 @@ From a snapshot or a scan:
 - **`notInRegistry`** — the pin names nothing the registry publishes. Correct it
   or drop the pack.
 - **`unresolvedNodes`** — every pack the definition cannot install, and a superset
-  of `notInRegistry` and `registryPending`. Read those two instead, or a publish
-  that is merely pending reads as a wrong pin.
+  of `notInRegistry` and `registryPending`. Its advisory line leaves out the packs
+  those two name, so a publish that is merely pending does not read as a wrong pin.
 - **`collidingNodes`** — a pack was left out because another claimed its folder.
   The build proceeds without it.
 - **`pythonSatisfied: false`** — no curated base image matches the scanned Python,
@@ -38,8 +38,8 @@ From a snapshot or a scan:
 - **`skippedPins`** — normal. The build owns those packages.
 - **`unpinnablePins`** — a package with no PyPI version to write: an editable or a
   direct URL. Not owned by the build, just undeclarable. A pack may still need it.
-- **`registryPending`** — the pin is right and not servable yet, so a retry later
-  works.
+- **`registryPending`** — the pin is right and not servable yet, so the import
+  left the pack out and importing again later works.
 - **`unverifiedPins`** — the registry never answered, so nothing was checked.
 
 From a workflow, six more:

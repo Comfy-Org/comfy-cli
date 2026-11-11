@@ -15,12 +15,42 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy build init`, `update` and `validate` carry `data.warnings[]` as
+  `{code, message}` under `--json`. `build_comfy_version_missing` means the
+  spec has no `baseComfyVersion`; `build_snapshot_empty` means a
+  `--from-snapshot` import carries no custom nodes or models. Its message says
+  whether the snapshot lists none (likely older than the install) or counts
+  the listed packs left out by cause: disabled, or the importer's own advisory
+  line for each cause its report gives, with no cause guessed where the report
+  gives none. On stderr those advisory lines appear only inside this warning,
+  so each pack is named once (also warned in pretty output); `--json` still
+  carries them under `advisories` as well.
+- `comfy build release create` refuses a spec with no `baseComfyVersion` with
+  `build_comfy_version_missing` when the Build it names has none either, before
+  the cut, and the hint names `comfy build update --comfy-version <ref>`. With
+  `--id` the spec is not read.
+
 ### Changed
 
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note
   saying it can read low is left out. `note` is empty when nothing is left to say.
+
+### Fixed
+
+- A snapshot import's advisories name a pending or disowned Registry pack
+  once: the `unresolvedNodes` line leaves out the packs `registryPending` and
+  `notInRegistry` already name. A pending pack's line says to import again once
+  the Comfy Registry finishes publishing it, where it said the build would wait
+  or fail on it; the importer leaves that pack out of the spec.
+- `comfy build update --comfy-version <ref>` on a spec with no install beside
+  it (imported from a workflow or a snapshot) sets the version without a rescan
+  (`source: "spec"`). A rescan that cannot run names that command and
+  `update --from-workflow` in its hint, and every `update` envelope, errors
+  included, says `command: "build update"`.
 
 ## [1.26.0] - 2026-11-11
 

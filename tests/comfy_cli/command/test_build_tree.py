@@ -180,8 +180,8 @@ def test_release_command_resolves_id_by_explicit_spec_then_picker(
     fixed_options: tuple[str, ...],
     resolution_method: str,
 ) -> None:
-    # Given
-    write_spec(workspace, build_id=spec_id, models=[], nodes=[])
+    # Given: a cut needs a ComfyUI version, which `release create` reads from the spec.
+    write_spec(workspace, build_id=spec_id, models=[], nodes=[], definition_extra={"baseComfyVersion": "v0.3.40"})
     if tier == "picker":
         monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", False, None))
         monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)

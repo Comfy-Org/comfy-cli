@@ -397,3 +397,92 @@ def test_changing_the_base_image_shows_up_in_the_diff_the_user_confirms(install:
 
     # Then
     assert envelope["data"]["diff"]["baseImage"] == "changed"
+
+
+def _imported_spec(root: Path) -> Path:
+    """A spec imported from a workflow: no install beside it, and no ComfyUI version."""
+    root.mkdir(parents=True)
+    path = root / "comfy-build.yaml"
+    write_build_spec(
+        path,
+        {
+            "schema": "comfy-build/1",
+            "id": "build-1",
+            "name": "Imported",
+            "description": "",
+            "syncedRevision": "revision-1",
+            "definition": {
+                "schema": "distribution-definition/0",
+                "models": [],
+                "customNodes": [{"name": "comfyui-essentials", "id": "comfyui-essentials", "registryVersion": "1.1.0"}],
+            },
+        },
+    )
+    return path
+
+
+def _run_bare(root: Path, *args: str):
+    """`update` with only the given options: no `--python`, no `--comfy-version`."""
+    return CliRunner().invoke(
+        cli_app,
+        ["build", "update", *args, str(root)],
+        env={"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"},
+    )
+
+
+def test_comfy_version_alone_sets_the_version_of_a_spec_with_no_install(tmp_path: Path) -> None:
+    # Given
+    path = _imported_spec(tmp_path / "imported")
+    before = read_build_spec(path)
+
+    # When
+    result = _run_bare(path.parent, "--comfy-version", "0.3.40", "-y")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    data = _envelope(result)["data"]
+    assert data["source"] == "spec"
+    assert data["warnings"] == []
+    assert data["diff"]["baseComfyVersion"] == "changed"
+    after = read_build_spec(path)
+    assert after["definition"] == {**before["definition"], "baseComfyVersion": "v0.3.40"}
+    assert {key: after[key] for key in ("id", "name", "syncedRevision")} == {
+        "id": "build-1",
+        "name": "Imported",
+        "syncedRevision": "revision-1",
+    }
+
+
+def test_a_rescan_with_no_install_names_the_update_that_works(tmp_path: Path) -> None:
+    # Given
+    path = _imported_spec(tmp_path / "imported")
+
+    # When
+    result = _run_bare(path.parent, "-y")
+
+    # Then
+    assert result.exit_code == 1
+    envelope = _envelope(result)
+    assert envelope["command"] == "build update"
+    error = envelope["error"]
+    assert error["code"] == "build_models_dir_missing"
+    assert "comfy build update --comfy-version <ref>" in error["hint"]
+    assert "comfy build update --from-workflow <file> --comfy-version <ref>" in error["hint"]
+
+
+def test_an_update_that_leaves_no_comfy_version_says_so_by_code(
+    install: Path, spec_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the spec loses its version, and the rescan detects none
+    spec = read_build_spec(spec_file)
+    assert isinstance(spec["definition"], dict)
+    spec["definition"].pop("baseComfyVersion")
+    write_build_spec(spec_file, spec)
+    monkeypatch.setattr(build, "detect_comfy_version_from_server", lambda base_url: None)
+
+    # When
+    result = _run_bare(install, "--python", sys.executable, "-y")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert [warning["code"] for warning in _envelope(result)["data"]["warnings"]] == ["build_comfy_version_missing"]

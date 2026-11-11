@@ -1521,6 +1521,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "fix the named field, or regenerate the file with `comfy build init`",
     ),
     ErrorCode(
+        "build_comfy_version_missing",
+        "`comfy build release create` refused to cut from a spec that sets no ComfyUI version "
+        "(`definition.baseComfyVersion`), which a release needs; no cut was requested. `details.path` "
+        "names the spec. Only a Build read from the spec is checked; with `--id` the builder decides. `init`, "
+        "`update` and `validate` report the same gap as a warning in `data.warnings[]` under this code.",
+        "run `comfy build update --comfy-version <ref>`, then `comfy build push`, then cut again",
+    ),
+    ErrorCode(
         "build_workflow_invalid",
         "`comfy build init --from-workflow <path>` or `comfy build update --from-workflow <path>` could not "
         "read the workflow file, or it is not a JSON object. `details.path` carries the path.",

@@ -934,3 +934,20 @@ def test_remote_validate_treats_a_list_naming_no_folder_as_unread(
     assert said.count(_FOLDER_CASE_UNCHECKED) == 1, pretty.output
     assert agent.exit_code == 0, agent.output
     assert _envelope(agent)["data"]["folder_case_checked"] is False
+
+
+def test_validate_warns_by_code_when_the_spec_sets_no_comfy_version(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[local_model()], nodes=[local_node()])
+
+    # When
+    agent = _invoke(workspace)
+    pretty = _invoke(workspace, output="pretty")
+
+    # Then
+    assert agent.exit_code == 0, agent.output
+    data = _envelope(agent)["data"]
+    assert [warning["code"] for warning in data["warnings"]] == ["build_comfy_version_missing"]
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+    assert pretty.exit_code == 0, pretty.output
+    assert "sets no ComfyUI version" in " ".join(pretty.output.split())

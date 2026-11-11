@@ -52,6 +52,12 @@ _IMPORT_REPORT = {
 _SCAN_ONLY_FLAGS = ("--models-dir", "--custom-nodes-dir", "--python", "--comfy-url")
 
 
+def _advisories(report: dict) -> list[str]:
+    """Every advisory line an import carries under ``advisories``: the packs it
+    left out, then everything else."""
+    return [*build._pack_lines(report)[0], *build.report_advisories(report)]
+
+
 class _Recorder:
     """Stands in for the shared ``request_json`` seam, recording each request."""
 
@@ -213,7 +219,7 @@ def test_init_renders_every_advisory_on_stderr_and_one_envelope_on_stdout(
     install: Path, snapshot: Path, recorder: _Recorder
 ) -> None:
     # Given
-    expected = build.report_advisories(_IMPORT_REPORT)
+    expected = _advisories(_IMPORT_REPORT)
     assert expected, "the fixture report must produce advisories or this passes vacuously"
 
     # When
@@ -376,7 +382,7 @@ def test_update_reports_the_import_through_the_ordinary_diff(
     diff = envelope["data"]["diff"]
     assert envelope["data"]["source"] == "snapshot"
     assert envelope["data"]["snapshot"] == str(snapshot)
-    assert envelope["data"]["advisories"] == build.report_advisories(_IMPORT_REPORT)
+    assert envelope["data"]["advisories"] == _advisories(_IMPORT_REPORT)
     assert envelope["changed"] is True
     assert envelope["data"]["written"] is True
     # A snapshot describes no models, so the scanned one is dropped and both
@@ -434,7 +440,7 @@ def test_update_renders_every_advisory_on_stderr_and_one_envelope_on_stdout(
     install: Path, spec_file: Path, snapshot: Path, recorder: _Recorder
 ) -> None:
     # Given
-    expected = build.report_advisories(_IMPORT_REPORT)
+    expected = _advisories(_IMPORT_REPORT)
 
     # When
     result = _run("update", install, "-y", "--from-snapshot", str(snapshot))
@@ -492,3 +498,190 @@ def test_the_update_payload_validates_against_its_registered_schema(
     # Then
     schema = json.loads((SCHEMAS_DIR / "build_update.json").read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(envelope["data"])
+
+
+def _empty_import(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    """The importer's answer for a snapshot taken before any pack was installed."""
+    return 200, {"definition": {"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}, "report": {}}
+
+
+def test_init_from_a_snapshot_with_nothing_in_it_says_to_take_a_newer_one(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a snapshot that lists no custom nodes at all
+    snapshot = tmp_path / "empty-snapshot.json"
+    snapshot.write_text(json.dumps({**_SNAPSHOT, "customNodes": []}), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
+
+    # When
+    agent = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+    env = {
+        "AI_AGENT": "1",
+        "COMFY_OUTPUT": "pretty",
+        "NO_COLOR": "1",
+        "COLUMNS": "400",
+        "COMFY_BUILDER_TOKEN": "tok_test",
+    }
+    pretty = CliRunner().invoke(
+        cli_app,
+        ["build", "init", "--force", "--name", "Foo", "--from-snapshot", str(snapshot), str(install)],
+        env=env,
+    )
+
+    # Then
+    assert agent.exit_code == 0, agent.stderr
+    assert len([line for line in agent.stdout.splitlines() if line.strip()]) == 1
+    data = _envelope(agent)["data"]
+    assert [warning["code"] for warning in data["warnings"]] == ["build_snapshot_empty"]
+    assert "older than the install" in _flat(agent.stderr)
+    jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
+    assert pretty.exit_code == 0, pretty.output
+    assert "take a newer one" in _flat(pretty.stdout)
+
+
+def test_init_from_a_snapshot_whose_packs_were_all_skipped_says_why_not_to_retake_it(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a current snapshot whose packs the importer drops (one disabled) or
+    # reports unresolved (two from no supported source), so it imports none
+    snapshot = tmp_path / "skipped-snapshot.json"
+    nodes = [
+        {"type": "cnr", "id": "comfyui-essentials", "dirName": "comfyui-essentials", "enabled": False},
+        {"type": "git", "dirName": "hand-rolled", "url": "https://gitlab.com/org/hand-rolled"},
+        {"type": "file", "dirName": "loose-pack"},
+    ]
+    snapshot.write_text(json.dumps({**_SNAPSHOT, "customNodes": nodes}), encoding="utf-8")
+    report = {"unresolvedNodes": ["hand-rolled", "loose-pack"]}
+    empty = {"definition": {"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}, "report": report}
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", lambda *args, **kwargs: (200, empty))
+
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    (warning,) = data["warnings"]
+    assert warning["code"] == "build_snapshot_empty"
+    message = _flat(warning["message"])
+    assert "lists 3 custom node packs" in message
+    assert "1 disabled" in message
+    assert "2 named nothing the builder can install from: hand-rolled, loose-pack" in message
+    assert "lists no custom nodes" not in message
+    assert "newer" not in message
+    assert "newer" not in _flat(result.stderr)
+    jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
+
+
+def _pending_import(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    """The importer's answer when its one Registry pin is not servable yet: it
+    drops the pin, so the pack also lands among the sourceless ones."""
+    report = {"registryPending": ["comfyui-essentials"], "unresolvedNodes": ["comfyui-essentials"]}
+    return 200, {"definition": {"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}, "report": report}
+
+
+def test_init_from_a_snapshot_whose_registry_pack_is_pending_names_it_as_waiting_on_the_registry(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a current snapshot whose only enabled pack is a Registry pin the
+    # Registry has not finished publishing, which the importer reports as pending
+    snapshot = tmp_path / "pending-snapshot.json"
+    snapshot.write_text(json.dumps(_SNAPSHOT), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _pending_import)
+
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    (warning,) = data["warnings"]
+    assert warning["code"] == "build_snapshot_empty"
+    message = _flat(warning["message"])
+    assert "lists 1 custom node pack" in message
+    assert "1 left out until the Comfy Registry finishes publishing them, so import again then" in message
+    assert message.endswith(": comfyui-essentials")
+    assert "named nothing the builder can install from" not in message
+    assert "disabled" not in message
+    assert "newer" not in message
+    assert "newer" not in _flat(result.stderr)
+    jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
+
+
+def test_init_from_a_snapshot_whose_packs_the_report_gives_no_cause_for_does_not_guess_one(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: an enabled pack the importer left out and its report says nothing about
+    snapshot = tmp_path / "unexplained-snapshot.json"
+    snapshot.write_text(json.dumps(_SNAPSHOT), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
+
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    (warning,) = _envelope(result)["data"]["warnings"]
+    message = _flat(warning["message"])
+    assert "1 left out with no reason in the importer's report" in message
+    assert "named nothing the builder can install from" not in message
+    assert "Comfy Registry" not in message
+    assert "newer" not in message
+
+
+def test_init_from_a_snapshot_with_packs_carries_no_empty_snapshot_warning(
+    install: Path, snapshot: Path, recorder: _Recorder
+) -> None:
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["warnings"] == []
+
+
+def test_a_pending_registry_pack_in_an_empty_import_prints_one_cause_line(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the snapshot's one pack is a Registry pin still being published,
+    # which the importer reports under registryPending and again under
+    # unresolvedNodes, so the import is empty
+    snapshot = tmp_path / "pending-snapshot.json"
+    snapshot.write_text(json.dumps(_SNAPSHOT), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _pending_import)
+    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400", "COMFY_BUILDER_TOKEN": "tok"}
+
+    # When
+    result = CliRunner().invoke(
+        cli_app, ["build", "init", "--name", "Foo", "--from-snapshot", str(snapshot), str(install)], env=env
+    )
+
+    # Then: one line names the pack, with the registryPending cause from the
+    # one advisory table, and no other line gives it a cause
+    assert result.exit_code == 0, result.output
+    naming = [line for line in result.output.splitlines() if "comfyui-essentials" in line]
+    assert len(naming) == 1, result.output
+    pending = dict(build._PACK_ADVISORIES)["registryPending"]
+    assert pending in naming[0]
+    table = (*build._PACK_ADVISORIES, *build._OTHER_ADVISORIES)
+    others = [meaning for key, meaning in table if key != "registryPending"]
+    assert not any(meaning in result.output for meaning in others), result.output
+
+
+def test_a_pack_the_report_names_under_a_registry_cause_is_not_named_again_as_unresolved() -> None:
+    # Given: the builder lists every disowned or pending Registry pin under
+    # unresolvedNodes as well, and asks that one or the other be shown
+    report = {
+        "registryPending": ["pending"],
+        "notInRegistry": ["disowned"],
+        "unresolvedNodes": ["pending", "disowned", "loose"],
+    }
+
+    # When
+    lines, named = build._pack_lines(report)
+
+    # Then
+    assert named == 3
+    assert len([line for line in lines if "pending" in line]) == 1
+    assert len([line for line in lines if "disowned" in line]) == 1
+    assert "1 named nothing the builder can install from: loose" in lines

@@ -6,6 +6,16 @@
   "type": "object",
   "additionalProperties": true,
   "properties": {
+    "warnings": {
+      "description": "Gaps in the definition that do not stop this command but stop a later one, as `{code, message}`: `build_comfy_version_missing` (no `baseComfyVersion`, which `release create` refuses). Empty when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": false,
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
+      }
+    },
     "folder_case_checked": {
       "description": "Present only when the spec has models. False when no usable folder list was read from the builder (offline, without `--remote`; a read that failed or named no folder), so a case variant of a folder (`Loras` for `loras`) passed unchecked; the builder refuses it at the release.",
       "type": "boolean"
