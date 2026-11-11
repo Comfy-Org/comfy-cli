@@ -1244,6 +1244,8 @@ class DefinitionImport:
     advisories: list[str]
     path: Path
     source: ImportSource
+    #: For a snapshot, why an empty import came out empty, read from the input.
+    empty_reason: str | None = None
 
 
 def _import_definition(renderer, source: ImportSource, value: str, *, comfy_version: str | None) -> DefinitionImport:
@@ -1298,15 +1300,18 @@ def _import_definition(renderer, source: ImportSource, value: str, *, comfy_vers
     advisories = report_advisories(imported.get("report") or {})
     for line in advisories:
         renderer.warn(line)
+    empty_reason = _snapshot_empty_message(data) if source.name == "snapshot" else None
     if _empty_snapshot(definition, source.name):
-        renderer.warn(_SNAPSHOT_EMPTY)
+        renderer.warn(empty_reason or _SNAPSHOT_EMPTY)
 
     # `--comfy-version` overrides a value in the definition rather than steering
     # a scan, so it is honoured here too; ignoring it on this path would leave a
     # flag that reads as accepted and does nothing.
     if comfy_version:
         definition["baseComfyVersion"] = as_comfy_git_ref(comfy_version)
-    return DefinitionImport(definition=definition, advisories=advisories, path=path, source=source)
+    return DefinitionImport(
+        definition=definition, advisories=advisories, path=path, source=source, empty_reason=empty_reason
+    )
 
 
 #: Said wherever a spec has no ``baseComfyVersion``, which a release cut needs.
@@ -1320,20 +1325,40 @@ _SNAPSHOT_EMPTY = (
 )
 
 
+def _snapshot_empty_message(snapshot: dict) -> str:
+    """What to say when a snapshot imports no custom nodes, judged on the input.
+
+    The importer drops a disabled pack and reports one from no supported source
+    as unresolved, so a current snapshot can list packs and still import none;
+    a newer snapshot fixes only one that really lists none."""
+    snapshots = as_snapshot_envelope(snapshot).get("snapshots")
+    first = snapshots[0] if isinstance(snapshots, list) and snapshots and isinstance(snapshots[0], dict) else {}
+    packs = first.get("customNodes")
+    packs = [pack for pack in packs if isinstance(pack, dict)] if isinstance(packs, list) else []
+    if not packs:
+        return _SNAPSHOT_EMPTY
+    disabled = sum(1 for pack in packs if pack.get("enabled") is False)
+    return (
+        f"the snapshot lists {len(packs)} custom node pack{'s' if len(packs) != 1 else ''} but none were imported: "
+        f"{disabled} disabled, {len(packs) - disabled} not from a supported source (the Comfy Registry or GitHub), "
+        "so the spec has none"
+    )
+
+
 def _empty_snapshot(definition: dict, source: str) -> bool:
     return (
         source == "snapshot" and not _entry_count(definition, "customNodes") and not _entry_count(definition, "models")
     )
 
 
-def _definition_warnings(definition: dict, source: str) -> list[dict[str, str]]:
+def _definition_warnings(definition: dict, source: str, empty_reason: str | None = None) -> list[dict[str, str]]:
     """The ``warnings`` a written definition carries: ``{code, message}`` objects,
     so a ``--json`` caller branches on ``code`` rather than reading prose."""
     warnings: list[dict[str, str]] = []
     if not definition.get("baseComfyVersion"):
         warnings.append({"code": "build_comfy_version_missing", "message": _COMFY_VERSION_MISSING})
     if _empty_snapshot(definition, source):
-        warnings.append({"code": "build_snapshot_empty", "message": _SNAPSHOT_EMPTY})
+        warnings.append({"code": "build_snapshot_empty", "message": empty_reason or _SNAPSHOT_EMPTY})
     return warnings
 
 
@@ -1608,7 +1633,9 @@ def init_cmd(
             "spec_file": str(spec_path),
             "name": build_name,
             **payload,
-            "warnings": _definition_warnings(definition, payload["source"]),
+            "warnings": _definition_warnings(
+                definition, payload["source"], imported.empty_reason if imported is not None else None
+            ),
             "definition": definition,
         },
         command="build init",
@@ -1811,7 +1838,7 @@ def update_cmd(
         "dry_run": dry_run,
         "summary": summary,
         "diff": diff.as_json(),
-        "warnings": _definition_warnings(definition, source),
+        "warnings": _definition_warnings(definition, source, imported.empty_reason if imported is not None else None),
         "definition": definition,
     }
     if imported is not None:
@@ -2524,7 +2551,7 @@ def _render_status(renderer, payload: dict, drift: DefinitionDiff | None) -> Non
     build = payload["build"]
     remote = payload["remote"]
     pushed = remote["state"] == "pushed"
-    renderer.print(f"build:  {build['id'] or '—'}" + (f"  {build['name']}" if build["name"] else ""))
+    renderer.print(f"build:  {build.get('id') or '—'}" + (f"  {build['name']}" if build["name"] else ""))
     renderer.print(f"spec:   {payload['spec']['path']}")
     if pushed:
         renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
@@ -2620,7 +2647,8 @@ def status_cmd(
     )
 
     payload = {
-        "build": {"id": target_id, "name": name},
+        # No `id` key before the first push: `build.id` is a string wherever it appears.
+        "build": {"name": name} if target_id is None else {"id": target_id, "name": name},
         "spec": {"path": str(paths.spec_file), "syncedRevision": _optional_str(spec.get("syncedRevision"))},
         "remote": remote_payload,
         "local": local,
@@ -3503,17 +3531,22 @@ _CUT_RETRY_HINT = (
 )
 
 
-def _refuse_cut_without_comfy_version(renderer, path: str | None) -> None:
-    """Refuse a cut from a spec that sets no ``baseComfyVersion``, before the
-    builder is asked. Only the spec is read: with ``--id`` there may be none, and
-    the builder answers for the Build it names. A missing spec is left to the
-    Build id lookup, which says so."""
+def _refuse_cut_without_comfy_version(renderer, client, path: str | None, build_id: str) -> None:
+    """Refuse a cut from a spec that sets no ``baseComfyVersion`` when the Build
+    it names has none either. The builder cuts its own definition, which another
+    writer may have given a version the local spec lacks, so a spec without one
+    is checked against the Build before refusing. With ``--id`` there may be no
+    spec, and the builder answers for the Build it names."""
     try:
         paths = resolve_build_paths(path)
     except BuildSpecNotFoundError:
         return
     spec = _read_spec(renderer, paths.spec_file)
     if not spec.get("id") or spec["definition"].get("baseComfyVersion"):
+        return
+    remote = _builder_call(renderer, lambda: client.get_build(build_id))
+    definition = remote.get("definition") if isinstance(remote, dict) else None
+    if isinstance(definition, dict) and definition.get("baseComfyVersion"):
         return
     renderer.error(
         code="build_comfy_version_missing",
@@ -3559,9 +3592,9 @@ def release_create(
             ),
         )
     client = _builder_client(renderer, builder_url)
-    if build_id is None:
-        _refuse_cut_without_comfy_version(renderer, path)
     selected_build_id = _resolve_build_id(renderer, client, _BuildScope(ctx, path, build_id))
+    if build_id is None:
+        _refuse_cut_without_comfy_version(renderer, client, path, selected_build_id)
     requested = [item.as_wire() for item in targets]
     release_id, status_url = _builder_call(
         renderer,
@@ -3831,8 +3864,10 @@ def _source_sha256(uri: str) -> str | None:
     One HEAD, redirects not followed: Hugging Face states the hash of an LFS file
     as ``X-Linked-Etag`` on the redirect to its CDN, and a link may carry a
     credential (a Civitai ``?token=``) that must not travel on to another host.
-    An ``ETag`` counts only when it is a sha256, so another host's md5 or git
-    blob id reads as no hash. Any failure is None: the filename lookup answers."""
+    Only ``X-Linked-Etag`` counts, as in the builder's own verifier: a plain
+    ``ETag`` can be an md5, an opaque CDN token or a Xet root even when it is 64
+    hex characters, so it reads as no hash. Any failure is None: the filename
+    lookup answers."""
     import urllib.request
 
     from comfy_cli.http import no_redirect_urlopen
@@ -3848,11 +3883,8 @@ def _source_sha256(uri: str) -> str | None:
         return None
     if headers is None:
         return None
-    for name in ("X-Linked-Etag", "ETag"):
-        value = (headers.get(name) or "").strip().removeprefix("W/").strip('"').lower()
-        if re.fullmatch(r"[0-9a-f]{64}", value):
-            return value
-    return None
+    value = (headers.get("X-Linked-Etag") or "").strip().removeprefix("W/").strip('"').lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
 
 
 @app.command("delete", help="Delete a build (soft-delete).")

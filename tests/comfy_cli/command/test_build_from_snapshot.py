@@ -500,9 +500,11 @@ def _empty_import(url, target, *, method="GET", body=None, timeout=30.0, max_byt
 
 
 def test_init_from_a_snapshot_with_nothing_in_it_says_to_take_a_newer_one(
-    install: Path, snapshot: Path, monkeypatch: pytest.MonkeyPatch
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Given
+    # Given: a snapshot that lists no custom nodes at all
+    snapshot = tmp_path / "empty-snapshot.json"
+    snapshot.write_text(json.dumps({**_SNAPSHOT, "customNodes": []}), encoding="utf-8")
     monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
 
     # When
@@ -529,6 +531,38 @@ def test_init_from_a_snapshot_with_nothing_in_it_says_to_take_a_newer_one(
     jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
     assert pretty.exit_code == 0, pretty.output
     assert "take a newer one" in _flat(pretty.stdout)
+
+
+def test_init_from_a_snapshot_whose_packs_were_all_skipped_says_why_not_to_retake_it(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a current snapshot whose packs the importer drops (one disabled) or
+    # reports unresolved (two from no supported source), so it imports none
+    snapshot = tmp_path / "skipped-snapshot.json"
+    nodes = [
+        {"type": "cnr", "id": "comfyui-essentials", "dirName": "comfyui-essentials", "enabled": False},
+        {"type": "git", "dirName": "hand-rolled", "url": "https://gitlab.com/org/hand-rolled"},
+        {"type": "file", "dirName": "loose-pack"},
+    ]
+    snapshot.write_text(json.dumps({**_SNAPSHOT, "customNodes": nodes}), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
+
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    (warning,) = data["warnings"]
+    assert warning["code"] == "build_snapshot_empty"
+    message = _flat(warning["message"])
+    assert "lists 3 custom node packs" in message
+    assert "1 disabled" in message
+    assert "2 not from a supported source" in message
+    assert "lists no custom nodes" not in message
+    assert "newer" not in message
+    assert "newer" not in _flat(result.stderr)
+    jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
 
 
 def test_init_from_a_snapshot_with_packs_carries_no_empty_snapshot_warning(

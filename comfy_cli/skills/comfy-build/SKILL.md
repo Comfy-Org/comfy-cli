@@ -42,7 +42,8 @@ hash, so the next cut is genuinely a new release.
   what you edit, what the user commits, and what every later command reads. The
   platform holds a copy, and `comfy build status` says how far apart they are.
   Before the first push it says `remote: not pushed` (`remote.state:
-  "not_pushed"` under `--json`) and still compares the spec with the install.
+  "not_pushed"` under `--json`, with no `build.id`) and still compares the spec
+  with the install.
 - **A cut names its targets explicitly.** `--target <os>/<gpu>` is repeatable
   and required, so nothing is built that nobody asked for. Read
   `comfy build refs build-targets` rather than promising an artifact from memory.
@@ -185,9 +186,12 @@ The import goes through the builder, so it needs the sign-in, and it cannot be
 combined with `--models-dir`, `--custom-nodes-dir`, `--python` or `--comfy-url`
 — it is a different source for the same definition, not a scan you steer. It
 carries **no models**, so use the scan whenever private weights have to travel.
-A snapshot that lists no custom nodes either is usually older than the install;
-`init` warns (`build_snapshot_empty` in `data.warnings[]`), and a newer snapshot
-is the fix. `--from-snapshot` and `--from-workflow` also refuse each other.
+An import with no custom nodes gets a warning (`build_snapshot_empty` in
+`data.warnings[]`). If the snapshot lists none, it is usually older than the
+install, and a newer snapshot is the fix. If it lists packs but every one was
+disabled or not from the Comfy Registry or GitHub, the message counts each kind;
+a newer snapshot will not help. `--from-snapshot` and `--from-workflow` also
+refuse each other.
 
 ## Path B — from a workflow file
 

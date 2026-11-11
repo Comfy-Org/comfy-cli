@@ -20,11 +20,14 @@ history.
 - `comfy build init`, `update` and `validate` carry `data.warnings[]` as
   `{code, message}` under `--json`. `build_comfy_version_missing` means the
   spec has no `baseComfyVersion`; `build_snapshot_empty` means a
-  `--from-snapshot` import found no custom nodes or models, so the snapshot is
-  likely older than the install (also warned in pretty output).
+  `--from-snapshot` import carries no custom nodes or models. Its message says
+  whether the snapshot lists none (likely older than the install) or how many
+  listed packs were skipped as disabled or not from a supported source (also
+  warned in pretty output).
 - `comfy build release create` refuses a spec with no `baseComfyVersion` with
-  `build_comfy_version_missing` before asking the builder, and the hint names
-  `comfy build update --comfy-version <ref>`. With `--id` the spec is not read.
+  `build_comfy_version_missing` when the Build it names has none either, before
+  the cut, and the hint names `comfy build update --comfy-version <ref>`. With
+  `--id` the spec is not read.
 - `comfy build validate --remote` asks a model's own `sourceUri` for its hash
   when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
   HEAD that does not follow redirects). The lookup reads `declared_ok` or
@@ -43,7 +46,8 @@ history.
 - `comfy build status` on a spec that was never pushed reports the local half
   and `remote.state: "not_pushed"` instead of asking for `--id` or offering a
   Build picker. `remote.state`
-  is `"pushed"` otherwise, and `build.id` is null when no Build is named.
+  is `"pushed"` otherwise. `build.id` is left out when no Build is named, so it
+  stays a string wherever it appears.
 - `comfy build update --comfy-version <ref>` on a spec with no install beside
   it (imported from a workflow or a snapshot) sets the version without a rescan
   (`source: "spec"`). A rescan that cannot run names that command and

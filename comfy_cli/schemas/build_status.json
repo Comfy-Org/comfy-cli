@@ -11,6 +11,26 @@
     "hint"
   ],
   "additionalProperties": false,
+  "if": {
+    "properties": {
+      "remote": {
+        "properties": {
+          "state": {
+            "const": "not_pushed"
+          }
+        }
+      }
+    }
+  },
+  "else": {
+    "properties": {
+      "build": {
+        "required": [
+          "id"
+        ]
+      }
+    }
+  },
   "$defs": {
     "counts": {
       "type": "object",
@@ -40,18 +60,14 @@
     "build": {
       "type": "object",
       "required": [
-        "id",
         "name"
       ],
       "additionalProperties": false,
       "properties": {
         "id": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": "string",
           "minLength": 1,
-          "description": "The Build compared against: `--id`, else the spec's id. Null when neither names one, so the spec was never pushed (`remote.state` is `not_pushed`)."
+          "description": "The Build compared against: `--id`, else the spec's id. Present whenever `remote.state` is `pushed`; absent when neither names one, so the spec was never pushed (`remote.state` is `not_pushed`)."
         },
         "name": {
           "type": [

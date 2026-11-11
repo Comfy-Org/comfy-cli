@@ -149,7 +149,7 @@ def test_diverged_remote_and_drifted_install_are_reported_together(
 
     assert result.exit_code == 0, result.stderr
     payload = data(result)
-    assert payload["remote"] == {"revision": "revision-moved", "behind": True}
+    assert payload["remote"] == {"state": "pushed", "revision": "revision-moved", "behind": True}
     assert payload["local"]["drift"]["models"]["added"] == 1
     assert "comfy build pull" in payload["hint"]
 
@@ -208,12 +208,17 @@ def test_status_before_the_first_push_reports_the_local_half_and_not_pushed(
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, result.stdout
     payload = data(result)
-    assert payload["build"] == {"id": None, "name": "Status"}
+    # `build.id` stays a string wherever it appears (envelope/1): unpushed, it is absent
+    assert payload["build"] == {"name": "Status"}
     assert payload["remote"] == {"state": "not_pushed", "revision": None, "behind": False}
     assert payload["local"]["scanned"] is True
     assert payload["local"]["drift"]["models"] == {"added": 0, "removed": 0, "changed": 0}
     assert "comfy build push" in payload["hint"]
-    jsonschema.Draft202012Validator(STATUS_SCHEMA).validate(payload)
+    validator = jsonschema.Draft202012Validator(STATUS_SCHEMA)
+    validator.validate(payload)
+    assert not validator.is_valid({**payload, "build": {"id": None, "name": "Status"}})
+    pushed = {**payload, "build": {"name": "Status"}, "remote": {"state": "pushed", "revision": "r", "behind": False}}
+    assert not validator.is_valid(pushed)
     assert client.calls == []
 
 
@@ -324,7 +329,7 @@ def test_a_spec_with_no_install_still_reports_spec_vs_remote(workspace: Path, mo
     # Then
     assert result.exit_code == 0, result.stderr
     payload = data(result)
-    assert payload["remote"] == {"revision": "revision-moved", "behind": True}
+    assert payload["remote"] == {"state": "pushed", "revision": "revision-moved", "behind": True}
     assert payload["local"]["scanned"] is False
     assert payload["local"]["drift"] is None
     assert str(workspace / "models") in payload["local"]["reason"]

@@ -919,7 +919,7 @@ not registered and is not listed in `comfy --json discover` under
 | --------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `workspace_not_found`       | The selected workspace does not exist on disk (`exists: false`); the message names the missing directory      |
 | `desktop_config_unreadable` | A Comfy Desktop record, settings file or path could not be read or checked; Desktop discovery may be incomplete |
-| `build_snapshot_empty`      | A `--from-snapshot` import found no custom nodes or models; the snapshot is likely older than the install      |
+| `build_snapshot_empty`      | A `--from-snapshot` import carries no custom nodes or models; the message says whether the snapshot lists none (likely older than the install) or how many listed packs were skipped |
 
 `build_comfy_version_missing` (the spec sets no `baseComfyVersion`) appears in
 `data.warnings[]` of `comfy build init`, `update` and `validate`. It is also

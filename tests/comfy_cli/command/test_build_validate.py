@@ -1038,11 +1038,48 @@ def test_remote_checks_a_declared_link_against_its_sha256_before_the_filename(
     jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
 
 
+def test_remote_takes_no_verdict_from_a_plain_etag_that_looks_like_a_sha256(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a host whose plain ETag is 64 hex characters (an opaque CDN token or
+    # a Xet root), not the file's sha256, and differs from the declared one
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    message = Message()
+    message["ETag"] = f'"{_SHA_B}"'
+
+    class Response:
+        headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", lambda request, *, timeout: Response())
+    uri = "https://cdn.example.com/org/repo/model.safetensors"
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "filename": "model.safetensors", "sourceUri": uri, "sha256": _SHA_A}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no declared verdict; the filename lookup answers, as before
+    assert result.exit_code == 0, result.stderr
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["model.safetensors"]}}]
+
+
 @pytest.mark.parametrize(
     ("status", "headers", "expected"),
     [
         pytest.param(302, {"X-Linked-Etag": f'"{_SHA_A.upper()}"'}, _SHA_A, id="hugging-face-redirect"),
-        pytest.param(200, {"ETag": f'W/"{_SHA_B}"'}, _SHA_B, id="weak-etag-sha256"),
+        pytest.param(200, {"ETag": f'W/"{_SHA_B}"'}, None, id="plain-etag-looks-like-sha256"),
         pytest.param(200, {"ETag": '"d41d8cd98f00b204e9800998ecf8427e"'}, None, id="md5-etag"),
         pytest.param(404, {"X-Linked-Etag": f'"{_SHA_A}"'}, None, id="not-found"),
     ],

@@ -50,6 +50,12 @@ class ReleaseBuilder:
         #: ``None`` is a body cut short inside its Content-Length, which the
         #: HTTP layer parses as ``{}`` rather than raising.
         self.logs: list[str | None] = []
+        #: The Build as the builder holds it; its definition is what a cut releases.
+        self.build: JsonObject = {"id": "build-1", "definition": {}}
+
+    def get_build(self, build_id: str) -> JsonObject:
+        self.calls.append({"method": "get_build", "id": build_id})
+        return self.build
 
     def list_build_targets(self) -> list[JsonObject]:
         self.calls.append({"method": "list_build_targets"})
@@ -2461,10 +2467,10 @@ def test_release_limit_refusal_keeps_todays_details_when_the_builds_cannot_be_re
     assert error["message"] == AT_THE_LIMIT
 
 
-def test_create_refuses_a_spec_with_no_comfy_version_before_the_builder(
+def test_create_refuses_when_neither_the_spec_nor_the_build_sets_a_comfy_version(
     workspace: Path, client: ReleaseBuilder
 ) -> None:
-    # Given: a pushed spec that never set baseComfyVersion
+    # Given: a pushed spec that never set baseComfyVersion, and a Build without one too
     write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
 
     # When
@@ -2476,7 +2482,20 @@ def test_create_refuses_a_spec_with_no_comfy_version_before_the_builder(
     assert error["code"] == "build_comfy_version_missing"
     assert "comfy build update --comfy-version" in error["hint"]
     assert Path(error["details"]["path"]).name == "comfy-build.yaml"
-    assert client.calls == []
+    assert client.calls == [{"method": "get_build", "id": "build-1"}]
+
+
+def test_create_cuts_when_the_build_has_a_comfy_version_the_spec_lacks(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given: the spec never set baseComfyVersion, but another writer set it on the Build
+    write_spec(workspace, build_id="build-1", revision="revision-1", models=[], nodes=[])
+    client.build = {"id": "build-1", "definition": {"baseComfyVersion": "v0.3.40"}}
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then: the cut goes out, since the builder releases its own definition
+    assert result.exit_code == 0, result.stderr
+    assert [call["method"] for call in client.calls] == ["get_build", "create_release"]
 
 
 def test_create_with_an_id_leaves_the_comfy_version_to_the_builder(workspace: Path, client: ReleaseBuilder) -> None:
