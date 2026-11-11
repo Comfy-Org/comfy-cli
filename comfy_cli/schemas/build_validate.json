@@ -16,6 +16,21 @@
         "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
       }
     },
+    "model_lookups": {
+      "description": "Present always; filled only with `--remote`. One entry per model, in the order of `wire_definition.models`: the spec as read, which sorts models by `type`, `filename` and `sha256`, so neither that order nor the index in `entry` (`definition.models[<n>]`) is the order of the entries in the spec file. `state` is `candidate_found`, `none_found`, `lookup_error` or `not_lookupable` from the filename lookup, or, for a model whose own https `sourceUri` states a sha256 (a link that is not https is never asked) (Hugging Face's `X-Linked-Etag`), `declared_ok` when it equals the model's `sha256` and `declared_mismatch` when it does not, with the link's hash in `sourceSha256`. A link that states no hash or does not answer gets the filename lookup, except for a model with no `filename`, which reads `not_lookupable` with no lookup.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entry", "filename", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "entry": {"type": "string"},
+          "filename": {"type": ["string", "null"]},
+          "state": {"enum": ["candidate_found", "none_found", "lookup_error", "not_lookupable", "declared_ok", "declared_mismatch"]},
+          "sourceSha256": {"type": "string"}
+        }
+      }
+    },
     "folder_case_checked": {
       "description": "Present only when the spec has models. False when no usable folder list was read from the builder (offline, without `--remote`; a read that failed or named no folder), so a case variant of a folder (`Loras` for `loras`) passed unchecked; the builder refuses it at the release.",
       "type": "boolean"

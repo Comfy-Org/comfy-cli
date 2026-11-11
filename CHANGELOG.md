@@ -31,6 +31,13 @@ history.
   `build_comfy_version_missing` when the Build it names has none either, before
   the cut, and the hint names `comfy build update --comfy-version <ref>`. With
   `--id` the spec is not read.
+- `comfy build validate --remote` asks a model's own `sourceUri` for its hash
+  when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
+  HEAD that does not follow redirects). Only an https link is asked, so a
+  credential in its query never goes out without TLS. The lookup reads
+  `declared_ok` or `declared_mismatch`, with the link's hash in
+  `sourceSha256`. A link that states no hash or does not answer gets the
+  filename lookup as before.
 
 ### Changed
 

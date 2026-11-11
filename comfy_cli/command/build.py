@@ -3828,7 +3828,11 @@ def validate_cmd(
     ] = None,
     remote: Annotated[
         bool,
-        typer.Option("--remote", help="Also look up public model-source candidates. Requires sign-in."),
+        typer.Option(
+            "--remote",
+            help="Also look up public model-source candidates, and check each model's sourceUri against its "
+            "sha256 where the link states one. Requires sign-in.",
+        ),
     ] = False,
     models_dir: Annotated[
         str | None,
@@ -3867,7 +3871,10 @@ def validate_cmd(
     if _has_models(spec):
         result["folder_case_checked"] = directories is not None
     if client is not None:
-        lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
+        lookups = _builder_call(
+            renderer,
+            lambda: lookup_public_model_sources(wire_definition, client.resolve_models, _source_sha256),
+        )
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
@@ -3879,8 +3886,52 @@ def validate_cmd(
         for lookup in result["model_lookups"]:
             label = lookup["filename"] or lookup["entry"]
             detail = f": {lookup['error']}" if lookup.get("error") else ""
+            if lookup["state"] == "declared_mismatch":
+                renderer.warn(f"declared_mismatch  {label}: its sourceUri states sha256 {lookup['sourceSha256']}")
+                continue
             renderer.info(f"{lookup['state']}  {label}{detail}")
     renderer.emit(result, command="build validate")
+
+
+#: How long one model link may take to answer the HEAD that reads its hash.
+_SOURCE_HEAD_TIMEOUT = 10.0
+
+
+def _source_sha256(uri: str) -> str | None:
+    """The sha256 a model link's host states for its file, or None.
+
+    One HEAD, redirects not followed: Hugging Face states the hash of an LFS file
+    as ``X-Linked-Etag`` on the redirect to its CDN, and a link may carry a
+    credential (a Civitai ``?token=``) that must not travel on to another host.
+    Only ``X-Linked-Etag`` counts, as in the builder's own verifier: a plain
+    ``ETag`` can be an md5, an opaque CDN token or a Xet root even when it is 64
+    hex characters, so it reads as no hash. A link that is not https is never
+    opened, so a credential in it does not travel without TLS: a ``source: local``
+    entry keeps its link on the wire and the link rules skip it. Any failure is
+    None: the filename lookup answers."""
+    import urllib.request
+
+    from comfy_cli.http import no_redirect_urlopen
+
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return None
+    if parts.scheme.lower() != "https" or not parts.hostname:
+        return None
+    try:
+        with no_redirect_urlopen(urllib.request.Request(uri, method="HEAD"), timeout=_SOURCE_HEAD_TIMEOUT) as response:
+            headers = response.headers
+    except urllib.error.HTTPError as error:
+        # The redirect the opener refused, which is where the hash is stated.
+        headers = error.headers if 300 <= error.code < 400 else None
+        error.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    if headers is None:
+        return None
+    value = (headers.get("X-Linked-Etag") or "").strip().removeprefix("W/").strip('"').lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
 
 
 @app.command("delete", help="Delete a build (soft-delete).")

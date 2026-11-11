@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 import jsonschema
@@ -951,3 +954,181 @@ def test_validate_warns_by_code_when_the_spec_sets_no_comfy_version(workspace: P
     jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
     assert pretty.exit_code == 0, pretty.output
     assert "sets no ComfyUI version" in " ".join(pretty.output.split())
+
+
+_SHA_A = "a" * 64
+_SHA_B = "b" * 64
+#: What each link's host states on its redirect, as Hugging Face does; a link
+#: missing here does not answer.
+_STATED = {
+    "https://huggingface.co/org/repo/resolve/main/match.safetensors": f'"{_SHA_A}"',
+    "https://huggingface.co/org/repo/resolve/main/differs.safetensors": f'"{_SHA_B}"',
+}
+
+
+def _head(sent: list[tuple[str, str]]):
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append((request.get_method(), request.full_url))
+        stated = _STATED.get(request.full_url)
+        if stated is None:
+            raise urllib.error.URLError("unreachable")
+        headers = Message()
+        headers["X-Linked-Etag"] = stated
+        raise urllib.error.HTTPError(request.full_url, 302, "redirect refused", headers, io.BytesIO())
+
+    return no_redirect_urlopen
+
+
+def test_remote_checks_a_declared_link_against_its_sha256_before_the_filename(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    base = "https://huggingface.co/org/repo/resolve/main"
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"{base}/{name}", "sha256": _SHA_A}
+        for name in ("match.safetensors", "differs.safetensors", "silent.safetensors")
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    by_file = {lookup["filename"]: lookup for lookup in data["model_lookups"]}
+    assert by_file["match.safetensors"]["state"] == "declared_ok"
+    assert by_file["differs.safetensors"]["state"] == "declared_mismatch"
+    assert by_file["differs.safetensors"]["sourceSha256"] == _SHA_B
+    assert by_file["silent.safetensors"]["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["silent.safetensors"]}}]
+    assert {method for method, _ in sent} == {"HEAD"}
+    assert len(sent) == 3
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+
+
+def test_remote_takes_no_verdict_from_a_plain_etag_that_looks_like_a_sha256(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a host whose plain ETag is 64 hex characters (an opaque CDN token or
+    # a Xet root), not the file's sha256, and differs from the declared one
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    message = Message()
+    message["ETag"] = f'"{_SHA_B}"'
+
+    class Response:
+        headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", lambda request, *, timeout: Response())
+    uri = "https://cdn.example.com/org/repo/model.safetensors"
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "filename": "model.safetensors", "sourceUri": uri, "sha256": _SHA_A}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no declared verdict; the filename lookup answers, as before
+    assert result.exit_code == 0, result.stderr
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["model.safetensors"]}}]
+
+
+def test_remote_never_sends_a_declared_link_that_is_not_https(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: a source: local model keeps its sourceUri on the wire (no blobId), and
+    # the link rules skip a local entry, so a plain http link with a credential in
+    # its query reaches the hash probe
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    uri = "http://civitai.example/api/download/models/1?token=secret"
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link; the filename lookup answers
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("http://huggingface.co/org/repo/resolve/main/x.safetensors?token=secret", id="http"),
+        pytest.param("HTTP://huggingface.co/org/repo/resolve/main/x.safetensors", id="http-upper"),
+        pytest.param("ftp://files.example/x.safetensors", id="ftp"),
+        pytest.param("file:///etc/passwd", id="file"),
+        pytest.param("huggingface.co/org/repo/x.safetensors", id="no-scheme"),
+    ],
+)
+def test_a_link_that_is_not_https_is_never_opened(monkeypatch: pytest.MonkeyPatch, uri: str) -> None:
+    # Given
+    sent: list[str] = []
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append(request.full_url)
+        raise AssertionError("opened a non-https link")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256(uri) is None
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        pytest.param(302, {"X-Linked-Etag": f'"{_SHA_A.upper()}"'}, _SHA_A, id="hugging-face-redirect"),
+        pytest.param(200, {"ETag": f'W/"{_SHA_B}"'}, None, id="plain-etag-looks-like-sha256"),
+        pytest.param(200, {"ETag": '"d41d8cd98f00b204e9800998ecf8427e"'}, None, id="md5-etag"),
+        pytest.param(404, {"X-Linked-Etag": f'"{_SHA_A}"'}, None, id="not-found"),
+    ],
+)
+def test_a_links_stated_hash_is_read_only_when_it_is_a_sha256(
+    monkeypatch: pytest.MonkeyPatch, status: int, headers: dict[str, str], expected: str | None
+) -> None:
+    # Given
+    message = Message()
+    for name, value in headers.items():
+        message[name] = value
+
+    class Response:
+        def __init__(self) -> None:
+            self.headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        assert request.get_method() == "HEAD"
+        if status == 200:
+            return Response()
+        raise urllib.error.HTTPError(request.full_url, status, "refused", message, io.BytesIO())
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256("https://huggingface.co/org/repo/resolve/main/x.safetensors") == expected
