@@ -83,7 +83,8 @@ history.
   on `validate` and `push`.
 - `comfy build status` on a spec that was never pushed reports the local half
   and `remote.state: "not_pushed"` instead of asking for `--id` or offering a
-  Build picker. `remote.state` is `"pushed"` otherwise. `build.id` is left out
+  Build picker. It needs no sign-in then, since it reads nothing from the
+  builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
   when no Build is named, so it stays a string wherever it appears.
 
 ## [1.26.0] - 2026-11-11

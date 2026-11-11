@@ -2662,10 +2662,6 @@ def status_cmd(
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
-    # Auth first, before the spec is even read: a signed-out `status` could still
-    # compute local drift, and reporting only that half silently answers the less
-    # interesting question (build design lines 327-329, 346-349).
-    client = _builder_client(renderer, builder_url)
     try:
         paths = resolve_build_paths(
             path,
@@ -2683,6 +2679,11 @@ def status_cmd(
     name = _optional_str(spec.get("name"))
     hint = "run `comfy build push` to create the Build" if target_id is None else None
     if target_id is not None:
+        # Signed in only once a Build is named, and before the drift half: a
+        # signed-out `status` could still compute local drift, and reporting only
+        # that half would silently answer the less interesting question. A spec
+        # never pushed reads nothing from the builder, so it needs no sign-in.
+        client = _builder_client(renderer, builder_url)
         remote = _builder_call(renderer, lambda: client.get_build(target_id))
         # The wire schema carries `updatedAt`, never a `revision` field, and
         # `updatedAt` is exactly the token `syncedRevision` mirrors — so the report

@@ -8,7 +8,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 from build_pull_support import PullBuilder, serve
-from build_push_support import envelope, invoke_push, make_workspace
+from build_push_support import envelope, invoke_push, make_workspace, write_spec
 from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
@@ -102,7 +102,12 @@ def refuse(name: str):
     return refusing
 
 
-def test_signed_out_status_reports_no_partial_local_block(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_signed_out_status_of_a_pushed_spec_reports_no_partial_local_block(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A spec with an id needs the builder read, so signed out it refuses before
+    # the local half: reporting only that half would answer the wrong question.
+    write_spec(workspace, build_id="build-pushed", revision="revision-1")
     monkeypatch.setattr(build, "_scan_install", refuse("_scan_install"))
     monkeypatch.setattr("comfy_cli.builder_api.request_json", refuse("request_json"))
 
@@ -220,6 +225,36 @@ def test_status_before_the_first_push_reports_the_local_half_and_not_pushed(
     pushed = {**payload, "build": {"name": "Status"}, "remote": {"state": "pushed", "revision": "r", "behind": False}}
     assert not validator.is_valid(pushed)
     assert client.calls == []
+
+
+def test_signed_out_status_before_the_first_push_reports_the_local_half_and_not_pushed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A never-pushed spec has no Build to read, so it needs no sign-in: signed
+    # out, status answers exactly as it does signed in.
+    real_builder_client = build._builder_client
+    install_client(monkeypatch, PullBuilder())
+    initialized = invoke_init(workspace)
+    assert initialized.exit_code == 0, initialized.stderr
+    monkeypatch.setattr(build, "_builder_client", real_builder_client)
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", refuse("request_json"))
+
+    result = invoke_status(workspace, token=None)
+
+    assert result.exit_code == 0, result.output
+    payload = data(result)
+    assert payload["build"] == {"name": "Status"}
+    assert payload["remote"] == {"state": "not_pushed", "revision": None, "behind": False}
+    assert payload["local"]["scanned"] is True
+    assert payload["local"]["drift"]["models"] == {"added": 0, "removed": 0, "changed": 0}
+    assert "comfy build push" in payload["hint"]
+
+    pretty = invoke_status(workspace, token=None, agentic=False)
+
+    assert pretty.exit_code == 0, pretty.output
+    assert "remote: not pushed" in pretty.stdout
+    assert "local:  " in pretty.stdout
+    assert "build_not_signed_in" not in pretty.output
 
 
 def test_tty_status_before_the_first_push_offers_no_build_picker(

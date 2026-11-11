@@ -43,7 +43,7 @@ hash, so the next cut is genuinely a new release.
   platform holds a copy, and `comfy build status` says how far apart they are.
   Before the first push it says `remote: not pushed` (`remote.state:
   "not_pushed"` under `--json`, with no `build.id`) and still compares the spec
-  with the install.
+  with the install, signed in or not.
 - **A cut names its targets explicitly.** `--target <os>/<gpu>` is repeatable
   and required, so nothing is built that nobody asked for. Read
   `comfy build refs build-targets` rather than promising an artifact from memory.
