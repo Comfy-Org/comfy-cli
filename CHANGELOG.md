@@ -30,12 +30,6 @@ history.
   `build_comfy_version_missing` when the Build it names has none either, before
   the cut, and the hint names `comfy build update --comfy-version <ref>`. With
   `--id` the spec is not read.
-- `comfy build validate --remote` asks a model's own `sourceUri` for its hash
-  when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
-  HEAD that does not follow redirects). Only an https link is asked, so a
-  credential in its query never goes out without TLS. The lookup reads `declared_ok` or
-  `declared_mismatch`, with the link's hash in `sourceSha256`. A link that
-  states no hash or does not answer gets the filename lookup as before.
 
 ### Changed
 
@@ -46,24 +40,11 @@ history.
 
 ### Fixed
 
-- `comfy build status` on a spec that was never pushed reports the local half
-  and `remote.state: "not_pushed"` instead of asking for `--id` or offering a
-  Build picker. `remote.state`
-  is `"pushed"` otherwise. `build.id` is left out when no Build is named, so it
-  stays a string wherever it appears.
 - `comfy build update --comfy-version <ref>` on a spec with no install beside
   it (imported from a workflow or a snapshot) sets the version without a rescan
   (`source: "spec"`). A rescan that cannot run names that command and
   `update --from-workflow` in its hint, and every `update` envelope, errors
   included, says `command: "build update"`.
-- A `build_spec_invalid` for a `localPath` that does not resolve names
-  `--models-dir` and `--custom-nodes-dir`, which a spec written apart from its
-  install (`init -o`) needs on `validate` and `push`.
-- A bare `comfy deploy ls` with no spec in the current folder lists the
-  workspace, as `--workspace` does, instead of failing with
-  `build_spec_not_found`. A PATH that holds no spec still fails. Under `--json`
-  the payload says what was listed: `scope: "build"` with the `buildId`, or
-  `scope: "workspace"`.
 
 ## [1.26.0] - 2026-11-11
 

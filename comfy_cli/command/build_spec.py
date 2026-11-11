@@ -51,21 +51,11 @@ class BuildSpecError(Exception):
 class BuildSpecInvalidError(BuildSpecError):
     code = "build_spec_invalid"
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        path: Path | None = None,
-        issues: Sequence[Mapping[str, str]] = (),
-        hint: str | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, path: Path | None = None, issues: Sequence[Mapping[str, str]] = ()) -> None:
         super().__init__(message, path=path)
         # One ``{field, reason}`` per problem when the check found several, so a
         # machine caller gets them apart rather than parsing the message.
         self.issues = [dict(issue) for issue in issues]
-        # The next step when it depends on the problem; None falls back to the
-        # code's registered hint.
-        self.hint = hint
 
 
 class BuildSpecWriteError(BuildSpecError):

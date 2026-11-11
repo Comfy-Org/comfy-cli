@@ -65,9 +65,6 @@ class ModelLookupState(str, Enum):
     NONE_FOUND = "none_found"
     LOOKUP_ERROR = "lookup_error"
     NOT_LOOKUPABLE = "not_lookupable"
-    # The entry's own sourceUri answered with a sha256, which matched or did not.
-    DECLARED_OK = "declared_ok"
-    DECLARED_MISMATCH = "declared_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +74,6 @@ class ModelLookup:
     state: ModelLookupState
     candidates: tuple[JsonObject, ...] = ()
     error: str | None = None
-    source_sha256: str | None = None
 
     def as_json(self) -> JsonObject:
         result: JsonObject = {
@@ -89,19 +85,11 @@ class ModelLookup:
             result["candidates"] = [deepcopy(candidate) for candidate in self.candidates]
         if self.error is not None:
             result["error"] = self.error
-        if self.source_sha256 is not None:
-            result["sourceSha256"] = self.source_sha256
         return result
 
 
 class ModelResolver(Protocol):
     def __call__(self, filenames: list[str]) -> list[JsonObject]: ...
-
-
-class SourceHasher(Protocol):
-    """The sha256 a model link's host states for the file, or None when it states none."""
-
-    def __call__(self, uri: str) -> str | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,13 +204,7 @@ def _validate_local_path(entry: JsonObject, context: LocalPathContext) -> None:
         case unreachable:
             assert_never(unreachable)
     if not correct_kind:
-        # Most often the spec was written apart from its install (`init -o`), so
-        # every localPath is read under the spec's folder instead.
-        raise BuildSpecInvalidError(
-            f"{context.location}.localPath must resolve to a {expected}: {local_path!r}",
-            hint=f"localPath is read under {context.root}. If the install is elsewhere, pass "
-            "`--models-dir <install>/models` and `--custom-nodes-dir <install>/custom_nodes`",
-        )
+        raise BuildSpecInvalidError(f"{context.location}.localPath must resolve to a {expected}: {local_path!r}")
 
 
 def _validate_authoring_definition(definition: JsonObject, paths: BuildPaths) -> None:
@@ -559,40 +541,12 @@ def _lookup_result(index: int, filename: str, response: JsonValue | None) -> Mod
     return ModelLookup(index, filename, state, candidates=tuple(parsed))
 
 
-def _declared_lookup(index: int, model: JsonObject, source_hash: SourceHasher | None) -> ModelLookup | None:
-    """Check a model that names its own ``sourceUri`` and ``sha256`` against the hash
-    that link's host states. None when the host states none, so the filename lookup
-    answers instead."""
-    uri, sha256 = model.get("sourceUri"), model.get("sha256")
-    if source_hash is None or not isinstance(uri, str) or not isinstance(sha256, str) or not _go_trim(sha256):
-        return None
-    stated = source_hash(_go_trim(uri))
-    if stated is None:
-        return None
-    filename = model.get("filename")
-    state = ModelLookupState.DECLARED_OK if stated == _go_trim(sha256).lower() else ModelLookupState.DECLARED_MISMATCH
-    return ModelLookup(
-        index, filename if isinstance(filename, str) and filename.strip() else None, state, source_sha256=stated
-    )
-
-
-def lookup_public_model_sources(
-    definition: JsonObject, resolver: ModelResolver, source_hash: SourceHasher | None = None
-) -> list[ModelLookup]:
-    """Resolve lookupable model filenames in 32-item batches and restore the order of
-    *definition*'s models (the canonical, sorted order, not the spec file's).
-
-    With *source_hash*, a model that declares its ``sourceUri`` and ``sha256`` is
-    checked against that link first; the filename lookup answers only when the link
-    states no hash or cannot be reached."""
+def lookup_public_model_sources(definition: JsonObject, resolver: ModelResolver) -> list[ModelLookup]:
+    """Resolve lookupable model filenames in 32-item batches and restore spec order."""
     models = _entries(definition, "models")
     lookupable: list[tuple[int, str]] = []
     results: dict[int, ModelLookup] = {}
     for index, model in enumerate(models):
-        declared = _declared_lookup(index, model, source_hash)
-        if declared is not None:
-            results[index] = declared
-            continue
         filename = model.get("filename")
         if isinstance(filename, str) and filename.strip():
             lookupable.append((index, filename))

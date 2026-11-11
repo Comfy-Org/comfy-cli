@@ -1685,7 +1685,7 @@ def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path)
     details: dict = {"path": str(spec_file)}
     if error.issues and not renderer.is_pretty():
         details["invalid"] = error.issues
-    renderer.error(code=error.code, message=str(error), hint=error.hint, details=details)
+    renderer.error(code=error.code, message=str(error), details=details)
     raise typer.Exit(code=1) from error
 
 
@@ -2585,20 +2585,14 @@ def _optional_str(value: object) -> str | None:
 def _render_status(renderer, payload: dict, drift: DefinitionDiff | None) -> None:
     build = payload["build"]
     remote = payload["remote"]
-    pushed = remote["state"] == "pushed"
-    renderer.print(f"build:  {build.get('id') or '—'}" + (f"  {build['name']}" if build["name"] else ""))
+    renderer.print(f"build:  {build['id']}" + (f"  {build['name']}" if build["name"] else ""))
     renderer.print(f"spec:   {payload['spec']['path']}")
-    if pushed:
-        renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
-    else:
-        renderer.print("remote: not pushed")
+    renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
     # "not compared" rather than a dash: silence here would read as "no drift".
     local = summarize_definition_diff(drift) if drift is not None else f"not compared ({payload['local']['reason']})"
     renderer.print(f"local:  {local}")
-    if payload["hint"] and pushed:
+    if payload["hint"]:
         renderer.warn("the remote Build has moved since this spec was synchronized", hint=payload["hint"])
-    elif payload["hint"]:
-        renderer.info(payload["hint"])
 
 
 @app.command("status", help="Report how far the local spec is from the remote Build and from the install.")
@@ -2654,25 +2648,19 @@ def status_cmd(
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
-    # A spec with no id was never pushed: there is no Build to compare it with,
-    # so the remote half says so and the local half still runs. No picker: any
-    # Build it offered would be another spec's.
-    target_id = _optional_str(build_id) or _optional_str(spec.get("id"))
-    remote_payload: dict = {"state": "not_pushed", "revision": None, "behind": False}
-    name = _optional_str(spec.get("name"))
-    hint = "run `comfy build push` to create the Build" if target_id is None else None
-    if target_id is not None:
-        remote = _builder_call(renderer, lambda: client.get_build(target_id))
-        # The wire schema carries `updatedAt`, never a `revision` field, and
-        # `updatedAt` is exactly the token `syncedRevision` mirrors — so the report
-        # renders it under `remote.revision` but the comparison reads `updatedAt`.
-        revision = _optional_str(remote.get("updatedAt"))
-        behind = _optional_str(spec.get("syncedRevision")) != revision
-        remote_payload = {"state": "pushed", "revision": revision, "behind": behind}
-        name = _optional_str(remote.get("name"))
-        # In the payload rather than only on stderr: `emit` has no hint field,
-        # and the agent reading this envelope is who needs the next step.
-        hint = "run `comfy build pull` to take the remote changes" if behind else None
+    target_id = require_option(
+        "--id",
+        build_id or spec.get("id"),
+        prompt_fn=lambda: _prompt_build_id(renderer, client),
+        error_code="build_id_unknown",
+        ctx=ctx,
+    )
+    remote = _builder_call(renderer, lambda: client.get_build(target_id))
+    # The wire schema carries `updatedAt`, never a `revision` field, and
+    # `updatedAt` is exactly the token `syncedRevision` mirrors — so the report
+    # renders it under `remote.revision` but the comparison reads `updatedAt`.
+    revision = _optional_str(remote.get("updatedAt"))
+    behind = _optional_str(spec.get("syncedRevision")) != revision
 
     stored = spec["definition"]
     # Independent halves: only the drift one needs an install, so a hand-authored
@@ -2682,12 +2670,13 @@ def status_cmd(
     )
 
     payload = {
-        # No `id` key before the first push: `build.id` is a string wherever it appears.
-        "build": {"name": name} if target_id is None else {"id": target_id, "name": name},
+        "build": {"id": target_id, "name": _optional_str(remote.get("name"))},
         "spec": {"path": str(paths.spec_file), "syncedRevision": _optional_str(spec.get("syncedRevision"))},
-        "remote": remote_payload,
+        "remote": {"revision": revision, "behind": behind},
         "local": local,
-        "hint": hint,
+        # In the payload rather than only on stderr: `emit` has no hint field,
+        # and the agent reading this envelope is who needs the next step.
+        "hint": "run `comfy build pull` to take the remote changes" if behind else None,
     }
     if renderer.is_pretty():
         _render_status(renderer, payload, drift)
@@ -3824,11 +3813,7 @@ def validate_cmd(
     ] = None,
     remote: Annotated[
         bool,
-        typer.Option(
-            "--remote",
-            help="Also look up public model-source candidates, and check each model's sourceUri against its "
-            "sha256 where the link states one. Requires sign-in.",
-        ),
+        typer.Option("--remote", help="Also look up public model-source candidates. Requires sign-in."),
     ] = False,
     models_dir: Annotated[
         str | None,
@@ -3867,10 +3852,7 @@ def validate_cmd(
     if _has_models(spec):
         result["folder_case_checked"] = directories is not None
     if client is not None:
-        lookups = _builder_call(
-            renderer,
-            lambda: lookup_public_model_sources(wire_definition, client.resolve_models, _source_sha256),
-        )
+        lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
@@ -3882,52 +3864,8 @@ def validate_cmd(
         for lookup in result["model_lookups"]:
             label = lookup["filename"] or lookup["entry"]
             detail = f": {lookup['error']}" if lookup.get("error") else ""
-            if lookup["state"] == "declared_mismatch":
-                renderer.warn(f"declared_mismatch  {label}: its sourceUri states sha256 {lookup['sourceSha256']}")
-                continue
             renderer.info(f"{lookup['state']}  {label}{detail}")
     renderer.emit(result, command="build validate")
-
-
-#: How long one model link may take to answer the HEAD that reads its hash.
-_SOURCE_HEAD_TIMEOUT = 10.0
-
-
-def _source_sha256(uri: str) -> str | None:
-    """The sha256 a model link's host states for its file, or None.
-
-    One HEAD, redirects not followed: Hugging Face states the hash of an LFS file
-    as ``X-Linked-Etag`` on the redirect to its CDN, and a link may carry a
-    credential (a Civitai ``?token=``) that must not travel on to another host.
-    Only ``X-Linked-Etag`` counts, as in the builder's own verifier: a plain
-    ``ETag`` can be an md5, an opaque CDN token or a Xet root even when it is 64
-    hex characters, so it reads as no hash. A link that is not https is never
-    opened, so a credential in it does not travel without TLS: a ``source: local``
-    entry keeps its link on the wire and the link rules skip it. Any failure is
-    None: the filename lookup answers."""
-    import urllib.request
-
-    from comfy_cli.http import no_redirect_urlopen
-
-    try:
-        parts = urlsplit(uri)
-    except ValueError:
-        return None
-    if parts.scheme.lower() != "https" or not parts.hostname:
-        return None
-    try:
-        with no_redirect_urlopen(urllib.request.Request(uri, method="HEAD"), timeout=_SOURCE_HEAD_TIMEOUT) as response:
-            headers = response.headers
-    except urllib.error.HTTPError as error:
-        # The redirect the opener refused, which is where the hash is stated.
-        headers = error.headers if 300 <= error.code < 400 else None
-        error.close()
-    except (OSError, ValueError, http.client.HTTPException):
-        return None
-    if headers is None:
-        return None
-    value = (headers.get("X-Linked-Etag") or "").strip().removeprefix("W/").strip('"').lower()
-    return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
 
 
 @app.command("delete", help="Delete a build (soft-delete).")

@@ -11,26 +11,6 @@
     "hint"
   ],
   "additionalProperties": false,
-  "if": {
-    "properties": {
-      "remote": {
-        "properties": {
-          "state": {
-            "const": "not_pushed"
-          }
-        }
-      }
-    }
-  },
-  "else": {
-    "properties": {
-      "build": {
-        "required": [
-          "id"
-        ]
-      }
-    }
-  },
   "$defs": {
     "counts": {
       "type": "object",
@@ -60,14 +40,14 @@
     "build": {
       "type": "object",
       "required": [
+        "id",
         "name"
       ],
       "additionalProperties": false,
       "properties": {
         "id": {
           "type": "string",
-          "minLength": 1,
-          "description": "The Build compared against: `--id`, else the spec's id. Present whenever `remote.state` is `pushed`; absent when neither names one, so the spec was never pushed (`remote.state` is `not_pushed`)."
+          "minLength": 1
         },
         "name": {
           "type": [
@@ -99,19 +79,11 @@
     "remote": {
       "type": "object",
       "required": [
-        "state",
         "revision",
         "behind"
       ],
       "additionalProperties": false,
       "properties": {
-        "state": {
-          "enum": [
-            "pushed",
-            "not_pushed"
-          ],
-          "description": "`not_pushed` when no Build id was found: nothing was read from the builder, `revision` is null, `behind` is false and `hint` names `comfy build push`. The local half is still reported."
-        },
         "revision": {
           "type": [
             "string",

@@ -1517,12 +1517,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "with no file extension and no filename, a malformed sha256), the message lists every one and "
         "`details.invalid` carries each as `{field, reason, model}`, `model` naming the entry. `push` checks "
         "the link a local model keeps after it hashes the model's file, so a bad kept link is reported once "
-        "the other problems are fixed. A model or node `localPath` that does not resolve is read under the "
-        "spec's folder unless `--models-dir` and `--custom-nodes-dir` name the install, so a spec written apart "
-        "from its install (`init -o`) needs both.",
-        "fix the named field; when a localPath does not resolve and the install is elsewhere, pass "
-        "`--models-dir <install>/models` and `--custom-nodes-dir <install>/custom_nodes`; or regenerate the "
-        "file with `comfy build init`",
+        "the other problems are fixed.",
+        "fix the named field, or regenerate the file with `comfy build init`",
     ),
     ErrorCode(
         "build_comfy_version_missing",

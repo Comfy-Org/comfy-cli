@@ -417,9 +417,7 @@ The rest are narrower:
   there; `up --release` takes a release id. This is how you find out *why*
   something reached `failed`, which `status` only reports as a state.
 - **`ls`** — live deployments of this Build, each row with its `releaseVersion`.
-  Run with no PATH where there is no spec, it lists every Build's, as `--workspace`
-  does; `--json` says which in `data.scope` (`build`, with `data.buildId`, or
-  `workspace`). `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
+  `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
   keep only the `releaseId`), `--status` filters server-side, `--limit` defaults
   to 20 and caps at 100. Reach for `--workspace` when hunting for compute nobody
   accounted for.
