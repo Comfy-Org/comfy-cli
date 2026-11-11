@@ -522,3 +522,27 @@ def test_the_payload_says_which_scope_was_listed(
     assert {key: payload[key] for key in ("scope", "buildId") if key in payload} == expected
     schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
     jsonschema.Draft202012Validator(schema).validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "valid"),
+    [
+        pytest.param({"deployments": []}, True, id="earlier-cli-without-scope"),
+        pytest.param({"scope": "workspace", "deployments": []}, True, id="workspace"),
+        pytest.param({"scope": "build", "buildId": "build-1", "deployments": []}, True, id="build"),
+        pytest.param({"scope": "build", "deployments": []}, False, id="build-without-build-id"),
+        pytest.param(
+            {"scope": "workspace", "buildId": "build-1", "deployments": []}, False, id="workspace-with-build-id"
+        ),
+    ],
+)
+def test_the_schema_still_accepts_a_payload_from_before_scope(payload: JsonObject, valid: bool) -> None:
+    # Given: scope is an additive optional field (docs/json-output.md "Stability"),
+    # so an earlier CLI's payload without it must still validate under the same id
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+
+    # When
+    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(payload))
+
+    # Then
+    assert (not errors) == valid, errors
