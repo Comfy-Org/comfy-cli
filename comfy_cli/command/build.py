@@ -105,6 +105,7 @@ from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.registry.api import sanitize_error_body
 from comfy_cli.utils import parse_rfc3339
 
@@ -2601,15 +2602,20 @@ def _render_status(renderer, payload: dict, drift: DefinitionDiff | None) -> Non
     build = payload["build"]
     remote = payload["remote"]
     pushed = remote["state"] == "pushed"
-    renderer.print(f"build:  {build.get('id') or '—'}" + (f"  {build['name']}" if build["name"] else ""))
-    renderer.print(f"spec:   {payload['spec']['path']}")
+    # `renderer.print` parses Rich markup, and every value below is data: a spec
+    # name, a path, a server revision or an error message. Escaped, a name like
+    # `Studio[/]` prints as written instead of raising MarkupError.
+    build_id = sanitize_markup(build.get("id") or "—")
+    renderer.print(f"build:  {build_id}" + (f"  {sanitize_markup(build['name'])}" if build["name"] else ""))
+    renderer.print(f"spec:   {sanitize_markup(payload['spec']['path'])}")
     if pushed:
-        renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
+        revision = sanitize_markup(remote["revision"] or "—")
+        renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {revision})")
     else:
         renderer.print("remote: not pushed")
     # "not compared" rather than a dash: silence here would read as "no drift".
     local = summarize_definition_diff(drift) if drift is not None else f"not compared ({payload['local']['reason']})"
-    renderer.print(f"local:  {local}")
+    renderer.print(f"local:  {sanitize_markup(local)}")
     if payload["hint"] and pushed:
         renderer.warn("the remote Build has moved since this spec was synchronized", hint=payload["hint"])
     elif payload["hint"]:

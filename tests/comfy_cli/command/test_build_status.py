@@ -55,8 +55,8 @@ def _invoke(root: Path, args: list[str], *, token: str | None, agentic: bool):
     )
 
 
-def invoke_init(root: Path):
-    args = ["build", "init", "--name", "Status", "--python", sys.executable, "--comfy-version", "0.3"]
+def invoke_init(root: Path, name: str = "Status"):
+    args = ["build", "init", "--name", name, "--python", sys.executable, "--comfy-version", "0.3"]
     return _invoke(root, args, token="tok_test", agentic=True)
 
 
@@ -236,6 +236,24 @@ def test_tty_status_before_the_first_push_offers_no_build_picker(
     result = invoke_status(workspace, agentic=False)
 
     assert result.exit_code == 0, result.output
+    assert "remote: not pushed" in result.stdout
+    assert client.calls == []
+
+
+def test_tty_status_before_the_first_push_prints_a_bracketed_name_literally(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Any string is a valid spec name, and before the first push the local one
+    # is what status prints: Rich must not read `[/]` as a closing tag.
+    client = PullBuilder()
+    install_client(monkeypatch, client)
+    initialized = invoke_init(workspace, name="Studio[/]")
+    assert initialized.exit_code == 0, initialized.stderr
+
+    result = invoke_status(workspace, "--no-scan", agentic=False)
+
+    assert result.exit_code == 0, result.output
+    assert "build:  —  Studio[/]" in result.stdout
     assert "remote: not pushed" in result.stdout
     assert client.calls == []
 
