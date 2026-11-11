@@ -39,7 +39,7 @@ argument you pass.
 | `deploy_unrelated_deployment` | `--deployment` names one outside this scope | Pick from `details.candidateIds` |
 | `deploy_missing_input` | A required option was omitted non-interactively | Pass everything in `details.missing` |
 | `deploy_compute_unavailable` | That GPU/region cannot provision now | Choose another pair from `comfy deploy refs compute` |
-| `deploy_quota_exceeded` | Workspace deployment or worker limit | Stop or scale down another deployment |
+| `deploy_quota_exceeded` | Workspace active-deployment limit, or the per-deployment worker limit; at the active limit `up` lists the slot holders in `details.activeDeployments` | Active limit: `comfy deploy stop --deployment <id>` on one the user names, read the limit with `comfy build quota`; worker limit: lower `--max` |
 | `deploy_payment_required` | No active subscription or credit | Billing problem; a retry will not fix it |
 | `deploy_conflict` | The deployment's state rejects the operation | Let it settle, re-read `status` |
 | `deploy_not_found` | No deployment with that id | `comfy deploy ls --workspace` |

@@ -10,6 +10,7 @@ from typing import Final
 import typer
 
 from comfy_cli.builder_api import BuilderAuthError
+from comfy_cli.command import build_quota
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import (
     BuilderReleaseClient,
@@ -213,6 +214,40 @@ def _deployments_made(deployments: Sequence[JsonObject], releases: Sequence[Json
     """Every deployment the Build has had, deleted ones included."""
     build_release_ids = {_required_string(release, "id") for release in releases}
     return sum(row.get("releaseId") in build_release_ids for row in deployments)
+
+
+#: The words comfy-deploy refuses a create with at its active-deployment cap,
+#: read only when the limit itself cannot be: the same 429 CONCURRENCY_LIMIT
+#: also refuses a create asking more workers than one deployment may have.
+_ACTIVE_CAP_WORDS: Final = "active deployment limit"
+
+
+def _name_active_deployments(
+    builder: BuilderReleaseClient, client: DeployUpClient, error: DeployAPIError, deployments: Sequence[JsonObject]
+) -> None:
+    """Add ``details.activeDeployments`` to a create refused at the workspace's active-deployment cap.
+
+    The cap is judged against the list the create was keyed from, read just
+    before it. Its caller runs it best effort, and ``error`` changes only at
+    the end, so a read that fails leaves the refusal as it was.
+    """
+    if error.status != 429 or (error.details or {}).get("server_code") != "CONCURRENCY_LIMIT":
+        return
+    active = build_quota.active_deployments(deployments)
+    limits = build_quota.best_effort(client.get_limits)
+    limit = limits.get("maxActiveDeployments") if isinstance(limits, dict) else None
+    if isinstance(limit, int) and not isinstance(limit, bool):
+        at_cap = len(active) >= limit
+    else:
+        at_cap = _ACTIVE_CAP_WORDS in str(error).lower()
+    if not at_cap or not active:
+        return
+    build_quota.label_builds(builder, active)
+    error.details = {**(error.details or {}), "activeDeployments": active}
+    error.hint = (
+        "stop one of `details.activeDeployments` with `comfy deploy stop --deployment <id>` to free a slot, "
+        "then retry; `comfy build quota` shows the limit"
+    )
 
 
 def _create_live_deployment(
@@ -698,7 +733,11 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         }
         estimate = _deploy_estimate(client, release_id, compute)
         made = _deployments_made(deployments, releases)
-        snapshot = _create_live_deployment(client, request, compute, deployments, made)
+        try:
+            snapshot = _create_live_deployment(client, request, compute, deployments, made)
+        except DeployAPIError as error:
+            build_quota.best_effort(lambda: _name_active_deployments(builder, client, error, deployments))
+            raise
         result = UpResult(
             snapshot,
             _release_summary(request.release),

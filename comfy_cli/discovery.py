@@ -39,6 +39,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build status": "build_status",
     "comfy build ls": "build_ls",
     "comfy build show": "build_show",
+    "comfy build quota": "build_quota",
     "comfy build release create": "build_release_create",
     "comfy build release ls": "build_release_ls",
     "comfy build release show": "build_release_show",

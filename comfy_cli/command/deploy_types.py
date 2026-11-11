@@ -44,6 +44,8 @@ class DeployUpClient(Protocol):
 
     def get_deployment_revisions(self, deployment_id: str) -> JsonObject: ...
 
+    def get_limits(self) -> JsonObject: ...
+
 
 @dataclass(frozen=True, slots=True)
 class UpRequest:

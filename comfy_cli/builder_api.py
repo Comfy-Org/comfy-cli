@@ -13,6 +13,8 @@ Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/workflows/resolve {workflow}           -> {definition, report, format}
   POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
   GET  /v1/releases/{id}                          -> {status, ...}
+  GET  /v1/release-labels?id=..                   -> {labels: [{releaseId, buildId, buildName, version}]}
+  GET  /v1/limits                                 -> {maxBuilds?, maxRunningBuilds, maxTotalReleases?}
 """
 
 from __future__ import annotations
@@ -341,6 +343,19 @@ class BuilderClient:
         ):
             builds.extend(page.get("builds", []))
         return builds
+
+    def release_labels(self, release_ids: list[str]) -> list[dict]:
+        """GET /v1/release-labels -> ``{releaseId, buildId, buildName, version}`` for
+        each id that is a live release of this workspace, any member's Build
+        included. At most 100 ids per call; an unknown id is left out, not refused."""
+        query = urllib.parse.urlencode([("id", release_id) for release_id in release_ids])
+        _, parsed = self._send(f"{self.target.url('release-labels')}?{query}", method="GET", max_bytes=_MAX_JSON)
+        return (parsed or {}).get("labels", []) if isinstance(parsed, dict) else []
+
+    def get_limits(self) -> dict:
+        """GET /v1/limits -> the build caps the workspace is held to. An absent cap
+        does not apply; the builder sends no used counts."""
+        return self._get(("limits",))
 
     def get_build(self, build_id: str) -> dict:
         """GET /v1/builds/{id} -> a build with its full definition."""

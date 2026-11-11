@@ -1606,9 +1606,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "each attaches `details.buildId` naming the Build the cut was for. No release was cut and retrying "
         "unchanged is refused again -- but only the cut was refused: under `comfy build push --release` the "
         "push already landed, so the build was created or updated, its blobs were stored, and its id was "
-        "written into the spec on disk before the refusal.",
-        "delete a release with `comfy build release delete`, or delete a whole build to give up every "
-        "release it holds, then cut again",
+        "written into the spec on disk before the refusal. Under `--json` `details.builds` lists each Build "
+        "the caller can see (`id`, `name`, `releases`, `newestReleaseAt`, and, when the deployments could be "
+        "read, `deployments` and `inUse`: how many undeleted deployments, stopped ones included, reference "
+        "its releases), and `details.buildsTruncated` is true when only the first 100 were read. A member "
+        "outside the enterprise plan sees only their own Builds while the limit counts every member's, so "
+        "the list can hold fewer releases than the limit. When those reads fail, `details` is as before.",
+        "see which Builds hold releases in `details.builds` or with `comfy build quota`; delete a release with "
+        "`comfy build release delete`, or delete a whole build to give up every release it holds, then cut again",
     ),
     ErrorCode(
         "build_limit",
@@ -1824,8 +1829,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_quota_exceeded",
-        "The workspace reached its active-deployment or concurrent-worker limit.",
-        "stop or scale down another deployment, or raise the workspace limit, then retry",
+        "The workspace reached its active-deployment limit, or the request asked one deployment for more "
+        "workers than the workspace's per-deployment worker limit allows. When `comfy deploy up` was refused "
+        "at the active-deployment limit, `details.activeDeployments` lists each deployment holding a slot "
+        "(`id`, `name`, `releaseId`, `buildId` where the builder names it, `status`, `createdAt`). Every "
+        "undeleted deployment not failed, stopped or stop_failed holds one.",
+        "at the active-deployment limit, `comfy deploy stop` one deployment to free a slot (`comfy build quota` "
+        "shows the limit); at the worker limit, lower `--max`; then retry",
     ),
     ErrorCode(
         "deploy_compute_unavailable",

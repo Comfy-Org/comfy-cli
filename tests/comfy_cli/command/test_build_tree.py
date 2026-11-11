@@ -96,6 +96,7 @@ def test_complete_visible_build_command_tree_is_exact() -> None:
         "ls",
         "pull",
         "push",
+        "quota",
         "refs",
         "release",
         "show",

@@ -77,6 +77,7 @@ _ROUTES: dict[tuple[str, str], tuple[int, JsonObject]] = {
     ("GET", "/v1/build-targets"): (200, {"targets": []}),
     ("GET", "/v1/model-directories"): (200, {"directories": []}),
     ("GET", "/v1/blobs"): (200, {"blobs": []}),
+    ("GET", "/v1/limits"): (200, {"maxRunningBuilds": 5, "maxTotalReleases": 10}),
 }
 
 

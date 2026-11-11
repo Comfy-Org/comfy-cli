@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_quota.json",
+  "title": "comfy build quota --json data payload",
+  "type": "object",
+  "required": ["releases", "activeDeployments", "builds", "note"],
+  "additionalProperties": true,
+  "$defs": {
+    "usage": {
+      "type": "object",
+      "required": ["used", "limit", "limitKnown"],
+      "additionalProperties": true,
+      "properties": {
+        "used": {"type": "integer", "minimum": 0},
+        "limit": {
+          "type": ["integer", "null"],
+          "description": "The workspace's cap, read from the service's /v1/limits. Null either when that read failed (limitKnown false) or when no cap of this kind applies (limitKnown true)."
+        },
+        "limitKnown": {"type": "boolean", "description": "False when the limits read failed, so the limit is unknown."}
+      }
+    }
+  },
+  "properties": {
+    "releases": {
+      "allOf": [{"$ref": "#/$defs/usage"}],
+      "description": "Releases held, summed over the Builds the caller can see, against maxTotalReleases. Outside the enterprise plan a member sees only their own Builds while the cap counts every member's, so used can read low.",
+      "properties": {
+        "truncated": {"type": "boolean", "description": "Present and true when more Builds are visible than the command reads releases for, so used counts only some of them."}
+      }
+    },
+    "activeDeployments": {
+      "allOf": [{"$ref": "#/$defs/usage"}],
+      "description": "The workspace's undeleted deployments in any status but failed, stopped and stop_failed, against maxActiveDeployments."
+    },
+    "builds": {
+      "allOf": [{"$ref": "#/$defs/usage"}],
+      "description": "Builds the caller can see, against maxBuilds; can read low the same way releases does."
+    },
+    "note": {"type": "string", "description": "Says which counts cover only the Builds the caller can see."}
+  }
+}

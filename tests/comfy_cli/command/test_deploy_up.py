@@ -1761,3 +1761,147 @@ def test_an_editor_edit_a_watch_read_confirms_is_a_change(tmp_path, monkeypatch)
     envelope = _json_envelope(result)
     assert envelope["ok"] is True
     assert envelope["changed"] is True
+
+
+_AT_ACTIVE_CAP = "workspace has reached its active deployment limit (2)"
+_OVER_WORKER_CAP = "computeConfig.max 30 is over this workspace's per-deployment worker limit of 20"
+
+
+class _RefusedDeploy(FakeDeploy):
+    """A comfy-deploy that answers every create 429 CONCURRENCY_LIMIT, as both of its caps do."""
+
+    def __init__(self, rows: list[JsonObject], message: str, limits: JsonObject | Exception) -> None:
+        super().__init__(rows)
+        self.message = message
+        self.limits = limits
+
+    def create_deployment(self, release_id: str, compute_config: JsonObject, **_: object) -> JsonObject:
+        raise DeployAPIError(
+            "deploy_quota_exceeded",
+            self.message,
+            status=429,
+            details={"operation": "create", "status": 429, "server_code": "CONCURRENCY_LIMIT"},
+        )
+
+    def get_limits(self) -> JsonObject:
+        if isinstance(self.limits, Exception):
+            raise self.limits
+        return self.limits
+
+
+class _LabellingBuilder(FakeBuilder):
+    def release_labels(self, release_ids: list[str]) -> list[JsonObject]:
+        labels = {"release-5": "build-1", "release-9": "build-2"}
+        return [{"releaseId": rid, "buildId": labels[rid], "buildName": "b", "version": 1} for rid in release_ids]
+
+
+def _slot_rows() -> list[JsonObject]:
+    return [
+        deployment("dep-1", status="ready"),
+        deployment("dep-2", release_id="release-9", status="provisioning"),
+        deployment("dep-3", status="stopped"),
+        deployment("dep-4", release_id="release-9", status="failed"),
+        deployment("dep-6", status="stop_failed"),
+        deployment("dep-7", status="ready", deleted_at="2026-08-23T13:00:00Z"),
+    ]
+
+
+def _refused_create(builder: FakeBuilder, client: FakeDeploy) -> DeployAPIError:
+    module = _deploy()
+    with pytest.raises(DeployAPIError) as caught:
+        module.reconcile_up(builder, client, _request(module, create=True))
+    return caught.value
+
+
+def test_a_create_refused_at_the_active_cap_names_each_deployment_holding_a_slot() -> None:
+    # Given two deployments holding slots, at a limit of two, beside four that hold none
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP, {"maxActiveDeployments": 2, "maxModelStorageGb": 100})
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then the slot holders are listed with their Builds, and the stopped, failed and deleted are not
+    assert error.code == "deploy_quota_exceeded"
+    assert [(row["id"], row["status"], row["buildId"]) for row in error.details["activeDeployments"]] == [
+        ("dep-1", "ready", "build-1"),
+        ("dep-2", "provisioning", "build-2"),
+    ]
+    assert all("createdAt" in row for row in error.details["activeDeployments"])
+    assert error.details["server_code"] == "CONCURRENCY_LIMIT"
+    assert "comfy deploy stop" in error.hint
+
+
+def test_a_create_over_the_worker_cap_names_no_deployment() -> None:
+    """comfy-deploy answers the per-deployment worker cap with the same 429, so
+    the list goes only where the active count has reached the limit."""
+    # Given two active deployments, under a limit of five
+    client = _RefusedDeploy(_slot_rows(), _OVER_WORKER_CAP, {"maxActiveDeployments": 5, "maxModelStorageGb": 100})
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then
+    assert "activeDeployments" not in error.details
+    assert error.hint is None
+
+
+@pytest.mark.parametrize(
+    ("message", "listed"),
+    [pytest.param(_AT_ACTIVE_CAP, True, id="active-cap-words"), pytest.param(_OVER_WORKER_CAP, False, id="worker")],
+)
+def test_without_the_limit_the_refusal_wording_decides(message: str, listed: bool) -> None:
+    # Given a limits read that fails
+    client = _RefusedDeploy(_slot_rows(), message, DeployAPIError("deploy_server_error", "down", status=503))
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then
+    assert ("activeDeployments" in error.details) is listed
+
+
+def test_a_failed_follow_up_read_leaves_the_quota_envelope_as_it_was(tmp_path, monkeypatch) -> None:
+    # Given a refusal at the active cap whose Build lookup blows up
+    module = _deploy()
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP, {"maxActiveDeployments": 2, "maxModelStorageGb": 100})
+
+    def broken(builder, active):
+        raise RuntimeError("labels broke")
+
+    monkeypatch.setattr("comfy_cli.command.build_quota.label_builds", broken)
+    monkeypatch.setattr(module, "_command_clients", lambda: (_LabellingBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--create", "--gpu", "l4", "--region", "US-MO-2"],
+    )
+
+    # Then the envelope is today's: its code, its details and the registered hint
+    from comfy_cli import error_codes
+
+    error = _json_envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_quota_exceeded"
+    assert error["details"] == {"operation": "create", "status": 429, "server_code": "CONCURRENCY_LIMIT"}
+    assert error["hint"] == error_codes.get("deploy_quota_exceeded").hint
+
+
+def test_the_active_cap_envelope_carries_the_list_and_names_deploy_stop(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP, {"maxActiveDeployments": 2, "maxModelStorageGb": 100})
+    monkeypatch.setattr(module, "_command_clients", lambda: (_LabellingBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--create", "--gpu", "l4", "--region", "US-MO-2"],
+    )
+
+    # Then
+    error = _json_envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_quota_exceeded"
+    assert [row["id"] for row in error["details"]["activeDeployments"]] == ["dep-1", "dep-2"]
+    assert "comfy deploy stop" in error["hint"]
