@@ -545,7 +545,9 @@ def test_init_from_a_snapshot_whose_packs_were_all_skipped_says_why_not_to_retak
         {"type": "file", "dirName": "loose-pack"},
     ]
     snapshot.write_text(json.dumps({**_SNAPSHOT, "customNodes": nodes}), encoding="utf-8")
-    monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
+    report = {"unresolvedNodes": ["hand-rolled", "loose-pack"]}
+    empty = {"definition": {"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}, "report": report}
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", lambda *args, **kwargs: (200, empty))
 
     # When
     result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
@@ -563,6 +565,61 @@ def test_init_from_a_snapshot_whose_packs_were_all_skipped_says_why_not_to_retak
     assert "newer" not in message
     assert "newer" not in _flat(result.stderr)
     jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
+
+
+def _pending_import(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    """The importer's answer when its one Registry pin is not servable yet: it
+    drops the pin, so the pack also lands among the sourceless ones."""
+    report = {"registryPending": ["comfyui-essentials"], "unresolvedNodes": ["comfyui-essentials"]}
+    return 200, {"definition": {"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}, "report": report}
+
+
+def test_init_from_a_snapshot_whose_registry_pack_is_pending_names_it_as_waiting_on_the_registry(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a current snapshot whose only enabled pack is a Registry pin the
+    # Registry has not finished publishing, which the importer reports as pending
+    snapshot = tmp_path / "pending-snapshot.json"
+    snapshot.write_text(json.dumps(_SNAPSHOT), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _pending_import)
+
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    (warning,) = data["warnings"]
+    assert warning["code"] == "build_snapshot_empty"
+    message = _flat(warning["message"])
+    assert "lists 1 custom node pack" in message
+    assert "1 waiting on the Comfy Registry to finish publishing (comfyui-essentials)" in message
+    assert "not from a supported source" not in message
+    assert "disabled" not in message
+    assert "newer" not in message
+    assert "newer" not in _flat(result.stderr)
+    jsonschema.Draft202012Validator(json.loads((SCHEMAS_DIR / "build_init.json").read_text())).validate(data)
+
+
+def test_init_from_a_snapshot_whose_packs_the_report_gives_no_cause_for_does_not_guess_one(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: an enabled pack the importer left out and its report says nothing about
+    snapshot = tmp_path / "unexplained-snapshot.json"
+    snapshot.write_text(json.dumps(_SNAPSHOT), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _empty_import)
+
+    # When
+    result = _run("init", install, "--name", "Foo", "--from-snapshot", str(snapshot))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    (warning,) = _envelope(result)["data"]["warnings"]
+    message = _flat(warning["message"])
+    assert "1 left out with no reason in the importer's report" in message
+    assert "not from a supported source" not in message
+    assert "Comfy Registry" not in message
+    assert "newer" not in message
 
 
 def test_init_from_a_snapshot_with_packs_carries_no_empty_snapshot_warning(

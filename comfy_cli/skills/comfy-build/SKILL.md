@@ -189,8 +189,11 @@ carries **no models**, so use the scan whenever private weights have to travel.
 An import with no custom nodes gets a warning (`build_snapshot_empty` in
 `data.warnings[]`). If the snapshot lists none, it is usually older than the
 install, and a newer snapshot is the fix. If it lists packs but every one was
-disabled or not from the Comfy Registry or GitHub, the message counts each kind;
-a newer snapshot will not help. `--from-snapshot` and `--from-workflow` also
+left out, the message counts each cause: disabled, or what the importer reports
+(waiting on the Comfy Registry to finish publishing, which names the pack and
+means import again later; a pin the Registry does not publish; an install folder
+another pack claimed; not from the Comfy Registry or GitHub), and gives no cause
+where the report has none. A newer snapshot will not help. `--from-snapshot` and `--from-workflow` also
 refuse each other.
 
 ## Path B — from a workflow file

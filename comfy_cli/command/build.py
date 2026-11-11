@@ -1300,7 +1300,7 @@ def _import_definition(renderer, source: ImportSource, value: str, *, comfy_vers
     advisories = report_advisories(imported.get("report") or {})
     for line in advisories:
         renderer.warn(line)
-    empty_reason = _snapshot_empty_message(data) if source.name == "snapshot" else None
+    empty_reason = _snapshot_empty_message(data, imported.get("report")) if source.name == "snapshot" else None
     if _empty_snapshot(definition, source.name):
         renderer.warn(empty_reason or _SNAPSHOT_EMPTY)
 
@@ -1325,23 +1325,58 @@ _SNAPSHOT_EMPTY = (
 )
 
 
-def _snapshot_empty_message(snapshot: dict) -> str:
-    """What to say when a snapshot imports no custom nodes, judged on the input.
+# Why the importer left an enabled pack out, as (report key, what it means), in
+# the order a pack is attributed: a pending or disowned Registry pin also lands
+# in `unresolvedNodes`, because dropping the pin leaves the pack no source.
+_SNAPSHOT_PACK_REASONS = (
+    ("registryPending", "waiting on the Comfy Registry to finish publishing"),
+    ("notInRegistry", "pinned to a version the Comfy Registry does not publish"),
+    ("collidingNodes", "sharing an install folder with another pack"),
+    ("unresolvedNodes", "not from a supported source (the Comfy Registry or GitHub)"),
+)
 
-    The importer drops a disabled pack and reports one from no supported source
-    as unresolved, so a current snapshot can list packs and still import none;
-    a newer snapshot fixes only one that really lists none."""
+
+def _report_names(report: dict, key: str) -> list[str]:
+    names = report.get(key)
+    return [_from_server(name) for name in names if isinstance(name, str)] if isinstance(names, list) else []
+
+
+def _snapshot_empty_message(snapshot: dict, report: dict | None = None) -> str:
+    """What to say when a snapshot imports no custom nodes.
+
+    A current snapshot can list packs and still import none, so a newer snapshot
+    fixes only one that really lists none. A disabled pack is read off the input;
+    every other cause comes from the importer's report, and a pack it gives no
+    cause for is said to be left out without a guess at why."""
     snapshots = as_snapshot_envelope(snapshot).get("snapshots")
     first = snapshots[0] if isinstance(snapshots, list) and snapshots and isinstance(snapshots[0], dict) else {}
     packs = first.get("customNodes")
     packs = [pack for pack in packs if isinstance(pack, dict)] if isinstance(packs, list) else []
     if not packs:
         return _SNAPSHOT_EMPTY
+    report = report if isinstance(report, dict) else {}
     disabled = sum(1 for pack in packs if pack.get("enabled") is False)
+    parts = [f"{disabled} disabled"] if disabled else []
+    remaining = len(packs) - disabled
+    attributed: set[str] = set()
+    for key, meaning in _SNAPSHOT_PACK_REASONS:
+        names = [name for name in dict.fromkeys(_report_names(report, key)) if name not in attributed]
+        attributed.update(names)
+        if not names or remaining <= 0:
+            continue
+        count = min(len(names), remaining)
+        remaining -= count
+        if key == "registryPending":
+            shown = names[:_ADVISORY_NAMES]
+            held_back = f", +{len(names) - len(shown)} more" if len(names) > len(shown) else ""
+            parts.append(f"{count} {meaning} ({', '.join(shown)}{held_back}), so import again once it has")
+        else:
+            parts.append(f"{count} {meaning}")
+    if remaining > 0:
+        parts.append(f"{remaining} left out with no reason in the importer's report")
     return (
-        f"the snapshot lists {len(packs)} custom node pack{'s' if len(packs) != 1 else ''} but none were imported: "
-        f"{disabled} disabled, {len(packs) - disabled} not from a supported source (the Comfy Registry or GitHub), "
-        "so the spec has none"
+        f"the snapshot lists {len(packs)} custom node pack{'s' if len(packs) != 1 else ''} and the spec has none "
+        f"of them: {'; '.join(parts)}"
     )
 
 

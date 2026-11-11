@@ -21,9 +21,11 @@ history.
   `{code, message}` under `--json`. `build_comfy_version_missing` means the
   spec has no `baseComfyVersion`; `build_snapshot_empty` means a
   `--from-snapshot` import carries no custom nodes or models. Its message says
-  whether the snapshot lists none (likely older than the install) or how many
-  listed packs were skipped as disabled or not from a supported source (also
-  warned in pretty output).
+  whether the snapshot lists none (likely older than the install) or counts
+  the listed packs left out by cause: disabled, or what the importer's report
+  says (a pack still waiting on the Comfy Registry is named, to import again
+  later), with no cause guessed where the report gives none (also warned in
+  pretty output).
 - `comfy build release create` refuses a spec with no `baseComfyVersion` with
   `build_comfy_version_missing` when the Build it names has none either, before
   the cut, and the hint names `comfy build update --comfy-version <ref>`. With
