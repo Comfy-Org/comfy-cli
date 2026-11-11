@@ -130,6 +130,7 @@ def test_clean_spec_and_clean_install_report_both_halves_clean(
     assert payload["build"]["id"] == build_id
     assert payload["spec"]["path"] == str(workspace / "comfy-build.yaml")
     assert payload["remote"]["behind"] is False
+    assert payload["remote"]["state"] == "pushed"
     assert payload["local"]["drift"]["models"] == {"added": 0, "removed": 0, "changed": 0}
     assert payload["local"]["drift"]["customNodes"] == {"added": 0, "removed": 0, "changed": 0}
     assert payload["local"]["drift"]["pipDependencies"] == "unchanged"
@@ -148,7 +149,7 @@ def test_diverged_remote_and_drifted_install_are_reported_together(
 
     assert result.exit_code == 0, result.stderr
     payload = data(result)
-    assert payload["remote"] == {"revision": "revision-moved", "behind": True}
+    assert payload["remote"] == {"state": "pushed", "revision": "revision-moved", "behind": True}
     assert payload["local"]["drift"]["models"]["added"] == 1
     assert "comfy build pull" in payload["hint"]
 
@@ -193,7 +194,9 @@ def test_status_writes_nothing(workspace: Path, monkeypatch: pytest.MonkeyPatch)
     assert envelope(result)["changed"] is False
 
 
-def test_agentic_status_needs_an_id_when_the_spec_has_none(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_before_the_first_push_reports_the_local_half_and_not_pushed(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = PullBuilder()
     install_client(monkeypatch, client)
     initialized = invoke_init(workspace)
@@ -201,25 +204,56 @@ def test_agentic_status_needs_an_id_when_the_spec_has_none(workspace: Path, monk
 
     result = invoke_status(workspace)
 
-    assert result.exit_code == 1
-    assert envelope(result)["error"]["code"] == "build_id_unknown"
+    assert result.exit_code == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, result.stdout
+    payload = data(result)
+    # `build.id` stays a string wherever it appears (envelope/1): unpushed, it is absent
+    assert payload["build"] == {"name": "Status"}
+    assert payload["remote"] == {"state": "not_pushed", "revision": None, "behind": False}
+    assert payload["local"]["scanned"] is True
+    assert payload["local"]["drift"]["models"] == {"added": 0, "removed": 0, "changed": 0}
+    assert "comfy build push" in payload["hint"]
+    validator = jsonschema.Draft202012Validator(STATUS_SCHEMA)
+    validator.validate(payload)
+    assert not validator.is_valid({**payload, "build": {"id": None, "name": "Status"}})
+    pushed = {**payload, "build": {"name": "Status"}, "remote": {"state": "pushed", "revision": "r", "behind": False}}
+    assert not validator.is_valid(pushed)
     assert client.calls == []
 
 
-def test_tty_status_without_an_id_uses_the_build_picker(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tty_status_before_the_first_push_offers_no_build_picker(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = PullBuilder()
     install_client(monkeypatch, client)
-    serve(client, "build-picked", {"schema": "distribution-definition/0", "models": [], "customNodes": []})
     initialized = invoke_init(workspace)
     assert initialized.exit_code == 0, initialized.stderr
     monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", False, None))
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
-    monkeypatch.setattr("comfy_cli.ui.prompt_select", lambda *args, **kwargs: "build-picked")
+    monkeypatch.setattr("comfy_cli.ui.prompt_select", refuse("prompt_select"))
 
     result = invoke_status(workspace, agentic=False)
 
+    assert result.exit_code == 0, result.output
+    assert "remote: not pushed" in result.stdout
+    assert client.calls == []
+
+
+def test_status_with_an_id_still_compares_a_never_pushed_spec_with_that_build(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = PullBuilder()
+    install_client(monkeypatch, client)
+    serve(client, "build-named", {"schema": "distribution-definition/0", "models": [], "customNodes": []})
+    initialized = invoke_init(workspace)
+    assert initialized.exit_code == 0, initialized.stderr
+
+    result = invoke_status(workspace, "--id", "build-named")
+
     assert result.exit_code == 0, result.stderr
-    assert [call["method"] for call in client.calls] == ["list_builds", "get_build"]
+    assert data(result)["remote"]["state"] == "pushed"
+    assert [call["method"] for call in client.calls] == ["get_build"]
 
 
 def test_status_payload_validates_against_its_registered_schema(
@@ -295,7 +329,7 @@ def test_a_spec_with_no_install_still_reports_spec_vs_remote(workspace: Path, mo
     # Then
     assert result.exit_code == 0, result.stderr
     payload = data(result)
-    assert payload["remote"] == {"revision": "revision-moved", "behind": True}
+    assert payload["remote"] == {"state": "pushed", "revision": "revision-moved", "behind": True}
     assert payload["local"]["scanned"] is False
     assert payload["local"]["drift"] is None
     assert str(workspace / "models") in payload["local"]["reason"]

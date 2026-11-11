@@ -2600,14 +2600,20 @@ def _optional_str(value: object) -> str | None:
 def _render_status(renderer, payload: dict, drift: DefinitionDiff | None) -> None:
     build = payload["build"]
     remote = payload["remote"]
-    renderer.print(f"build:  {build['id']}" + (f"  {build['name']}" if build["name"] else ""))
+    pushed = remote["state"] == "pushed"
+    renderer.print(f"build:  {build.get('id') or '—'}" + (f"  {build['name']}" if build["name"] else ""))
     renderer.print(f"spec:   {payload['spec']['path']}")
-    renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
+    if pushed:
+        renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
+    else:
+        renderer.print("remote: not pushed")
     # "not compared" rather than a dash: silence here would read as "no drift".
     local = summarize_definition_diff(drift) if drift is not None else f"not compared ({payload['local']['reason']})"
     renderer.print(f"local:  {local}")
-    if payload["hint"]:
+    if payload["hint"] and pushed:
         renderer.warn("the remote Build has moved since this spec was synchronized", hint=payload["hint"])
+    elif payload["hint"]:
+        renderer.info(payload["hint"])
 
 
 @app.command("status", help="Report how far the local spec is from the remote Build and from the install.")
@@ -2663,19 +2669,25 @@ def status_cmd(
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
-    target_id = require_option(
-        "--id",
-        build_id or spec.get("id"),
-        prompt_fn=lambda: _prompt_build_id(renderer, client),
-        error_code="build_id_unknown",
-        ctx=ctx,
-    )
-    remote = _builder_call(renderer, lambda: client.get_build(target_id))
-    # The wire schema carries `updatedAt`, never a `revision` field, and
-    # `updatedAt` is exactly the token `syncedRevision` mirrors — so the report
-    # renders it under `remote.revision` but the comparison reads `updatedAt`.
-    revision = _optional_str(remote.get("updatedAt"))
-    behind = _optional_str(spec.get("syncedRevision")) != revision
+    # A spec with no id was never pushed: there is no Build to compare it with,
+    # so the remote half says so and the local half still runs. No picker: any
+    # Build it offered would be another spec's.
+    target_id = _optional_str(build_id) or _optional_str(spec.get("id"))
+    remote_payload: dict = {"state": "not_pushed", "revision": None, "behind": False}
+    name = _optional_str(spec.get("name"))
+    hint = "run `comfy build push` to create the Build" if target_id is None else None
+    if target_id is not None:
+        remote = _builder_call(renderer, lambda: client.get_build(target_id))
+        # The wire schema carries `updatedAt`, never a `revision` field, and
+        # `updatedAt` is exactly the token `syncedRevision` mirrors — so the report
+        # renders it under `remote.revision` but the comparison reads `updatedAt`.
+        revision = _optional_str(remote.get("updatedAt"))
+        behind = _optional_str(spec.get("syncedRevision")) != revision
+        remote_payload = {"state": "pushed", "revision": revision, "behind": behind}
+        name = _optional_str(remote.get("name"))
+        # In the payload rather than only on stderr: `emit` has no hint field,
+        # and the agent reading this envelope is who needs the next step.
+        hint = "run `comfy build pull` to take the remote changes" if behind else None
 
     stored = spec["definition"]
     # Independent halves: only the drift one needs an install, so a hand-authored
@@ -2685,13 +2697,12 @@ def status_cmd(
     )
 
     payload = {
-        "build": {"id": target_id, "name": _optional_str(remote.get("name"))},
+        # No `id` key before the first push: `build.id` is a string wherever it appears.
+        "build": {"name": name} if target_id is None else {"id": target_id, "name": name},
         "spec": {"path": str(paths.spec_file), "syncedRevision": _optional_str(spec.get("syncedRevision"))},
-        "remote": {"revision": revision, "behind": behind},
+        "remote": remote_payload,
         "local": local,
-        # In the payload rather than only on stderr: `emit` has no hint field,
-        # and the agent reading this envelope is who needs the next step.
-        "hint": "run `comfy build pull` to take the remote changes" if behind else None,
+        "hint": hint,
     }
     if renderer.is_pretty():
         _render_status(renderer, payload, drift)
