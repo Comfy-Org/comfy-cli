@@ -127,8 +127,12 @@ and none is fixed by editing anything:
   theirs. A delete takes the build's releases with it, so ask the user first;
   `comfy skills show comfy-build` carries the rules for it.
 - **`build_release_limit`** — the workspace holds its maximum number of releases.
-  A retry does not clear it; deleting one does. `comfy build release delete` is the
-  procedure, and `comfy skills show comfy-build` carries the rules for it.
+  A retry does not clear it; deleting one does. Under `--json`, `details.builds`
+  says which Builds hold releases and whether a deployment uses them,
+  `comfy build release ls --id <build>` lists one Build's, and
+  `comfy build quota` reads the limit, which comes from the plan. `comfy build
+  release delete` is the procedure, and `comfy skills show comfy-build` carries
+  the rules for it.
 - **`429 CONCURRENCY_LIMIT`**, which arrives as `build_builder_error` with the
   builder's own message — too many builds running at once. Transient, unlike the
   two above. Wait for one to finish, or say which are running.

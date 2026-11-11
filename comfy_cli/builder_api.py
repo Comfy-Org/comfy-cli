@@ -13,6 +13,8 @@ Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/workflows/resolve {workflow}           -> {definition, report, format}
   POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
   GET  /v1/releases/{id}                          -> {status, ...}
+  GET  /v1/release-labels?id=..                   -> {labels: [{releaseId, buildId, buildName, version}]}
+  GET  /v1/limits                                 -> {maxBuilds?, maxRunningBuilds, maxTotalReleases?}
 """
 
 from __future__ import annotations
@@ -185,12 +187,15 @@ class BuilderClient:
         """The environment of the stored sign-in this client's token came from; None for a key or a handed token."""
         return self._sign_in_base_url if self._refreshes_on_401 else None
 
-    def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:
+    def _send(
+        self, url: str, *, before_retry: Callable[[], None] | None = None, **kwargs
+    ) -> tuple[int, dict | list | None]:
         """Every builder request goes through here, so a long wait survives its token expiring.
 
         The access token lasts fifteen minutes. After a 401 a client built from
         the stored sign-in forces the shared refresh and sends the request once
         more; the server refuses before acting, so that is safe for every method.
+        ``before_retry`` runs before that second request and stops it by raising.
         """
         try:
             return request_json(url, self.target, **kwargs)
@@ -201,6 +206,8 @@ class BuilderClient:
             if token is None:
                 raise BuilderCredentialRefused(error, self._refused_hint) from error
         self.target = replace(self.target, auth_token=token)
+        if before_retry is not None:
+            before_retry()
         try:
             return request_json(url, self.target, **kwargs)
         except urllib.error.HTTPError as error:
@@ -321,32 +328,54 @@ class BuilderClient:
         the definition. That registry sweep is what earns the raised timeout."""
         return self._post(("workflows", "resolve"), {"workflow": workflow}, timeout=_WORKFLOW_IMPORT_TIMEOUT)
 
-    def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
+    def _get(
+        self,
+        parts: tuple[str, ...],
+        params: dict | None = None,
+        *,
+        max_bytes: int = _MAX_JSON,
+        before_retry: Callable[[], None] | None = None,
+    ) -> dict:
         url = self.target.url(*parts)
         if params:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
             if query:
                 url = f"{url}?{query}"
-        _, parsed = self._send(url, method="GET", max_bytes=max_bytes)
+        _, parsed = self._send(url, method="GET", max_bytes=max_bytes, before_retry=before_retry)
         return parsed or {}
 
-    def list_builds(self) -> list[dict]:
+    def list_builds(self, *, before_page: Callable[[], None] | None = None) -> list[dict]:
         """GET every cursor page from /v1/builds -> the caller's builds (summaries).
 
         The builder pages this read, so a workspace past one page silently lost
         its tail when only the first was taken."""
         builds: list[dict] = []
         for page in cursor_pages(
-            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}), "builds"
+            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}, before_retry=before_page),
+            "builds",
+            before_page,
         ):
             builds.extend(page.get("builds", []))
         return builds
+
+    def release_labels(self, release_ids: list[str]) -> list[dict]:
+        """GET /v1/release-labels -> ``{releaseId, buildId, buildName, version}`` for
+        each id that is a live release of this workspace, any member's Build
+        included. At most 100 ids per call; an unknown id is left out, not refused."""
+        query = urllib.parse.urlencode([("id", release_id) for release_id in release_ids])
+        _, parsed = self._send(f"{self.target.url('release-labels')}?{query}", method="GET", max_bytes=_MAX_JSON)
+        return (parsed or {}).get("labels", []) if isinstance(parsed, dict) else []
+
+    def get_limits(self) -> dict:
+        """GET /v1/limits -> the build caps the workspace is held to. An absent cap
+        does not apply; the builder sends no used counts."""
+        return self._get(("limits",))
 
     def get_build(self, build_id: str) -> dict:
         """GET /v1/builds/{id} -> a build with its full definition."""
         return self._get(("builds", build_id))
 
-    def list_releases(self, build_id: str) -> list[dict]:
+    def list_releases(self, build_id: str, *, before_page: Callable[[], None] | None = None) -> list[dict]:
         """GET every cursor page from /v1/builds/{id}/releases -> the build's
         releases. A server that predates the version-to-release rename keys the
         list ``versions``, so both spellings parse."""
@@ -354,9 +383,12 @@ class BuilderClient:
         pages = cursor_pages(
             # A Build id a person typed reaches here unchecked, so it goes as one segment.
             lambda cursor: self._get(
-                ("builds", urllib.parse.quote(build_id, safe=""), "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}
+                ("builds", urllib.parse.quote(build_id, safe=""), "releases"),
+                {"cursor": cursor, "limit": PAGE_LIMIT},
+                before_retry=before_page,
             ),
             "releases",
+            before_page,
         )
         for page in pages:
             releases.extend(page.get("releases") or page.get("versions") or [])

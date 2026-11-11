@@ -1606,9 +1606,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "each attaches `details.buildId` naming the Build the cut was for. No release was cut and retrying "
         "unchanged is refused again -- but only the cut was refused: under `comfy build push --release` the "
         "push already landed, so the build was created or updated, its blobs were stored, and its id was "
-        "written into the spec on disk before the refusal.",
-        "delete a release with `comfy build release delete`, or delete a whole build to give up every "
-        "release it holds, then cut again",
+        "written into the spec on disk before the refusal. Under `--json` `details.builds` lists each Build "
+        "the caller can see (`id`, `name`, `releases`, `newestReleaseAt`, and, when the deployments could be "
+        "read within the 10 seconds, from the builder's host and with the credential the Builds were read with, "
+        "`deployments` and `inUse`: how many undeleted deployments, stopped ones included, reference "
+        "its releases), and `details.buildsTruncated` is true when the list stopped short of the visible Builds: "
+        "past the first 100, or when those reads reached their 10-second deadline, past which no page request "
+        "starts. A member "
+        "outside the enterprise plan sees only their own Builds while the limit counts every member's, so "
+        "the list can hold fewer releases than the limit. When those reads fail, `details` is as before.",
+        "see which Builds hold releases in `details.builds`, or list one Build's with `comfy build release ls "
+        "--id <build>`; `comfy build quota` shows how many releases are used against the limit. Delete a release "
+        "with `comfy build release delete`, or delete a whole build to give up every release it holds, then cut "
+        "again",
     ),
     ErrorCode(
         "build_limit",
@@ -1824,8 +1834,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_quota_exceeded",
-        "The workspace reached its active-deployment or concurrent-worker limit.",
-        "stop or scale down another deployment, or raise the workspace limit, then retry",
+        "The workspace reached its active-deployment limit, or the request asked one deployment for more "
+        "workers than the workspace's per-deployment worker limit allows. When `comfy deploy up` was refused "
+        "at the active-deployment limit, creating, restarting or moving a deployment, `details.activeDeployments` lists the deployments the deploy list shows "
+        "holding a slot (`id`, `name`, `releaseId`, `buildId` where the builder names it, `status`, `createdAt`): "
+        "every undeleted deployment not failed, stopped or stop_failed. A stopped deployment moving to another "
+        "release can also hold one through its queued replacement, so the list can be shorter than the limit.",
+        "at the active-deployment limit, `comfy deploy stop` one deployment to free a slot (`comfy build quota` "
+        "shows the limit); at the worker limit, lower `--max`; then retry",
     ),
     ErrorCode(
         "deploy_compute_unavailable",

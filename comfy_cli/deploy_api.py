@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import urllib.error
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -45,6 +45,7 @@ class _Request:
     params: dict | None = None
     headers: dict[str, str] | None = None
     max_bytes: int = _MAX_JSON
+    before_retry: Callable[[], None] | None = None
 
 
 def _resolved_base_url(base_url: str | None) -> str:
@@ -172,6 +173,8 @@ class DeployClient:
             if token is None:
                 raise
             self.target = replace(self.target, auth_token=token)
+            if request.before_retry is not None:
+                request.before_retry()
             return send()
 
     def _get(self, operation: str, parts: tuple[str, ...], params: dict | None = None) -> dict:
@@ -220,11 +223,23 @@ class DeployClient:
     def list_deployments(self, *, status: str | None = None, limit: int | None = None) -> dict:
         return self._get("list", ("deployments",), {"status": status, "limit": limit})
 
-    def iter_deployments(self, *, status: str | None = None, limit: int | None = None) -> Iterator[dict]:
+    def iter_deployments(
+        self, *, status: str | None = None, limit: int | None = None, before_page: Callable[[], None] | None = None
+    ) -> Iterator[dict]:
+        """``before_page`` runs before each request, a sign-in retry included, and stops the walk by raising."""
         after: str | None = None
         seen: set[str] = set()
         for _ in range(_MAX_PAGES):
-            page = self._get("list", ("deployments",), {"status": status, "limit": limit, "after": after})
+            if before_page is not None:
+                before_page()
+            page = self._request(
+                _Request(
+                    operation="list",
+                    parts=("deployments",),
+                    params={"status": status, "limit": limit, "after": after},
+                    before_retry=before_page,
+                )
+            )
             yield page
             next_cursor = page.get("nextCursor")
             if not isinstance(next_cursor, str) or not next_cursor:
@@ -243,11 +258,17 @@ class DeployClient:
             details={"operation": "list", "pages": _MAX_PAGES},
         )
 
-    def list_all_deployments(self, *, status: str | None = None, limit: int | None = None) -> list[dict]:
+    def list_all_deployments(
+        self, *, status: str | None = None, limit: int | None = None, before_page: Callable[[], None] | None = None
+    ) -> list[dict]:
         deployments: list[dict] = []
-        for page in self.iter_deployments(status=status, limit=limit):
+        for page in self.iter_deployments(status=status, limit=limit, before_page=before_page):
             deployments.extend(page.get("deployments", []))
         return deployments
+
+    def get_limits(self) -> dict:
+        """GET /v1/limits -> the deploy caps the workspace is held to, ``maxActiveDeployments`` always among them."""
+        return self._get("limits", ("limits",))
 
     def get_deployment(self, deployment_id: str) -> dict:
         return self._get("get", ("deployments", deployment_id))

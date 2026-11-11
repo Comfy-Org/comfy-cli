@@ -56,6 +56,7 @@ pull      Replace the local spec with a fetched Build, keeping local asset ident
 status    Report how far the spec is from the remote Build and from the install.
 ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
+quota     Releases and active deployments the workspace holds, against its limits.
 validate  Validate the local spec without contacting the builder.
 delete    Delete a Build (soft-delete).
 release   create · ls · show · logs · manifest · delete
@@ -342,7 +343,13 @@ Each is cleared by deleting something, and each exits 1:
   with it, so ask the user first, or ask them to have a teammate delete one;
   then push again.
 - **`build_release_limit`** — the cut was refused because the workspace already
-  holds as many releases as its limit allows. Free a slot, then cut again.
+  holds as many releases as its limit allows. Under `--json`, `details.builds`
+  names each Build you can see with its release count, its newest release, and
+  `inUse` when a deployment references one of its releases. `inUse` is left out
+  when the deployments could not be read within 10 seconds, when
+  `COMFY_BUILDER_TOKEN` signs the builder reads with another credential than the
+  deploy commands', or when the builder URL is on another host than the deploy
+  URL. Free a slot, then cut again.
 - **`build_release_in_use`** — `comfy build release delete` was refused because a
   deployment still references that release. The `message` is the builder's own
   wording and names the blocking deployments, though on a long list it may name
@@ -356,7 +363,18 @@ Each is cleared by deleting something, and each exits 1:
 
 A workspace has a ceiling on **how many releases it may hold**, counting every
 status and whether or not anything deploys them, and a separate ceiling on **how
-many builds it may keep**. Both are cleared the same way, by deleting:
+many builds it may keep**. Beside them, comfy-deploy caps **how many deployments
+are active at once** per workspace; `comfy deploy stop` frees one of those slots.
+The numbers come from the workspace's plan and can be raised for one workspace,
+so never quote one from memory: **`comfy build quota`** reads the release and
+active-deployment limits and how much of each is used. Its release count covers
+only the Builds you can see (your own outside the enterprise plan), so it can
+read low; `comfy build release ls --id <build>` lists one Build's releases. Its
+active deployment count comes from the deploy list (`exact: false`, printed as "at
+least"): a stopped deployment moving to another release can hold a slot through
+its queued replacement. Past 100 Builds the release count covers only the first
+100 (`truncated: true`, said beside the count). The release and
+build ceilings are cleared the same way, by deleting:
 
 - **`comfy build release delete RELEASE`** gives up one release slot. RELEASE is
   required — there is no default and no spec to fall back on, so name the id from

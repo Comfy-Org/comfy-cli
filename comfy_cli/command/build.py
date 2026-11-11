@@ -47,6 +47,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
+from comfy_cli.command import build_quota
 from comfy_cli.command.build_diff import (
     DefinitionDiff,
     diff_definitions,
@@ -2236,6 +2237,7 @@ def push_cmd(
             {"buildId": target_id},
             hint=_CUT_RETRY_HINT,
             models=preparation.definition.get("models") or [],
+            on_release_limit=lambda: build_quota.release_limit_details(client),
         )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
@@ -2715,6 +2717,8 @@ def _report_builder_error(
     subject: Mapping[str, str] | None = None,
     hint: str | None = None,
     models: Sequence[Mapping] = (),
+    *,
+    on_release_limit: Callable[[], Mapping[str, Any]] | None = None,
 ) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
@@ -2734,7 +2738,13 @@ def _report_builder_error(
     reaches only the two ambiguous outcomes — an unmapped builder error and a
     transport failure — where the envelope cannot say whether the write landed.
     The TLS, limited-beta and mapped-refusal branches keep their own remediation,
-    which names a cause and a next step the call site does not know about."""
+    which names a cause and a next step the call site does not know about.
+
+    *on_release_limit* is read only for a ``RELEASE_LIMIT`` refusal outside the
+    pretty panel, and the keys it returns join ``details`` beside the ones it
+    always has. It must not raise: a cut's callers pass
+    ``build_quota.release_limit_details``, which answers nothing when its reads
+    fail."""
     import urllib.error
 
     from comfy_cli.http import tls_trust_hint, tls_verification_failed
@@ -2829,10 +2839,14 @@ def _report_builder_error(
             # carries the same bytes raw. A terminal is protected where the
             # terminal is: `error_panel` sanitizes `message` and every details
             # row on the pretty path.
+            details = {**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]}
+            # Like `details.invalid` above, a list for an agent: the panel would print it as one dense row.
+            if builder_error == "RELEASE_LIMIT" and on_release_limit is not None and not renderer.is_pretty():
+                details = {**on_release_limit(), **details}
             renderer.error(
                 code=refusal["code"],
                 message=_capped_message(builder_message or refusal["message"]),
-                details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
+                details=details,
             )
             return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
@@ -2863,6 +2877,7 @@ def _builder_call(
     *,
     hint: str | None = None,
     models: Sequence[Mapping] = (),
+    on_release_limit: Callable[[], Mapping[str, Any]] | None = None,
 ):
     """Run a builder API call, mapping every failure class to one error envelope
     + exit(1) via _report_builder_error. *subject* names the id the command is
@@ -2877,6 +2892,7 @@ def _builder_call(
     whose failure leaves the caller unable to tell whether the write landed. See
     ``_CUT_RETRY_HINT``. ``models`` are the models of the definition the builder
     read, when the caller has them, so a refused ``models[<n>]`` names its model.
+    ``on_release_limit`` is as for ``_report_builder_error``.
     """
     import urllib.error
 
@@ -2893,7 +2909,7 @@ def _builder_call(
     # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
     # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e, subject, hint, models)
+        _report_builder_error(renderer, e, subject, hint, models, on_release_limit=on_release_limit)
         raise typer.Exit(code=1) from e
     # A response body that stalls past the timeout or drops mid-read is raised by
     # ``resp.read`` (``http.read_capped``), outside urllib's ``URLError`` wrapping of
@@ -3059,6 +3075,47 @@ def ls_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
         for build in builds:
             renderer.print(f"  {build.get('id', '?')}  {build.get('name', '')}")
     renderer.emit({"builds": builds}, command="build ls")
+
+
+@app.command("quota", help="Show the releases and active deployments the workspace holds, against its limits.")
+@tracking.track_command("build")
+def quota_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
+    from comfy_cli.deploy_api_errors import DeployAPIError
+    from comfy_cli.http import ResponseTooLarge
+
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    holders, visible = _builder_call(renderer, lambda: build_quota.release_holders(client))
+    try:
+        deploy = build_quota.deploy_client()
+        rows = deploy.list_all_deployments()
+    except DeployAPIError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except (ResponseTooLarge, OSError, http.client.HTTPException) as error:
+        renderer.error(code="deploy_server_error", message=str(error))
+        raise typer.Exit(code=1) from error
+    # The deploy read takes the deploy commands' URL, whatever moved the builder's.
+    overridden = bool(builder_url or os.environ.get("COMFY_BUILDER_URL"))
+    notes = [build_quota.builder_url_note(deploy.target.base_url)] if overridden else []
+    if build_quota.signed_in_apart(deploy):
+        notes.append(build_quota.SIGN_IN_NOTE)
+    # A limit that cannot be read is unknown, and the counts still stand.
+    payload = build_quota.quota_payload(
+        holders,
+        visible,
+        len(build_quota.active_deployments(rows)),
+        build_quota.best_effort(client.get_limits),
+        build_quota.best_effort(deploy.get_limits),
+        notes=notes,
+    )
+    if renderer.is_pretty():
+        renderer.info(build_quota.usage_line("Releases", payload["releases"]))
+        renderer.info(build_quota.usage_line("Active deployments", payload["activeDeployments"]))
+        renderer.info(f"Note: {build_quota.NOTE}.")
+        for note in notes:
+            renderer.info(f"Note: {note}.")
+    renderer.emit(payload, command="build quota")
 
 
 @app.command("show", help="Show a build and its full definition.")
@@ -3417,6 +3474,7 @@ def release_create(
         lambda: client.create_release(selected_build_id, requested),
         {"buildId": selected_build_id},
         hint=_CUT_RETRY_HINT,
+        on_release_limit=lambda: build_quota.release_limit_details(client),
     )
     payload = {
         "buildId": selected_build_id,

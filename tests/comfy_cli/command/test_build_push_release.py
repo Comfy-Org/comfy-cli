@@ -7,8 +7,11 @@ aborted picker and a failed push must all end with **zero** release cuts.
 
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -479,3 +482,66 @@ def test_only_a_model_link_field_holds_a_release(workspace: Path, client: Record
     # Then
     assert result.exit_code == 0, result.stderr
     assert len(_calls(client, "create_release")) == 1
+
+
+# --- refused at the release limit -------------------------------------------
+
+
+class ReleaseLimitBuilder(RecordingBuilder):
+    """Saves the push, then refuses its cut at the workspace's release limit."""
+
+    target = SimpleNamespace(base_url="https://platform.test/builder")
+
+    def create_release(self, build_id: str, targets: list[JsonObject] | None = None) -> tuple[str, str]:
+        body = json.dumps({"error": "RELEASE_LIMIT", "message": "this workspace already holds 20 releases"})
+        raise urllib.error.HTTPError(
+            "https://builder.test/v1/builds/build-1/releases", 409, "Conflict", {}, io.BytesIO(body.encode())
+        )
+
+    def list_builds(self, **_: object) -> list[JsonObject]:
+        return [{"id": "build-1", "name": "portraits"}]
+
+    def list_releases(self, build_id: str, **_: object) -> list[JsonObject]:
+        return [{"id": "rel-1a", "createdAt": "2026-08-20T00:00:00Z"}]
+
+
+class OneDeploymentOn:
+    target = SimpleNamespace(base_url="https://platform.test/deploy")
+
+    def __init__(self, release_id: str) -> None:
+        self.release_id = release_id
+
+    def list_all_deployments(self, **_: object) -> list[JsonObject]:
+        return [{"id": "dep-1", "releaseId": self.release_id, "status": "stopped", "deletedAt": None}]
+
+
+def test_push_release_refused_at_the_release_limit_lists_the_builds_holding_releases(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a push that lands, and a cut after it refused at the release limit
+    from comfy_cli.command import deploy_runtime
+
+    recorder = ReleaseLimitBuilder()
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, builder_url: recorder)
+    monkeypatch.setattr(deploy_runtime, "deploy_client", lambda: OneDeploymentOn("rel-1a"))
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    recorder.remote_revisions["build-1"] = "revision-0"
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_release_limit"
+    assert error["details"]["buildId"] == "build-1"
+    assert error["details"]["builds"] == [
+        {
+            "id": "build-1",
+            "name": "portraits",
+            "releases": 1,
+            "newestReleaseAt": "2026-08-20T00:00:00Z",
+            "deployments": 1,
+            "inUse": True,
+        }
+    ]
