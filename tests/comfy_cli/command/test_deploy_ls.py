@@ -422,6 +422,10 @@ def test_rows_carry_and_print_the_editor_value_and_blank_where_none_was_sent(tmp
     assert "dep-c3  ready  v5\n" in pretty.stdout
 
 
+def _ls_schema() -> JsonObject:
+    return json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+
+
 _FALLBACK_NOTE = "No build spec here, so this lists every Build's deployments"
 
 
@@ -458,6 +462,10 @@ def test_bare_ls_with_no_spec_here_lists_the_workspace(tmp_path: Path, monkeypat
     assert builder.calls == []
     assert _FALLBACK_NOTE in result.stderr
     assert _FALLBACK_NOTE not in result.stdout
+    payload = _payload(result)
+    assert payload["scope"] == "workspace"
+    assert "buildId" not in payload
+    jsonschema.Draft202012Validator(_ls_schema()).validate(payload)
 
 
 def test_bare_ls_with_no_spec_here_puts_the_note_on_stderr_in_pretty_mode(tmp_path: Path, monkeypatch) -> None:
@@ -488,6 +496,9 @@ def test_bare_ls_inside_a_pushed_spec_lists_only_that_builds_deployments(tmp_pat
     # Then
     assert result.exit_code == 0, result.output
     assert [row["id"] for row in _deployments(result)] == ["build-live"]
+    payload = _payload(result)
+    assert (payload["scope"], payload["buildId"]) == ("build", "build-1")
+    jsonschema.Draft202012Validator(_ls_schema()).validate(payload)
 
 
 def test_bare_ls_inside_a_spec_that_was_never_pushed_still_refuses(tmp_path: Path, monkeypatch) -> None:
@@ -516,33 +527,21 @@ def test_a_named_path_with_no_spec_still_refuses(tmp_path: Path, monkeypatch) ->
     assert json.loads(result.stdout.splitlines()[-1])["error"]["code"] == "build_spec_not_found"
 
 
-@pytest.mark.parametrize(
-    ("setup", "args", "expected"),
-    [
-        pytest.param("spec", (), {"scope": "build", "buildId": "build-1"}, id="spec-here"),
-        pytest.param("none", (), {"scope": "workspace"}, id="no-spec-falls-back"),
-        pytest.param("spec", ("--workspace",), {"scope": "workspace"}, id="workspace-flag"),
-    ],
-)
-def test_the_payload_says_which_scope_was_listed(
-    tmp_path: Path, monkeypatch, setup: str, args: tuple[str, ...], expected: JsonObject
-) -> None:
-    # Given: under --json the fallback notice goes to stderr only, so the payload
-    # itself must tell one Build's listing from a workspace listing
+def test_the_workspace_flag_payload_says_workspace_even_inside_a_spec(tmp_path: Path, monkeypatch) -> None:
+    # Given
     _install_clients(monkeypatch, FakeBuilder(), _two_builds())
-    if setup == "spec":
-        _spec_here(tmp_path, "build-1")
+    _spec_here(tmp_path, "build-1")
     monkeypatch.chdir(tmp_path)
 
     # When
-    result = CliRunner().invoke(app, ["--json", "deploy", "ls", *args])
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls", "--workspace"])
 
     # Then
     assert result.exit_code == 0, result.output
     payload = _payload(result)
-    assert {key: payload[key] for key in ("scope", "buildId") if key in payload} == expected
-    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
-    jsonschema.Draft202012Validator(schema).validate(payload)
+    assert payload["scope"] == "workspace"
+    assert "buildId" not in payload
+    jsonschema.Draft202012Validator(_ls_schema()).validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -560,10 +559,9 @@ def test_the_payload_says_which_scope_was_listed(
 def test_the_schema_still_accepts_a_payload_from_before_scope(payload: JsonObject, valid: bool) -> None:
     # Given: scope is an additive optional field (docs/json-output.md "Stability"),
     # so an earlier CLI's payload without it must still validate under the same id
-    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
 
     # When
-    errors = list(jsonschema.Draft202012Validator(schema).iter_errors(payload))
+    errors = list(jsonschema.Draft202012Validator(_ls_schema()).iter_errors(payload))
 
     # Then
     assert (not errors) == valid, errors
