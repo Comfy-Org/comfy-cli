@@ -11,6 +11,7 @@ from urllib.parse import unquote
 
 from typing_extensions import assert_never
 
+from comfy_cli import error_codes
 from comfy_cli.command.build_paths import BuildPaths, resolve_local_path
 from comfy_cli.command.build_spec import SPEC_SCHEMA, BuildSpecInvalidError, JsonObject, JsonValue
 
@@ -216,12 +217,16 @@ def _validate_local_path(entry: JsonObject, context: LocalPathContext) -> None:
         case unreachable:
             assert_never(unreachable)
     if not correct_kind:
-        # Most often the spec was written apart from its install (`init -o`), so
-        # every localPath is read under the spec's folder instead.
+        # The entry may be misspelled or deleted, so the registered advice leads.
+        # Most often, though, the spec was written apart from its install
+        # (`init -o`), so every localPath is read under the spec's folder instead.
+        registered = error_codes.get(BuildSpecInvalidError.code)
+        advice = registered.hint if registered is not None and registered.hint else "fix the named field"
         raise BuildSpecInvalidError(
             f"{context.location}.localPath must resolve to a {expected}: {local_path!r}",
-            hint=f"localPath is read under {context.root}. If the install is elsewhere, pass "
-            "`--models-dir <install>/models` and `--custom-nodes-dir <install>/custom_nodes`",
+            hint=f"{advice}. localPath is read under {context.root}. If the install is elsewhere, pass "
+            "the folder for each kind of entry the spec lists: `--models-dir <install>/models`, "
+            "`--custom-nodes-dir <install>/custom_nodes`",
         )
 
 

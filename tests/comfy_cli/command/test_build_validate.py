@@ -14,6 +14,7 @@ import pytest
 from build_validate_support import ResolveRecorder, local_model, local_node, remote_model, write_spec
 from typer.testing import CliRunner
 
+from comfy_cli import error_codes
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
 from comfy_cli.command.build_spec import JsonObject
@@ -1269,7 +1270,10 @@ def test_a_spec_written_apart_from_its_install_names_the_flags_that_point_at_it(
     assert refused.exit_code == 1
     error = _envelope(refused)["error"]
     assert error["code"] == "build_spec_invalid"
+    # The registered advice leads, so a misspelled or deleted entry still reads as one to fix
+    assert error["hint"].startswith(error_codes.get("build_spec_invalid").hint)
     assert str(elsewhere / "models") in error["hint"]
+    assert "the folder for each kind of entry" in error["hint"]
     assert "--models-dir <install>/models" in error["hint"]
     assert "--custom-nodes-dir <install>/custom_nodes" in error["hint"]
     assert pointed.exit_code == 0, pointed.output

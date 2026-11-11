@@ -76,9 +76,11 @@ history.
   `build_spec_not_found`. A PATH that holds no spec still fails. Under `--json`
   the payload says what was listed: `scope: "build"` with the `buildId`, or
   `scope: "workspace"`.
-- A `build_spec_invalid` for a `localPath` that does not resolve names
-  `--models-dir` and `--custom-nodes-dir`, which a spec written apart from its
-  install (`init -o`) needs on `validate` and `push`.
+- A `build_spec_invalid` for a `localPath` that does not resolve keeps its
+  advice to fix the named field, then says which folder `localPath` was read
+  under and names `--models-dir` and `--custom-nodes-dir`. A spec written apart
+  from its install (`init -o`) needs the folder for each kind of entry it lists
+  on `validate` and `push`.
 
 ## [1.26.0] - 2026-11-11
 
