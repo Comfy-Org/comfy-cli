@@ -267,7 +267,8 @@ class DeployClient:
         return deployments
 
     def get_limits(self) -> dict:
-        """GET /v1/limits -> the deploy caps the workspace is held to, ``maxActiveDeployments`` always among them."""
+        """GET /v1/limits -> the deploy caps the workspace is held to, ``maxActiveDeployments`` always among them;
+        a newer comfy-deploy also sends ``used: {activeDeployments}``."""
         return self._get("limits", ("limits",))
 
     def get_deployment(self, deployment_id: str) -> dict:

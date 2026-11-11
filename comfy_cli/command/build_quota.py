@@ -189,13 +189,16 @@ def release_limit_details(builder, *, now: Callable[[], float] = time.monotonic)
     return {"builds": holders, **({"buildsTruncated": True} if visible > len(holders) else {})}
 
 
-#: Said beside every count: GET /v1/builds shows a member outside the enterprise
-#: plan only their own Builds, while the release cap counts every member's.
-NOTE: Final = (
+#: Said beside a release count read from the listings: GET /v1/builds shows a member
+#: outside the enterprise plan only their own Builds, while the release cap counts every member's.
+RELEASE_NOTE: Final = (
     "releases are counted over the Builds you can see, your own outside the enterprise plan, while the limit "
-    "counts the whole workspace, so that count can read low; active deployments are counted from the deploy "
-    "list, which can miss a slot held by a deployment moving to another release, so that count is at least "
-    "the number shown"
+    "counts the whole workspace, so that count can read low"
+)
+#: Said beside an active-deployment count read from the deploy list.
+DEPLOY_NOTE: Final = (
+    "active deployments are counted from the deploy list, which can miss a slot held by a deployment moving "
+    "to another release, so that count is at least the number shown"
 )
 
 
@@ -231,6 +234,26 @@ def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def exact_used(limits: object, key: str) -> int | None:
+    """``limits["used"][key]`` when the service sent that count, else None, and the count is estimated."""
+    used = limits.get("used") if isinstance(limits, dict) else None
+    count = used.get(key) if isinstance(used, dict) else None
+    return count if _is_count(count) and count >= 0 else None
+
+
+def count_note(build_limits: object, deploy_limits: object) -> str:
+    """What may make the counts read low: one half per count estimated from the listings, empty when neither is."""
+    estimated = [
+        note
+        for note, key, limits in (
+            (RELEASE_NOTE, "totalReleases", build_limits),
+            (DEPLOY_NOTE, "activeDeployments", deploy_limits),
+        )
+        if exact_used(limits, key) is None
+    ]
+    return "; ".join(estimated)
+
+
 def quota_payload(
     holders: Sequence[Mapping[str, Any]],
     visible: int,
@@ -240,17 +263,22 @@ def quota_payload(
     *,
     notes: Sequence[str] = (),
 ) -> dict[str, Any]:
-    releases = _usage(
-        sum(holder["releases"] for holder in holders), build_limits, "maxTotalReleases", shape=_BUILDER_SHAPE
-    )
-    if visible > len(holders):
+    """The usage the command reports: each count as the service sent it in ``used``, else counted from the listings."""
+    total = exact_used(build_limits, "totalReleases")
+    counted = sum(holder["releases"] for holder in holders)
+    releases = _usage(counted if total is None else total, build_limits, "maxTotalReleases", shape=_BUILDER_SHAPE)
+    if total is None and visible > len(holders):
         releases["truncated"] = True
-    # Counted from the deploy list, which can miss a slot held by a queued copy.
-    deployments = {**_usage(active, deploy_limits, "maxActiveDeployments", shape=_DEPLOY_SHAPE), "exact": False}
+    # Counted from the deploy list, which can miss a slot held by a queued copy, unless comfy-deploy sent it.
+    held = exact_used(deploy_limits, "activeDeployments")
+    deployments = {
+        **_usage(active if held is None else held, deploy_limits, "maxActiveDeployments", shape=_DEPLOY_SHAPE),
+        "exact": held is not None,
+    }
     return {
         "releases": releases,
         "activeDeployments": deployments,
-        "note": "; ".join((NOTE, *notes)),
+        "note": "; ".join(note for note in (count_note(build_limits, deploy_limits), *notes) if note),
     }
 
 

@@ -14,7 +14,8 @@ Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
   GET  /v1/releases/{id}                          -> {status, ...}
   GET  /v1/release-labels?id=..                   -> {labels: [{releaseId, buildId, buildName, version}]}
-  GET  /v1/limits                                 -> {maxBuilds?, maxRunningBuilds, maxTotalReleases?}
+  GET  /v1/limits                                 -> {maxBuilds?, maxRunningBuilds, maxTotalReleases?,
+                                                      used?: {builds, runningBuilds, totalReleases}}
 """
 
 from __future__ import annotations
@@ -368,7 +369,7 @@ class BuilderClient:
 
     def get_limits(self) -> dict:
         """GET /v1/limits -> the build caps the workspace is held to. An absent cap
-        does not apply; the builder sends no used counts."""
+        does not apply; a newer builder also sends the workspace's counts in ``used``."""
         return self._get(("limits",))
 
     def get_build(self, build_id: str) -> dict:
