@@ -22,10 +22,10 @@ history.
   spec has no `baseComfyVersion`; `build_snapshot_empty` means a
   `--from-snapshot` import carries no custom nodes or models. Its message says
   whether the snapshot lists none (likely older than the install) or counts
-  the listed packs left out by cause: disabled, or what the importer's report
-  says (a pack still waiting on the Comfy Registry is named, to import again
-  later), with no cause guessed where the report gives none (also warned in
-  pretty output).
+  the listed packs left out by cause: disabled, or the importer's own advisory
+  line for each cause its report gives, with no cause guessed where the report
+  gives none. Those advisory lines appear only inside this warning, so each
+  pack is named once (also warned in pretty output).
 - `comfy build release create` refuses a spec with no `baseComfyVersion` with
   `build_comfy_version_missing` when the Build it names has none either, before
   the cut, and the hint names `comfy build update --comfy-version <ref>`. With
@@ -40,6 +40,11 @@ history.
 
 ### Fixed
 
+- A snapshot import's advisories name a pending or disowned Registry pack
+  once: the `unresolvedNodes` line leaves out the packs `registryPending` and
+  `notInRegistry` already name. A pending pack's line says to import again once
+  the Comfy Registry finishes publishing it, where it said the build would wait
+  or fail on it; the importer leaves that pack out of the spec.
 - `comfy build update --comfy-version <ref>` on a spec with no install beside
   it (imported from a workflow or a snapshot) sets the version without a rescan
   (`source: "spec"`). A rescan that cannot run names that command and

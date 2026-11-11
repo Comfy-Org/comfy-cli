@@ -758,12 +758,18 @@ def snapshot_from_definition(definition: dict) -> dict:
     }
 
 
-# Each entry is (report key, what it means to the reader).
-_REPORT_ADVISORIES = (
+# Each entry is (report key, what it means to the reader). These first four name
+# custom node packs the import left out; an empty snapshot import folds their
+# lines into its one warning.
+_PACK_ADVISORIES = (
     ("notInRegistry", "pinned to something the Comfy Registry does not publish"),
     ("collidingNodes", "left out: another pack already claimed the folder they install into"),
-    ("registryPending", "published but not yet servable; the build will wait or fail on it"),
+    # The importer drops a pending pin, so the pack waits on a new import, not on the build.
+    ("registryPending", "left out until the Comfy Registry finishes publishing them, so import again then"),
     ("unresolvedNodes", "named nothing the builder can install from"),
+)
+_REPORT_ADVISORIES = (
+    *_PACK_ADVISORIES,
     ("unverifiedPins", "left unchecked because the registry did not answer"),
     ("skippedPins", "dropped: the build owns these packages"),
     ("unpinnablePins", "dropped: not a public PyPI release"),
@@ -865,8 +871,39 @@ _REPORT_ENTRY_ADVISORIES = (
 )
 
 
-def report_advisories(report: dict) -> list[str]:
-    """One line per thing the importer could not carry, in reader's terms."""
+def _table_lines(report: dict, table: tuple[tuple[str, str], ...]) -> tuple[list[str], int]:
+    """The advisory line for each key of *table* the report fills, and how many
+    names those lines carry. The builder lists a disowned or pending Registry pin
+    under ``unresolvedNodes`` too, so that line leaves those names out: each pack
+    gets one cause."""
+    lines, named = [], 0
+    for key, meaning in table:
+        entries = report.get(key)
+        if not entries:
+            continue
+        # A scalar here would otherwise render one line per character.
+        if not isinstance(entries, list | tuple):
+            lines.append(_unrenderable(key, entries))
+            continue
+        names = [_from_server(e) for e in entries]
+        if key == "unresolvedNodes":
+            given = {
+                _from_server(e)
+                for other in ("notInRegistry", "registryPending")
+                if isinstance(report.get(other), list | tuple)
+                for e in report[other]
+            }
+            names = [name for name in names if name not in given]
+            if not names:
+                continue
+        lines.append(_advisory_line(len(names), meaning, names))
+        named += len(names)
+    return lines, named
+
+
+def report_advisories(report: dict, *, packs: bool = True) -> list[str]:
+    """One line per thing the importer could not carry, in reader's terms.
+    ``packs=False`` leaves out the `_PACK_ADVISORIES` lines."""
     lines = []
     # Present and false is the finding; absent means the importer did not say.
     if report.get("pythonSatisfied") is False:
@@ -883,15 +920,7 @@ def report_advisories(report: dict) -> list[str]:
             "the importer pinned every pack the workflow named without a version to the registry's newest "
             "published one, so importing the same file later can build something different"
         )
-    for key, meaning in _REPORT_ADVISORIES:
-        entries = report.get(key)
-        if not entries:
-            continue
-        # A scalar here would otherwise render one line per character.
-        if not isinstance(entries, list | tuple):
-            lines.append(_unrenderable(key, entries))
-            continue
-        lines.append(_advisory_line(len(entries), meaning, [_from_server(e) for e in entries]))
+    lines.extend(_table_lines(report, _REPORT_ADVISORIES if packs else _REPORT_ADVISORIES[len(_PACK_ADVISORIES) :])[0])
     for key, render in _REPORT_ENTRY_ADVISORIES:
         entries = report.get(key)
         if not entries:
@@ -1297,12 +1326,16 @@ def _import_definition(renderer, source: ImportSource, value: str, *, comfy_vers
     # not carry so it is visible now rather than inside a build. Every line goes
     # through `renderer.warn`, which writes to stderr in JSON mode, so stdout
     # still carries exactly one envelope.
-    advisories = report_advisories(imported.get("report") or {})
-    for line in advisories:
+    report = imported.get("report") if isinstance(imported.get("report"), dict) else {}
+    advisories = report_advisories(report)
+    empty_reason = _snapshot_empty_message(data, report) if _empty_snapshot(definition, source.name) else None
+    # An empty import that listed packs gives their causes inside its one
+    # warning, so each pack is said once.
+    folded = empty_reason is not None and bool(_snapshot_packs(data))
+    for line in report_advisories(report, packs=False) if folded else advisories:
         renderer.warn(line)
-    empty_reason = _snapshot_empty_message(data, imported.get("report")) if source.name == "snapshot" else None
-    if _empty_snapshot(definition, source.name):
-        renderer.warn(empty_reason or _SNAPSHOT_EMPTY)
+    if empty_reason is not None:
+        renderer.warn(empty_reason)
 
     # `--comfy-version` overrides a value in the definition rather than steering
     # a scan, so it is honoured here too; ignoring it on this path would leave a
@@ -1325,53 +1358,28 @@ _SNAPSHOT_EMPTY = (
 )
 
 
-# Why the importer left an enabled pack out, as (report key, what it means), in
-# the order a pack is attributed: a pending or disowned Registry pin also lands
-# in `unresolvedNodes`, because dropping the pin leaves the pack no source.
-_SNAPSHOT_PACK_REASONS = (
-    ("registryPending", "waiting on the Comfy Registry to finish publishing"),
-    ("notInRegistry", "pinned to a version the Comfy Registry does not publish"),
-    ("collidingNodes", "sharing an install folder with another pack"),
-    ("unresolvedNodes", "not from a supported source (the Comfy Registry or GitHub)"),
-)
+def _snapshot_packs(snapshot: dict) -> list[dict]:
+    snapshots = as_snapshot_envelope(snapshot).get("snapshots")
+    first = snapshots[0] if isinstance(snapshots, list) and snapshots and isinstance(snapshots[0], dict) else {}
+    packs = first.get("customNodes")
+    return [pack for pack in packs if isinstance(pack, dict)] if isinstance(packs, list) else []
 
 
-def _report_names(report: dict, key: str) -> list[str]:
-    names = report.get(key)
-    return [_from_server(name) for name in names if isinstance(name, str)] if isinstance(names, list) else []
-
-
-def _snapshot_empty_message(snapshot: dict, report: dict | None = None) -> str:
+def _snapshot_empty_message(snapshot: dict, report: dict) -> str:
     """What to say when a snapshot imports no custom nodes.
 
     A current snapshot can list packs and still import none, so a newer snapshot
     fixes only one that really lists none. A disabled pack is read off the input;
-    every other cause comes from the importer's report, and a pack it gives no
-    cause for is said to be left out without a guess at why."""
-    snapshots = as_snapshot_envelope(snapshot).get("snapshots")
-    first = snapshots[0] if isinstance(snapshots, list) and snapshots and isinstance(snapshots[0], dict) else {}
-    packs = first.get("customNodes")
-    packs = [pack for pack in packs if isinstance(pack, dict)] if isinstance(packs, list) else []
+    every other cause is the importer's own advisory line, and a pack its report
+    gives no cause for is said to be left out without a guess at why."""
+    packs = _snapshot_packs(snapshot)
     if not packs:
         return _SNAPSHOT_EMPTY
-    report = report if isinstance(report, dict) else {}
     disabled = sum(1 for pack in packs if pack.get("enabled") is False)
+    causes, named = _table_lines(report, _PACK_ADVISORIES)
     parts = [f"{disabled} disabled"] if disabled else []
-    remaining = len(packs) - disabled
-    attributed: set[str] = set()
-    for key, meaning in _SNAPSHOT_PACK_REASONS:
-        names = [name for name in dict.fromkeys(_report_names(report, key)) if name not in attributed]
-        attributed.update(names)
-        if not names or remaining <= 0:
-            continue
-        count = min(len(names), remaining)
-        remaining -= count
-        if key == "registryPending":
-            shown = names[:_ADVISORY_NAMES]
-            held_back = f", +{len(names) - len(shown)} more" if len(names) > len(shown) else ""
-            parts.append(f"{count} {meaning} ({', '.join(shown)}{held_back}), so import again once it has")
-        else:
-            parts.append(f"{count} {meaning}")
+    parts.extend(causes)
+    remaining = len(packs) - disabled - named
     if remaining > 0:
         parts.append(f"{remaining} left out with no reason in the importer's report")
     return (

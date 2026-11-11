@@ -560,7 +560,7 @@ def test_init_from_a_snapshot_whose_packs_were_all_skipped_says_why_not_to_retak
     message = _flat(warning["message"])
     assert "lists 3 custom node packs" in message
     assert "1 disabled" in message
-    assert "2 not from a supported source" in message
+    assert "2 named nothing the builder can install from: hand-rolled, loose-pack" in message
     assert "lists no custom nodes" not in message
     assert "newer" not in message
     assert "newer" not in _flat(result.stderr)
@@ -593,8 +593,9 @@ def test_init_from_a_snapshot_whose_registry_pack_is_pending_names_it_as_waiting
     assert warning["code"] == "build_snapshot_empty"
     message = _flat(warning["message"])
     assert "lists 1 custom node pack" in message
-    assert "1 waiting on the Comfy Registry to finish publishing (comfyui-essentials)" in message
-    assert "not from a supported source" not in message
+    assert "1 left out until the Comfy Registry finishes publishing them, so import again then" in message
+    assert message.endswith(": comfyui-essentials")
+    assert "named nothing the builder can install from" not in message
     assert "disabled" not in message
     assert "newer" not in message
     assert "newer" not in _flat(result.stderr)
@@ -617,7 +618,7 @@ def test_init_from_a_snapshot_whose_packs_the_report_gives_no_cause_for_does_not
     (warning,) = _envelope(result)["data"]["warnings"]
     message = _flat(warning["message"])
     assert "1 left out with no reason in the importer's report" in message
-    assert "not from a supported source" not in message
+    assert "named nothing the builder can install from" not in message
     assert "Comfy Registry" not in message
     assert "newer" not in message
 
@@ -631,3 +632,48 @@ def test_init_from_a_snapshot_with_packs_carries_no_empty_snapshot_warning(
     # Then
     assert result.exit_code == 0, result.stderr
     assert _envelope(result)["data"]["warnings"] == []
+
+
+def test_a_pending_registry_pack_in_an_empty_import_prints_one_cause_line(
+    install: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: the snapshot's one pack is a Registry pin still being published,
+    # which the importer reports under registryPending and again under
+    # unresolvedNodes, so the import is empty
+    snapshot = tmp_path / "pending-snapshot.json"
+    snapshot.write_text(json.dumps(_SNAPSHOT), encoding="utf-8")
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", _pending_import)
+    env = {"AI_AGENT": "1", "COMFY_OUTPUT": "pretty", "NO_COLOR": "1", "COLUMNS": "400", "COMFY_BUILDER_TOKEN": "tok"}
+
+    # When
+    result = CliRunner().invoke(
+        cli_app, ["build", "init", "--name", "Foo", "--from-snapshot", str(snapshot), str(install)], env=env
+    )
+
+    # Then: one line names the pack, with the registryPending cause from the
+    # one advisory table, and no other line gives it a cause
+    assert result.exit_code == 0, result.output
+    naming = [line for line in result.output.splitlines() if "comfyui-essentials" in line]
+    assert len(naming) == 1, result.output
+    pending = dict(build._REPORT_ADVISORIES)["registryPending"]
+    assert pending in naming[0]
+    others = [meaning for key, meaning in build._REPORT_ADVISORIES if key != "registryPending"]
+    assert not any(meaning in result.output for meaning in others), result.output
+
+
+def test_a_pack_the_report_names_under_a_registry_cause_is_not_named_again_as_unresolved() -> None:
+    # Given: the builder lists every disowned or pending Registry pin under
+    # unresolvedNodes as well, and asks that one or the other be shown
+    report = {
+        "registryPending": ["pending"],
+        "notInRegistry": ["disowned"],
+        "unresolvedNodes": ["pending", "disowned", "loose"],
+    }
+
+    # When
+    lines = build.report_advisories(report)
+
+    # Then
+    assert len([line for line in lines if "pending" in line]) == 1
+    assert len([line for line in lines if "disowned" in line]) == 1
+    assert "1 named nothing the builder can install from: loose" in lines
