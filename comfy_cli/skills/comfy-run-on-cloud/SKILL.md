@@ -272,8 +272,14 @@ at the first that works:
      build;
    - the Python passed as `--python`, by path: the yes confirms it is the one
      that starts their server. When they name another, rescan with
-     `comfy --json build update '<install>' --python '<that one>'` (and the
-     same `--comfy-url`) and show the plan again;
+     `comfy --json build update '<install>' --python '<that one>' --dry-run`
+     (and the same `--comfy-url`), show the person each entry of its `diff`
+     by name and the `pipDependencies` lines it adds and drops, and run it
+     again with `--yes` only after they agree. The rescan rebuilds
+     `customNodes` and `models` from the install, so it brings back each
+     folder dropped above and removes each model added by hand: repeat the
+     step-4 `customNodes` checks (`.disabled`, no nodes, single `.py` files)
+     and the model review on the new spec, then show the plan again;
    - the Build id the push replaces, when the spec has one, asked as a
      question of its own;
    - the GPU and region (cheapest that fits first, from

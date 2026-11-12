@@ -600,6 +600,24 @@ def test_run_on_cloud_skill_has_the_person_confirm_the_server_python():
     assert "comfy --json build update '<install>' --python '<that one>'" in run
 
 
+def test_run_on_cloud_skill_reviews_the_python_correction_rescan():
+    """`update` refuses an agent without `--yes` (`build_update_needs_confirm`),
+    and its rescan rebuilds `customNodes` and `models` from the install, so it
+    brings back the folders step 4 dropped and removes models added by hand:
+    the correction is dry-run first, agreed, then checked again before the plan."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    rescan = "comfy --json build update '<install>' --python '<that one>' --dry-run"
+    assert rescan in run
+    correction = run[run.index(rescan) :]
+    assert "show the person each entry of its `diff` by name and the `pipDependencies` lines it adds" in correction
+    assert "run it again with `--yes` only after they agree" in correction
+    assert "it brings back each folder dropped above and removes each model added by hand" in correction
+    assert (
+        "repeat the step-4 `customNodes` checks (`.disabled`, no nodes, single `.py` files) and the model review"
+        " on the new spec, then show the plan again" in correction
+    )
+
+
 def test_run_on_cloud_skill_keeps_an_existing_build_spec():
     """`init` writes `comfy-build.yaml` into the person's install and refuses
     when one is there; `--force` would overwrite an earlier build's id and
