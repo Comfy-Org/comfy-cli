@@ -179,7 +179,31 @@ at the first that works:
    prints that too. A match only rules a wrong Python out; it does not prove
    this one starts the server, so the plan names it and the person confirms
    it. When neither is there or it differs, ask the person which Python starts
-   the server. Then, with every path quoted:
+   the server.
+
+   Before `init`, list the symlinks under `custom_nodes/` whose name ends in
+   `.disabled`:
+
+   ```shell
+   find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l
+   ```
+
+   `init` follows such a link to its folder, and unless that folder is a git
+   checkout with a GitHub `origin` or a registry pack, it treats it as a local
+   pack, refuses to package a symlinked one (`build_spec_invalid`, `node root
+   must not be a symlink`), and stops before writing any spec. You cannot tell
+   every case from outside, so ask about each link listed. Name it to the
+   person: ComfyUI does not load such a link, but `init` cannot scan past it.
+   Ask them to move the link itself (no trailing `/`) out of `custom_nodes/`:
+
+   ```shell
+   mv '<install>/custom_nodes/<name>.disabled' '<install>/<name>.disabled'
+   ```
+
+   and back after the build with
+   `mv '<install>/<name>.disabled' '<install>/custom_nodes/<name>.disabled'`.
+   Run `init` only after they move every one; if they decline, stop. Then,
+   with every path quoted:
 
    ```shell
    comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'

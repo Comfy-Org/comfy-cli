@@ -176,7 +176,16 @@ falls to `0` means the connection stalled, not that the upload is slow.
   carry that library, so such a pack fails on Cloud unless a wheel line installs
   it (`comfy-build-pins`).
 - **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
-  load. Drop that entry too, and name it in the disclosure.
+  load. Drop that entry too, and name it in the disclosure. **A `.disabled`
+  symlink stops `init` before it writes a spec** when the folder it points at
+  is neither a git checkout with a GitHub `origin` nor a registry pack: the scan
+  follows the link to a local pack, and packaging refuses a symlinked node root
+  (`build_spec_invalid`). Before `init`, list such links with
+  `find <install>/custom_nodes -maxdepth 1 -name '*.disabled' -type l`, tell the
+  person ComfyUI does not load them but `init` cannot scan past them, and ask
+  them to move each link out of `custom_nodes/`
+  (`mv <install>/custom_nodes/<name>.disabled <install>/<name>.disabled`, and
+  the reverse `mv` after the build); run `init` only after they do.
 - **It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as
   a pack. The build does not carry it: name it in the disclosure. When the
   workflow uses a node it provides (its `python_module` in `object_info` is

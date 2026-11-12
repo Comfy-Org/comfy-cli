@@ -53,7 +53,10 @@ history.
   asks, and never passes `--force`. A scanned `custom_nodes/` folder whose
   name ends in `.disabled`, or that declares neither `NODE_CLASS_MAPPINGS` nor
   `comfy_entrypoint`, is dropped and named in the plan; `comfy-build` Path A
-  says the same. A single `.py` file under `custom_nodes/`, which ComfyUI loads
+  says the same. Before `init`, both list each `custom_nodes/` symlink whose
+  name ends in `.disabled`, which `init` follows and cannot package when it
+  points at a local pack, and ask the person to move it out of `custom_nodes/`
+  (with the `mv` back), stopping when they decline. A single `.py` file under `custom_nodes/`, which ComfyUI loads
   but the scan skips, is named as not carried, and the skill stops when the
   workflow needs a node from one. A workflow model the spec does not list (outside `models/`,
   a dotfile, or an extension the scan skips, such as `.sft`) is added from a
