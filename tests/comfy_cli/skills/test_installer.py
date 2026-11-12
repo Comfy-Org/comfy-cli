@@ -528,6 +528,19 @@ def test_run_on_cloud_skill_runs_unproven_models_on_clouds_copy_and_names_them()
     assert "Ask: use Cloud's copy" not in text
 
 
+def test_run_on_cloud_skill_builds_from_the_whole_install():
+    """A custom build for a local workflow takes the whole install: the pack
+    versions installed and every model with its folder and hash. Building from
+    the workflow alone (`--from-workflow`) picks the newest version of each
+    pack and starts with no models."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "--from-workflow" not in run
+    assert "comfy --json build init <install> --name '<name>'" in run
+    assert "show the plan and get a yes" in run
+    build = " ".join(skill_content("comfy-build").split())
+    assert "carries only what that workflow loads" not in build
+    assert "a build it needs is made from the whole install (Path A)" in build
+
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():
     """A server on another port than 8188 must be the one `--where local` reads."""
     text = skill_content("comfy-run-on-cloud")

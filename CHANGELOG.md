@@ -34,6 +34,11 @@ history.
 
 ### Changed
 
+- The `comfy-run-on-cloud` skill makes a custom build from the person's whole
+  install (`comfy build init <install>`, Path A of `comfy-build`), not from the
+  workflow alone (`--from-workflow`): the build carries the installed pack
+  versions and every model with its folder and hash. It still shows the plan
+  and asks before building.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note

@@ -153,11 +153,13 @@ at the first that works:
 3. **A lossy swap**, asked first. A yes runs the copy on Comfy Cloud. A no goes
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
-   show comfy-deploy`, and follow them. Build only what this workflow loads:
-   `comfy --json build init <dir> --name '<name>' --from-workflow <file>`, where
-   `<file>` is `"<work>/cloud.json"` when you made a copy and
-   `"<work>/original.json"` otherwise. Before
-   building, show the plan and get a yes: what it uploads, the GPU and region
+   show comfy-deploy`, and follow them. Build from the person's whole install,
+   the one serving `<server>` (step 3's `comfy --json which`), by comfy-build's
+   Path A: `comfy --json build init <install> --name '<name>'` (Comfy Desktop:
+   its Path A′). The build then carries the pack versions they have installed
+   and every model with its folder and hash, so Cloud runs what runs locally;
+   the push swaps a public model for its download. Before building, show the
+   plan and get a yes: what it uploads, the GPU and region
    (cheapest that fits first, from `comfy --json deploy refs compute`), the
    costs, and `--min 0 --max 1` workers.
 

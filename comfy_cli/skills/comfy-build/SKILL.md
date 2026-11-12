@@ -110,7 +110,8 @@ tail.
 If the goal is one workflow running on Comfy Cloud ("Run on Cloud", or "put this
 workflow on Cloud") rather than an environment, read
 `comfy skills show comfy-run-on-cloud` first: Comfy Cloud itself or an existing
-build may already run it, and a build it needs carries only what that workflow loads.
+build may already run it, and a build it needs is made from the whole install
+(Path A).
 
 ---
 
