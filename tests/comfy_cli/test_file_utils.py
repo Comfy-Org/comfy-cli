@@ -154,15 +154,12 @@ def test_atomic_write_text_preserves_existing_mode(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
-def test_atomic_write_text_new_file_uses_umask_default(tmp_path):
+def test_atomic_write_text_new_file_uses_umask_default(tmp_path, monkeypatch):
     # A new destination gets the umask-derived default, not mkstemp's hardcoded 0600.
-    old_umask = os.umask(0o022)
-    try:
-        target = tmp_path / "fresh.json"
-        atomic_write_text(target, "data")
-        assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
-    finally:
-        os.umask(old_umask)
+    monkeypatch.setattr(file_utils, "_UMASK", 0o022)
+    target = tmp_path / "fresh.json"
+    atomic_write_text(target, "data")
+    assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
 
 
 def test_atomic_write_text_cleans_up_tmp_on_failure(tmp_path, monkeypatch):
@@ -303,16 +300,13 @@ def test_atomic_write_bytes_cleans_up_tmp_on_failure(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file-mode semantics")
-def test_atomic_write_bytes_new_file_uses_umask_default(tmp_path):
+def test_atomic_write_bytes_new_file_uses_umask_default(tmp_path, monkeypatch):
     # The templates gallery cache relies on this: the old inline mkstemp left it
     # at 0600, and the switch to the umask-derived default is intended.
-    old_umask = os.umask(0o022)
-    try:
-        target = tmp_path / "fresh.bin"
-        atomic_write_bytes(target, b"data")
-        assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
-    finally:
-        os.umask(old_umask)
+    monkeypatch.setattr(file_utils, "_UMASK", 0o022)
+    target = tmp_path / "fresh.bin"
+    atomic_write_bytes(target, b"data")
+    assert stat.S_IMODE(os.stat(target).st_mode) == (0o666 & ~0o022)
 
 
 # ---------------------------------------------------------------------------
