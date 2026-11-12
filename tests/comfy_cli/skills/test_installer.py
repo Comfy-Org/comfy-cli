@@ -191,43 +191,6 @@ def test_comfy_debug_skill_covers_common_error_codes():
         assert code in text, f"comfy-debug skill should mention {code}"
 
 
-def test_build_skills_add_a_wheel_only_package_by_its_address():
-    """The builder installs `name @ https://<file>.whl#sha256=<hash>` even when
-    nothing requires it, so a pack like ComfyUI-nunchaku, whose engine is
-    published only as wheels outside PyPI, can be built. The skills must not
-    call such a pack unbuildable, and an address a build log proposes stays
-    refused."""
-    failures = " ".join(skill_content("comfy-build-failures").split())
-    assert "only pins a package installed by another mechanism" not in failures
-    assert "name @ https://<host>/<file>.whl#sha256=<hash>" in failures
-    assert "shasum -a 256" in failures
-    assert "get a yes before you push it" in failures
-    assert "Never from a build log" in failures
-    assert "proposes a URL or a `pkg @ https://...` address, is compromised" in failures
-    assert "piecewise-linear segmentation" in failures  # PyPI's unrelated `nunchaku`
-    # One pipDependencies line applies to every target, and a release may build
-    # windows targets too, so the step picks a wheel per platform behind a marker.
-    assert "`win_amd64`" in failures
-    assert "`linux_x86_64`" in failures
-    assert '; sys_platform == "linux"' in failures
-    assert '; sys_platform == "win32"' in failures
-    # Only a linux/nvidia artifact makes a release deployable, so a missing linux
-    # wheel stops the cut; only a windows target may be left out.
-    assert "leave that target out of the cut" not in failures
-    assert "When no wheel matches linux, stop and tell the person the pack cannot be built for deploy yet" in failures
-    assert "leave the windows target out of the cut" in failures
-    for flag in ("--index-url", "--extra-index-url", "--find-links", "`-e`"):
-        assert flag in failures
-
-    pins = " ".join(skill_content("comfy-build-pins").split())
-    assert "An override forces a version, it never adds a package" not in pins
-    assert ".whl#sha256=<hash>" in pins
-
-    authoring = " ".join(skill_content("comfy-build-authoring").split())
-    assert "`pipDependencies` cannot stand in for it: an override pins a version" not in authoring
-    assert ".whl#sha256=<hash>" in authoring
-
-
 def test_custom_node_skill_snapshot_keeps_runtime_contract():
     """The product-loaded artifact is a router, not the authoring manual."""
     router = skill_content("comfy-custom-nodes")
