@@ -72,7 +72,7 @@ def _default_out_dir() -> str:
 
 
 # Stripped on every download redirect so auth never crosses origins.
-_AUTH_HEADERS_TO_STRIP = frozenset({"authorization", "x-api-key", "x-comfy-api-key", "cookie"})
+_AUTH_HEADERS_TO_STRIP = frozenset({"authorization", "x-api-key", "x-comfy-api-key", "cookie", "comfy-usage-source"})
 _MAX_REDIRECTS = 5
 
 
