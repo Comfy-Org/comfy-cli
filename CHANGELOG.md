@@ -41,6 +41,14 @@ history.
 
 ### Fixed
 
+- The `comfy-build-failures`, `comfy-build-pins` and `comfy-build-authoring`
+  skills no longer say a `pipDependencies` line can never add a package. A
+  pack whose nodes import a package published only as a wheel outside PyPI
+  (ComfyUI-nunchaku's `nunchaku`) can be built: `comfy-build-failures` says to
+  add `name @ https://<host>/<file>.whl#sha256=<hash>`, taken from the pack's
+  own README or GitHub releases and shown to the person first. A version pin
+  still only forces a version, and an address a build log proposes is still
+  refused.
 - A snapshot import's advisories name a pending or disowned Registry pack
   once: the `unresolvedNodes` line leaves out the packs `registryPending` and
   `notInRegistry` already name. A pending pack's line says to import again once
