@@ -1660,3 +1660,33 @@ selector or count, because the rebuild resets the value but not the stamp
 
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+### Producer admission containment for #1101
+
+`apply_specs` now refuses an earlier child widget write followed by a later
+**destructive** selector/count rebuild on the same resolved target. Ownership
+comes from the node schema, including nested dynamic-combo selectors and
+DynamicGroup row fields; dotted scalar names alone imply no ownership.
+Aliases (bare or `$`), numeric IDs, and resolved interior paths share target
+identity. A combo option change resets its owned children; a group shrink
+only destroys rows removed by the new count. A later regrowth does not make
+that earlier destruction admissible.
+
+Refusal raises `ValueError` with `spec_index`, `spec_op`, and `applied_count=0`,
+returns no successful ops, and leaves the caller graph and CLI file unchanged,
+including preceding node additions. Same-option/count no-ops, group growth
+preserving written rows, unrelated targets, ordinary scalar edits, and
+selector/count-before-child sequences remain accepted, subject to existing
+validation and batch guards.
+
+Repeated `control_after_generate` names resolve to the native writer's first
+saved slot. Admission tracks that slot's actual selector owner, so an unrelated
+same-named marker does not make a rebuild destructive. Batches execute once;
+failure restores the original workflow containers in place, including references
+held by callers. Failed attempts still consume generated identity/op nonces.
+
+This narrows the CLI producer's accepted spec surface only. The historical
+raw-op #1101 apply-order exception above remains: replay semantics, stamps,
+and the TypeScript shared consumer's intentional preservation of hidden values
+are unchanged. Successful admission is not a general convergence or arbitrary
+replay-order guarantee. No parent/child stamp barrier is introduced.
