@@ -490,7 +490,7 @@ def _matches(
         return False
     if tag and not any((t or "").lower() == tag.lower() for t in row.get("tags") or []):
         return False
-    if model and not any(_contains(m, model) for m in row.get("models") or []):
+    if model and not (any(_contains(m, model) for m in row.get("models") or []) or _variant_matches(row, model)):
         return False
     if provider and not any(_contains(p, provider) for p in row.get("providers") or []):
         return False
@@ -516,6 +516,66 @@ def _contains(haystack: Any, needle: str) -> bool:
         return True
     squashed = _SEPARATORS.sub("", n)
     return bool(squashed) and squashed in _SEPARATORS.sub("", hay)
+
+
+# Word boundaries for `_variant_matches`. Wider than `_SEPARATORS` because
+# titles also use ":" "," "(" "/" between words ("Krea-2: Text to Image").
+# "." is kept so a version stays one word: "5.0", "2.2", "wan2.2".
+_WORD_BREAKS = re.compile(r"[^a-z0-9.]+")
+
+
+def _word_list(text: Any) -> list[str]:
+    """Lowercase ``text`` and split it into words, in order; a non-string has none."""
+    if not isinstance(text, str):
+        return []
+    return [w for w in (part.strip(".") for part in _WORD_BREAKS.split(text.lower())) if w]
+
+
+def _words(text: Any) -> set[str]:
+    """The set of words in ``text``, as ``_word_list`` splits them."""
+    return set(_word_list(text))
+
+
+def _variant_matches(row: dict[str, Any], model: str) -> bool:
+    """``--model`` written as base model plus variant: ``Seedream 5.0 Lite``, ``krea 2 turbo``.
+
+    The gallery lists the base model in ``models`` ("Seedream 5.0", "Krea 2")
+    and names the variant only in the title, tags or template name, so no
+    single model name contains the whole query. This matches when, for ONE of
+    the template's models:
+
+    - the query's first word is a word of that model name (requests name the
+      model first, and the anchor keeps this a model filter: ``Text Image`` is
+      not a model even though "Qwen-Image" contains "image");
+    - every other word is a word of that model name, the title or the tags,
+      or of the template name. A number is the exception: outside the model
+      name it counts only in the title, since a template name's numbers are
+      not versions (``photo_2``, ``step_2``, ``t2i``).
+
+    Words come from one model so ``Nano Banana Pro`` does not pool "Nano
+    Banana 2" and "Gemini-3.1-Pro" from the same template. Whole words, not
+    substrings, so ``Wan 2.2`` does not match a "Wan 2.1" title. A one-word
+    query has no variant part and is left to ``_contains``.
+    """
+    words = _word_list(model)
+    if len(words) < 2:
+        return False
+    title_words = _words(row.get("title"))
+    text_words = title_words | _words(row.get("name"))
+    for tag in row.get("tags") or []:
+        text_words |= _words(tag)
+    for name in row.get("models") or []:
+        model_words = _words(name)
+        if words[0] not in model_words:
+            continue
+        if all(w in model_words or (w in title_words if _is_number(w) else w in text_words) for w in words[1:]):
+            return True
+    return False
+
+
+def _is_number(word: str) -> bool:
+    """True for a version-like word made of digits and dots, such as ``2``, ``5.0`` or ``2511``."""
+    return word.replace(".", "").isdigit()
 
 
 # ---------------------------------------------------------------------------
