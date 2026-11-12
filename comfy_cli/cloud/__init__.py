@@ -71,6 +71,11 @@ _DEFAULT_SCOPES = (
     "comfy-cloud:settings:read",
     "comfy-cloud:settings:write",
     "comfy-cloud:billing:read",
+    # Append only, never reorder: the joined string is what the authorize URL
+    # sends. A refresh cannot widen a grant (RFC 6749 §6), so a session minted
+    # before a scope was added here needs a fresh `comfy cloud login`.
+    "comfy-cloud:secrets:write",
+    "comfy-cloud:agent:write",
 )
 
 CONFIG_KEY_RESOURCE_URL = "cloud_resource_url"
