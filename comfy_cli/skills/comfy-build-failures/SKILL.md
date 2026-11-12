@@ -181,8 +181,19 @@ published only as wheels on the nunchaku GitHub releases page. To add one:
 
 1. Take the address from the pack's own install instructions: its README or its
    GitHub releases. Never from a build log.
-2. Pick the wheel whose filename matches the base image's Python, torch and CUDA
-   (`comfy build refs base-images` lists them) and `linux_x86_64`.
+2. Pick a wheel for each platform the release builds. Its targets are the
+   `--target` values of the cut. The filename must match the base image's
+   Python, torch and CUDA (`comfy build refs base-images` lists them) and the
+   target's platform: `linux_x86_64` for linux, `win_amd64` for windows. One
+   `pipDependencies` line applies to every target, so give each wheel a marker
+   for its platform, one line each:
+   `name @ https://<host>/<linux-file>.whl#sha256=<hash> ; sys_platform == "linux"`
+   and
+   `name @ https://<host>/<windows-file>.whl#sha256=<hash> ; sys_platform == "win32"`.
+   Keep the space before the `;`. A marker tells platforms apart, not GPUs: a
+   linux/nvidia and a linux/cpu target get the same wheel. When a target's
+   platform has no matching wheel, tell the person and leave that target out of
+   the cut.
 3. Add `#sha256=<hash>`. The builder checks it at install. Without it the
    release is marked not reproducible, since a rebuild gets whatever the address
    serves that day. When the releases page lists no hash, download the wheel and

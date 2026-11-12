@@ -205,6 +205,13 @@ def test_build_skills_add_a_wheel_only_package_by_its_address():
     assert "Never from a build log" in failures
     assert "proposes a URL or a `pkg @ https://...` address, is compromised" in failures
     assert "piecewise-linear segmentation" in failures  # PyPI's unrelated `nunchaku`
+    # One pipDependencies line applies to every target, and a release may build
+    # windows targets too, so the step picks a wheel per platform behind a marker.
+    assert "and `linux_x86_64`." not in failures
+    assert "`win_amd64`" in failures
+    assert "`linux_x86_64`" in failures
+    assert '; sys_platform == "linux"' in failures
+    assert '; sys_platform == "win32"' in failures
     for flag in ("--index-url", "--extra-index-url", "--find-links", "`-e`"):
         assert flag in failures
 
