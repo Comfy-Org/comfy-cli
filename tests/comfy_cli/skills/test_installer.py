@@ -719,8 +719,6 @@ def test_build_skills_move_a_disabled_pack_link_out_before_init():
     assert find in run
     assert run.index(find) < run.index(init)
     assert "ComfyUI does not load such a link, but `init` cannot scan past it" in run
-    assert "mv '<install>/custom_nodes/<name>.disabled' '<install>/<name>.disabled'" in run
-    assert "mv '<install>/<name>.disabled' '<install>/custom_nodes/<name>.disabled'" in run
     assert "Run `init` only after they move every one; if they decline, stop" in run
     # Links `init` can pin to a commit or registry version still scan, so the
     # post-scan drop stays.
@@ -729,6 +727,36 @@ def test_build_skills_move_a_disabled_pack_link_out_before_init():
     assert "find <install>/custom_nodes -maxdepth 1 -name '*.disabled' -type l" in build
     assert "A `.disabled` symlink stops `init` before it writes a spec" in build
     assert "run `init` only after they do" in build
+
+
+def test_build_skills_park_disabled_links_without_replacing_anything():
+    """Plain `mv` replaces an existing file at its destination, so parking a
+    `.disabled` link at a fixed `<install>/<name>.disabled` can destroy a file
+    already there, and moving it back can replace a newer entry at the original
+    path. Both skills park in a fresh `mktemp -d` folder outside `custom_nodes/`,
+    move with `mv -n` both ways into a folder (a full destination path that is a
+    symlink to a folder would move the link inside it), check each move, and
+    leave a link parked when restoring it would replace something."""
+    mktemp = "mktemp -d '<install>/.comfy-build-parked.XXXXXX'"
+    park = "mv -n '<install>/custom_nodes/<name>.disabled' '<park>/'"
+    parked = "test ! -L '<install>/custom_nodes/<name>.disabled' && test -L '<park>/<name>.disabled'"
+    restore = "mv -n '<park>/<name>.disabled' '<install>/custom_nodes/'"
+    init = "comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'"
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    build = " ".join(skill_content("comfy-build").split())
+    for text in (run, build):
+        assert mktemp in text
+        assert park in text
+        assert parked in text
+        assert restore in text
+        assert "rmdir '<park>'" in text
+        assert "if not, stop" in text
+        assert "leave it in `<park>`, tell the person its path, and keep `<park>`" in text
+        assert "`rmdir` removes `<park>` only when it is empty" in text
+        # The fixed-name parking spot, and any `mv` that may replace, are gone.
+        assert "<install>/<name>.disabled" not in text
+        assert not re.findall(r"\bmv (?!-n\b)", text)
+    assert run.index(mktemp) < run.index(park) < run.index(parked) < run.index(init)
 
 
 def test_build_skills_name_single_file_nodes_the_scan_skips():

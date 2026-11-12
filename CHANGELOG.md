@@ -56,7 +56,10 @@ history.
   says the same. Before `init`, both list each `custom_nodes/` symlink whose
   name ends in `.disabled`, which `init` follows and cannot package when it
   points at a local pack, and ask the person to move it out of `custom_nodes/`
-  (with the `mv` back), stopping when they decline. A single `.py` file under `custom_nodes/`, which ComfyUI loads
+  into a new `mktemp -d` folder with `mv -n`, which never replaces a file,
+  stopping when they decline or the move did not happen. Moving it back also
+  uses `mv -n`; a link whose name is taken again stays parked, and the person
+  is told where. A single `.py` file under `custom_nodes/`, which ComfyUI loads
   but the scan skips, is named as not carried, and the skill stops when the
   workflow needs a node from one. A workflow model the spec does not list (outside `models/`,
   a dotfile, or an extension the scan skips, such as `.sft`) is added from a

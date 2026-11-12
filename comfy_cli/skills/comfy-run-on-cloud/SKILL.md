@@ -194,14 +194,27 @@ at the first that works:
    must not be a symlink`), and stops before writing any spec. You cannot tell
    every case from outside, so ask about each link listed. Name it to the
    person: ComfyUI does not load such a link, but `init` cannot scan past it.
-   Ask them to move the link itself (no trailing `/`) out of `custom_nodes/`:
+   Ask them to move the link itself (no trailing `/` after its name) out of
+   `custom_nodes/` into a new folder, which `mktemp` creates and prints; call
+   it `<park>`, and name it in the plan. `mv -n` never replaces anything:
 
    ```shell
-   mv '<install>/custom_nodes/<name>.disabled' '<install>/<name>.disabled'
+   mktemp -d '<install>/.comfy-build-parked.XXXXXX'
+   mv -n '<install>/custom_nodes/<name>.disabled' '<park>/'
+   test ! -L '<install>/custom_nodes/<name>.disabled' && test -L '<park>/<name>.disabled'
    ```
 
-   and back after the build with
-   `mv '<install>/<name>.disabled' '<install>/custom_nodes/<name>.disabled'`.
+   The `test` line checks the link left `custom_nodes/` and is in `<park>`;
+   if not, stop. After the build, move each one back the same way:
+
+   ```shell
+   mv -n '<park>/<name>.disabled' '<install>/custom_nodes/'
+   rmdir '<park>'
+   ```
+
+   When a link is still in `<park>` after that, something now holds its name
+   in `custom_nodes/`: do not replace it; leave it in `<park>`, tell the person
+   its path, and keep `<park>`. `rmdir` removes `<park>` only when it is empty.
    Run `init` only after they move every one; if they decline, stop. Then,
    with every path quoted:
 

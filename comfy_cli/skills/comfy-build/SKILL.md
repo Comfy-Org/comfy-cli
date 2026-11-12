@@ -183,9 +183,17 @@ falls to `0` means the connection stalled, not that the upload is slow.
   (`build_spec_invalid`). Before `init`, list such links with
   `find <install>/custom_nodes -maxdepth 1 -name '*.disabled' -type l`, tell the
   person ComfyUI does not load them but `init` cannot scan past them, and ask
-  them to move each link out of `custom_nodes/`
-  (`mv <install>/custom_nodes/<name>.disabled <install>/<name>.disabled`, and
-  the reverse `mv` after the build); run `init` only after they do.
+  them to move each link out of `custom_nodes/` into a new folder `<park>`,
+  which `mktemp -d '<install>/.comfy-build-parked.XXXXXX'` creates and prints,
+  with `mv -n`, which never replaces anything:
+  `mv -n '<install>/custom_nodes/<name>.disabled' '<park>/'`. Then
+  `test ! -L '<install>/custom_nodes/<name>.disabled' && test -L '<park>/<name>.disabled'`
+  checks the move; if not, stop: run `init` only after they do. After the
+  build, move each one back with
+  `mv -n '<park>/<name>.disabled' '<install>/custom_nodes/'` and
+  `rmdir '<park>'`. When a link is still in `<park>` after that, something now
+  holds its name: do not replace it; leave it in `<park>`, tell the person its
+  path, and keep `<park>`. `rmdir` removes `<park>` only when it is empty.
 - **It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as
   a pack. The build does not carry it: name it in the disclosure. When the
   workflow uses a node it provides (its `python_module` in `object_info` is
