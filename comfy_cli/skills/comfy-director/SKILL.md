@@ -76,8 +76,8 @@ need that shot — don't ship the break.
   audio that plays (KlingAvatar `sound_file`) and cut between *angles of the same
   lip-synced head* — B-roll over a continuous VO reads as a montage, and
   i2v-invented mouths drift. "No lip-sync / doesn't feel real" is the classic
-  rejection. (Generate audio in-graph — cloud `LoadAudio` can't see uploads; see
-  `comfy` audio gotchas.)
+  rejection. (Wire audio generated in the same job by connection; an uploaded
+  stem loads in `LoadAudio` by its `cloud_name` — see `comfy` audio gotchas.)
 - **Lock voice & casting by EAR before the expensive renders.** Voice/accent is
   subjective and unreadable from a waveform — render a few cheap candidate TTS
   takes of one line, have the user pick, THEN bake the winner into the costly,
