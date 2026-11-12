@@ -43,18 +43,22 @@ history.
   `main.py`), not from `comfy which`, and uses that path only when the server
   runs on this machine outside a container and the install is there.
   Otherwise, or for a relative `--base-directory`, it asks the person for the
-  folder on this machine. It passes the Python beside `main.py` as `--python`.
+  folder on this machine. It passes the Python beside `main.py` as `--python`
+  when its `sys.version` is the server's `python_version`, and asks otherwise.
   Comfy Desktop is scanned the same way (its data folder and Python), not
   imported from its snapshot, which carries no models. When the install
   already has a `comfy-build.yaml`, it shows `comfy build update`'s diff and
   asks, and never passes `--force`. A scanned `custom_nodes/` folder whose
   name ends in `.disabled`, or that declares neither `NODE_CLASS_MAPPINGS` nor
   `comfy_entrypoint`, is dropped and named in the plan; `comfy-build` Path A
-  says the same. A model outside the scanned folder is added from a public
-  source only when its sha256 matches the local file; another file is a lossy
-  swap asked on its own and named as a stand-in, or the model is named as not
-  carried. The plan names the spec file, each local pack as a whole folder,
-  and the models by count and total size, and its yes covers those uploads.
+  says the same. A workflow model the spec does not list (outside `models/`,
+  a dotfile, or an extension the scan skips, such as `.sft`) is added from a
+  public source only when its sha256 matches the local file; another file is
+  a lossy swap asked on its own and named as a stand-in, or the model is named
+  as not carried. The plan names the spec file, each local pack as a whole folder,
+  the models by count and total size, and each git pack with uncommitted
+  changes, and its yes covers those uploads; replacing the spec's existing
+  Build is asked on its own.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note

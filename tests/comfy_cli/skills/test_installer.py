@@ -566,6 +566,9 @@ def test_run_on_cloud_skill_checks_the_server_path_on_this_machine():
     assert "Docker" in run
     assert "this machine has `main.py` and `custom_nodes/` where `argv` puts them" in run
     assert "ask the person which folder on this machine holds that install" in run
+    # The Docker path is absolute, so the ask must not hinge on `argv` lacking one.
+    assert "In every other case (a container or VM, a path missing here" in run
+    assert "Otherwise, when `argv` gives no full path" not in run
 
 
 def test_run_on_cloud_skill_quotes_the_install_and_takes_python_beside_main_py():
@@ -575,9 +578,13 @@ def test_run_on_cloud_skill_quotes_the_install_and_takes_python_beside_main_py()
     run = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'" in run
     assert "`--base-directory=<dir>`" in run
-    assert "the `--base-directory` value is a relative path, ask the person" in run
+    assert "or a relative `--base-directory` value), ask the person" in run
     assert "`.venv` or `venv` in the folder holding `main.py`" in run
     assert "ask the person which Python starts the server" in run
+    # A stale venv beside `main.py` would freeze the wrong packages, so it is
+    # taken only when it is the interpreter the server reports.
+    assert "print(sys.version)'` prints the server's `system.python_version` exactly" in run
+    assert "When neither is there or it differs, ask the person which Python starts the server" in run
 
 
 def test_run_on_cloud_skill_keeps_an_existing_build_spec():
@@ -590,6 +597,14 @@ def test_run_on_cloud_skill_keeps_an_existing_build_spec():
     assert "comfy --json build update '<install>' --dry-run" in run
     assert "run it again with `--yes` only after they agree" in run
     assert "the spec file `init` or `update` wrote, `<install>/comfy-build.yaml`" in run
+    # `summary` is only counts; the `diff` names what a rescan drops, and the
+    # push then updates the Build the spec names in place.
+    assert "show the person its `summary`" not in run
+    assert "show the person each entry of its `diff` by name" in run
+    assert "a rescan removes a model added by hand earlier" in run
+    assert "the `pipDependencies` lines it adds and drops" in run
+    assert "so the push replaces that Build's definition" in run
+    assert "the Build id the push replaces, when the spec has one, asked as a question of its own" in run
 
 
 def test_run_on_cloud_skill_asks_for_an_install_build_by_folder_and_model_count():
@@ -644,6 +659,12 @@ def test_build_skills_drop_scanned_folders_that_declare_no_nodes():
         ), name
         assert "declared custom nodes failed to import" in text, name
         assert "each dropped folder in the" in text, name
+    # A kept pack may import a dropped library, which the build does not carry.
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Name each dropped folder in the plan, and any kept pack that imports it" in run
+    build = " ".join(skill_content("comfy-build").split())
+    assert "with each kept pack that imports its library (grep the kept packs for the import)" in build
+    assert "the build does not carry that library" in build
 
 
 def test_build_skills_drop_disabled_pack_folders():
@@ -667,6 +688,20 @@ def test_run_on_cloud_skill_matches_an_external_model_by_hash():
     assert "is another model: offering it is a lossy swap, asked on its own" in run
     assert "the build's yes does not cover it" in run
     assert "in the plan as a stand-in for the person's file, and any model not added as not carried" in run
+    # The scan skips `.sft`, dotfiles and files outside `models/`, so membership
+    # is checked against the spec, not the path.
+    assert "A workflow model the spec's `models` does not list is not carried, wherever it sits" in run
+    assert "`.safetensors`, `.ckpt`, `.pt`, `.pth` and `.bin`, such as `.sft`" in run
+    assert "A model loaded from any other folder" not in run
+
+
+def test_run_on_cloud_skill_discloses_git_packs_with_local_changes():
+    """`init` records a git pack as its origin and HEAD, so uncommitted edits
+    and untracked files in it do not reach Cloud; the plan names such a pack."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "A git pack (`source` `git`) builds from its commit, without the changes" in run
+    assert "git -C '<install>/custom_nodes/<folder>' status --porcelain" in run
+    assert "each dropped folder, each git pack with local changes, each stand-in model" in run
 
 
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():

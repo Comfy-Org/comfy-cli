@@ -166,15 +166,16 @@ at the first that works:
    at `/host/ComfyUI` here. Take the `--base-directory` folder, else the one
    holding `main.py`, only when the server runs on this machine outside a
    container or VM, and this machine has `main.py` and `custom_nodes/` where
-   `argv` puts them. Otherwise, when `argv` gives no full path, or when the
-   `--base-directory` value is a relative path, ask the person which folder on
-   this machine holds that install.
+   `argv` puts them. In every other case (a container or VM, a path missing
+   here, no full path in `argv`, or a relative `--base-directory` value), ask
+   the person which folder on this machine holds that install.
 
    The Python that runs the server sits beside `main.py`, not in a
    `--base-directory` folder: `.venv` or `venv` in the folder holding
-   `main.py`, as `bin/python` (`Scripts\python.exe` on Windows). When neither
-   is there, ask the person which Python starts the server. Then, with every
-   path quoted:
+   `main.py`, as `bin/python` (`Scripts\python.exe` on Windows). Take it only
+   when `'<python>' -c 'import sys; print(sys.version)'` prints the server's
+   `system.python_version` exactly. When neither is there or it differs, ask
+   the person which Python starts the server. Then, with every path quoted:
 
    ```shell
    comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'
@@ -189,13 +190,17 @@ at the first that works:
    `build_spec_exists`: it is an earlier build of this install, holding its
    Build id and the person's edits. Never pass `--force`, which overwrites it.
    Run `comfy --json build update '<install>' --dry-run` with the same
-   `--comfy-url` and `--python` instead, show the person its `summary`, and
-   run it again with `--yes` only after they agree. `update` rewrites the
-   definition and keeps the Build id and name.
+   `--comfy-url` and `--python` instead, show the person each entry of its
+   `diff` by name (a rescan removes a model added by hand earlier) and the
+   `pipDependencies` lines it adds and drops, and run it again with `--yes`
+   only after they agree. `update` rewrites the definition and keeps the Build
+   id and name, so the push replaces that Build's definition.
 
-   The build carries the installed pack versions and each model under
-   `<install>/models` with its folder and hash; the push swaps a public model
-   for its download. Then check the spec's `customNodes` before the plan:
+   The build carries the installed pack versions and the models `init` lists
+   with their folder and hash; the push swaps a public model for its download.
+   A git pack (`source` `git`) builds from its commit, without the changes
+   `git -C '<install>/custom_nodes/<folder>' status --porcelain` lists. Then
+   check the spec's `customNodes` before the plan:
 
    - Drop each entry whose folder name ends in `.disabled`. ComfyUI does not
      load such a folder, but `init` lists it.
@@ -206,9 +211,12 @@ at the first that works:
      defines or imports `NODE_CLASS_MAPPINGS` (the V1 node API) or
      `comfy_entrypoint` (the V3 node API).
 
-   Name each dropped folder in the plan. A model loaded from any other folder
-   (step 3's `local_paths` say where) is not scanned. Hash that file with
-   sha256 (`shasum -a 256 '<file>'`) and look it up with
+   Name each dropped folder in the plan, and any kept pack that imports it
+   (`comfy-build`). A workflow model the spec's `models` does not list is not
+   carried, wherever it sits (step 3's `local_paths` say where): `init` skips
+   a file outside `<install>/models`, a dotfile, and an extension other than
+   `.safetensors`, `.ckpt`, `.pt`, `.pth` and `.bin`, such as `.sft`. Hash
+   that file with sha256 (`shasum -a 256 '<file>'`) and look it up with
    `comfy build refs resolve` (`comfy-build-authoring`). Add a candidate
    before the push only when its `sha256` equals that hash. A candidate whose
    `sha256` differs, or that has none, is another model: offering it is a
@@ -222,7 +230,10 @@ at the first that works:
    - each local pack (`source` `local`) as a whole folder: it uploads with
      everything in it, a key or config file too;
    - the models, by count and total size (the spec's `models`);
-   - each dropped folder, each stand-in model and each model not carried;
+   - each dropped folder, each git pack with local changes, each stand-in
+     model and each model not carried;
+   - the Build id the push replaces, when the spec has one, asked as a
+     question of its own;
    - the GPU and region (cheapest that fits first, from
      `comfy --json deploy refs compute`), the costs, and `--min 0 --max 1`
      workers.

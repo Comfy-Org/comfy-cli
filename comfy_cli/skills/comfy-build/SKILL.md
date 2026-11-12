@@ -171,7 +171,10 @@ falls to `0` means the connection stalled, not that the upload is slow.
   A folder declares nodes when its `__init__.py` defines or imports
   `NODE_CLASS_MAPPINGS` (the V1 node API) or `comfy_entrypoint` (the V3 node
   API). Drop each `customNodes` entry whose folder declares neither from the
-  spec, and name each dropped folder in the disclosure.
+  spec, and name each dropped folder in the disclosure, with each kept pack that
+  imports its library (grep the kept packs for the import): the build does not
+  carry that library, so such a pack fails on Cloud unless a wheel line installs
+  it (`comfy-build-pins`).
 - **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
   load. Drop that entry too, and name it in the disclosure.
 - **A model's `type` is the directory under `models/` it was found in**, so
