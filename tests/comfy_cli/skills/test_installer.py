@@ -207,11 +207,15 @@ def test_build_skills_add_a_wheel_only_package_by_its_address():
     assert "piecewise-linear segmentation" in failures  # PyPI's unrelated `nunchaku`
     # One pipDependencies line applies to every target, and a release may build
     # windows targets too, so the step picks a wheel per platform behind a marker.
-    assert "and `linux_x86_64`." not in failures
     assert "`win_amd64`" in failures
     assert "`linux_x86_64`" in failures
     assert '; sys_platform == "linux"' in failures
     assert '; sys_platform == "win32"' in failures
+    # Only a linux/nvidia artifact makes a release deployable, so a missing linux
+    # wheel stops the cut; only a windows target may be left out.
+    assert "leave that target out of the cut" not in failures
+    assert "When no wheel matches linux, stop and tell the person the pack cannot be built for deploy yet" in failures
+    assert "leave the windows target out of the cut" in failures
     for flag in ("--index-url", "--extra-index-url", "--find-links", "`-e`"):
         assert flag in failures
 

@@ -191,9 +191,11 @@ published only as wheels on the nunchaku GitHub releases page. To add one:
    and
    `name @ https://<host>/<windows-file>.whl#sha256=<hash> ; sys_platform == "win32"`.
    Keep the space before the `;`. A marker tells platforms apart, not GPUs: a
-   linux/nvidia and a linux/cpu target get the same wheel. When a target's
-   platform has no matching wheel, tell the person and leave that target out of
-   the cut.
+   linux/nvidia and a linux/cpu target get the same wheel. When no wheel matches
+   linux, stop and tell the person the pack cannot be built for deploy yet. Do
+   not cut. Only a `linux/nvidia` artifact makes a release deployable, so a cut
+   without linux is green and still cannot be deployed. When only windows has no
+   matching wheel, tell the person and leave the windows target out of the cut.
 3. Add `#sha256=<hash>`. The builder checks it at install. Without it the
    release is marked not reproducible, since a rebuild gets whatever the address
    serves that day. When the releases page lists no hash, download the wheel and
