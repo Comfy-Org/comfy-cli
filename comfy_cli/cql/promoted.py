@@ -839,7 +839,7 @@ def source_value(
         return UNSET
     stack = _stack | {id(sg)}
     defs = defs if defs is not None else defs_by_id(workflow)
-    inner = next((n for n in sg.get("nodes") or [] if str(n.get("id")) == pi.source_node), None)
+    inner = _inner_node(sg, pi.source_node)
     if inner is None:
         return UNSET
     if pi.nested:
@@ -958,15 +958,7 @@ def deepest_source(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> tuple[
         path.append(current.source_node)
         if not current.nested:
             return path, str(current.source_widget)
-        nodes = current_sg.get("nodes")
-        inner = next(
-            (
-                n
-                for n in (nodes if isinstance(nodes, list) else [])
-                if isinstance(n, dict) and str(n.get("id")) == current.source_node
-            ),
-            None,
-        )
+        inner = _inner_node(current_sg, current.source_node)
         inner_def = defs.get(str(inner.get("type", ""))) if inner is not None else None
         if inner_def is None or current.source_input is None:
             return None
@@ -1138,7 +1130,7 @@ def resolve_write(
                 )
             if link is not None:
                 origin = link.get("origin_id")
-                origin_node = next((n for n in parent_def.get("nodes") or [] if str(n.get("id")) == str(origin)), None)
+                origin_node = _inner_node(parent_def, origin)
                 raise ValueError(
                     f"{given} is fed by interior node {'/'.join(segments[:-1])}/{origin} "
                     f"({origin_node.get('type') if origin_node else '?'}) — that link supplies the value, so a widget "
@@ -1388,7 +1380,7 @@ class LegacyEntry:
         validation/source-port lookup a linked promotion gets applies."""
         if self.plan == PLAN_PRIMITIVE:
             tid, slot = self.targets[0]
-            target = next((n for n in sg.get("nodes") or [] if str(n.get("id")) == tid), None)
+            target = _inner_node(sg, tid)
             entry = (target.get("inputs") or [])[slot] if target is not None else None
             marker = entry.get("widget") if isinstance(entry, dict) else None
             widget = marker.get("name") if isinstance(marker, dict) and marker.get("name") else entry.get("name")
@@ -1437,7 +1429,15 @@ def _proxy_tuples(instance: dict) -> list[list]:
 
 
 def _inner_node(sg: dict, node_id: Any) -> dict | None:
-    return next((n for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("id")) == str(node_id)), None)
+    nodes = sg.get("nodes")
+    return next(
+        (
+            n
+            for n in (nodes if isinstance(nodes, list) else [])
+            if isinstance(n, dict) and str(n.get("id")) == str(node_id)
+        ),
+        None,
+    )
 
 
 def _node_widget_names(node: dict, graph) -> list[str]:
