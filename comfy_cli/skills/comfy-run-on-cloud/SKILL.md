@@ -174,8 +174,12 @@ at the first that works:
    `--base-directory` folder: `.venv` or `venv` in the folder holding
    `main.py`, as `bin/python` (`Scripts\python.exe` on Windows). Take it only
    when `'<python>' -c 'import sys; print(sys.version)'` prints the server's
-   `system.python_version` exactly. When neither is there or it differs, ask
-   the person which Python starts the server. Then, with every path quoted:
+   `system.python_version` exactly and, when `system_stats` has
+   `system.pytorch_version`, `'<python>' -c 'import torch; print(torch.__version__)'`
+   prints that too. A match only rules a wrong Python out; it does not prove
+   this one starts the server, so the plan names it and the person confirms
+   it. When neither is there or it differs, ask the person which Python starts
+   the server. Then, with every path quoted:
 
    ```shell
    comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'
@@ -210,6 +214,14 @@ at the first that works:
      ComfyUI runs past it. A folder declares nodes when its `__init__.py`
      defines or imports `NODE_CLASS_MAPPINGS` (the V1 node API) or
      `comfy_entrypoint` (the V3 node API).
+   - List the single `.py` files directly under `<install>/custom_nodes/`.
+     ComfyUI loads each as a pack (it skips only other extensions and names
+     ending in `.disabled`), but `init` scans folders only, so no such file
+     reaches the spec. A node type comes from one when
+     `<server>/api/object_info/<class>` gives its `python_module` as
+     `custom_nodes.<file name without .py>`. When the workflow uses such a
+     node type, or you cannot tell, stop: the build cannot carry it unless the
+     person makes it a folder pack or names an installable source for it.
 
    Name each dropped folder in the plan, and any kept pack that imports it
    (`comfy-build`). A workflow model the spec's `models` does not list is not
@@ -232,6 +244,12 @@ at the first that works:
    - the models, by count and total size (the spec's `models`);
    - each dropped folder, each git pack with local changes, each stand-in
      model and each model not carried;
+   - each single `.py` file under `custom_nodes/`, as not carried by the
+     build;
+   - the Python passed as `--python`, by path: the yes confirms it is the one
+     that starts their server. When they name another, rescan with
+     `comfy --json build update '<install>' --python '<that one>'` (and the
+     same `--comfy-url`) and show the plan again;
    - the Build id the push replaces, when the spec has one, asked as a
      question of its own;
    - the GPU and region (cheapest that fits first, from

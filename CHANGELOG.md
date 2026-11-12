@@ -44,14 +44,18 @@ history.
   runs on this machine outside a container and the install is there.
   Otherwise, or for a relative `--base-directory`, it asks the person for the
   folder on this machine. It passes the Python beside `main.py` as `--python`
-  when its `sys.version` is the server's `python_version`, and asks otherwise.
+  when its `sys.version` is the server's `python_version` (and its torch
+  version the server's `pytorch_version`, when reported), and asks otherwise;
+  the plan names that Python and its yes confirms it starts the server.
   Comfy Desktop is scanned the same way (its data folder and Python), not
   imported from its snapshot, which carries no models. When the install
   already has a `comfy-build.yaml`, it shows `comfy build update`'s diff and
   asks, and never passes `--force`. A scanned `custom_nodes/` folder whose
   name ends in `.disabled`, or that declares neither `NODE_CLASS_MAPPINGS` nor
   `comfy_entrypoint`, is dropped and named in the plan; `comfy-build` Path A
-  says the same. A workflow model the spec does not list (outside `models/`,
+  says the same. A single `.py` file under `custom_nodes/`, which ComfyUI loads
+  but the scan skips, is named as not carried, and the skill stops when the
+  workflow needs a node from one. A workflow model the spec does not list (outside `models/`,
   a dotfile, or an extension the scan skips, such as `.sft`) is added from a
   public source only when its sha256 matches the local file; another file is
   a lossy swap asked on its own and named as a stand-in, or the model is named

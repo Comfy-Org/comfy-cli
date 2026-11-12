@@ -177,6 +177,12 @@ falls to `0` means the connection stalled, not that the upload is slow.
   it (`comfy-build-pins`).
 - **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
   load. Drop that entry too, and name it in the disclosure.
+- **It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as
+  a pack. The build does not carry it: name it in the disclosure. When the
+  workflow uses a node it provides (its `python_module` in `object_info` is
+  `custom_nodes.<file name without .py>`), or you cannot tell, stop: the build
+  cannot carry it unless the person makes it a folder pack or names an
+  installable source.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;

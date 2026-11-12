@@ -587,6 +587,19 @@ def test_run_on_cloud_skill_quotes_the_install_and_takes_python_beside_main_py()
     assert "When neither is there or it differs, ask the person which Python starts the server" in run
 
 
+def test_run_on_cloud_skill_has_the_person_confirm_the_server_python():
+    """A venv whose Python and torch versions match the server's may still be
+    another environment, so the match only rules a Python out: the plan names
+    the one taken, and its yes confirms it starts the server."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "`system.pytorch_version`" in run
+    assert "'<python>' -c 'import torch; print(torch.__version__)'" in run
+    assert "A match only rules a wrong Python out; it does not prove this one starts the server" in run
+    assert "When neither is there or it differs, ask the person which Python starts the server" in run
+    assert "the Python passed as `--python`, by path: the yes confirms it is the one that starts their server" in run
+    assert "comfy --json build update '<install>' --python '<that one>'" in run
+
+
 def test_run_on_cloud_skill_keeps_an_existing_build_spec():
     """`init` writes `comfy-build.yaml` into the person's install and refuses
     when one is there; `--force` would overwrite an earlier build's id and
@@ -675,6 +688,22 @@ def test_build_skills_drop_disabled_pack_folders():
     assert "ComfyUI does not load such a folder, but `init` lists it" in run
     build = " ".join(skill_content("comfy-build").split())
     assert "a folder whose name ends in `.disabled`**, which ComfyUI does not load" in build
+
+
+def test_build_skills_name_single_file_nodes_the_scan_skips():
+    """ComfyUI loads a single `.py` file under `custom_nodes/` as a pack, but
+    `init` scans folders only, so such a file never reaches the spec: the plan
+    names it as not carried, and a workflow that needs its nodes stops."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "List the single `.py` files directly under `<install>/custom_nodes/`" in run
+    assert "`init` scans folders only, so no such file reaches the spec" in run
+    assert "gives its `python_module` as `custom_nodes.<file name without .py>`" in run
+    assert "or you cannot tell, stop: the build cannot carry it unless the person makes it a folder pack" in run
+    assert "or names an installable source for it" in run
+    assert "each single `.py` file under `custom_nodes/`, as not carried by the build" in run
+    build = " ".join(skill_content("comfy-build").split())
+    assert "It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as a pack" in build
+    assert "unless the person makes it a folder pack or names an installable source" in build
 
 
 def test_run_on_cloud_skill_matches_an_external_model_by_hash():
