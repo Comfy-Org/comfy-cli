@@ -170,11 +170,21 @@ at the first that works:
    models: `<install>` is `desktop.data_dir`, with `--python
    '<desktop.python>'`. The build carries the installed pack versions, minus
    packs disabled locally, and each model under `<install>/models` with its
-   folder and hash; the push swaps a public model for its download. A model
+   folder and hash; the push swaps a public model for its download. `init`
+   lists every folder under `custom_nodes/` as a pack, and the builder fails
+   the release on one that declares no nodes (`declared custom nodes failed to
+   import`), though ComfyUI runs past it. So after `init`, check that each
+   `customNodes` entry's folder declares `NODE_CLASS_MAPPINGS`, or has an
+   `__init__.py` that does. Drop any that does not from the spec, and name
+   each dropped folder in the plan. A model
    loaded from any other folder (step 3's `local_paths` say where) is not
-   scanned: add a public one with `comfy build refs resolve`
-   (`comfy-build-authoring`) before the push, and name any other in the plan as
-   not carried. Before building, show the plan and get a yes: what it uploads,
+   scanned. Hash that file with sha256 (`shasum -a 256 '<file>'`) and look it
+   up with `comfy build refs resolve` (`comfy-build-authoring`). Add a
+   candidate before the push only when its `sha256` equals that hash. A
+   candidate whose `sha256` differs, or that has none, is another model:
+   offering it is a lossy swap, asked on its own (below), and the build's yes
+   does not cover it. Name any model not added in the plan as not carried.
+   Before building, show the plan and get a yes: what it uploads,
    the GPU and region
    (cheapest that fits first, from `comfy --json deploy refs compute`), the
    costs, and `--min 0 --max 1` workers.

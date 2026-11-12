@@ -31,7 +31,8 @@ disclosed.
 ## What to delete
 
 Delete rather than curate: `torch`, `torchvision`, `torchaudio`, `triton`,
-`xformers`, every `nvidia-*`, `comfyui-frontend-package`, `comfyui-manager`,
+`xformers`, every `nvidia-*` except an `nvidia-vfx` pin a pack needs (see the
+keep rules below), `comfyui-frontend-package`, `comfyui-manager`,
 `comfyui-embedded-docs`, and any wheel that only exists on the source OS
 (`pywin32`, `pyobjc*`).
 

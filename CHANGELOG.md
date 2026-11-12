@@ -43,9 +43,12 @@ history.
   outside a container and the install is there. Otherwise it asks the person
   for the folder on this machine. Comfy Desktop is
   scanned the same way (its data folder and Python), not imported from its
-  snapshot, which carries no models. A model outside the scanned folder is
-  added from a public source or named as not carried. It still shows the plan
-  and asks before building.
+  snapshot, which carries no models. A scanned `custom_nodes/` folder that
+  declares no `NODE_CLASS_MAPPINGS` is dropped and named in the plan. A model
+  outside the scanned folder is added from a public source only when its
+  sha256 matches the local file; another file is a lossy swap asked on its
+  own, or the model is named as not carried. It still shows the plan and asks
+  before building.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note

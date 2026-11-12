@@ -164,6 +164,13 @@ falls to `0` means the connection stalled, not that the upload is slow.
   `models/loras` pointed at a shared drive is scanned. A dotfile, a weight loose
   in `models/` with no folder, another extension, and anything cached outside the
   tree are all absent without a word — check the count against the install.
+- **It lists every folder under `custom_nodes/` as a pack**, whether or not it
+  declares nodes. The builder fails the release on one that does not
+  (`declared custom nodes failed to import`), though ComfyUI runs past it. A
+  library cloned there only to `pip install` it is one (`comfy-build-authoring`).
+  So check that each `customNodes` entry's folder declares `NODE_CLASS_MAPPINGS`,
+  or has an `__init__.py` that does. Drop any that does not from the spec, and
+  name each dropped folder in the disclosure.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;

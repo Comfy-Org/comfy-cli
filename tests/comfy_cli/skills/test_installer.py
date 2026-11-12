@@ -614,6 +614,37 @@ def test_build_skills_name_the_pins_the_builder_installs():
         assert ".whl" in text, f"{name} should name the wheel exception"
 
 
+def test_build_pins_skill_keeps_a_needed_nvidia_vfx_pin():
+    """The builder installs an exact `nvidia-vfx` pin, so the delete rule for
+    `nvidia-*` exempts one a pack needs, as the keep rule says."""
+    text = " ".join(skill_content("comfy-build-pins").split())
+    assert "every `nvidia-*`, `comfyui-frontend-package`" not in text
+    assert "every `nvidia-*` except an `nvidia-vfx` pin a pack needs" in text
+
+
+def test_build_skills_drop_scanned_folders_that_declare_no_nodes():
+    """`init` lists every `custom_nodes/` folder as a pack, and the builder fails
+    the release on a side-loaded library that declares no nodes, so the scan
+    paths check `NODE_CLASS_MAPPINGS` and name each folder they drop."""
+    for name in ("comfy-run-on-cloud", "comfy-build"):
+        text = " ".join(skill_content(name).split())
+        assert "declares `NODE_CLASS_MAPPINGS`, or has an `__init__.py` that does" in text, name
+        assert "declared custom nodes failed to import" in text, name
+        assert "name each dropped folder in the" in text, name
+
+
+def test_run_on_cloud_skill_matches_an_external_model_by_hash():
+    """`refs resolve` looks up by filename and reads no local file, so a model
+    outside `<install>/models` is added only when a candidate's sha256 equals
+    the local file's; any other candidate is a lossy swap asked on its own."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "add a public one with `comfy build refs resolve`" not in run
+    assert "Hash that file with sha256" in run
+    assert "only when its `sha256` equals that hash" in run
+    assert "is another model: offering it is a lossy swap, asked on its own" in run
+    assert "the build's yes does not cover it" in run
+
+
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():
     """A server on another port than 8188 must be the one `--where local` reads."""
     text = skill_content("comfy-run-on-cloud")
