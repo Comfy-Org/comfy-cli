@@ -39,7 +39,9 @@ history.
   workflow alone (`--from-workflow`): the build carries the installed pack
   versions and the models under the install's `models/` with folder and hash.
   It takes the install from the server's `system_stats` `argv`, not from
-  `comfy which`, and asks when that names no full path. Comfy Desktop is
+  `comfy which`, and uses that path only when the server runs on this machine
+  outside a container and the install is there. Otherwise it asks the person
+  for the folder on this machine. Comfy Desktop is
   scanned the same way (its data folder and Python), not imported from its
   snapshot, which carries no models. A model outside the scanned folder is
   added from a public source or named as not carried. It still shows the plan
@@ -55,8 +57,10 @@ history.
   whose name ends in `.disabled`, as ComfyUI does, so a pack disabled locally
   is not built.
 - The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and
-  `comfy-build-failures` skills say a version pin in `pipDependencies` never
-  adds a package, where they said any line never does.
+  `comfy-build-failures` skills say an ordinary version pin in
+  `pipDependencies` adds no package, where they said any line never does. They
+  name the two kinds of line the builder installs on their own: a wheel by its
+  `https://` address, and an exact, unmarked `nvidia-vfx` pin.
 - A snapshot import's advisories name a pending or disowned Registry pack
   once: the `unresolvedNodes` line leaves out the packs `registryPending` and
   `notInRegistry` already name. A pending pack's line says to import again once

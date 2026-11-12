@@ -166,8 +166,11 @@ the exact edit, and which build this is, and wait.
 **A missing import needs an installation mechanism before another cut.** Read
 the selected pack's verified source and declared requirements, or establish a
 supported builder installation path. A `name==version` pin in `pipDependencies`
-only forces the version of a package something else installs; adding
-`PyYAML==<version>` does not by itself install a missing `yaml` import. First
+forces the version of a package something else installs; adding
+`PyYAML==<version>` does not by itself install a missing `yaml` import. The
+builder installs two kinds of line on their own: a wheel by its address
+(`name @ https://.../name-1.0-py3-none-any.whl`), and an exact, unmarked
+`nvidia-vfx==<version>` pin. First
 verify what will install the package, then select a compatible constraint if
 needed. A changed local source bundle also needs approval for its changed
 contents and bytes before upload.

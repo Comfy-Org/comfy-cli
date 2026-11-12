@@ -155,12 +155,17 @@ at the first that works:
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
    show comfy-deploy`, and follow them. Build from the whole install that
    serves `<server>`, by comfy-build's Path A. `comfy --json which` does not
-   prove which install that is. The server's `system_stats` (step 2) does:
+   prove which install that is. The server's `system_stats` (step 2) names it:
    `system.argv` starts with its `main.py`, and a `--base-directory <dir>` in
-   it is the folder that holds `models/` and `custom_nodes/`. Scan that folder,
-   else the one holding `main.py`; when `argv` gives no full path, ask the
-   person. Then `comfy --json build init <install> --name '<name>' --comfy-url
-   '<server>'`, with `--python` for a venv that is not inside `<install>`.
+   it is the folder that holds `models/` and `custom_nodes/`. That path is the
+   server's, not always this machine's: ComfyUI in Docker reports
+   `/app/ComfyUI/main.py` for an install that sits at `/host/ComfyUI` here.
+   Take the `--base-directory` folder, else the one holding `main.py`, only
+   when the server runs on this machine outside a container or VM, and this
+   machine has `main.py` and `custom_nodes/` where `argv` puts them.
+   Otherwise, or when `argv` gives no full path, ask the person which folder
+   on this machine holds that install. Then `comfy --json build init <install>
+   --name '<name>' --comfy-url '<server>'`, with `--python` for a venv that is not inside `<install>`.
    Comfy Desktop builds the same way, not from its snapshot, which carries no
    models: `<install>` is `desktop.data_dir`, with `--python
    '<desktop.python>'`. The build carries the installed pack versions, minus

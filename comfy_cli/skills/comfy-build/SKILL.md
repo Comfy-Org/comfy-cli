@@ -283,8 +283,9 @@ spec's `syncedRevision` belongs to another Build.
 ## The pins, in one rule
 
 `init` fills `pipDependencies` with the whole pip freeze, and the builder applies
-every version pin as a pip **override** — which *replaces* what packages
-declared rather than capping it, torch included. A freeze taken on macOS with
+each ordinary version pin as a pip **override** — which *replaces* what packages
+declared rather than capping it, torch included. `comfy-build-pins` names the
+two kinds of line it installs on their own. A freeze taken on macOS with
 Python 3.13 will force those versions onto a linux Python 3.12 build, and that is
 the usual reason a first build fails.
 

@@ -581,6 +581,39 @@ def test_build_skills_do_not_say_pip_dependencies_never_adds_a_package():
             assert phrase not in text, f"{name} should not say {phrase!r}"
 
 
+def test_run_on_cloud_skill_checks_the_server_path_on_this_machine():
+    """A server in Docker reports `/app/ComfyUI/main.py` for an install at
+    `/host/ComfyUI` here, so the reported path is scanned only once it is
+    checked on this machine; otherwise the person names the local folder."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert (
+        "Scan that folder, else the one holding `main.py`; when `argv` gives no full path, ask the person." not in run
+    )
+    assert "Docker" in run
+    assert "`main.py` and `custom_nodes/`" in run
+    assert "ask the person which folder on this machine holds that install" in run
+    assert "show the plan and get a yes" in run
+
+
+def test_build_skills_name_the_pins_the_builder_installs():
+    """An exact, unmarked `nvidia-vfx` pin and an HTTPS wheel line are installed
+    even when no node asks for them, so no skill says a pin never adds one."""
+    for name in ("comfy-build", "comfy-build-pins", "comfy-build-authoring", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        for phrase in (
+            "A version pin forces a version, it never adds a package",
+            "a pin never adds a package",
+            "the builder applies every version pin as a pip **override**",
+            "The builder applies every version pin as a pip **override**",
+            "only forces the version of a package something else installs",
+        ):
+            assert phrase not in text, f"{name} should not say {phrase!r}"
+    for name in ("comfy-build-pins", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        assert "nvidia-vfx==" in text, f"{name} should name the nvidia-vfx exception"
+        assert ".whl" in text, f"{name} should name the wheel exception"
+
+
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():
     """A server on another port than 8188 must be the one `--where local` reads."""
     text = skill_content("comfy-run-on-cloud")
