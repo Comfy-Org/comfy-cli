@@ -3828,7 +3828,12 @@ def validate_cmd(
     ] = None,
     remote: Annotated[
         bool,
-        typer.Option("--remote", help="Also look up public model-source candidates. Requires sign-in."),
+        typer.Option(
+            "--remote",
+            help="Also look up public model-source candidates on the builder (requires sign-in), and send one "
+            "HEAD to each model's https sourceUri that has a sha256, to compare the hash its host states. "
+            "Those HEADs go to the model hosts and share a 15-second budget.",
+        ),
     ] = False,
     models_dir: Annotated[
         str | None,
@@ -3867,8 +3872,17 @@ def validate_cmd(
     if _has_models(spec):
         result["folder_case_checked"] = directories is not None
     if client is not None:
-        lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
+        probe = _SourceProbe()
+        lookups = _builder_call(
+            renderer,
+            lambda: lookup_public_model_sources(wire_definition, client.resolve_models, probe),
+        )
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
+        if probe.skipped:
+            renderer.info(
+                f"the link checks used their {_SOURCE_PROBE_BUDGET:g}-second budget, so {probe.skipped} "
+                f"model{'s' if probe.skipped != 1 else ''} got the filename lookup without one"
+            )
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
         for warning in result["warnings"]:
@@ -3879,8 +3893,52 @@ def validate_cmd(
         for lookup in result["model_lookups"]:
             label = lookup["filename"] or lookup["entry"]
             detail = f": {lookup['error']}" if lookup.get("error") else ""
+            if lookup["state"] == "declared_mismatch":
+                renderer.warn(f"declared_mismatch  {label}: its sourceUri states sha256 {lookup['sourceSha256']}")
+                continue
             renderer.info(f"{lookup['state']}  {label}{detail}")
     renderer.emit(result, command="build validate")
+
+
+#: How long one model link may take to answer the HEAD that reads its hash.
+_SOURCE_HEAD_TIMEOUT = 5.0
+#: How long all the link HEADs of one `validate --remote` may take together.
+_SOURCE_PROBE_BUDGET = 15.0
+
+
+class _SourceProbe:
+    """``_source_sha256`` under one time budget shared by every link in a spec.
+    Each HEAD gets what is left, up to its own timeout, measured over the whole
+    request (connect, TLS and headers) rather than per socket read; a HEAD still
+    running then is abandoned. Once the budget is spent a link is not asked, is
+    counted in ``skipped``, and gets the filename lookup."""
+
+    def __init__(self, budget: float = _SOURCE_PROBE_BUDGET) -> None:
+        self._deadline = time.monotonic() + budget
+        self.skipped = 0
+
+    def __call__(self, uri: str) -> str | None:
+        from comfy_cli.http import https_without_userinfo
+
+        if not https_without_userinfo(uri):
+            return None
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            self.skipped += 1
+            return None
+        return _source_sha256(uri, timeout=min(_SOURCE_HEAD_TIMEOUT, remaining))
+
+
+def _source_sha256(uri: str, *, timeout: float = _SOURCE_HEAD_TIMEOUT) -> str | None:
+    """Only ``X-Linked-Etag`` counts, as in the builder's verifier: a plain ``ETag``
+    can be 64 hex characters and not a sha256 (ADR-BUILD-VALIDATION-0015)."""
+    from comfy_cli.http import head_headers
+
+    headers = head_headers(uri, timeout=timeout)
+    if headers is None:
+        return None
+    value = (headers.get("X-Linked-Etag") or "").strip().removeprefix("W/").strip('"').lower()
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
 
 
 @app.command("delete", help="Delete a build (soft-delete).")

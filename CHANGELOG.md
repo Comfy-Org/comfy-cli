@@ -31,6 +31,18 @@ history.
   `build_comfy_version_missing` when the Build it names has none either, before
   the cut, and the hint names `comfy build update --comfy-version <ref>`. With
   `--id` the spec is not read.
+- `comfy build validate --remote` asks a model's own `sourceUri` for its hash
+  when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
+  HEAD that does not follow redirects). Only an https link with no user or
+  password before its host, written out or percent-encoded (`TOKEN%40host`),
+  is asked, so a credential in the link never goes out without TLS or to a
+  proxy. The lookup reads
+  `declared_ok` or `declared_mismatch`, with the link's hash in
+  `sourceSha256`. Each HEAD, from connect to its last header, may take 5
+  seconds and all of them 15 seconds
+  together; a link past that budget, or one that states no hash or does not
+  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0015
+  records that `validate --remote` now contacts the model hosts.
 
 ### Changed
 

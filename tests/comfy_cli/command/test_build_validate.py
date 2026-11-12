@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import threading
+import time
+import urllib.error
+from email.message import Message
 from pathlib import Path
 
 import jsonschema
@@ -951,3 +956,293 @@ def test_validate_warns_by_code_when_the_spec_sets_no_comfy_version(workspace: P
     jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
     assert pretty.exit_code == 0, pretty.output
     assert "sets no ComfyUI version" in " ".join(pretty.output.split())
+
+
+_SHA_A = "a" * 64
+_SHA_B = "b" * 64
+#: What each link's host states on its redirect, as Hugging Face does; a link
+#: missing here does not answer.
+_STATED = {
+    "https://huggingface.co/org/repo/resolve/main/match.safetensors": f'"{_SHA_A}"',
+    "https://huggingface.co/org/repo/resolve/main/differs.safetensors": f'"{_SHA_B}"',
+}
+
+
+def _head(sent: list[tuple[str, str]]):
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append((request.get_method(), request.full_url))
+        stated = _STATED.get(request.full_url)
+        if stated is None:
+            raise urllib.error.URLError("unreachable")
+        headers = Message()
+        headers["X-Linked-Etag"] = stated
+        raise urllib.error.HTTPError(request.full_url, 302, "redirect refused", headers, io.BytesIO())
+
+    return no_redirect_urlopen
+
+
+def test_remote_checks_a_declared_link_against_its_sha256_before_the_filename(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    base = "https://huggingface.co/org/repo/resolve/main"
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"{base}/{name}", "sha256": _SHA_A}
+        for name in ("match.safetensors", "differs.safetensors", "silent.safetensors")
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    by_file = {lookup["filename"]: lookup for lookup in data["model_lookups"]}
+    assert by_file["match.safetensors"]["state"] == "declared_ok"
+    assert by_file["differs.safetensors"]["state"] == "declared_mismatch"
+    assert by_file["differs.safetensors"]["sourceSha256"] == _SHA_B
+    assert by_file["silent.safetensors"]["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["silent.safetensors"]}}]
+    assert {method for method, _ in sent} == {"HEAD"}
+    assert len(sent) == 3
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+
+
+def test_remote_takes_no_verdict_from_a_plain_etag_that_looks_like_a_sha256(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: a host whose plain ETag is 64 hex characters (an opaque CDN token or
+    # a Xet root), not the file's sha256, and differs from the declared one
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    message = Message()
+    message["ETag"] = f'"{_SHA_B}"'
+
+    class Response:
+        headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", lambda request, *, timeout: Response())
+    uri = "https://cdn.example.com/org/repo/model.safetensors"
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "filename": "model.safetensors", "sourceUri": uri, "sha256": _SHA_A}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no declared verdict; the filename lookup answers, as before
+    assert result.exit_code == 0, result.stderr
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["model.safetensors"]}}]
+
+
+def test_remote_never_sends_a_declared_link_that_is_not_https(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: a source: local model keeps its sourceUri on the wire (no blobId), and
+    # the link rules skip a local entry, so a plain http link with a credential in
+    # its query reaches the hash probe
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    uri = "http://civitai.example/api/download/models/1?token=secret"
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link; the filename lookup answers
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("http://huggingface.co/org/repo/resolve/main/x.safetensors?token=secret", id="http"),
+        pytest.param("HTTP://huggingface.co/org/repo/resolve/main/x.safetensors", id="http-upper"),
+        pytest.param("ftp://files.example/x.safetensors", id="ftp"),
+        pytest.param("file:///etc/passwd", id="file"),
+        pytest.param("huggingface.co/org/repo/x.safetensors", id="no-scheme"),
+    ],
+)
+def test_a_link_that_is_not_https_is_never_opened(monkeypatch: pytest.MonkeyPatch, uri: str) -> None:
+    # Given
+    sent: list[str] = []
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        sent.append(request.full_url)
+        raise AssertionError("opened a non-https link")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256(uri) is None
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "expected"),
+    [
+        pytest.param(302, {"X-Linked-Etag": f'"{_SHA_A.upper()}"'}, _SHA_A, id="hugging-face-redirect"),
+        pytest.param(200, {"ETag": f'W/"{_SHA_B}"'}, None, id="plain-etag-looks-like-sha256"),
+        pytest.param(200, {"ETag": '"d41d8cd98f00b204e9800998ecf8427e"'}, None, id="md5-etag"),
+        pytest.param(404, {"X-Linked-Etag": f'"{_SHA_A}"'}, None, id="not-found"),
+    ],
+)
+def test_a_links_stated_hash_is_read_only_when_it_is_a_sha256(
+    monkeypatch: pytest.MonkeyPatch, status: int, headers: dict[str, str], expected: str | None
+) -> None:
+    # Given
+    message = Message()
+    for name, value in headers.items():
+        message[name] = value
+
+    class Response:
+        def __init__(self) -> None:
+            self.headers = message
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def no_redirect_urlopen(request, *, timeout: float):
+        assert request.get_method() == "HEAD"
+        if status == 200:
+            return Response()
+        raise urllib.error.HTTPError(request.full_url, status, "refused", message, io.BytesIO())
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", no_redirect_urlopen)
+
+    # When / Then
+    assert build._source_sha256("https://huggingface.co/org/repo/resolve/main/x.safetensors") == expected
+
+
+def test_link_checks_stop_at_their_time_budget_and_the_rest_get_the_filename_lookup(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given: 40 models whose links all name hosts that never answer, each HEAD
+    # using its whole timeout on a fake clock
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    sent: list[float] = []
+
+    def dead_host(request, *, timeout: float):
+        sent.append(timeout)
+        clock[0] += timeout
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", dead_host)
+    names = [f"model-{index:02}.safetensors" for index in range(40)]
+    models: list[JsonObject] = [
+        {"type": "loras", "filename": name, "sourceUri": f"https://dead-{index}.example/{name}", "sha256": _SHA_A}
+        for index, name in enumerate(names)
+    ]
+    write_spec(workspace, models=models, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: the HEADs together took at most 15 seconds, the probes stopped
+    # once that was spent, and every model got the filename lookup
+    assert result.exit_code == 0, result.stderr
+    assert sum(sent) <= 15.0, sent
+    assert 0 < len(sent) < len(names)
+    assert sorted(name for call in recorder.calls for name in call["body"]["filenames"]) == names
+    lookups = _envelope(result)["data"]["model_lookups"]
+    assert {lookup["state"] for lookup in lookups} == {"none_found"}
+    assert f"{len(names) - len(sent)} models" in " ".join(result.stderr.split())
+
+
+def test_a_link_that_trickles_its_headers_is_cut_off_at_the_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: hosts that keep each socket read inside its timeout but never finish
+    # the headers, so a per-read timeout alone would never fire; the budget is
+    # shrunk so the test runs fast
+    monkeypatch.setattr(build, "_SOURCE_HEAD_TIMEOUT", 0.2)
+    released = threading.Event()
+    opened: list[str] = []
+
+    def trickling_host(request, *, timeout: float):
+        opened.append(request.full_url)
+        released.wait(3.0)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", trickling_host)
+    probe = build._SourceProbe(budget=0.5)
+    links = [f"https://slow-{index}.example/model.safetensors" for index in range(10)]
+
+    # When
+    started = time.monotonic()
+    try:
+        stated = [probe(link) for link in links]
+        elapsed = time.monotonic() - started
+    finally:
+        released.set()
+
+    # Then: the whole run stops near the budget, no link states a hash, and the
+    # links not asked are counted for the filename lookup
+    assert elapsed < 1.5, elapsed
+    assert stated == [None] * len(links)
+    assert 0 < len(opened) < len(links)
+    assert probe.skipped == len(links) - len(opened)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("https://TOKEN@models.example/x.safetensors", id="user"),
+        pytest.param("https://user:secret@models.example/x.safetensors", id="user-and-password"),
+        pytest.param("https://:secret@models.example/x.safetensors", id="password-only"),
+        pytest.param("https://@models.example/x.safetensors", id="empty-userinfo"),
+        pytest.param("https://TOKEN%40models.example/x.safetensors", id="encoded-at"),
+        pytest.param("https://user%3Asecret%40models.example/x.safetensors", id="encoded-user-and-password"),
+        pytest.param("https://user:secret%40models.example/x.safetensors", id="encoded-at-after-password"),
+        pytest.param("https://TOKEN%2540models.example/x.safetensors", id="double-encoded-at"),
+    ],
+)
+def test_a_link_with_a_credential_before_its_host_is_never_opened(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, uri: str
+) -> None:
+    # Given: through an HTTP proxy, urllib sends the userinfo in the clear in its
+    # CONNECT line, before TLS starts, and percent-decodes it first, so
+    # TOKEN%40host goes out as TOKEN@host. A source: local model keeps its link
+    # on the wire and skips the link rules, so every form reaches the hash probe
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr("comfy_cli.http.no_redirect_urlopen", _head(sent))
+    write_spec(workspace, models=[local_model(sourceUri=uri, sha256=_SHA_A)], nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then: no request is opened for the link, the filename lookup answers, and
+    # no message or lookup names the credential
+    assert result.exit_code == 0, result.stderr
+    assert sent == []
+    (lookup,) = _envelope(result)["data"]["model_lookups"]
+    assert lookup["state"] == "none_found"
+    assert recorder.calls == [{"method": "POST", "body": {"filenames": ["base.safetensors"]}}]
+    for credential in ("secret", "TOKEN"):
+        assert credential not in result.stderr
+        assert credential not in json.dumps(lookup)

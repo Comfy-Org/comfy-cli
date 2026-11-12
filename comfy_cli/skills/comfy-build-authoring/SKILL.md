@@ -311,7 +311,20 @@ is the only check available on this path, because the conflict prediction in
 the policy fields back unchecked, so a pass showing your `mode` is not
 confirmation the `mode` is valid — the builder is the first thing to refuse a bad
 one, at `push`. `--remote` additionally looks up public model-source candidates
-and needs the sign-in.
+and needs the sign-in. For a model with both an https `sourceUri` and a `sha256`, it first
+asks that link for its hash (Hugging Face states it on the download link): the
+lookup reads `declared_ok` when the hash matches and `declared_mismatch`, with
+the link's `sourceSha256`, when it does not. That one HEAD goes to the model's
+host, not the builder. It carries no credential beyond what the link itself
+holds and does not follow a redirect; a link with a user or password before its
+host (`https://user@host/...`, or encoded as `user%40host`) is not asked. All of them share a 15-second budget
+(5 seconds each, counted over the whole request); models past it get the filename lookup, and the command says
+how many. A link that states no hash, or does
+not answer, gets the filename lookup instead, unless the model has no `filename`:
+that one reads `not_lookupable`, with no lookup. Lookups follow
+`wire_definition.models`, which `validate` sorts by `type`, `filename` and
+`sha256`, so a lookup's `entry` index points into `wire_definition.models`, not
+at the spec file's order.
 
 ## Correcting a scanned pack id
 
