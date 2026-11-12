@@ -1700,7 +1700,7 @@ def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path)
     details: dict = {"path": str(spec_file)}
     if error.issues and not renderer.is_pretty():
         details["invalid"] = error.issues
-    renderer.error(code=error.code, message=str(error), details=details)
+    renderer.error(code=error.code, message=str(error), hint=error.hint, details=details)
     raise typer.Exit(code=1) from error
 
 
