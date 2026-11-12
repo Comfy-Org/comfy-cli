@@ -59,6 +59,11 @@ history.
   (`source: "spec"`). A rescan that cannot run names that command and
   `update --from-workflow` in its hint, and every `update` envelope, errors
   included, says `command: "build update"`.
+- A bare `comfy deploy ls` with no spec in the current folder lists the
+  workspace, as `--workspace` does, instead of failing with
+  `build_spec_not_found`. A PATH that holds no spec still fails. Under `--json`
+  the payload says what was listed: `scope: "build"` with the `buildId`, or
+  `scope: "workspace"`.
 
 ## [1.26.0] - 2026-11-11
 
