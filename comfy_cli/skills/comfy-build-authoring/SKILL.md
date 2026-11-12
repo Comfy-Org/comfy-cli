@@ -26,8 +26,10 @@ the ComfyUI nodes. ComfyUI logs such an import failure and carries on; **the
 builder treats it as fatal** — `exit_code 13`, `class user_error`, `declared
 custom nodes failed to import` — which cost a release. So check each clone
 declares `NODE_CLASS_MAPPINGS` before listing it in `customNodes`. A side-loaded
-library belongs nowhere in the definition, and `pipDependencies` cannot stand in
-for it: an override pins a version, it never adds a package.
+library is not a `customNodes` entry, and a version pin in `pipDependencies`
+cannot stand in for it: a pin never adds a package. When a pack imports the
+library and the library publishes a wheel, a wheel address adds it
+(`comfy skills show comfy-build-failures` says how).
 
 When `comfy which` still names a path, say so and let the user settle it — a
 `workspace_type` of `recent` is a remembered directory, not a declared workspace.
@@ -227,6 +229,9 @@ definition:
   `blobId`. A `repository` must be an `https://github.com/<org>/<repo>` URL with
   no userinfo. A `commit`, if given, must be a bare 40-hex sha.
 - **`pipDependencies`** — requirements-file **text**, not a list; max 64 KiB.
+  A `name==version` line forces the version of a package something else
+  installs. A `name @ https://<host>/<file>.whl#sha256=<hash>` line adds a
+  package published only as a wheel outside PyPI.
   `comfy skills show comfy-build-pins` is the procedure for deciding what goes in
   it, and on this path the answer is usually nothing at all.
 - **`environment`** — `{os, arch, pythonVersion, torch}`, written by `init` to

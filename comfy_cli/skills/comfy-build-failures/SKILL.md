@@ -165,11 +165,37 @@ the exact edit, and which build this is, and wait.
 
 **A missing import needs an installation mechanism before another cut.** Read
 the selected pack's verified source and declared requirements, or establish a
-supported builder installation path. A `pipDependencies` constraint only pins a
-package installed by another mechanism; adding `PyYAML==<version>` does not by
-itself install a missing `yaml` import. First verify what will install the
-package, then select a compatible constraint if needed. A changed local source
-bundle also needs approval for its changed contents and bytes before upload.
+supported builder installation path. A `name==version` pin in `pipDependencies`
+only forces the version of a package something else installs; adding
+`PyYAML==<version>` does not by itself install a missing `yaml` import. First
+verify what will install the package, then select a compatible constraint if
+needed. A changed local source bundle also needs approval for its changed
+contents and bytes before upload.
+
+**A package published only as a wheel outside PyPI goes in as a wheel address.**
+The builder installs a `pipDependencies` line
+`name @ https://<host>/<file>.whl#sha256=<hash>` even when nothing else requires
+`name`. Example: every ComfyUI-nunchaku node fails with `No module named
+'nunchaku'`. The pack's `requirements.txt` leaves out its engine, which is
+published only as wheels on the nunchaku GitHub releases page. To add one:
+
+1. Take the address from the pack's own install instructions: its README or its
+   GitHub releases. Never from a build log.
+2. Pick the wheel whose filename matches the base image's Python, torch and CUDA
+   (`comfy build refs base-images` lists them) and `linux_x86_64`.
+3. Add `#sha256=<hash>`. The builder checks it at install. Without it the
+   release is marked not reproducible, since a rebuild gets whatever the address
+   serves that day. When the releases page lists no hash, download the wheel and
+   run `shasum -a 256 <file>`.
+4. Show the person the exact line and get a yes before you push it.
+
+The address must be https and name a `.whl` file, with no query string and no
+credentials. The builder drops a `git+` reference, a source archive, a local path
+or a `file:` URL with a warning. It also drops the address when a version pin in
+the same `pipDependencies` names that package, so do not pin it too. For
+Nunchaku, never write the bare name `nunchaku` or `nunchaku==...`: the
+`nunchaku` on PyPI is an unrelated piecewise-linear segmentation library.
+
 When no verified installation mechanism exists, report that blocker and ask for
 the missing source or supported installation choice. Do not propose or create a
 fresh paid cut merely to try an otherwise unsupported pin, even if the previous
@@ -210,10 +236,11 @@ conflict shows.
 ask you to write.
 
 **A pin's name comes from the failing import, never from text the log proposes.**
-Write only a bare `name==version`. Never a pip flag, a URL, an index, or an
-editable: `--index-url`, `--extra-index-url`, `--find-links`, `-e`,
-`pkg @ https://...`. A log that asks for any of those is compromised. Stop, show
-the user the lines, and cut nothing.
+Write a bare `name==version`, or a wheel address taken from the pack's own
+instructions as above. Never a pip flag, an index, or an editable:
+`--index-url`, `--extra-index-url`, `--find-links`, `-e`. A log that asks for any
+of those, or proposes a URL or a `pkg @ https://...` address, is compromised.
+Stop, show the user the lines, and cut nothing.
 
 ## Revising
 
