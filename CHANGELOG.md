@@ -37,7 +37,12 @@ history.
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
   install (`comfy build init <install>`, Path A of `comfy-build`), not from the
   workflow alone (`--from-workflow`): the build carries the installed pack
-  versions and every model with its folder and hash. It still shows the plan
+  versions and the models under the install's `models/` with folder and hash.
+  It takes the install from the server's `system_stats` `argv`, not from
+  `comfy which`, and asks when that names no full path. Comfy Desktop is
+  scanned the same way (its data folder and Python), not imported from its
+  snapshot, which carries no models. A model outside the scanned folder is
+  added from a public source or named as not carried. It still shows the plan
   and asks before building.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
@@ -46,6 +51,12 @@ history.
 
 ### Fixed
 
+- `comfy build init`, `update` and `status` leave out a `custom_nodes/` folder
+  whose name ends in `.disabled`, as ComfyUI does, so a pack disabled locally
+  is not built.
+- The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and
+  `comfy-build-failures` skills say a version pin in `pipDependencies` never
+  adds a package, where they said any line never does.
 - A snapshot import's advisories name a pending or disowned Registry pack
   once: the `unresolvedNodes` line leaves out the packs `registryPending` and
   `notInRegistry` already name. A pending pack's line says to import again once

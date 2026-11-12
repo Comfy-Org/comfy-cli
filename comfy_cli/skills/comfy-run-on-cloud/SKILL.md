@@ -153,13 +153,24 @@ at the first that works:
 3. **A lossy swap**, asked first. A yes runs the copy on Comfy Cloud. A no goes
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
-   show comfy-deploy`, and follow them. Build from the person's whole install,
-   the one serving `<server>` (step 3's `comfy --json which`), by comfy-build's
-   Path A: `comfy --json build init <install> --name '<name>'` (Comfy Desktop:
-   its Path A′). The build then carries the pack versions they have installed
-   and every model with its folder and hash, so Cloud runs what runs locally;
-   the push swaps a public model for its download. Before building, show the
-   plan and get a yes: what it uploads, the GPU and region
+   show comfy-deploy`, and follow them. Build from the whole install that
+   serves `<server>`, by comfy-build's Path A. `comfy --json which` does not
+   prove which install that is. The server's `system_stats` (step 2) does:
+   `system.argv` starts with its `main.py`, and a `--base-directory <dir>` in
+   it is the folder that holds `models/` and `custom_nodes/`. Scan that folder,
+   else the one holding `main.py`; when `argv` gives no full path, ask the
+   person. Then `comfy --json build init <install> --name '<name>' --comfy-url
+   '<server>'`, with `--python` for a venv that is not inside `<install>`.
+   Comfy Desktop builds the same way, not from its snapshot, which carries no
+   models: `<install>` is `desktop.data_dir`, with `--python
+   '<desktop.python>'`. The build carries the installed pack versions, minus
+   packs disabled locally, and each model under `<install>/models` with its
+   folder and hash; the push swaps a public model for its download. A model
+   loaded from any other folder (step 3's `local_paths` say where) is not
+   scanned: add a public one with `comfy build refs resolve`
+   (`comfy-build-authoring`) before the push, and name any other in the plan as
+   not carried. Before building, show the plan and get a yes: what it uploads,
+   the GPU and region
    (cheapest that fits first, from `comfy --json deploy refs compute`), the
    costs, and `--min 0 --max 1` workers.
 

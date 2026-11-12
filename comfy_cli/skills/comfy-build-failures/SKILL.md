@@ -165,11 +165,12 @@ the exact edit, and which build this is, and wait.
 
 **A missing import needs an installation mechanism before another cut.** Read
 the selected pack's verified source and declared requirements, or establish a
-supported builder installation path. A `pipDependencies` constraint only pins a
-package installed by another mechanism; adding `PyYAML==<version>` does not by
-itself install a missing `yaml` import. First verify what will install the
-package, then select a compatible constraint if needed. A changed local source
-bundle also needs approval for its changed contents and bytes before upload.
+supported builder installation path. A `name==version` pin in `pipDependencies`
+only forces the version of a package something else installs; adding
+`PyYAML==<version>` does not by itself install a missing `yaml` import. First
+verify what will install the package, then select a compatible constraint if
+needed. A changed local source bundle also needs approval for its changed
+contents and bytes before upload.
 When no verified installation mechanism exists, report that blocker and ask for
 the missing source or supported installation choice. Do not propose or create a
 fresh paid cut merely to try an otherwise unsupported pin, even if the previous

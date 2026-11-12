@@ -328,6 +328,19 @@ def test_scan_custom_nodes_marks_unfetchable_as_local(custom_nodes_tree):
     assert nodes["hand_dropped"]["gitRef"] is None
 
 
+def test_scan_custom_nodes_skips_disabled_packs(tmp_path):
+    """ComfyUI never loads a custom_nodes entry whose name ends in `.disabled`
+    (nodes.py), so the scan leaves it out too, even a fetchable git checkout:
+    building it would install requirements the person turned off."""
+    root = tmp_path / "custom_nodes"
+    root.mkdir()
+    _git_init_node(root / "Foo.disabled", remote="https://github.com/example/Foo")
+    (root / "Bar").mkdir()
+    (root / "Bar" / "nodes.py").write_text("# node")
+
+    assert [n["name"] for n in build.scan_custom_nodes(root)] == ["Bar"]
+
+
 def test_scan_custom_nodes_missing_dir_is_empty(tmp_path):
     assert build.scan_custom_nodes(tmp_path / "nope") == []
 

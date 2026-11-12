@@ -26,8 +26,8 @@ the ComfyUI nodes. ComfyUI logs such an import failure and carries on; **the
 builder treats it as fatal** — `exit_code 13`, `class user_error`, `declared
 custom nodes failed to import` — which cost a release. So check each clone
 declares `NODE_CLASS_MAPPINGS` before listing it in `customNodes`. A side-loaded
-library belongs nowhere in the definition, and `pipDependencies` cannot stand in
-for it: an override pins a version, it never adds a package.
+library is not a `customNodes` entry, and a version pin in `pipDependencies`
+cannot stand in for it: a pin never adds a package.
 
 When `comfy which` still names a path, say so and let the user settle it — a
 `workspace_type` of `recent` is a remembered directory, not a declared workspace.

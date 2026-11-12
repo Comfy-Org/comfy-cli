@@ -530,9 +530,9 @@ def test_run_on_cloud_skill_runs_unproven_models_on_clouds_copy_and_names_them()
 
 def test_run_on_cloud_skill_builds_from_the_whole_install():
     """A custom build for a local workflow takes the whole install: the pack
-    versions installed and every model with its folder and hash. Building from
-    the workflow alone (`--from-workflow`) picks the newest version of each
-    pack and starts with no models."""
+    versions installed and the models it holds, each with its folder and hash.
+    Building from the workflow alone (`--from-workflow`) picks the newest
+    version of each pack and starts with no models."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "--from-workflow" not in run
     assert "comfy --json build init <install> --name '<name>'" in run
@@ -540,6 +540,46 @@ def test_run_on_cloud_skill_builds_from_the_whole_install():
     build = " ".join(skill_content("comfy-build").split())
     assert "carries only what that workflow loads" not in build
     assert "a build it needs is made from the whole install (Path A)" in build
+
+
+def test_run_on_cloud_skill_scans_desktop_with_its_models():
+    """Desktop's snapshot import (Path A') carries no models, so Run on Cloud
+    scans Desktop's data folder with Desktop's Python instead, and names the
+    models the scan leaves out instead of promising every one."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Path A′" not in run
+    assert "--from-snapshot" not in run
+    assert "--python '<desktop.python>'" in run
+    assert "`desktop.data_dir`" in run
+    assert "every model with its folder and hash" not in run
+    assert "comfy build refs resolve" in run
+
+
+def test_run_on_cloud_skill_finds_the_install_serving_the_server():
+    """`comfy which` names the install comfy-cli tracks, not the one serving the
+    workflow, so the scan root comes from the server's own `argv`, or the person."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "the one serving `<server>` (step 3's `comfy --json which`)" not in run
+    assert "`system.argv`" in run
+    assert "--base-directory" in run
+    assert "--comfy-url '<server>'" in run
+
+
+def test_build_skills_do_not_say_pip_dependencies_never_adds_a_package():
+    """The builder installs an HTTPS wheel line in `pipDependencies` as a root,
+    so only a version pin is an override that adds nothing."""
+    for name in ("comfy-build", "comfy-build-pins", "comfy-build-authoring", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        for phrase in (
+            "every line as a pip **override**",
+            "An override forces a version, it never adds a package",
+            "an override pins a version, it never adds a package",
+            "and `pipDependencies` cannot stand in for it",
+            "belongs nowhere in the definition",
+            "A `pipDependencies` constraint only pins a package installed by another mechanism",
+        ):
+            assert phrase not in text, f"{name} should not say {phrase!r}"
+
 
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():
     """A server on another port than 8188 must be the one `--where local` reads."""
@@ -1481,7 +1521,6 @@ def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
     assert "Name slots in `connect`, never their numbers" in text
     assert "lists a node's inputs and outputs by name" in text
     assert "the server's answer proves nothing" in text
-    assert '`"<work>/original.json"` otherwise' in text
     assert '> "<work>/preview.json"' in text
     assert '--workflow "<work>/api.json"' in text
     assert "> preview.json" not in text

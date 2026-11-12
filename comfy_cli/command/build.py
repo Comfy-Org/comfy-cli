@@ -457,6 +457,8 @@ def scan_custom_nodes(
       rather than cloning;
     - otherwise ``source: local`` — no upstream, so it must be uploaded as a blob.
 
+    A directory whose name ends in ``.disabled`` is left out, as ComfyUI skips it.
+
     Returns an empty list when the folder is absent (a workflow may use no custom
     nodes)."""
     nodes: list[dict] = []
@@ -468,6 +470,8 @@ def scan_custom_nodes(
             continue  # single-file .py nodes aren't buildable units here
         if entry.name.startswith(".") or entry.name == "__pycache__":
             continue
+        if entry.name.endswith(".disabled"):
+            continue  # ComfyUI never loads a pack disabled this way (nodes.py)
         node = _identify_node(entry)
         local_path = entry.relative_to(root).as_posix()
         node["localPath"] = local_path
