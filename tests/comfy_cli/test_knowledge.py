@@ -1763,6 +1763,7 @@ class TestNamedModelDisambiguation:
             "Qwen 2.1２",
             "Qwen 2.1K",
             "Qwen 2.1İ",
+            "Qwen\u0301 2.1",
             "Qwеn 2.1",  # Cyrillic e
         ],
     )
@@ -1782,6 +1783,7 @@ class TestNamedModelDisambiguation:
             "Qwen Image 2.1²",
             "Qwen Image 2.1K",
             "Qwen Image 2.1İ",
+            "Qwen\u0301 Image 2.1",
             "Qwеn Image 2.1",
         ],
     )
@@ -1852,6 +1854,44 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, "Qwen Text 2.1") == "qwen-image-2-1"
         assert knowledge.model_candidates(b, "Qwen 2.1") == ["qwen-image-2-1"]
 
+    def test_case_distinct_canonical_candidates_resolve_to_their_own_rows(self, monkeypatch, capsys):
+        """A suggestion is actionable only when its exact id returns that id's row."""
+        ids = ["QWEN-IMAGE-2-1", "qwen-image-2-1"]
+        b = knowledge._index(
+            {
+                "models": {
+                    ids[0]: {"owner": "upper"},
+                    ids[1]: {"owner": "lower", "aliases": ["Qwen Photo 2.1"]},
+                }
+            },
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0,
+        )
+        monkeypatch.setattr(knowledge, "load_bundle", lambda **kw: b)
+
+        rc, env = _run(["resolve", "Qwen 2.1"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unknown_model"
+        assert env["error"]["details"]["candidate_ids"] == sorted(ids)
+        for model_id in env["error"]["details"]["candidate_ids"]:
+            assert knowledge.resolve_id(b, model_id) == model_id
+            rc, resolved = _run(["resolve", model_id], capsys)
+            assert rc == 0
+            assert resolved["data"]["id"] == model_id
+            assert resolved["data"]["model"]["owner"] == ("upper" if model_id == ids[0] else "lower")
+
+        # Case folding cannot choose between distinct canonical ids. This is
+        # still an unknown-model error, not a fuzzy or single-candidate resolve.
+        ambiguous = "QwEn-ImAgE-2-1"
+        assert ambiguous not in b.models
+        assert knowledge.resolve_id(b, ambiguous) is None
+        rc, env = _run(["resolve", ambiguous], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unknown_model"
+
     def test_raw_unicode_model_id_cannot_offer_ascii_candidates(self):
         mid = "Qwen Image 2.1K"
         b = knowledge._index({"models": {mid: {}}}, None, source="env", stale=False, path="fixture", mtime=0)
@@ -1879,10 +1919,11 @@ class TestNamedModelDisambiguation:
 
     def test_candidates_are_general_sorted_bounded_and_deduplicated(self):
         ids = [f"acme-variant{letter}-2-1" for letter in "hgfedcba"]
+        missing_id = "aaa-missing-row"
         b = knowledge._index(
             {
                 "models": {mid: {"id": mid, "aliases": [mid.upper(), mid.replace("-", " ") + " turbo"]} for mid in ids},
-                "aliases": {"Acme Missing 2.1": "missing-row"},
+                "aliases": {"Acme Missing 2.1": missing_id},
             },
             None,
             source="env",
@@ -1890,6 +1931,9 @@ class TestNamedModelDisambiguation:
             path="fixture",
             mtime=0.0,
         )
+        # If the missing-row guard regresses, this id sorts into (not beyond)
+        # the returned window, making the equality below fail decisively.
+        assert missing_id < sorted(ids)[4]
         assert knowledge.model_candidates(b, "Acme 2.1") == sorted(ids)[:5]
         boundary_query = "Acme 2.1".ljust(knowledge.MAX_QUERY_CHARS)
         assert len(boundary_query) == 200

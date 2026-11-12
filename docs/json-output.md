@@ -1005,9 +1005,11 @@ with exit code 1. When catalog ids or aliases contain the same family word and
 numeric components, in order, `error.details.candidate_ids` lists up to five
 sorted, distinct canonical ids. Omitted words are allowed for suggestions;
 substituted family words and different versions are not.
-Suggestions conservatively skip queries and catalog aliases containing non-ASCII
-letters or numbers rather than discard or normalize those qualifiers. Declared
-id and alias resolution still uses its existing rules.
+Suggestions conservatively skip queries and catalog aliases containing any
+non-ASCII character rather than discard a qualifier such as a combining mark or
+normalize it into a different spelling. Exact canonical ids resolve before
+case-folded aliases. If two canonical ids differ only by case, each remains
+reachable by its exact spelling and other casing variants remain ambiguous.
 
 These are suggestions, even when there is only one. Ask which model is intended,
 then retry `comfy knowledge resolve <exact-id>`. They grant no permission to
