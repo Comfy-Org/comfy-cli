@@ -22,7 +22,10 @@ Each of these needs its own yes in chat, asked before you do it:
 - **uploading any file from this machine**: a model, a LoRA, an input image,
   video or audio, or a custom node folder. Ask by file name, one line per file:
   path, size, what it is for, where it goes. A yes covers the files you named; a
-  new or changed file needs a new yes;
+  new or changed file needs a new yes. A custom build from the install (step 4)
+  is asked differently: its plan names each local pack as a whole folder and
+  gives the models by count and total size, and the yes to that plan is the
+  yes to those uploads;
 - a **lossy** change (step 4);
 - running **partner-API nodes**, which spend credits on top of the run (step 6);
 - a **new build or deployment** (it costs money to build and to keep running);
@@ -156,38 +159,75 @@ at the first that works:
    show comfy-deploy`, and follow them. Build from the whole install that
    serves `<server>`, by comfy-build's Path A. `comfy --json which` does not
    prove which install that is. The server's `system_stats` (step 2) names it:
-   `system.argv` starts with its `main.py`, and a `--base-directory <dir>` in
-   it is the folder that holds `models/` and `custom_nodes/`. That path is the
-   server's, not always this machine's: ComfyUI in Docker reports
-   `/app/ComfyUI/main.py` for an install that sits at `/host/ComfyUI` here.
-   Take the `--base-directory` folder, else the one holding `main.py`, only
-   when the server runs on this machine outside a container or VM, and this
-   machine has `main.py` and `custom_nodes/` where `argv` puts them.
-   Otherwise, or when `argv` gives no full path, ask the person which folder
-   on this machine holds that install. Then `comfy --json build init <install>
-   --name '<name>' --comfy-url '<server>'`, with `--python` for a venv that is not inside `<install>`.
+   `system.argv` starts with its `main.py`, and a `--base-directory <dir>` or
+   `--base-directory=<dir>` in it is the folder that holds `models/` and
+   `custom_nodes/`. That path is the server's, not always this machine's:
+   ComfyUI in Docker reports `/app/ComfyUI/main.py` for an install that sits
+   at `/host/ComfyUI` here. Take the `--base-directory` folder, else the one
+   holding `main.py`, only when the server runs on this machine outside a
+   container or VM, and this machine has `main.py` and `custom_nodes/` where
+   `argv` puts them. Otherwise, when `argv` gives no full path, or when the
+   `--base-directory` value is a relative path, ask the person which folder on
+   this machine holds that install.
+
+   The Python that runs the server sits beside `main.py`, not in a
+   `--base-directory` folder: `.venv` or `venv` in the folder holding
+   `main.py`, as `bin/python` (`Scripts\python.exe` on Windows). When neither
+   is there, ask the person which Python starts the server. Then, with every
+   path quoted:
+
+   ```shell
+   comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'
+   ```
+
    Comfy Desktop builds the same way, not from its snapshot, which carries no
    models: `<install>` is `desktop.data_dir`, with `--python
-   '<desktop.python>'`. The build carries the installed pack versions, minus
-   packs disabled locally, and each model under `<install>/models` with its
-   folder and hash; the push swaps a public model for its download. `init`
-   lists every folder under `custom_nodes/` as a pack, and the builder fails
-   the release on one that declares no nodes (`declared custom nodes failed to
-   import`), though ComfyUI runs past it. So after `init`, check that each
-   `customNodes` entry's folder declares `NODE_CLASS_MAPPINGS`, or has an
-   `__init__.py` that does. Drop any that does not from the spec, and name
-   each dropped folder in the plan. A model
-   loaded from any other folder (step 3's `local_paths` say where) is not
-   scanned. Hash that file with sha256 (`shasum -a 256 '<file>'`) and look it
-   up with `comfy build refs resolve` (`comfy-build-authoring`). Add a
-   candidate before the push only when its `sha256` equals that hash. A
-   candidate whose `sha256` differs, or that has none, is another model:
-   offering it is a lossy swap, asked on its own (below), and the build's yes
-   does not cover it. Name any model not added in the plan as not carried.
-   Before building, show the plan and get a yes: what it uploads,
-   the GPU and region
-   (cheapest that fits first, from `comfy --json deploy refs compute`), the
-   costs, and `--min 0 --max 1` workers.
+   '<desktop.python>'`.
+
+   `init` writes the spec to `<install>/comfy-build.yaml`, in the person's
+   install. If that file is already there, `init` refuses with
+   `build_spec_exists`: it is an earlier build of this install, holding its
+   Build id and the person's edits. Never pass `--force`, which overwrites it.
+   Run `comfy --json build update '<install>' --dry-run` with the same
+   `--comfy-url` and `--python` instead, show the person its `summary`, and
+   run it again with `--yes` only after they agree. `update` rewrites the
+   definition and keeps the Build id and name.
+
+   The build carries the installed pack versions and each model under
+   `<install>/models` with its folder and hash; the push swaps a public model
+   for its download. Then check the spec's `customNodes` before the plan:
+
+   - Drop each entry whose folder name ends in `.disabled`. ComfyUI does not
+     load such a folder, but `init` lists it.
+   - Drop each entry whose folder declares no nodes. `init` lists every folder
+     under `custom_nodes/` as a pack, and the builder fails the release on one
+     that declares no nodes (`declared custom nodes failed to import`), though
+     ComfyUI runs past it. A folder declares nodes when its `__init__.py`
+     defines or imports `NODE_CLASS_MAPPINGS` (the V1 node API) or
+     `comfy_entrypoint` (the V3 node API).
+
+   Name each dropped folder in the plan. A model loaded from any other folder
+   (step 3's `local_paths` say where) is not scanned. Hash that file with
+   sha256 (`shasum -a 256 '<file>'`) and look it up with
+   `comfy build refs resolve` (`comfy-build-authoring`). Add a candidate
+   before the push only when its `sha256` equals that hash. A candidate whose
+   `sha256` differs, or that has none, is another model: offering it is a
+   lossy swap, asked on its own (below), and the build's yes does not cover
+   it. Name a candidate added on that swap's yes in the plan as a stand-in
+   for the person's file, and any model not added as not carried.
+
+   Before building, show the plan and get a yes. The plan names:
+
+   - the spec file `init` or `update` wrote, `<install>/comfy-build.yaml`;
+   - each local pack (`source` `local`) as a whole folder: it uploads with
+     everything in it, a key or config file too;
+   - the models, by count and total size (the spec's `models`);
+   - each dropped folder, each stand-in model and each model not carried;
+   - the GPU and region (cheapest that fits first, from
+     `comfy --json deploy refs compute`), the costs, and `--min 0 --max 1`
+     workers.
+
+   This plan's yes is the yes to its uploads; nothing is uploaded before it.
 
 | kind | what counts | what you do |
 |---|---|---|

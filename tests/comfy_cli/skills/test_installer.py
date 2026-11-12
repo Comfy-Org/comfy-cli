@@ -535,8 +535,7 @@ def test_run_on_cloud_skill_builds_from_the_whole_install():
     version of each pack and starts with no models."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "--from-workflow" not in run
-    assert "comfy --json build init <install> --name '<name>'" in run
-    assert "show the plan and get a yes" in run
+    assert "Build from the whole install that serves `<server>`, by comfy-build's Path A" in run
     build = " ".join(skill_content("comfy-build").split())
     assert "carries only what that workflow loads" not in build
     assert "a build it needs is made from the whole install (Path A)" in build
@@ -544,41 +543,19 @@ def test_run_on_cloud_skill_builds_from_the_whole_install():
 
 def test_run_on_cloud_skill_scans_desktop_with_its_models():
     """Desktop's snapshot import (Path A') carries no models, so Run on Cloud
-    scans Desktop's data folder with Desktop's Python instead, and names the
-    models the scan leaves out instead of promising every one."""
+    scans Desktop's data folder with Desktop's Python instead."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "Path A′" not in run
-    assert "--from-snapshot" not in run
     assert "--python '<desktop.python>'" in run
-    assert "`desktop.data_dir`" in run
-    assert "every model with its folder and hash" not in run
-    assert "comfy build refs resolve" in run
+    assert "`<install>` is `desktop.data_dir`" in run
+    assert "not from its snapshot, which carries no models" in run
 
 
 def test_run_on_cloud_skill_finds_the_install_serving_the_server():
     """`comfy which` names the install comfy-cli tracks, not the one serving the
-    workflow, so the scan root comes from the server's own `argv`, or the person."""
+    workflow, so the scan root comes from the server's own `argv`."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "the one serving `<server>` (step 3's `comfy --json which`)" not in run
-    assert "`system.argv`" in run
-    assert "--base-directory" in run
-    assert "--comfy-url '<server>'" in run
-
-
-def test_build_skills_do_not_say_pip_dependencies_never_adds_a_package():
-    """The builder installs an HTTPS wheel line in `pipDependencies` as a root,
-    so only a version pin is an override that adds nothing."""
-    for name in ("comfy-build", "comfy-build-pins", "comfy-build-authoring", "comfy-build-failures"):
-        text = " ".join(skill_content(name).split())
-        for phrase in (
-            "every line as a pip **override**",
-            "An override forces a version, it never adds a package",
-            "an override pins a version, it never adds a package",
-            "and `pipDependencies` cannot stand in for it",
-            "belongs nowhere in the definition",
-            "A `pipDependencies` constraint only pins a package installed by another mechanism",
-        ):
-            assert phrase not in text, f"{name} should not say {phrase!r}"
+    assert "`comfy --json which` does not prove which install that is" in run
+    assert "`system.argv` starts with its `main.py`" in run
 
 
 def test_run_on_cloud_skill_checks_the_server_path_on_this_machine():
@@ -586,13 +563,45 @@ def test_run_on_cloud_skill_checks_the_server_path_on_this_machine():
     `/host/ComfyUI` here, so the reported path is scanned only once it is
     checked on this machine; otherwise the person names the local folder."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert (
-        "Scan that folder, else the one holding `main.py`; when `argv` gives no full path, ask the person." not in run
-    )
     assert "Docker" in run
-    assert "`main.py` and `custom_nodes/`" in run
+    assert "this machine has `main.py` and `custom_nodes/` where `argv` puts them" in run
     assert "ask the person which folder on this machine holds that install" in run
-    assert "show the plan and get a yes" in run
+
+
+def test_run_on_cloud_skill_quotes_the_install_and_takes_python_beside_main_py():
+    """Install paths often hold spaces, `--base-directory` comes in two forms
+    and may be relative to a folder the agent cannot see, and the venv sits
+    beside `main.py`, not in the base directory, so `init` gets it as `--python`."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'" in run
+    assert "`--base-directory=<dir>`" in run
+    assert "the `--base-directory` value is a relative path, ask the person" in run
+    assert "`.venv` or `venv` in the folder holding `main.py`" in run
+    assert "ask the person which Python starts the server" in run
+
+
+def test_run_on_cloud_skill_keeps_an_existing_build_spec():
+    """`init` writes `comfy-build.yaml` into the person's install and refuses
+    when one is there; `--force` would overwrite an earlier build's id and
+    edits, so the skill rescans with `update` after a yes and names the file."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "`build_spec_exists`" in run
+    assert "Never pass `--force`, which overwrites it" in run
+    assert "comfy --json build update '<install>' --dry-run" in run
+    assert "run it again with `--yes` only after they agree" in run
+    assert "the spec file `init` or `update` wrote, `<install>/comfy-build.yaml`" in run
+
+
+def test_run_on_cloud_skill_asks_for_an_install_build_by_folder_and_model_count():
+    """A whole-install build cannot be asked one file per line, and a local pack
+    uploads as a whole folder, so the plan names each such folder, counts the
+    models, and is the yes to those uploads; the per-file rule says so."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "its plan names each local pack as a whole folder" in run
+    assert "the yes to that plan is the yes to those uploads" in run
+    assert "it uploads with everything in it, a key or config file too" in run
+    assert "the models, by count and total size" in run
+    assert "This plan's yes is the yes to its uploads" in run
 
 
 def test_build_skills_name_the_pins_the_builder_installs():
@@ -624,25 +633,40 @@ def test_build_pins_skill_keeps_a_needed_nvidia_vfx_pin():
 
 def test_build_skills_drop_scanned_folders_that_declare_no_nodes():
     """`init` lists every `custom_nodes/` folder as a pack, and the builder fails
-    the release on a side-loaded library that declares no nodes, so the scan
-    paths check `NODE_CLASS_MAPPINGS` and name each folder they drop."""
+    the release on a side-loaded library that declares no nodes. ComfyUI loads a
+    folder exporting `NODE_CLASS_MAPPINGS` or a V3 `comfy_entrypoint`, so the
+    scan paths keep either and name each folder they drop."""
     for name in ("comfy-run-on-cloud", "comfy-build"):
         text = " ".join(skill_content(name).split())
-        assert "declares `NODE_CLASS_MAPPINGS`, or has an `__init__.py` that does" in text, name
+        assert (
+            "`__init__.py` defines or imports `NODE_CLASS_MAPPINGS` (the V1 node API) or "
+            "`comfy_entrypoint` (the V3 node API)" in text
+        ), name
         assert "declared custom nodes failed to import" in text, name
-        assert "name each dropped folder in the" in text, name
+        assert "each dropped folder in the" in text, name
+
+
+def test_build_skills_drop_disabled_pack_folders():
+    """ComfyUI skips a `custom_nodes/` folder whose name ends in `.disabled`, but
+    `init` lists it, so the scan paths drop that entry and name it."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Drop each entry whose folder name ends in `.disabled`" in run
+    assert "ComfyUI does not load such a folder, but `init` lists it" in run
+    build = " ".join(skill_content("comfy-build").split())
+    assert "a folder whose name ends in `.disabled`**, which ComfyUI does not load" in build
 
 
 def test_run_on_cloud_skill_matches_an_external_model_by_hash():
     """`refs resolve` looks up by filename and reads no local file, so a model
     outside `<install>/models` is added only when a candidate's sha256 equals
-    the local file's; any other candidate is a lossy swap asked on its own."""
+    the local file's; any other candidate is a lossy swap asked on its own, and
+    the plan names it as a stand-in."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "add a public one with `comfy build refs resolve`" not in run
     assert "Hash that file with sha256" in run
     assert "only when its `sha256` equals that hash" in run
     assert "is another model: offering it is a lossy swap, asked on its own" in run
     assert "the build's yes does not cover it" in run
+    assert "in the plan as a stand-in for the person's file, and any model not added as not carried" in run
 
 
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():

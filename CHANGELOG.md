@@ -35,20 +35,26 @@ history.
 ### Changed
 
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
-  install (`comfy build init <install>`, Path A of `comfy-build`), not from the
-  workflow alone (`--from-workflow`): the build carries the installed pack
+  install (`comfy build init '<install>'`, Path A of `comfy-build`), not from
+  the workflow alone (`--from-workflow`): the build carries the installed pack
   versions and the models under the install's `models/` with folder and hash.
-  It takes the install from the server's `system_stats` `argv`, not from
-  `comfy which`, and uses that path only when the server runs on this machine
-  outside a container and the install is there. Otherwise it asks the person
-  for the folder on this machine. Comfy Desktop is
-  scanned the same way (its data folder and Python), not imported from its
-  snapshot, which carries no models. A scanned `custom_nodes/` folder that
-  declares no `NODE_CLASS_MAPPINGS` is dropped and named in the plan. A model
-  outside the scanned folder is added from a public source only when its
-  sha256 matches the local file; another file is a lossy swap asked on its
-  own, or the model is named as not carried. It still shows the plan and asks
-  before building.
+  It takes the install from the server's `system_stats` `argv`
+  (`--base-directory <dir>` or `--base-directory=<dir>`, else the folder of
+  `main.py`), not from `comfy which`, and uses that path only when the server
+  runs on this machine outside a container and the install is there.
+  Otherwise, or for a relative `--base-directory`, it asks the person for the
+  folder on this machine. It passes the Python beside `main.py` as `--python`.
+  Comfy Desktop is scanned the same way (its data folder and Python), not
+  imported from its snapshot, which carries no models. When the install
+  already has a `comfy-build.yaml`, it shows `comfy build update`'s diff and
+  asks, and never passes `--force`. A scanned `custom_nodes/` folder whose
+  name ends in `.disabled`, or that declares neither `NODE_CLASS_MAPPINGS` nor
+  `comfy_entrypoint`, is dropped and named in the plan; `comfy-build` Path A
+  says the same. A model outside the scanned folder is added from a public
+  source only when its sha256 matches the local file; another file is a lossy
+  swap asked on its own and named as a stand-in, or the model is named as not
+  carried. The plan names the spec file, each local pack as a whole folder,
+  and the models by count and total size, and its yes covers those uploads.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note
@@ -56,9 +62,6 @@ history.
 
 ### Fixed
 
-- `comfy build init`, `update` and `status` leave out a `custom_nodes/` folder
-  whose name ends in `.disabled`, as ComfyUI does, so a pack disabled locally
-  is not built.
 - The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and
   `comfy-build-failures` skills say an ordinary version pin in
   `pipDependencies` adds no package, where they said any line never does. They

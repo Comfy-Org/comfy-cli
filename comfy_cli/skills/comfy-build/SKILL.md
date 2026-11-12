@@ -168,9 +168,12 @@ falls to `0` means the connection stalled, not that the upload is slow.
   declares nodes. The builder fails the release on one that does not
   (`declared custom nodes failed to import`), though ComfyUI runs past it. A
   library cloned there only to `pip install` it is one (`comfy-build-authoring`).
-  So check that each `customNodes` entry's folder declares `NODE_CLASS_MAPPINGS`,
-  or has an `__init__.py` that does. Drop any that does not from the spec, and
-  name each dropped folder in the disclosure.
+  A folder declares nodes when its `__init__.py` defines or imports
+  `NODE_CLASS_MAPPINGS` (the V1 node API) or `comfy_entrypoint` (the V3 node
+  API). Drop each `customNodes` entry whose folder declares neither from the
+  spec, and name each dropped folder in the disclosure.
+- **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
+  load. Drop that entry too, and name it in the disclosure.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;
