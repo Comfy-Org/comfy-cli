@@ -580,7 +580,6 @@ def test_run_on_cloud_skill_quotes_the_install_and_takes_python_beside_main_py()
     assert "`--base-directory=<dir>`" in run
     assert "or a relative `--base-directory` value), ask the person" in run
     assert "`.venv` or `venv` in the folder holding `main.py`" in run
-    assert "ask the person which Python starts the server" in run
     # A stale venv beside `main.py` would freeze the wrong packages, so it is
     # taken only when it is the interpreter the server reports.
     assert "print(sys.version)'` prints the server's `system.python_version` exactly" in run
@@ -595,9 +594,7 @@ def test_run_on_cloud_skill_has_the_person_confirm_the_server_python():
     assert "`system.pytorch_version`" in run
     assert "'<python>' -c 'import torch; print(torch.__version__)'" in run
     assert "A match only rules a wrong Python out; it does not prove this one starts the server" in run
-    assert "When neither is there or it differs, ask the person which Python starts the server" in run
     assert "the Python passed as `--python`, by path: the yes confirms it is the one that starts their server" in run
-    assert "comfy --json build update '<install>' --python '<that one>'" in run
 
 
 def test_run_on_cloud_skill_reviews_the_python_correction_rescan():
@@ -623,18 +620,17 @@ def test_run_on_cloud_skill_keeps_an_existing_build_spec():
     when one is there; `--force` would overwrite an earlier build's id and
     edits, so the skill rescans with `update` after a yes and names the file."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "`build_spec_exists`" in run
-    assert "Never pass `--force`, which overwrites it" in run
-    assert "comfy --json build update '<install>' --dry-run" in run
-    assert "run it again with `--yes` only after they agree" in run
+    existing = run[run.index("`build_spec_exists`") : run.index("so the push replaces that Build's definition")]
+    assert "Never pass `--force`, which overwrites it" in existing
+    assert "comfy --json build update '<install>' --dry-run" in existing
+    assert "run it again with `--yes` only after they agree" in existing
     assert "the spec file `init` or `update` wrote, `<install>/comfy-build.yaml`" in run
     # `summary` is only counts; the `diff` names what a rescan drops, and the
     # push then updates the Build the spec names in place.
     assert "show the person its `summary`" not in run
-    assert "show the person each entry of its `diff` by name" in run
-    assert "a rescan removes a model added by hand earlier" in run
-    assert "the `pipDependencies` lines it adds and drops" in run
-    assert "so the push replaces that Build's definition" in run
+    assert "show the person each entry of its `diff` by name" in existing
+    assert "a rescan removes a model added by hand earlier" in existing
+    assert "the `pipDependencies` lines it adds and drops" in existing
     assert "the Build id the push replaces, when the spec has one, asked as a question of its own" in run
 
 
@@ -677,115 +673,111 @@ def test_build_pins_skill_keeps_a_needed_nvidia_vfx_pin():
     assert "every `nvidia-*` except an `nvidia-vfx` pin a pack needs" in text
 
 
-def test_build_skills_drop_scanned_folders_that_declare_no_nodes():
+def test_build_skill_searches_every_py_file_before_calling_a_folder_node_less():
     """`init` lists every `custom_nodes/` folder as a pack, and the builder fails
-    the release on a side-loaded library that declares no nodes. ComfyUI loads a
-    folder exporting `NODE_CLASS_MAPPINGS` or a V3 `comfy_entrypoint`, so the
-    scan paths keep either and name each folder they drop."""
-    for name in ("comfy-run-on-cloud", "comfy-build"):
-        text = " ".join(skill_content(name).split())
-        assert (
-            "`__init__.py` defines or imports `NODE_CLASS_MAPPINGS` (the V1 node API) or "
-            "`comfy_entrypoint` (the V3 node API)" in text
-        ), name
-        assert "declared custom nodes failed to import" in text, name
-        assert "each dropped folder in the" in text, name
-    # A kept pack may import a dropped library, which the build does not carry.
-    run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "Name each dropped folder in the plan, and any kept pack that imports it" in run
+    the release on a side-loaded library that declares no nodes. A pack may build
+    `NODE_CLASS_MAPPINGS` or a V3 `comfy_entrypoint` in a submodule and re-export
+    it with a wildcard import, so `__init__.py` alone cannot tell: Path A
+    searches every `.py` file in the folder, and asks before dropping a folder
+    where neither name appears."""
     build = " ".join(skill_content("comfy-build").split())
+    assert "`__init__.py` defines or imports" not in build
+    assert (
+        "A folder declares nodes when `NODE_CLASS_MAPPINGS` (the V1 node API) or `comfy_entrypoint` "
+        "(the V3 node API) appears in any `.py` file in it, subfolders included" in build
+    )
+    assert (
+        "grep -rlE --include='*.py' 'NODE_CLASS_MAPPINGS|comfy_entrypoint' '<install>/custom_nodes/<folder>'" in build
+    )
+    assert 'name it in the disclosure as "declares no nodes" and ask before dropping its `customNodes` entry' in build
+    assert "declared custom nodes failed to import" in build
+    # A kept pack may import a dropped library, which the build does not carry.
     assert "with each kept pack that imports its library (grep the kept packs for the import)" in build
     assert "the build does not carry that library" in build
-
-
-def test_build_skills_drop_disabled_pack_folders():
-    """ComfyUI skips a `custom_nodes/` folder whose name ends in `.disabled`, but
-    `init` lists it, so the scan paths drop that entry and name it."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "Drop each entry whose folder name ends in `.disabled`" in run
-    assert "ComfyUI does not load such a folder, but `init` lists it" in run
+    assert 'each folder Path A names as "declares no nodes", with the ask whether to drop it' in run
+
+
+def test_build_skill_drops_disabled_pack_folders():
+    """ComfyUI skips a `custom_nodes/` folder whose name ends in `.disabled`, but
+    `init` lists it, so Path A drops that entry and names it."""
     build = " ".join(skill_content("comfy-build").split())
     assert "a folder whose name ends in `.disabled`**, which ComfyUI does not load" in build
+    assert "Drop that entry too, and name it in the disclosure" in build
 
 
-def test_build_skills_move_a_disabled_pack_link_out_before_init():
+def test_build_skill_stops_on_a_disabled_pack_link_before_init():
     """`init` follows a `custom_nodes/<name>.disabled` symlink, and packaging
-    refuses a symlinked local pack, so the scan stops before any spec exists and
-    the post-scan `.disabled` drop never runs. The check comes before `init`,
-    and the person moves the link out, or the run stops."""
-    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    refuses a symlinked local pack, so the scan stops before any spec exists.
+    The scanner owns that case: until it skips such a link, the agent names the
+    link and stops before `init`. It never moves or deletes the link, so no link
+    is left in a folder the person does not know about."""
+    build = " ".join(skill_content("comfy-build").split())
     find = "find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l"
-    init = "comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'"
-    assert find in run
-    assert run.index(find) < run.index(init)
-    assert "ComfyUI does not load such a link, but `init` cannot scan past it" in run
-    assert "Run `init` only after they move every one; if they decline, stop" in run
-    # Links `init` can pin to a commit or registry version still scan, so the
-    # post-scan drop stays.
-    assert "Drop each entry whose folder name ends in `.disabled`" in run
-    build = " ".join(skill_content("comfy-build").split())
-    assert "find <install>/custom_nodes -maxdepth 1 -name '*.disabled' -type l" in build
-    assert "A `.disabled` symlink stops `init` before it writes a spec" in build
-    assert "run `init` only after they do" in build
-
-
-def test_build_skills_park_disabled_links_without_replacing_anything():
-    """Plain `mv` replaces an existing file at its destination, so parking a
-    `.disabled` link at a fixed `<install>/<name>.disabled` can destroy a file
-    already there, and moving it back can replace a newer entry at the original
-    path. Both skills park in a fresh `mktemp -d` folder outside `custom_nodes/`,
-    move with `mv -n` both ways into a folder (a full destination path that is a
-    symlink to a folder would move the link inside it), check each move, and
-    leave a link parked when restoring it would replace something."""
-    mktemp = "mktemp -d '<install>/.comfy-build-parked.XXXXXX'"
-    park = "mv -n '<install>/custom_nodes/<name>.disabled' '<park>/'"
-    parked = "test ! -L '<install>/custom_nodes/<name>.disabled' && test -L '<park>/<name>.disabled'"
-    restore = "mv -n '<park>/<name>.disabled' '<install>/custom_nodes/'"
-    init = "comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'"
+    assert f"Before `init`, list such links: `{find}`" in build
+    assert "`build_spec_invalid`, `node root must not be a symlink`" in build
+    assert "name each link to the person, say `init` fails on it, and stop" in build
+    assert "Never move or delete the link yourself: the person may move or delete it and ask again" in build
     run = " ".join(skill_content("comfy-run-on-cloud").split())
-    build = " ".join(skill_content("comfy-build").split())
     for text in (run, build):
-        assert mktemp in text
-        assert park in text
-        assert parked in text
-        assert restore in text
-        assert "rmdir '<park>'" in text
-        assert "if not, stop" in text
-        assert "leave it in `<park>`, tell the person its path, and keep `<park>`" in text
-        assert "`rmdir` removes `<park>` only when it is empty" in text
-        # The fixed-name parking spot, and any `mv` that may replace, are gone.
-        assert "<install>/<name>.disabled" not in text
-        assert not re.findall(r"\bmv (?!-n\b)", text)
-    assert run.index(mktemp) < run.index(park) < run.index(parked) < run.index(init)
+        assert "mktemp" not in text
+        assert "<park>" not in text
+        assert not re.findall(r"\bmv ", text)
+
+
+def test_run_on_cloud_skill_points_to_path_a_for_the_custom_nodes_checks():
+    """Each `custom_nodes/` rule lives once, in comfy-build Path A; step 4 names
+    the checks, runs the symlink one before `init`, and points there."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    pointer = (
+        "Run comfy-build Path A's `custom_nodes/` checks, which hold the rules: the `.disabled` symlink check"
+        " before `init` (on such a link it stops), then, on the spec `init` or `update` writes, the `.disabled`"
+        " folder, no-nodes and single `.py` file checks"
+    )
+    assert pointer in run
+    init = "comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'"
+    assert run.index(pointer) < run.index(init)
+    for rule in (
+        "find '<install>/custom_nodes'",
+        "NODE_CLASS_MAPPINGS",
+        "Drop each entry whose folder name ends in `.disabled`",
+        "List the single `.py` files directly under",
+        "custom_nodes.<file name without .py>",
+    ):
+        assert rule not in run, rule
 
 
 def test_build_skills_name_single_file_nodes_the_scan_skips():
     """ComfyUI loads a single `.py` file under `custom_nodes/` as a pack, but
     `init` scans folders only, so such a file never reaches the spec: the plan
     names it as not carried, and a workflow that needs its nodes stops."""
-    run = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "List the single `.py` files directly under `<install>/custom_nodes/`" in run
-    assert "`init` scans folders only, so no such file reaches the spec" in run
-    assert "gives its `python_module` as `custom_nodes.<file name without .py>`" in run
-    assert "or you cannot tell, stop: the build cannot carry it unless the person makes it a folder pack" in run
-    assert "or names an installable source for it" in run
-    assert "each single `.py` file under `custom_nodes/`, as not carried by the build" in run
     build = " ".join(skill_content("comfy-build").split())
     assert "It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as a pack" in build
-    assert "unless the person makes it a folder pack or names an installable source" in build
+    assert "`init` scans folders only, so no such file reaches the spec" in build
+    assert "List the single `.py` files directly under `<install>/custom_nodes/`" in build
+    assert "gives its `python_module` as `custom_nodes.<file name without .py>`" in build
+    assert (
+        "or you cannot tell, stop: the build cannot carry it unless the person makes it a folder pack"
+        " or names an installable source for it" in build
+    )
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "each single `.py` file under `custom_nodes/`, as not carried by the build" in run
 
 
 def test_run_on_cloud_skill_matches_an_external_model_by_hash():
     """`refs resolve` looks up by filename and reads no local file, so a model
     outside `<install>/models` is added only when a candidate's sha256 equals
-    the local file's; any other candidate is a lossy swap asked on its own, and
-    the plan names it as a stand-in."""
+    the local file's. Inside a custom build "Keep the original" is the route
+    already taken, so another candidate gets its own ask: use the public file
+    as a stand-in, or leave the model out and name it as not carried."""
     run = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "Hash that file with sha256" in run
     assert "only when its `sha256` equals that hash" in run
-    assert "is another model: offering it is a lossy swap, asked on its own" in run
-    assert "the build's yes does not cover it" in run
-    assert "in the plan as a stand-in for the person's file, and any model not added as not carried" in run
+    assert "offering it is a lossy swap, asked on its own (below)" not in run
+    assert "is another model, and the build's yes does not cover it. Ask about it on its own, with two choices" in run
+    assert "**Use the public file as a stand-in**" in run
+    assert "The plan names it as a stand-in for the person's file" in run
+    assert "**Leave it out**: the build does not carry the model, and the plan names it as not carried" in run
     # The scan skips `.sft`, dotfiles and files outside `models/`, so membership
     # is checked against the spec, not the path.
     assert "A workflow model the spec's `models` does not list is not carried, wherever it sits" in run

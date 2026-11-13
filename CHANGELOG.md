@@ -50,25 +50,26 @@ history.
   Comfy Desktop is scanned the same way (its data folder and Python), not
   imported from its snapshot, which carries no models. When the install
   already has a `comfy-build.yaml`, it shows `comfy build update`'s diff and
-  asks, and never passes `--force`. A scanned `custom_nodes/` folder whose
-  name ends in `.disabled`, or that declares neither `NODE_CLASS_MAPPINGS` nor
-  `comfy_entrypoint`, is dropped and named in the plan; `comfy-build` Path A
-  says the same. Before `init`, both list each `custom_nodes/` symlink whose
-  name ends in `.disabled`, which `init` follows and cannot package when it
-  points at a local pack, and ask the person to move it out of `custom_nodes/`
-  into a new `mktemp -d` folder with `mv -n`, which never replaces a file,
-  stopping when they decline or the move did not happen. Moving it back also
-  uses `mv -n`; a link whose name is taken again stays parked, and the person
-  is told where. A single `.py` file under `custom_nodes/`, which ComfyUI loads
-  but the scan skips, is named as not carried, and the skill stops when the
-  workflow needs a node from one. A workflow model the spec does not list (outside `models/`,
-  a dotfile, or an extension the scan skips, such as `.sft`) is added from a
-  public source only when its sha256 matches the local file; another file is
-  a lossy swap asked on its own and named as a stand-in, or the model is named
-  as not carried. The plan names the spec file, each local pack as a whole folder,
-  the models by count and total size, and each git pack with uncommitted
-  changes, and its yes covers those uploads; replacing the spec's existing
-  Build is asked on its own.
+  asks, and never passes `--force`. It runs the `custom_nodes/` checks of
+  `comfy-build` Path A, where those rules now live once. A folder whose name
+  ends in `.disabled` is dropped and named in the plan. A folder where neither
+  `NODE_CLASS_MAPPINGS` nor `comfy_entrypoint` appears in any of its `.py`
+  files, subfolders included, is named as declaring no nodes, and the agent
+  asks before dropping it. Before `init`, the agent lists each
+  `custom_nodes/` symlink whose name ends in `.disabled`, which `init`
+  follows and cannot package when it points at a local pack, names each one
+  to the person and stops; it never moves or deletes the link. A single `.py`
+  file under `custom_nodes/`, which ComfyUI loads but the scan skips, is
+  named as not carried, and the skill stops when the workflow needs a node
+  from one. A workflow model the spec does not list (outside `models/`, a
+  dotfile, or an extension the scan skips, such as `.sft`) is added from a
+  public source only when its sha256 matches the local file. For another
+  file the agent asks on its own: use the public file as a stand-in, named
+  so in the plan, or leave the model out, named as not carried. The plan
+  names the spec file, each local pack as a whole folder, the models by count
+  and total size, and each git pack with uncommitted changes, and its yes
+  covers those uploads; replacing the spec's existing Build is asked on its
+  own.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note

@@ -181,42 +181,10 @@ at the first that works:
    it. When neither is there or it differs, ask the person which Python starts
    the server.
 
-   Before `init`, list the symlinks under `custom_nodes/` whose name ends in
-   `.disabled`:
-
-   ```shell
-   find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l
-   ```
-
-   `init` follows such a link to its folder, and unless that folder is a git
-   checkout with a GitHub `origin` or a registry pack, it treats it as a local
-   pack, refuses to package a symlinked one (`build_spec_invalid`, `node root
-   must not be a symlink`), and stops before writing any spec. You cannot tell
-   every case from outside, so ask about each link listed. Name it to the
-   person: ComfyUI does not load such a link, but `init` cannot scan past it.
-   Ask them to move the link itself (no trailing `/` after its name) out of
-   `custom_nodes/` into a new folder, which `mktemp` creates and prints; call
-   it `<park>`, and name it in the plan. `mv -n` never replaces anything:
-
-   ```shell
-   mktemp -d '<install>/.comfy-build-parked.XXXXXX'
-   mv -n '<install>/custom_nodes/<name>.disabled' '<park>/'
-   test ! -L '<install>/custom_nodes/<name>.disabled' && test -L '<park>/<name>.disabled'
-   ```
-
-   The `test` line checks the link left `custom_nodes/` and is in `<park>`;
-   if not, stop. After the build, move each one back the same way:
-
-   ```shell
-   mv -n '<park>/<name>.disabled' '<install>/custom_nodes/'
-   rmdir '<park>'
-   ```
-
-   When a link is still in `<park>` after that, something now holds its name
-   in `custom_nodes/`: do not replace it; leave it in `<park>`, tell the person
-   its path, and keep `<park>`. `rmdir` removes `<park>` only when it is empty.
-   Run `init` only after they move every one; if they decline, stop. Then,
-   with every path quoted:
+   Run comfy-build Path A's `custom_nodes/` checks, which hold the rules: the
+   `.disabled` symlink check before `init` (on such a link it stops), then, on
+   the spec `init` or `update` writes, the `.disabled` folder, no-nodes and
+   single `.py` file checks. Then, with every path quoted:
 
    ```shell
    comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'
@@ -240,38 +208,25 @@ at the first that works:
    The build carries the installed pack versions and the models `init` lists
    with their folder and hash; the push swaps a public model for its download.
    A git pack (`source` `git`) builds from its commit, without the changes
-   `git -C '<install>/custom_nodes/<folder>' status --porcelain` lists. Then
-   check the spec's `customNodes` before the plan:
+   `git -C '<install>/custom_nodes/<folder>' status --porcelain` lists.
 
-   - Drop each entry whose folder name ends in `.disabled`. ComfyUI does not
-     load such a folder, but `init` lists it.
-   - Drop each entry whose folder declares no nodes. `init` lists every folder
-     under `custom_nodes/` as a pack, and the builder fails the release on one
-     that declares no nodes (`declared custom nodes failed to import`), though
-     ComfyUI runs past it. A folder declares nodes when its `__init__.py`
-     defines or imports `NODE_CLASS_MAPPINGS` (the V1 node API) or
-     `comfy_entrypoint` (the V3 node API).
-   - List the single `.py` files directly under `<install>/custom_nodes/`.
-     ComfyUI loads each as a pack (it skips only other extensions and names
-     ending in `.disabled`), but `init` scans folders only, so no such file
-     reaches the spec. A node type comes from one when
-     `<server>/api/object_info/<class>` gives its `python_module` as
-     `custom_nodes.<file name without .py>`. When the workflow uses such a
-     node type, or you cannot tell, stop: the build cannot carry it unless the
-     person makes it a folder pack or names an installable source for it.
+   A workflow model the spec's `models` does not list is not carried, wherever
+   it sits (step 3's `local_paths` say where): `init` skips a file outside
+   `<install>/models`, a dotfile, and an extension other than `.safetensors`,
+   `.ckpt`, `.pt`, `.pth` and `.bin`, such as `.sft`. Hash that file with
+   sha256 (`shasum -a 256 '<file>'`) and look it up with `comfy build refs
+   resolve` (`comfy-build-authoring`). Add a candidate before the push only
+   when its `sha256` equals that hash. A candidate whose `sha256` differs, or
+   that has none, is another model, and the build's yes does not cover it.
+   Ask about it on its own, with two choices:
 
-   Name each dropped folder in the plan, and any kept pack that imports it
-   (`comfy-build`). A workflow model the spec's `models` does not list is not
-   carried, wherever it sits (step 3's `local_paths` say where): `init` skips
-   a file outside `<install>/models`, a dotfile, and an extension other than
-   `.safetensors`, `.ckpt`, `.pt`, `.pth` and `.bin`, such as `.sft`. Hash
-   that file with sha256 (`shasum -a 256 '<file>'`) and look it up with
-   `comfy build refs resolve` (`comfy-build-authoring`). Add a candidate
-   before the push only when its `sha256` equals that hash. A candidate whose
-   `sha256` differs, or that has none, is another model: offering it is a
-   lossy swap, asked on its own (below), and the build's yes does not cover
-   it. Name a candidate added on that swap's yes in the plan as a stand-in
-   for the person's file, and any model not added as not carried.
+   - **Use the public file as a stand-in**: the build carries that file in
+     place of the person's, and the output may differ. The plan names it as a
+     stand-in for the person's file.
+   - **Leave it out**: the build does not carry the model, and the plan names
+     it as not carried.
+
+   A model with no candidate is not carried either; the plan names it so.
 
    Before building, show the plan and get a yes. The plan names:
 
@@ -281,6 +236,8 @@ at the first that works:
    - the models, by count and total size (the spec's `models`);
    - each dropped folder, each git pack with local changes, each stand-in
      model and each model not carried;
+   - each folder Path A names as "declares no nodes", with the ask whether to
+     drop it;
    - each single `.py` file under `custom_nodes/`, as not carried by the
      build;
    - the Python passed as `--python`, by path: the yes confirms it is the one

@@ -168,38 +168,38 @@ falls to `0` means the connection stalled, not that the upload is slow.
   declares nodes. The builder fails the release on one that does not
   (`declared custom nodes failed to import`), though ComfyUI runs past it. A
   library cloned there only to `pip install` it is one (`comfy-build-authoring`).
-  A folder declares nodes when its `__init__.py` defines or imports
-  `NODE_CLASS_MAPPINGS` (the V1 node API) or `comfy_entrypoint` (the V3 node
-  API). Drop each `customNodes` entry whose folder declares neither from the
-  spec, and name each dropped folder in the disclosure, with each kept pack that
-  imports its library (grep the kept packs for the import): the build does not
-  carry that library, so such a pack fails on Cloud unless a wheel line installs
-  it (`comfy-build-pins`).
+  A folder declares nodes when `NODE_CLASS_MAPPINGS` (the V1 node API) or
+  `comfy_entrypoint` (the V3 node API) appears in any `.py` file in it,
+  subfolders included: a pack may build them in a submodule and re-export them
+  from `__init__.py` with a wildcard import. Search each folder with
+  `grep -rlE --include='*.py' 'NODE_CLASS_MAPPINGS|comfy_entrypoint' '<install>/custom_nodes/<folder>'`.
+  A folder where neither name appears is not dropped without asking: name it
+  in the disclosure as "declares no nodes" and ask before dropping its
+  `customNodes` entry. Name each dropped folder in the disclosure, with each
+  kept pack that imports its library (grep the kept packs for the import): the
+  build does not carry that library, so such a pack fails on Cloud unless a
+  wheel line installs it (`comfy-build-pins`).
 - **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
-  load. Drop that entry too, and name it in the disclosure. **A `.disabled`
-  symlink stops `init` before it writes a spec** when the folder it points at
-  is neither a git checkout with a GitHub `origin` nor a registry pack: the scan
-  follows the link to a local pack, and packaging refuses a symlinked node root
-  (`build_spec_invalid`). Before `init`, list such links with
-  `find <install>/custom_nodes -maxdepth 1 -name '*.disabled' -type l`, tell the
-  person ComfyUI does not load them but `init` cannot scan past them, and ask
-  them to move each link out of `custom_nodes/` into a new folder `<park>`,
-  which `mktemp -d '<install>/.comfy-build-parked.XXXXXX'` creates and prints,
-  with `mv -n`, which never replaces anything:
-  `mv -n '<install>/custom_nodes/<name>.disabled' '<park>/'`. Then
-  `test ! -L '<install>/custom_nodes/<name>.disabled' && test -L '<park>/<name>.disabled'`
-  checks the move; if not, stop: run `init` only after they do. After the
-  build, move each one back with
-  `mv -n '<park>/<name>.disabled' '<install>/custom_nodes/'` and
-  `rmdir '<park>'`. When a link is still in `<park>` after that, something now
-  holds its name: do not replace it; leave it in `<park>`, tell the person its
-  path, and keep `<park>`. `rmdir` removes `<park>` only when it is empty.
+  load. Drop that entry too, and name it in the disclosure.
+- **A `.disabled` symlink under `custom_nodes/` can stop `init` before it
+  writes a spec.** The scan follows the link. When the folder it points at is
+  neither a git checkout with a GitHub `origin` nor a registry pack, the scan
+  packages it as a local pack, and `build_package.py` refuses a symlinked pack
+  root (`build_spec_invalid`, `node root must not be a symlink`). Before
+  `init`, list such links:
+  `find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l`.
+  You cannot tell every case from outside. When it lists any, name each link
+  to the person, say `init` fails on it, and stop. Never move or delete the
+  link yourself: the person may move or delete it and ask again.
 - **It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as
-  a pack. The build does not carry it: name it in the disclosure. When the
-  workflow uses a node it provides (its `python_module` in `object_info` is
-  `custom_nodes.<file name without .py>`), or you cannot tell, stop: the build
-  cannot carry it unless the person makes it a folder pack or names an
-  installable source.
+  a pack (it skips only other extensions and names ending in `.disabled`), but
+  `init` scans folders only, so no such file reaches the spec. List the single
+  `.py` files directly under `<install>/custom_nodes/` and name each in the
+  disclosure as not carried. A node type comes from one when
+  `<server>/api/object_info/<class>` gives its `python_module` as
+  `custom_nodes.<file name without .py>`. When the workflow uses such a node
+  type, or you cannot tell, stop: the build cannot carry it unless the person
+  makes it a folder pack or names an installable source for it.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;
