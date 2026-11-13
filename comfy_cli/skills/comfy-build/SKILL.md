@@ -113,7 +113,8 @@ tail.
 If the goal is one workflow running on Comfy Cloud ("Run on Cloud", or "put this
 workflow on Cloud") rather than an environment, read
 `comfy skills show comfy-run-on-cloud` first: Comfy Cloud itself or an existing
-build may already run it, and a build it needs carries only what that workflow loads.
+build may already run it, and a build it needs is made from the whole install
+(Path A).
 
 ---
 
@@ -166,6 +167,42 @@ falls to `0` means the connection stalled, not that the upload is slow.
   `models/loras` pointed at a shared drive is scanned. A dotfile, a weight loose
   in `models/` with no folder, another extension, and anything cached outside the
   tree are all absent without a word — check the count against the install.
+- **It lists every folder under `custom_nodes/` as a pack**, whether or not it
+  declares nodes. The builder fails the release on one that does not
+  (`declared custom nodes failed to import`), though ComfyUI runs past it. A
+  library cloned there only to `pip install` it is one (`comfy-build-authoring`).
+  A folder declares nodes when `NODE_CLASS_MAPPINGS` (the V1 node API) or
+  `comfy_entrypoint` (the V3 node API) appears in any `.py` file in it,
+  subfolders included: a pack may build them in a submodule and re-export them
+  from `__init__.py` with a wildcard import. Search each folder with
+  `grep -rlE --include='*.py' 'NODE_CLASS_MAPPINGS|comfy_entrypoint' '<install>/custom_nodes/<folder>'`.
+  A folder where neither name appears is not dropped without asking: name it
+  in the disclosure as "declares no nodes" and ask before dropping its
+  `customNodes` entry. Name each dropped folder in the disclosure, with each
+  kept pack that imports its library (grep the kept packs for the import): the
+  build does not carry that library, so such a pack fails on Cloud unless a
+  wheel line installs it (`comfy-build-pins`).
+- **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
+  load. Drop that entry too, and name it in the disclosure.
+- **A `.disabled` symlink under `custom_nodes/` can stop `init` before it
+  writes a spec.** The scan follows the link. When the folder it points at is
+  neither a git checkout with a GitHub `origin` nor a registry pack, the scan
+  packages it as a local pack, and `build_package.py` refuses a symlinked pack
+  root (`build_spec_invalid`, `node root must not be a symlink`). Before
+  `init`, list such links:
+  `find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l`.
+  You cannot tell every case from outside. When it lists any, name each link
+  to the person, say `init` fails on it, and stop. Never move or delete the
+  link yourself: the person may move or delete it and ask again.
+- **It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as
+  a pack (it skips only other extensions and names ending in `.disabled`), but
+  `init` scans folders only, so no such file reaches the spec. List the single
+  `.py` files directly under `<install>/custom_nodes/` and name each in the
+  disclosure as not carried. A node type comes from one when
+  `<server>/api/object_info/<class>` gives its `python_module` as
+  `custom_nodes.<file name without .py>`. When the workflow uses such a node
+  type, or you cannot tell, stop: the build cannot carry it unless the person
+  makes it a folder pack or names an installable source for it.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;
@@ -285,8 +322,9 @@ spec's `syncedRevision` belongs to another Build.
 ## The pins, in one rule
 
 `init` fills `pipDependencies` with the whole pip freeze, and the builder applies
-every version pin as a pip **override** — which *replaces* what packages
-declared rather than capping it, torch included. A freeze taken on macOS with
+each ordinary version pin as a pip **override** — which *replaces* what packages
+declared rather than capping it, torch included. `comfy-build-pins` names the
+two kinds of line it installs on their own. A freeze taken on macOS with
 Python 3.13 will force those versions onto a linux Python 3.12 build, and that is
 the usual reason a first build fails.
 

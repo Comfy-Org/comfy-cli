@@ -13,7 +13,7 @@ line, or when a build failed on a conflict.
 ## Why an inherited freeze is the usual first failure
 
 `init` fills `pipDependencies` with the whole pip freeze, behind a two-line
-comment header naming the platform it was captured on. The builder applies every
+comment header naming the platform it was captured on. The builder applies a
 version pin as a pip **override**, and an override *replaces* what every package
 declared rather than capping it — a user line for a package the torch stack also
 names replaces it in place. Left alone, a freeze taken on macOS with Python 3.13
@@ -31,7 +31,8 @@ disclosed.
 ## What to delete
 
 Delete rather than curate: `torch`, `torchvision`, `torchaudio`, `triton`,
-`xformers`, every `nvidia-*`, `comfyui-frontend-package`, `comfyui-manager`,
+`xformers`, every `nvidia-*` except an `nvidia-vfx` pin a pack needs (see the
+keep rules below), `comfyui-frontend-package`, `comfyui-manager`,
 `comfyui-embedded-docs`, and any wheel that only exists on the source OS
 (`pywin32`, `pyobjc*`).
 
@@ -56,11 +57,12 @@ to. Then:
   printf 'opencv-python\nopencv-python-headless\n' > pair.txt
   <install>/.venv/bin/uv pip compile pair.txt --python-version <py> --python-platform linux
   ```
-- **A version pin forces a version, it never adds a package.** Pinning something
-  nothing requires installs nothing, and the build says so. The line that adds a
-  package is a wheel address, `name @ https://<host>/<file>.whl#sha256=<hash>`,
-  for a package published only as a wheel outside PyPI. `comfy-build-failures`
-  says when to write one and how.
+- **An ordinary version pin forces a version; it adds no package.** Pinning
+  something nothing requires installs nothing, and the build says so. The builder
+  installs two kinds of line even when no node asks for them: a wheel by its
+  address (`name @ https://.../name-1.0-py3-none-any.whl`), and an exact,
+  unmarked `nvidia-vfx==<version>` pin, which it installs from NVIDIA's index
+  after the lock.
 
 ## Predict the conflict instead of buying it
 
