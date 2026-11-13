@@ -1,0 +1,64 @@
+name: Test optional LanceDB documentation search
+
+on:
+  pull_request:
+    paths:
+      - "comfy_cli/docs/**"
+      - "comfy_cli/command/docs.py"
+      - "comfy_cli/schemas/docs.json"
+      - "comfy_cli/docs/search/**"
+      - "packages/comfy-cli-docs-search/**"
+      - "scripts/build_docs_lancedb.py"
+      - "scripts/set_release_version.py"
+      - "tests/comfy_cli/test_docs*.py"
+      - "docs/search-sources.json"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs-search.yml"
+  push:
+    branches: [main]
+    paths:
+      - "comfy_cli/docs/**"
+      - "comfy_cli/command/docs.py"
+      - "comfy_cli/schemas/docs.json"
+      - "packages/comfy-cli-docs-search/**"
+      - "scripts/build_docs_lancedb.py"
+      - "scripts/set_release_version.py"
+      - "tests/comfy_cli/test_docs*.py"
+      - "docs/search-sources.json"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs-search.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-search:
+    env:
+      PYTHONUTF8: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: '3.10'
+
+      - name: Install optional search dependencies
+        run: uv sync --extra dev --extra docs-search --locked
+
+      - name: Build the pinned offline pack
+        run: uv run --locked --extra dev --extra docs-search python scripts/build_docs_lancedb.py
+
+      - name: Check the generated pack
+        run: uv run --locked --extra dev --extra docs-search python scripts/build_docs_lancedb.py --check
+
+      - name: Test lexical, semantic, and hybrid retrieval
+        run: uv run --locked --extra dev --extra docs-search pytest tests/comfy_cli/test_docs.py tests/comfy_cli/test_docs_lancedb.py tests/comfy_cli/command/test_docs_cli.py tests/comfy_cli/output/test_discovery.py tests/comfy_cli/output/test_envelope_schemas.py -q

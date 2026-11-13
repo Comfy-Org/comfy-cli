@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "path": "README.md",
+      "title": "comfy-cli",
+      "include_level_two_headings": [
+        "Quick Start",
+        "Run a workflow in the cloud",
+        "Installation",
+        "Usage",
+        "Curated model knowledge",
+        "Searching the CLI docs",
+        "Analytics"
+      ]
+    },
+    {
+      "path": "docs/json-output.md",
+      "title": "Machine-readable JSON output"
+    },
+    { "path": "comfy_cli/skills/comfy/SKILL.md", "title": "comfy agent guide" },
+    { "path": "comfy_cli/skills/comfy-debug/SKILL.md", "title": "comfy-debug agent guide" },
+    { "path": "comfy_cli/skills/comfy-relay/SKILL.md", "title": "comfy-relay agent guide" },
+    { "path": "comfy_cli/skills/comfy-director/SKILL.md", "title": "comfy-director agent guide" },
+    { "path": "comfy_cli/skills/comfy-build/SKILL.md", "title": "comfy-build agent guide" },
+    { "path": "comfy_cli/skills/comfy-deploy/SKILL.md", "title": "comfy-deploy agent guide" },
+    { "path": "comfy_cli/skills/comfy-custom-nodes/SKILL.md", "title": "comfy-custom-nodes agent guide" },
+    {
+      "path": "comfy_cli/skills/comfy-build-authoring/SKILL.md",
+      "title": "comfy-build-authoring agent guide"
+    },
+    { "path": "comfy_cli/skills/comfy-build-pins/SKILL.md", "title": "comfy-build-pins agent guide" },
+    {
+      "path": "comfy_cli/skills/comfy-build-failures/SKILL.md",
+      "title": "comfy-build-failures agent guide"
+    },
+    {
+      "path": "comfy_cli/skills/comfy-deploy-failures/SKILL.md",
+      "title": "comfy-deploy-failures agent guide"
+    },
+    {
+      "path": "comfy_cli/skills/comfy-agent-permissions/SKILL.md",
+      "title": "comfy-agent-permissions agent guide"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy docs *",
+  "description": "Output shape for local documentation search and section retrieval. Fields are optional because search and show return different payloads.",
+  "type": "object",
+  "properties": {
+    "query": { "type": "string", "description": "The plain-text query passed to docs search." },
+    "results": {
+      "type": "array",
+      "description": "Ranked section previews (search).",
+      "items": { "$ref": "#/$defs/preview" }
+    },
+    "zero_hit": { "type": "boolean", "description": "Whether search found no sections." },
+    "has_more": { "type": "boolean", "description": "Whether additional results exist beyond the requested limit (search)." },
+    "search_backend": {
+      "type": "string",
+      "enum": ["fts5", "token-scan", "none", "lancedb-bm25", "lancedb-vector", "lancedb-hybrid-rrf"],
+      "description": "Search backend used; none means the query contained no searchable terms."
+    },
+    "retrieval_mode": { "type": "string", "enum": ["none", "bm25", "semantic", "hybrid", "token-scan-fallback"] },
+    "query_mode": { "type": "string", "enum": ["auto", "bm25", "semantic", "hybrid"] },
+    "fallback_reason": { "type": ["string", "null"], "description": "Why auto mode used core BM25 instead of LanceDB hybrid retrieval." },
+    "hint": { "type": ["string", "null"], "description": "A suggested next step for a no-hit query or an unavailable optional mode." },
+    "id": { "type": "string", "description": "Section ID accepted by docs show." },
+    "title": { "type": "string", "description": "The source document title." },
+    "headings": { "type": "array", "items": { "type": "string" }, "description": "Heading path to this section." },
+    "source": { "type": "string", "description": "Repository-relative Markdown source path." },
+    "source_line": { "type": "integer", "minimum": 1, "description": "One-based heading line in the source file." },
+    "content": { "type": "string", "description": "The Markdown section, or one requested page of it (show)." },
+    "total_chars": { "type": "integer", "minimum": 0, "description": "Section content length in Unicode characters (show)." },
+    "offset": { "type": "integer", "minimum": 0, "description": "Starting character offset of this page (show)." },
+    "truncated": { "type": "boolean", "description": "Whether more section content is available (show)." },
+    "next_offset": { "type": ["integer", "null"], "minimum": 0, "description": "Offset for the next page, or null when the section is complete (show)." },
+    "corpus_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 identity of the installed documentation corpus." },
+    "core_modes": { "type": "array", "items": { "type": "string" } },
+    "pack_installed": { "type": "boolean" },
+    "pack_compatible": { "type": "boolean" },
+    "pack_version": { "type": ["string", "null"] },
+    "lancedb_version": { "type": ["string", "null"] },
+    "model": { "type": ["string", "null"] },
+    "highest_vector_similarity": { "type": ["number", "null"], "description": "Highest cosine similarity among vector candidates, when semantic search ran." },
+    "fts_term_coverage": { "type": "number", "minimum": 0, "maximum": 1, "description": "Fraction of meaningful query terms found in the best lexical candidate." },
+    "available_modes": { "type": "array", "items": { "type": "string" } },
+    "unavailable_reason": { "type": ["string", "null"] }
+  },
+  "$defs": {
+    "preview": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "headings": { "type": "array", "items": { "type": "string" } },
+        "source": { "type": "string" },
+        "source_line": { "type": "integer", "minimum": 1 },
+        "excerpt": { "type": "string", "maxLength": 800 },
+        "score": { "type": "number", "description": "Mode-specific lexical, cosine, or fused relevance score." },
+        "score_type": { "type": "string", "enum": ["bm25", "cosine_similarity", "rrf"] }
+      },
+      "required": ["id", "title", "headings", "source", "source_line", "excerpt"]
+    }
+  }
+}
