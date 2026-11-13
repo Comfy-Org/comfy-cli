@@ -198,11 +198,9 @@ falls to `0` means the connection stalled, not that the upload is slow.
   a pack (it skips only other extensions and names ending in `.disabled`), but
   `init` scans folders only, so no such file reaches the spec. List the single
   `.py` files directly under `<install>/custom_nodes/` and name each in the
-  disclosure as not carried. A node type comes from one when
-  `<server>/api/object_info/<class>` gives its `python_module` as
-  `custom_nodes.<file name without .py>`. When the workflow uses such a node
-  type, or you cannot tell, stop: the build cannot carry it unless the person
-  makes it a folder pack or names an installable source for it.
+  disclosure as not carried. When the node the workflow is missing on Cloud
+  comes from such a file, stop before the plan and tell the person: the build
+  cannot carry it, so it would fail on that node.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;
@@ -360,6 +358,10 @@ Say all of this in plain words, and wait for a yes:
   count and the `--dry-run` upload size **as an upper bound**, because `push`
   rewrites a local entry into a fetch when a public candidate's digest matches —
   three promised uploads can report `uploaded: 0`. Offer to list the filenames.
+  Every file in each local pack's folder uploads, config files and keys such as
+  `.env` included. Run `git -C '<install>/custom_nodes/<folder>' status --porcelain`
+  for each Git pack: Cloud builds the recorded commit, so name each Git pack with
+  uncommitted changes and say those edits will not be in the build.
 - **Which targets you will cut**, since each is a separate build. Name them, and
   take the set from `comfy build refs build-targets`.
 - **What it takes**: any upload, then a build of several minutes of wall clock —
