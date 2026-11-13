@@ -556,6 +556,23 @@ def test_run_on_cloud_skill_gates_a_custom_build_on_one_plan_yes():
     assert "A custom build's plan yes (step 4) covers its uploads" in " ".join(text.split())
 
 
+def test_build_skill_says_uncommitted_edits_in_a_git_pack_stay_behind():
+    """`init` records a Git-sourced pack's repository and HEAD commit and `push`
+    does not upload it, so the disclosure names each pack with uncommitted
+    changes and says those edits are not in the build."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "git -C '<install>/custom_nodes/<folder>' status --porcelain" in build
+    assert "Cloud builds the recorded commit, so name each Git pack with uncommitted changes" in build
+    assert "and say those edits will not be in the build" in build
+
+
+def test_build_skill_says_a_local_pack_uploads_its_whole_folder():
+    """`push` packages every ordinary file in a local pack's folder, so the
+    disclosure says config files and keys such as `.env` upload too."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "Every file in each local pack's folder uploads, config files and keys such as `.env` included" in build
+
+
 def test_build_skills_name_the_pins_the_builder_installs():
     """An exact, unmarked `nvidia-vfx` pin and an HTTPS wheel line are installed
     even when no node asks for them, so no skill says a pin never adds one."""

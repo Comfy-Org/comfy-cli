@@ -356,6 +356,10 @@ Say all of this in plain words, and wait for a yes:
   count and the `--dry-run` upload size **as an upper bound**, because `push`
   rewrites a local entry into a fetch when a public candidate's digest matches —
   three promised uploads can report `uploaded: 0`. Offer to list the filenames.
+  Every file in each local pack's folder uploads, config files and keys such as
+  `.env` included. Run `git -C '<install>/custom_nodes/<folder>' status --porcelain`
+  for each Git pack: Cloud builds the recorded commit, so name each Git pack with
+  uncommitted changes and say those edits will not be in the build.
 - **Which targets you will cut**, since each is a separate build. Name them, and
   take the set from `comfy build refs build-targets`.
 - **What it takes**: any upload, then a build of several minutes of wall clock —
