@@ -924,6 +924,14 @@ class TestSetWidgetSubgraph:
         assert _instance(wf)["widgets_values"] == ["old prompt", 12345, 20]
         assert _interior(wf, 3)["widgets_values"][0] == 42  # interior default untouched
 
+    def test_flat_promoted_int_input_writes_a_digit_string_as_the_number(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _subgraph_workflow())
+        env = _run(["set-widget", str(path), "57.seed", '"424242"'], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["op"]["value"] == 424242
+        wf = json.loads(path.read_text())
+        assert _instance(wf)["widgets_values"] == ["old prompt", 424242, 20]
+
     def test_nested_interior_address_is_redirected_to_the_host(self, patched_graph, tmp_path, capsys):
         """`57/27.text` (the nested form the skill documents) is the widget a
         legacy promotion owns: the write is redirected to the host, like the

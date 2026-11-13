@@ -1617,6 +1617,9 @@ def _normalize_combo(
         )
     if port is None:
         return value, None
+    # "424242" on an INT widget is written as the number (Port.coerce); the
+    # op then records the int, so every applier writes the same JSON number.
+    value = port.coerce(value)
     text = _string_widget_text(port, value)
     if text is not None:
         return text, {
@@ -1738,6 +1741,7 @@ def _set_widget_impl(
         value, norm_note = _normalize_combo(graph, inner_type, port.name if port else widget, value)
         warnings: list[dict] = []
         if port is not None:
+            value = port.coerce(value)
             err = port.validate_shape(value)
             if err:
                 raise ValueError(err)

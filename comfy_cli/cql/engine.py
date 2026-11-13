@@ -620,6 +620,24 @@ class Port:
             warning["precision_sibling"] = sibling
             warning["message"] += f" ({sibling!r} is the same model in another precision: set it)"
 
+    def coerce(self, value: Any) -> Any:
+        """``value`` as an edit should write it: an INT port given a string of
+        ASCII digits (optional leading ``-``, surrounding whitespace ignored)
+        gets the int, so ``"424242"`` is stored as the JSON number ``424242``.
+        Anything else comes back unchanged for :meth:`validate_shape` to judge.
+
+        Narrower than :meth:`server_coercion`: ``int()`` also takes ``"+5"``,
+        ``"4_2"`` and non-ASCII digits, which an edit should not rewrite
+        silently. Python ints are unbounded, so a seed above 2**53 stays exact.
+        """
+        if self.type != "INT" or not isinstance(value, str):
+            return value
+        text = value.strip()
+        digits = text[1:] if text.startswith("-") else text
+        if digits.isascii() and digits.isdigit():
+            return int(text)
+        return value
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -5557,6 +5575,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
 
     warnings: list[dict] = []
     if port:
+        value = port.coerce(value)
         err = port.validate_shape(value)
         if err:
             raise ValueError(err)
@@ -6012,6 +6031,7 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
         _class, port = promoted_source_port(sg, pi, _subgraph_defs_by_id(workflow), graph)
         warnings: list[dict] = []
         if port is not None:
+            value = port.coerce(value)
             err = port.validate_shape(value)
             if err:
                 raise ValueError(err)
