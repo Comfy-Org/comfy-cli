@@ -22,10 +22,8 @@ Each of these needs its own yes in chat, asked before you do it:
 - **uploading any file from this machine**: a model, a LoRA, an input image,
   video or audio, or a custom node folder. Ask by file name, one line per file:
   path, size, what it is for, where it goes. A yes covers the files you named; a
-  new or changed file needs a new yes. A custom build from the install (step 4)
-  is asked differently: its plan names each local pack as a whole folder and
-  gives the models by count and total size, and the yes to that plan is the
-  yes to those uploads;
+  new or changed file needs a new yes. A custom build's plan yes (step 4)
+  covers its uploads;
 - a **lossy** change (step 4);
 - running **partner-API nodes**, which spend credits on top of the run (step 6);
 - a **new build or deployment** (it costs money to build and to keep running);
@@ -157,106 +155,11 @@ at the first that works:
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
    show comfy-deploy`, and follow them. Build from the whole install that
-   serves `<server>`, by comfy-build's Path A. `comfy --json which` does not
-   prove which install that is. The server's `system_stats` (step 2) names it:
-   `system.argv` starts with its `main.py`, and a `--base-directory <dir>` or
-   `--base-directory=<dir>` in it is the folder that holds `models/` and
-   `custom_nodes/`. That path is the server's, not always this machine's:
-   ComfyUI in Docker reports `/app/ComfyUI/main.py` for an install that sits
-   at `/host/ComfyUI` here. Take the `--base-directory` folder, else the one
-   holding `main.py`, only when the server runs on this machine outside a
-   container or VM, and this machine has `main.py` and `custom_nodes/` where
-   `argv` puts them. In every other case (a container or VM, a path missing
-   here, no full path in `argv`, or a relative `--base-directory` value), ask
-   the person which folder on this machine holds that install.
-
-   The Python that runs the server sits beside `main.py`, not in a
-   `--base-directory` folder: `.venv` or `venv` in the folder holding
-   `main.py`, as `bin/python` (`Scripts\python.exe` on Windows). Take it only
-   when `'<python>' -c 'import sys; print(sys.version)'` prints the server's
-   `system.python_version` exactly and, when `system_stats` has
-   `system.pytorch_version`, `'<python>' -c 'import torch; print(torch.__version__)'`
-   prints that too. A match only rules a wrong Python out; it does not prove
-   this one starts the server, so the plan names it and the person confirms
-   it. When neither is there or it differs, ask the person which Python starts
-   the server.
-
-   Run comfy-build Path A's `custom_nodes/` checks, which hold the rules: the
-   `.disabled` symlink check before `init` (on such a link it stops), then, on
-   the spec `init` or `update` writes, the `.disabled` folder, no-nodes and
-   single `.py` file checks. Then, with every path quoted:
-
-   ```shell
-   comfy --json build init '<install>' --name '<name>' --comfy-url '<server>' --python '<python>'
-   ```
-
-   Comfy Desktop builds the same way, not from its snapshot, which carries no
-   models: `<install>` is `desktop.data_dir`, with `--python
-   '<desktop.python>'`.
-
-   `init` writes the spec to `<install>/comfy-build.yaml`, in the person's
-   install. If that file is already there, `init` refuses with
-   `build_spec_exists`: it is an earlier build of this install, holding its
-   Build id and the person's edits. Never pass `--force`, which overwrites it.
-   Run `comfy --json build update '<install>' --dry-run` with the same
-   `--comfy-url` and `--python` instead, show the person each entry of its
-   `diff` by name (a rescan removes a model added by hand earlier) and the
-   `pipDependencies` lines it adds and drops, and run it again with `--yes`
-   only after they agree. `update` rewrites the definition and keeps the Build
-   id and name, so the push replaces that Build's definition.
-
-   The build carries the installed pack versions and the models `init` lists
-   with their folder and hash; the push swaps a public model for its download.
-   A git pack (`source` `git`) builds from its commit, without the changes
-   `git -C '<install>/custom_nodes/<folder>' status --porcelain` lists.
-
-   A workflow model the spec's `models` does not list is not carried, wherever
-   it sits (step 3's `local_paths` say where): `init` skips a file outside
-   `<install>/models`, a dotfile, and an extension other than `.safetensors`,
-   `.ckpt`, `.pt`, `.pth` and `.bin`, such as `.sft`. Hash that file with
-   sha256 (`shasum -a 256 '<file>'`) and look it up with `comfy build refs
-   resolve` (`comfy-build-authoring`). Add a candidate before the push only
-   when its `sha256` equals that hash. A candidate whose `sha256` differs, or
-   that has none, is another model, and the build's yes does not cover it.
-   Ask about it on its own, with two choices:
-
-   - **Use the public file as a stand-in**: the build carries that file in
-     place of the person's, and the output may differ. The plan names it as a
-     stand-in for the person's file.
-   - **Leave it out**: the build does not carry the model, and the plan names
-     it as not carried.
-
-   A model with no candidate is not carried either; the plan names it so.
-
-   Before building, show the plan and get a yes. The plan names:
-
-   - the spec file `init` or `update` wrote, `<install>/comfy-build.yaml`;
-   - each local pack (`source` `local`) as a whole folder: it uploads with
-     everything in it, a key or config file too;
-   - the models, by count and total size (the spec's `models`);
-   - each dropped folder, each git pack with local changes, each stand-in
-     model and each model not carried;
-   - each folder Path A names as "declares no nodes", with the ask whether to
-     drop it;
-   - each single `.py` file under `custom_nodes/`, as not carried by the
-     build;
-   - the Python passed as `--python`, by path: the yes confirms it is the one
-     that starts their server. When they name another, rescan with
-     `comfy --json build update '<install>' --python '<that one>' --dry-run`
-     (and the same `--comfy-url`), show the person each entry of its `diff`
-     by name and the `pipDependencies` lines it adds and drops, and run it
-     again with `--yes` only after they agree. The rescan rebuilds
-     `customNodes` and `models` from the install, so it brings back each
-     folder dropped above and removes each model added by hand: repeat the
-     step-4 `customNodes` checks (`.disabled`, no nodes, single `.py` files)
-     and the model review on the new spec, then show the plan again;
-   - the Build id the push replaces, when the spec has one, asked as a
-     question of its own;
-   - the GPU and region (cheapest that fits first, from
-     `comfy --json deploy refs compute`), the costs, and `--min 0 --max 1`
-     workers.
-
-   This plan's yes is the yes to its uploads; nothing is uploaded before it.
+   serves `<server>`, by comfy-build's Path A. If you cannot tell which folder
+   that is, ask the person. Before building, show the plan and get one yes: the
+   local packs and models it uploads (count and total size), the GPU and region
+   (cheapest that fits first, from `comfy --json deploy refs compute`), the
+   cost, and `--min 0 --max 1` workers. Nothing uploads before that yes.
 
 | kind | what counts | what you do |
 |---|---|---|

@@ -47,41 +47,9 @@ history.
 ### Changed
 
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
-  install (`comfy build init '<install>'`, Path A of `comfy-build`), not from
-  the workflow alone (`--from-workflow`): the build carries the installed pack
-  versions and the models under the install's `models/` with folder and hash.
-  It takes the install from the server's `system_stats` `argv`
-  (`--base-directory <dir>` or `--base-directory=<dir>`, else the folder of
-  `main.py`), not from `comfy which`, and uses that path only when the server
-  runs on this machine outside a container and the install is there.
-  Otherwise, or for a relative `--base-directory`, it asks the person for the
-  folder on this machine. It passes the Python beside `main.py` as `--python`
-  when its `sys.version` is the server's `python_version` (and its torch
-  version the server's `pytorch_version`, when reported), and asks otherwise;
-  the plan names that Python and its yes confirms it starts the server.
-  Comfy Desktop is scanned the same way (its data folder and Python), not
-  imported from its snapshot, which carries no models. When the install
-  already has a `comfy-build.yaml`, it shows `comfy build update`'s diff and
-  asks, and never passes `--force`. It runs the `custom_nodes/` checks of
-  `comfy-build` Path A, where those rules now live once. A folder whose name
-  ends in `.disabled` is dropped and named in the plan. A folder where neither
-  `NODE_CLASS_MAPPINGS` nor `comfy_entrypoint` appears in any of its `.py`
-  files, subfolders included, is named as declaring no nodes, and the agent
-  asks before dropping it. Before `init`, the agent lists each
-  `custom_nodes/` symlink whose name ends in `.disabled`, which `init`
-  follows and cannot package when it points at a local pack, names each one
-  to the person and stops; it never moves or deletes the link. A single `.py`
-  file under `custom_nodes/`, which ComfyUI loads but the scan skips, is
-  named as not carried, and the skill stops when the workflow needs a node
-  from one. A workflow model the spec does not list (outside `models/`, a
-  dotfile, or an extension the scan skips, such as `.sft`) is added from a
-  public source only when its sha256 matches the local file. For another
-  file the agent asks on its own: use the public file as a stand-in, named
-  so in the plan, or leave the model out, named as not carried. The plan
-  names the spec file, each local pack as a whole folder, the models by count
-  and total size, and each git pack with uncommitted changes, and its yes
-  covers those uploads; replacing the spec's existing Build is asked on its
-  own.
+  install (Path A of `comfy-build`), not from the workflow alone
+  (`--from-workflow`). Its custom build step is short and uploads nothing
+  before one yes to the plan.
 - `comfy build quota` uses the release and active-deployment counts the builder
   and comfy-deploy send with their limits, when they do: such a count is exact
   (`exact: true` for deployments, no `truncated` for releases), and the note

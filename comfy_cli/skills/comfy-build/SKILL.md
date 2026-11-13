@@ -198,11 +198,7 @@ falls to `0` means the connection stalled, not that the upload is slow.
   a pack (it skips only other extensions and names ending in `.disabled`), but
   `init` scans folders only, so no such file reaches the spec. List the single
   `.py` files directly under `<install>/custom_nodes/` and name each in the
-  disclosure as not carried. A node type comes from one when
-  `<server>/api/object_info/<class>` gives its `python_module` as
-  `custom_nodes.<file name without .py>`. When the workflow uses such a node
-  type, or you cannot tell, stop: the build cannot carry it unless the person
-  makes it a folder pack or names an installable source for it.
+  disclosure as not carried.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;
