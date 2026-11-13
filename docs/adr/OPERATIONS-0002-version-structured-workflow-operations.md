@@ -33,6 +33,12 @@ existing subgraph definition with an exact reused-host schema contract and
 explicit conflict metadata. It does not add an operation kind or weaken this
 ADR's versioning and fail-closed requirements.
 
+Amendment v1.15 extends the `set_widget` mint-time rewrites (§1.3): a string of
+ASCII digits on an INT widget is minted and replayed as the integer, with a
+`normalized_value` warning. It only turns a refusal into a write, so every op
+that applied before still applies the same way, and every other string on an
+INT widget is still rejected.
+
 ## Alternatives considered
 
 - Treat Python functions as the contract. Rejected because remote producers
