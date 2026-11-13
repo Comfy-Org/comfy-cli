@@ -572,7 +572,7 @@ def test_run_on_cloud_skill_plan_is_comfy_builds_before_you_cut():
     questions), plus the GPU, region, cost and workers."""
     text = skill_content("comfy-run-on-cloud")
     step = " ".join(text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")].split())
-    assert "comfy-build's \"Before you cut\" plan" in step
+    assert 'comfy-build\'s "Before you cut" plan' in step
     assert "(count and total size)" not in step
 
 
