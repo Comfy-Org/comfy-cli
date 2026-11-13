@@ -797,3 +797,59 @@ def test_find_property_shares_the_object_memo_across_union_branches(monkeypatch)
     monkeypatch.setattr(spec, "_schema_may_be_object", counted)
     assert spec._find_property(schema, "model") is None
     assert calls < 100
+
+
+def test_load_raw_spec_recovers_from_a_corrupt_cache(tmp_path, monkeypatch):
+    """A truncated cache (killed refresh) used to poison every generate
+    command until the 7-day TTL expired. The load now quarantines it and
+    falls back to the vendored spec."""
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_text("not: [valid: yaml", encoding="utf-8")
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    try:
+        parsed = spec.load_raw_spec()
+        assert isinstance(parsed.get("paths"), dict), "vendored spec won"
+        assert cache.with_suffix(cache.suffix + ".corrupt").exists(), "cache quarantined"
+    finally:
+        spec.load_raw_spec.cache_clear()
+
+
+def test_write_cache_is_atomic_and_loadable(tmp_path, monkeypatch):
+    cache = tmp_path / "nested" / "openapi-cache.yml"
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    try:
+        spec.write_cache(_VALID_JSON_SPEC)
+        assert "openapi" in cache.read_text(encoding="utf-8")
+        assert spec.load_raw_spec()["openapi"] == "3.1.0"
+    finally:
+        spec.load_raw_spec.cache_clear()
+
+
+def test_load_raw_spec_recovers_from_an_empty_cache(tmp_path, monkeypatch):
+    """An interrupted write can leave a zero-byte cache: yaml.load returns
+    None without raising, so the None/shape guard must quarantine it too."""
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_text("", encoding="utf-8")
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    try:
+        parsed = spec.load_raw_spec()
+        assert isinstance(parsed.get("paths"), dict), "vendored spec won"
+        assert cache.with_suffix(cache.suffix + ".corrupt").exists()
+    finally:
+        spec.load_raw_spec.cache_clear()
+
+
+def test_load_raw_spec_recovers_from_invalid_utf8(tmp_path, monkeypatch):
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_bytes(b"paths: \xff\xfe\x80 truncated")
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    try:
+        parsed = spec.load_raw_spec()
+        assert isinstance(parsed.get("paths"), dict), "vendored spec won"
+        assert cache.with_suffix(cache.suffix + ".corrupt").exists()
+    finally:
+        spec.load_raw_spec.cache_clear()
