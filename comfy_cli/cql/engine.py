@@ -638,6 +638,20 @@ class Port:
             return int(text)
         return value
 
+    def coerce_with_note(self, value: Any, field: str) -> tuple[Any, dict | None]:
+        """:meth:`coerce` plus the ``normalized_value`` warning that records the
+        rewrite (op-vocabulary amendment v1.15), or ``None`` when nothing changed."""
+        coerced = self.coerce(value)
+        if coerced is value:
+            return value, None
+        return coerced, {
+            "code": "normalized_value",
+            "field": field,
+            "message": f"{field} is an INT widget; wrote {value!r} as the number {coerced}",
+            "from": value,
+            "to": coerced,
+        }
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -5575,11 +5589,13 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
 
     warnings: list[dict] = []
     if port:
-        value = port.coerce(value)
+        value, note = port.coerce_with_note(value, input_name)
         err = port.validate_shape(value)
         if err:
             raise ValueError(err)
         warnings = port.validate_catalog(value)
+        if note:
+            warnings = [note, *warnings]
         if any(p.is_dynamic_group and input_name.startswith(f"{p.name}.") for p in m.inputs):
             fatal = next((finding for finding in warnings if finding.get("severity") == SEVERITY_ERROR), None)
             if fatal:
@@ -6031,11 +6047,13 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
         _class, port = promoted_source_port(sg, pi, _subgraph_defs_by_id(workflow), graph)
         warnings: list[dict] = []
         if port is not None:
-            value = port.coerce(value)
+            value, note = port.coerce_with_note(value, addr)
             err = port.validate_shape(value)
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
+            if note:
+                warnings = [note, *warnings]
         if target.repair is not None:
             # A legacy ``proxyWidgets`` promotion: run the frontend's forward
             # migration on this instance first (forking a shared definition,

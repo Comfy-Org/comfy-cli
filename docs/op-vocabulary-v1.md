@@ -1660,3 +1660,40 @@ selector or count, because the rebuild resets the value but not the stamp
 
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 24. Amendment v1.15 — 2026-11-12 (a digit string on an INT widget is minted as the number)
+
+Producers often send an integer widget value as a digit string (`"424242"`
+for a seed, `"480"` for a width). §1.3 rejected it at mint time as a shape
+mismatch, even though the meaning is unambiguous and the server's own `int()`
+conversion accepts it.
+
+**The rule.** On an INT widget, a string of ASCII digits with an optional
+leading `-` (surrounding whitespace ignored) is rewritten at mint time, like
+the other §1.3 rewrites. The minted `value` is the JSON integer, exact at any
+size (a seed above 2^53 is not rounded). The op carries a `normalized_value`
+warning with the same keys as the other §1.3 rewrites: `code`, `field`,
+`message`, `from` (the string) and `to` (the integer).
+
+**Replay.** `apply_op` applies the same rewrite. An op that still carries the
+string (minted by an older producer, or written by hand) lands as the same
+integer instead of being refused. An op minted at this version always carries
+the integer.
+
+**Still refused.** Every other string on an INT widget is still a shape
+mismatch, at mint and at replay, with the same message: a word (`"high"`), a
+decimal (`"1.5"`), `"+5"`, `"4_2"`, `"0x10"`, an empty string and non-ASCII
+digits. `int()` accepts some of these, but the rewrite stays narrow so that
+only an unambiguous value changes type. A boolean is still refused. FLOAT,
+COMBO, STRING and BOOLEAN widgets are unchanged, and `validate` still reports
+a stored digit string as `coercible_type`.
+
+**Compatibility.** The rewrite only turns a refusal into a write. An op or
+document that applied before this amendment applies the same way after it. A
+receiver that has not adopted the amendment refuses only an op that still
+carries the string, and no op minted at this version does.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+`tests/comfy_cli/test_op_vocabulary_contract.py` pins the minted value, the
+warning, the replay and the refusals.

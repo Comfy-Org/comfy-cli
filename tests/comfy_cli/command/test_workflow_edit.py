@@ -929,6 +929,8 @@ class TestSetWidgetSubgraph:
         env = _run(["set-widget", str(path), "57.seed", '"424242"'], capsys)
         assert env["ok"] is True, env
         assert env["data"]["op"]["value"] == 424242
+        notes = [w for w in env["data"]["op"].get("warnings", []) if w["code"] == "normalized_value"]
+        assert [(n["from"], n["to"]) for n in notes] == [("424242", 424242)]
         wf = json.loads(path.read_text())
         assert _instance(wf)["widgets_values"] == ["old prompt", 424242, 20]
 

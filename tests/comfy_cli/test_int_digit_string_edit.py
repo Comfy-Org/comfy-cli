@@ -61,6 +61,30 @@ def _written(workflow: dict, widget: str):
     return value, json.dumps(value)
 
 
+def _note(warnings: list[dict]) -> dict | None:
+    notes = [w for w in warnings if w.get("code") == "normalized_value"]
+    assert len(notes) <= 1, notes
+    return notes[0] if notes else None
+
+
+def _expected_note(widget: str, text: str, number: int) -> dict:
+    # Same shape as the COMBO/STRING rewrites (op-vocabulary §1.3, amendment v1.15).
+    return {
+        "code": "normalized_value",
+        "field": widget,
+        "message": f"{widget} is an INT widget; wrote {text!r} as the number {number}",
+        "from": text,
+        "to": number,
+    }
+
+
+def test_an_int_value_records_no_rewrite(graph):
+    _, op = W.set_widget(_workflow(), graph, 3, "seed", 424242)
+    assert _note(op.get("warnings", [])) is None
+    _, warnings = graph.apply_slots(_workflow(), {"3.seed": 424242})
+    assert _note(warnings) is None
+
+
 @pytest.mark.parametrize(
     ("widget", "text", "expected"),
     [
@@ -78,6 +102,7 @@ class TestDigitStringIsWrittenAsInt:
         assert type(value) is int and value == expected
         assert token == str(expected)
         assert op["value"] == expected and type(op["value"]) is int
+        assert _note(op.get("warnings", [])) == _expected_note(widget, text, expected)
 
     def test_apply_specs(self, graph, widget, text, expected):
         specs = [{"op": "set_widget", "node": 3, "widget": widget, "value": text}]
@@ -85,12 +110,14 @@ class TestDigitStringIsWrittenAsInt:
         value, token = _written(wf, widget)
         assert type(value) is int and value == expected
         assert token == str(expected)
+        assert _note(ops[0].get("warnings", [])) == _expected_note(widget, text, expected)
 
     def test_apply_slots(self, graph, widget, text, expected):
-        wf, _warnings = graph.apply_slots(_workflow(), {f"3.{widget}": text})
+        wf, warnings = graph.apply_slots(_workflow(), {f"3.{widget}": text})
         value, token = _written(wf, widget)
         assert type(value) is int and value == expected
         assert token == str(expected)
+        assert _note(warnings) == _expected_note(widget, text, expected)
 
     def test_replayed_op_with_a_string_value(self, graph, widget, text, expected):
         # An op minted elsewhere can still carry the string: the writer coerces too.
