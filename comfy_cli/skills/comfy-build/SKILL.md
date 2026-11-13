@@ -198,7 +198,9 @@ falls to `0` means the connection stalled, not that the upload is slow.
   a pack (it skips only other extensions and names ending in `.disabled`), but
   `init` scans folders only, so no such file reaches the spec. List the single
   `.py` files directly under `<install>/custom_nodes/` and name each in the
-  disclosure as not carried.
+  disclosure as not carried. When the node the workflow is missing on Cloud
+  comes from such a file, stop before the plan and tell the person: the build
+  cannot carry it, so it would fail on that node.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;

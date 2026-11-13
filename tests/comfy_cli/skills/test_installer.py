@@ -556,6 +556,26 @@ def test_run_on_cloud_skill_gates_a_custom_build_on_one_plan_yes():
     assert "A custom build's plan yes (step 4) covers its uploads" in " ".join(text.split())
 
 
+def test_run_on_cloud_skill_passes_the_server_to_init():
+    """`init` reads the ComfyUI version from a running server when the install
+    has no version marker (split and Desktop layouts), and defaults to port
+    8188. A server on another port must be passed, or the spec has no base
+    version and the release is refused after the yes."""
+    text = skill_content("comfy-run-on-cloud")
+    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
+    assert "pass `<server>` to `init` as `--comfy-url`" in " ".join(step.split())
+
+
+def test_run_on_cloud_skill_plan_is_comfy_builds_before_you_cut():
+    """The one yes covers comfy-build's whole "Before you cut" plan (every file
+    in a local pack uploads, Git packs with uncommitted edits, its own
+    questions), plus the GPU, region, cost and workers."""
+    text = skill_content("comfy-run-on-cloud")
+    step = " ".join(text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")].split())
+    assert "comfy-build's \"Before you cut\" plan" in step
+    assert "(count and total size)" not in step
+
+
 def test_build_skill_says_uncommitted_edits_in_a_git_pack_stay_behind():
     """`init` records a Git-sourced pack's repository and HEAD commit and `push`
     does not upload it, so the disclosure names each pack with uncommitted
@@ -658,6 +678,13 @@ def test_build_skills_name_single_file_nodes_the_scan_skips():
     assert "It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as a pack" in build
     assert "`init` scans folders only, so no such file reaches the spec" in build
     assert "List the single `.py` files directly under `<install>/custom_nodes/`" in build
+
+
+def test_build_skill_stops_when_the_missing_node_comes_from_a_single_file():
+    """A single-file node cannot be carried, so a build for a workflow missing
+    that node on Cloud would fail on it: Path A stops before the plan."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "When the node the workflow is missing on Cloud comes from such a file, stop before the plan" in build
 
 
 def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():

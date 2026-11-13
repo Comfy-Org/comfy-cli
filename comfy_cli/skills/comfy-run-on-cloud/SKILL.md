@@ -155,11 +155,12 @@ at the first that works:
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
    show comfy-deploy`, and follow them. Build from the whole install that
-   serves `<server>`, by comfy-build's Path A. If you cannot tell which folder
-   that is, ask the person. Before building, show the plan and get one yes: the
-   local packs and models it uploads (count and total size), the GPU and region
-   (cheapest that fits first, from `comfy --json deploy refs compute`), the
-   cost, and `--min 0 --max 1` workers. Nothing uploads before that yes.
+   serves `<server>`, by comfy-build's Path A, and pass `<server>` to `init`
+   as `--comfy-url`. If you cannot tell which folder holds that install, ask
+   the person. Before building, show the plan and get one yes: comfy-build's
+   "Before you cut" plan and its questions, plus the GPU and region (cheapest
+   that fits first, from `comfy --json deploy refs compute`), the cost, and
+   `--min 0 --max 1` workers. Nothing uploads before that yes.
 
 | kind | what counts | what you do |
 |---|---|---|
