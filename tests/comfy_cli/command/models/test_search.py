@@ -964,6 +964,19 @@ class TestCloudSearchTokens:
         assert queries[0]["name_contains"] == ["flux"]
         assert len(queries) == 1
 
+    def test_one_page_answers_ask_for_the_exact_total(self, cloud_target, monkeypatch, capsys):
+        """A one-page answer reports the server's `total` as exact, so it asks for the uncapped count."""
+        queries = _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        _run(["search", "--where", "cloud"], capsys)
+        _run(["search", "--text", "flux", "--where", "cloud"], capsys)
+        assert [q["capped_total"] for q in queries] == [["false"], ["false"]]
+
+    def test_a_scan_does_not_ask_for_the_exact_total(self, cloud_target, monkeypatch, capsys):
+        """A scan counts its own matches, so it leaves the server's total capped."""
+        queries = _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        _run(["search", "--text", "sdxl base", "--where", "cloud"], capsys)
+        assert queries and all("capped_total" not in q for q in queries)
+
     def test_a_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
         """`sdxl base` must find `sd_xl_base_1.0`, as local search does, though the server only knows `sd_xl`."""
         _patch_asset_server(monkeypatch, _CLOUD_CATALOG)

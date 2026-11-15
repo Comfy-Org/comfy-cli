@@ -152,7 +152,9 @@ def ls_cmd(
     renderer = get_renderer()
     target = cloud_target_or_local_error(where, renderer)
 
-    params: list[tuple[str, Any]] = [("limit", min(max(limit, 1), 500))]
+    # `capped_total=false` asks Comfy Cloud for the exact `total` this command
+    # forwards; without it the server may answer with a capped count.
+    params: list[tuple[str, Any]] = [("limit", min(max(limit, 1), 500)), ("capped_total", "false")]
     if name:
         params.append(("name_contains", name))
     for t in tags.split(",") if tags else []:

@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -190,6 +191,15 @@ class TestLsPagination:
         # Alongside, not instead of, the existing shape.
         assert data["count"] == 1
         assert data["assets"][0]["id"] == "a1"
+
+    def test_asks_for_the_exact_total(self, cloud_target, monkeypatch, capsys):
+        # Without `capped_total=false` Comfy Cloud may answer with a capped
+        # `total`, and `ls` would forward it as if it were the exact count.
+        calls = _patch_urlopen(monkeypatch, {"assets": [], "has_more": False, "total": 0})
+        _run(["ls", "--name", "cat", "--where", "cloud"], capsys)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]["url"]).query)
+        assert query["capped_total"] == ["false"]
+        assert query["name_contains"] == ["cat"]
 
     def test_forwards_has_more_false(self, cloud_target, monkeypatch, capsys):
         # `false` is a real answer, not a missing one — the falsy value must

@@ -457,7 +457,7 @@ def _cloud_search(
     tokens = _search_tokens(text)
     if tokens is None:
         # No filter: one page, the server's own total.
-        body = _assets_page(target, {**base, "limit": min(max(limit, 1), 500)})
+        body = _assets_page(target, {**base, **_EXACT_TOTAL, "limit": min(max(limit, 1), 500)})
         rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
         return rows, int(body.get("total") or len(rows)), False
     if not tokens:
@@ -469,7 +469,7 @@ def _cloud_search(
     if plain_word:
         # The server's substring match is already exact for a plain word:
         # one page, and its total, when it finds anything.
-        body = _assets_page(target, {**base, "name_contains": text, "limit": min(max(limit, 1), 500)})
+        body = _assets_page(target, {**base, **_EXACT_TOTAL, "name_contains": text, "limit": min(max(limit, 1), 500)})
         rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
         if rows:
             return rows, int(body.get("total") or len(rows)), False
@@ -478,6 +478,13 @@ def _cloud_search(
         if found[1]:
             return found
     return _scan_assets(target, base, tokens, limit)
+
+
+# The two one-page answers above report the server's `total` as exact.
+# `capped_total=false` asks Comfy Cloud for that exact count; without it the
+# server may answer with a capped one. A scan counts its own matches and
+# does not send it.
+_EXACT_TOTAL = {"capped_total": "false"}
 
 
 def _scan_assets(
