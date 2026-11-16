@@ -56,6 +56,132 @@ def test_split_payload_multipart_separates_files(tmp_path):
         payload[1].close()
 
 
+def test_send_request_encodes_form_urlencoded_values(monkeypatch):
+    ep = spec.get_endpoint("pika/generate/2.2/t2v")
+    flags = schema.flags_for(ep)
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(client.httpx, "post", fake_post)
+
+    client.send_request(ep, {"promptText": "hello"}, flags, api_key="comfyui-test")
+
+    assert captured["data"] == {"promptText": "hello"}
+    assert captured.get("files") is None
+    assert captured.get("json") is None
+
+
+def test_multipart_without_a_file_stays_multipart(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/multipart",
+        path="/proxy/example/multipart",
+        method="post",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="multipart/form-data",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        client.httpx,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or httpx.Response(200),
+    )
+
+    client.send_request(ep, {"prompt": "hello"}, [], api_key="comfyui-test")
+
+    assert captured["files"] == [("prompt", (None, "hello"))]
+    assert captured["data"] is None
+
+
+def test_form_urlencoded_arrays_repeat_keys_and_binary_is_refused(tmp_path):
+    flags = [
+        schema.FlagDef(name="tags", kind="array", item_kind="string", required=False),
+        schema.FlagDef(name="image", kind="binary", required=False),
+    ]
+    data = client._split_payload({"tags": ["a", "b"]}, flags, "application/x-www-form-urlencoded")[2]
+    assert data == {"tags": ["a", "b"]}
+    request = httpx.Request("POST", "https://example.test", data=data)
+    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert request.content == b"tags=a&tags=b"
+    image = tmp_path / "image.png"
+    image.write_bytes(b"x")
+    with pytest.raises(client.ApiError, match="require multipart"):
+        client._split_payload({"image": image}, flags, "application/x-www-form-urlencoded")
+
+
+def test_form_urlencoded_rejects_non_array_and_nested_values():
+    flags = [schema.FlagDef(name="tags", kind="array", item_kind="string", required=False)]
+    with pytest.raises(client.ApiError, match="expected an array"):
+        client._split_payload({"tags": "not-an-array"}, flags, "application/x-www-form-urlencoded")
+    with pytest.raises(client.ApiError, match="nested form values"):
+        client._split_payload({"tags": [{"secret": "value"}]}, flags, "application/x-www-form-urlencoded")
+
+
+def test_empty_multipart_payload_forces_multipart_encoding():
+    payload = client._split_payload({}, [], "multipart/form-data")
+    assert payload == (None, [], None)
+
+
+def test_send_empty_multipart_payload_builds_a_zero_part_wire_body(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/multipart",
+        path="/proxy/example/multipart",
+        method="post",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="multipart/form-data",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        client.httpx,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or httpx.Response(200),
+    )
+
+    client.send_request(ep, {}, [], api_key="comfyui-test")
+
+    assert captured["headers"]["Content-Type"] == "multipart/form-data; boundary=comfy-cli-empty"
+    assert captured["content"] == b"--comfy-cli-empty--\r\n"
+    assert "files" not in captured and "data" not in captured
+
+
+def test_parameterized_json_media_type_uses_json_body(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/json",
+        path="/proxy/example/json",
+        method="post",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="application/problem+json; charset=utf-8",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        client.httpx,
+        "post",
+        lambda url, **kwargs: captured.update(url=url, **kwargs) or httpx.Response(200),
+    )
+
+    client.send_request(ep, {"prompt": "hello"}, [], api_key="comfyui-test")
+
+    assert captured["json"] == {"prompt": "hello"}
+    assert "files" not in captured and "data" not in captured
+
+
 def _capture_post(monkeypatch):
     captured = {}
 
@@ -87,6 +213,32 @@ def test_send_request_uses_bearer_for_firebase_tokens(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer eyJhbGciOi.foo.bar"
     assert "X-API-Key" not in captured["headers"]
     assert captured["url"].endswith("/proxy/bfl/flux-pro-1.1/generate")
+
+
+def test_send_request_dispatches_non_get_post_methods(monkeypatch):
+    ep = spec.Endpoint(
+        id="example/update",
+        path="/proxy/example/update",
+        method="put",
+        partner="example",
+        summary="",
+        category="test",
+        request_schema={"type": "object"},
+        request_content_type="application/json",
+        response_schema={},
+        polling=None,
+    )
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(client.httpx, "request", fake_request)
+    client.send_request(ep, {"prompt": "x"}, [], api_key="comfyui-test")
+
+    assert captured["method"] == "PUT"
+    assert captured["json"] == {"prompt": "x"}
 
 
 def test_raise_for_status_includes_body():

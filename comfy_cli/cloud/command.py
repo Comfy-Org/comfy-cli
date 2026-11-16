@@ -182,12 +182,16 @@ def logout_cmd():
 @app.command("whoami", help="Show the current Comfy Cloud sign-in status.")
 @tracking.track_command("cloud")
 def whoami_cmd():
-    from comfy_cli.credentials import find_api_key, get_session
+    from comfy_cli.credentials import env_credential, find_api_key, get_session
 
     renderer = get_renderer()
+    # A credential handed in by env outranks the stored sign-in for every cloud
+    # call, so whoami reports that one as the identity in effect.
+    handed_in = env_credential("cloud")
     # Refresh first so we report (and persist) a live token rather than a
-    # token that quietly lapsed since the last command.
-    session = get_session(refresh=True)
+    # token that quietly lapsed since the last command — but only when the
+    # sign-in is what cloud calls will send. Otherwise it is read as stored.
+    session = get_session(refresh=handed_in is None)
     configured_base_url = get_base_url()
 
     # Ambient API key (env / store), reported even when an OAuth session
@@ -198,28 +202,47 @@ def whoami_cmd():
     if ambient_key is not None:
         api_key_source = "env" if ambient_key.source.startswith("env:") else "store"
 
-    # `signed_in` reflects *any* valid auth path — OAuth session or API key.
-    # When both are present, OAuth wins (it's the credential the client sends);
-    # the API key is only used as a fallback when no live session exists.
+    # `signed_in` reflects *any* valid auth path. Precedence matches what the
+    # client sends: a credential handed in by env (COMFY_CLOUD_AUTH_TOKEN, then
+    # COMFY_CLOUD_API_KEY), then a live OAuth session, then the stored key.
+    # `credential_source` names the one in effect ("env:<VAR>", "session",
+    # "stored:<provider>").
     has_api_key = api_key_source is not None
     has_oauth = session is not None
     expired = session.is_expired() if session else None
-    oauth_usable = has_oauth and not expired
+    # A session minted for another base URL is never sent to the configured
+    # one (the replay-guard in resolve_target), so it is not usable here.
+    stale_base_url = (session.base_url != configured_base_url) if session else False
+    oauth_usable = has_oauth and not expired and not stale_base_url
     # `signed_in` must reflect whether we can actually authenticate right now:
-    # a live (non-expired) OAuth session, or an API key. An expired,
-    # unrefreshable OAuth session is NOT signed in on its own.
-    signed_in = oauth_usable or has_api_key
+    # a handed-in credential, a live (non-expired) OAuth session, or an API
+    # key. An expired, unrefreshable OAuth session is NOT signed in on its own.
+    signed_in = handed_in is not None or oauth_usable or has_api_key
     auth_method: str | None
-    if oauth_usable:
+    credential_source: str | None
+    if handed_in is not None:
+        auth_method = handed_in.kind
+        credential_source = handed_in.source
+    elif oauth_usable:
         auth_method = "oauth"
-    elif has_api_key:
+        credential_source = "session"
+    elif ambient_key is not None:
         auth_method = "api_key"
+        credential_source = ambient_key.source
     else:
         auth_method = None
-    stale_base_url = (session.base_url != configured_base_url) if session else False
+        credential_source = None
 
     if renderer.is_pretty():
-        if has_oauth:
+        if handed_in is not None:
+            env_var = handed_in.source.removeprefix("env:")
+            rprint(f"[bold]Authenticated via {env_var}[/bold] [dim](handed in by the environment)[/dim]")
+            if has_oauth:
+                rprint(
+                    f"[dim]A stored `comfy cloud login` session ({session.base_url}) is present "
+                    f"but unused while {env_var} is set.[/dim]"
+                )
+        elif has_oauth:
             from comfy_cli.output.branding import whoami_banner
 
             renderer.console().print(
@@ -244,7 +267,8 @@ def whoami_cmd():
                         f"[dim]OAuth session is preferred; X-API-Key from {api_key_source} present but unused.[/dim]"
                     )
                 else:
-                    rprint(f"[dim]OAuth session expired — falling back to X-API-Key from {api_key_source}.[/dim]")
+                    reason = "is for another base URL" if stale_base_url else "expired"
+                    rprint(f"[dim]OAuth session {reason} — falling back to X-API-Key from {api_key_source}.[/dim]")
         else:
             from comfy_cli.output.branding import signed_out_banner
 
@@ -260,9 +284,13 @@ def whoami_cmd():
     payload: dict[str, object | None] = {
         "signed_in": signed_in,
         "auth_method": auth_method,
-        "base_url": session.base_url if session else configured_base_url,
+        # The URL the credential in effect goes to. Cloud calls always go to the
+        # configured URL (a session minted for another one is not used), so
+        # this is the configured URL; the session's own URL is in `session`.
+        "base_url": configured_base_url,
         "configured_base_url": configured_base_url,
         "api_key_source": api_key_source,
+        "credential_source": credential_source,
     }
     if session is not None:
         payload["expired"] = expired
@@ -449,7 +477,7 @@ def status_cmd(
     plans_body, _ = _billing_get_optional(target.url("billing", "plans"), target)
 
     balance_micros = billing.select_effective_balance_micros(balance_body if isinstance(balance_body, dict) else None)
-    balance_usd = billing.micros_to_usd(balance_micros)
+    balance_usd = billing.cents_to_usd(balance_micros)
     balance_credits = billing.usd_to_credits(balance_usd)
 
     subscription_status = status_body.get("subscription_status")

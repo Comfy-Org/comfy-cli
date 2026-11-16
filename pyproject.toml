@@ -5,7 +5,7 @@ requires = [ "setuptools>=61" ]
 
 [project]
 name = "comfy-cli"
-version = "0.0.0"                                            # Will be filled in by the CI/CD pipeline. Check publish_package.py.
+version = "0.0.0"                                            # Will be filled in by the CI/CD pipeline. Check .github/workflows/publish_package.yml.
 description = "A CLI tool for installing and using ComfyUI."
 readme = "README.md"
 keywords = [ "comfyui", "stable diffusion" ]

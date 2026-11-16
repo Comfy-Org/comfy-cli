@@ -1,5 +1,8 @@
 # `comfy run --json`: Machine-Readable Output (NDJSON)
 
+The accepted architecture for machine-readable output is recorded in
+[ADR-AUTOMATION-0003](adr/AUTOMATION-0003-one-versioned-machine-output-dialect.md).
+
 > **Dialect change (breaking).** The legacy `{"event": …, "schema_version": 1,
 > "error": {"kind": …}}` dialect was removed; `comfy run --json` now emits the
 > CLI-wide renderer stream. Every event line carries `schema: "event/1"` and a
@@ -29,7 +32,38 @@ A local ComfyUI server does **not** broadcast execution events: it addresses
 state file `comfy run` wrote, else `/queue`, else `/history` — and reconnects
 under it; the terminal envelope reports which id it used (`data.client_id`) and
 whether it was the real submitter (`data.attached`). Use `--client-id` to force a
-specific one. Both keys are present on *every* `jobs watch` terminal envelope: a
+specific one — except on a run submitted by `comfy run --client-id`, where the
+id belongs to a live client being fed on purpose. Resolution withholds it
+deliberately (`attached: false`) and the watch polls status instead; passing
+`--client-id` on such a run is refused with `client_id_rejected`
+(`reason: "borrowed"`) before any socket opens. That marker is read from the job
+state file *and* from the `extra_data` the server echoes back, and an override is
+honoured only once one of them has actually vouched for the run. If there is no
+local state file and the prompt's own server record cannot be read — the fetch
+failed, the body came back the wrong shape, or neither `/queue` nor `/history`
+mentions the prompt — then nothing has ruled the marker out, so the run is not
+assumed unmarked: the watch polls (`attached: false`) and an explicit
+`--client-id` is refused with `reason: "indeterminate"`. A retry clears that once
+the server answers again; a `prompt_id` that is a typo or already pruned stays
+unreadable, and no id works for it.
+
+The check is on the id as well as on the prompt: naming a borrowed client's id
+as `--client-id` while watching some *other*, perfectly ordinary prompt is
+refused the same way, because attaching evicts that client either way. Those
+ids are read from `/queue`, and if that read does not come back whole the
+override is refused as `indeterminate` rather than waved through — an empty
+list of borrowed ids counts as "nobody is borrowing" only when the queue was
+actually walked. What it cannot see is a run that has already *left* the queue:
+an id that run was feeding is honoured again. Watch by `prompt_id` and let
+resolution do its job; `--client-id` is a last resort. One more gap: a prompt that is
+*already terminal* short-circuits before any of this runs, so a non-empty
+`--client-id` is ignored rather than refused there — harmless, because that path
+opens no socket at all. Separately, and by design, this protects only runs
+*comfy-cli* submitted with `--client-id`: a browser tab that submits its own
+prompt stamps no marker, so watching that prompt re-attaches as the tab, exactly
+as the last paragraph of this section describes for any re-attach. Both
+`data.client_id` and `data.attached` are present on every *local* `jobs watch`
+terminal envelope (cloud watch emits neither): a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id
 is ComfyUI's own session-resume path, so a submitter that is *still* holding that
@@ -39,6 +73,28 @@ it reconnects.
 `data.completed_nodes` on the terminal envelope does not depend on the stream: it
 is the union of what the watch observed and what `/history` records for the
 prompt, so it is populated even for a watch that attached after the job ended.
+
+`data.poll_reason` says why a watch polled instead of opening a socket, and is
+`null` when it attached (and on a prompt that was already terminal, which opens
+no socket either). `"borrowed"` means the run was submitted for another client
+that is receiving its events — drop `--client-id` and keep polling.
+`"indeterminate"` means nothing could vouch for the run — retry once the server
+answers. `data.attached` alone cannot separate those two, and they want opposite
+responses, which is why the reason is published rather than only printed.
+
+**`data.execution_error` on a failed watch.** Any `jobs watch` that ends in
+`status: "error"` — not just a borrowed or poll-only one — carries the node's
+structured failure under `data.execution_error`, never under
+`data.details.error`. Both of the command's exits do this: the live/poll path
+and the short-circuit for a prompt that had already failed before the watch
+started. `data.details` keeps the rest of the record on the paths that have one.
+The key is what the shared error classifier reads to produce
+`error.code` / `error.message` / `error.hint` — the same path `comfy run` uses —
+so a failure left anywhere else reaches the envelope unclassified, and also
+unredacted: `current_inputs` is scrubbed and `traceback` capped to its last two
+frames only for the value under this key. Earlier builds of this branch put it
+at `data.details.error` (live path) and `data.error` (terminal path); neither is
+published any more.
 
 ## Overview
 
@@ -165,7 +221,7 @@ list of differences:
 | Envelope `where` | `"local"` | `"cloud"` |
 | Envelope target fields | `data.host` (str), `data.port` (int) | `data.base_url` (str) |
 | Envelope `data.cached_node_ids` / `data.executed_node_ids` | Present on `--wait` | Absent — they are derived from the per-node event stream, which the cloud has none of |
-| Envelope `data.warnings` | Absent | Present on `--wait` success: an array of non-fatal warning objects (currently only `partial_execution`, see below). `[]` when there are none |
+| Envelope `data.warnings` | Absent | Present on `--wait` success: an array of non-fatal warning objects (`partial_execution`, and `partial_execution_targets_ignored` under `--output-node-ids`; see below). `[]` when there are none |
 | `prompt_rejected` `details` | `status` (400) and `node_errors` | `node_errors` only — the cloud reports rejected nodes on an otherwise-2xx submit, so there is no 4xx status to report. The `node_errors` value has the same [array-of-records shape](#node_errors-shape) on both targets |
 | Error codes | The local set below | The workflow/pre-flight codes and the node-failure codes (`execution_error`, `transient_auth`, `prompt_rejected`, `cancelled`, `spend_consent_required`) plus the cloud-only codes below. The local-server- and WebSocket-specific codes cannot occur: `server_not_running`, `object_info_unavailable`, `connection_error`, `ws_timeout`, `ws_disconnected`, `invalid_response`, `client_error`, `server_error`, `partner_node_requires_credential` (the cloud injects the caller's credential itself) |
 
@@ -181,6 +237,8 @@ the `--print-prompt` and `--no-wait` stream shapes.
 | -------------------- | ------------------------------------------------------------------ | -------------------------------- | ---- |
 | `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login` | —                     | 1 |
 | `cloud_http_error`   | The cloud API returned a non-2xx response on submit or while polling | `status` (int), `body` (str) on submit; `status`, `prompt_id` while polling | 1 |
+| `cloud_rate_limited` | The cloud API throttled the request (HTTP 429) on submit or while polling. Throttling is not a verdict on the workflow, but it does not by itself prove the submit had no effect, and the CLI never repeats a submit on its own. On submit, wait, then check `comfy jobs ls --where cloud` for the job before re-running; while polling, the job was already submitted, so follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running (the job record is left non-terminal). Cloud only: a local server's 429 is `client_error` | same as `cloud_http_error`, plus `retry_after` (seconds) when the server sent `Retry-After` | 1 |
+| `cloud_payment_required` | The cloud refused the request because the account's plan does not allow it (HTTP 402, or a legacy HTTP 429 whose body type is a plan refusal: free generations used up, subscription required, a partner node or model that needs a paid plan). Not throttling and not a workflow problem; nothing was queued, so do not retry or edit the workflow. A full queue stays `cloud_rate_limited` | `status` (402 or 429), `body` (str), `reason` (the server's refusal type, when it sent one) | 1 |
 | `cloud_timeout`      | The cloud job produced no progress for `--timeout` seconds          | `prompt_id` (str)               | 1 |
 | `cql_no_graph`       | A UI-format workflow needs the cloud `object_info` snapshot to be lowered to API format, and it could not be loaded — run `comfy nodes refresh --where cloud` | — | 1 |
 
@@ -201,6 +259,33 @@ run off as a clean success:
 
 The envelope is still `ok: true` (exit `0`) — the job did run. Agents that
 need all-or-nothing semantics should check `data.warnings` is empty.
+
+With `--output-node-ids`, only the targeted output nodes are counted: an
+untargeted output node that produced nothing is not a warning, and outputs
+from untargeted nodes do not count toward a target that produced nothing. A
+target whose entry is only empty lists (`{"images": []}`) produced nothing.
+The warning then also carries `missing_output_node_ids`, the targeted ids that
+returned no outputs. It is emitted even when the cloud node catalog could not
+be loaded; the ids were then only checked to exist, so the message allows
+that a missing target may not be an output node:
+
+```json
+{"code": "partial_execution", "message": "targeted 1 output node(s) but the cloud returned outputs for only 0; no outputs from node(s) 12 (pruned server-side, likely failed validation)", "submitted_output_nodes": 1, "returned_output_nodes": 0, "missing_output_node_ids": ["12"]}
+```
+
+### `partial_execution_targets_ignored` warning
+
+On a `--output-node-ids` cloud `--wait` run, a node outside the targets and
+the nodes they depend on that still produced outputs means the server ran
+more than was asked for, most likely because it does not support
+`partial_execution_targets` and ran the whole graph:
+
+```json
+{"code": "partial_execution_targets_ignored", "message": "ran with --output-node-ids but node(s) outside the targets also produced outputs: 9; the server likely ignored partial_execution_targets and ran the whole graph", "untargeted_output_node_ids": ["9"]}
+```
+
+A local run has no `data.warnings`; compare `data.executed_node_ids` with the
+targets to check the same thing.
 
 ## Event reference
 
@@ -250,6 +335,10 @@ request's `prompt` field. It does **not** include `client_id` or
 
 Under `--print-prompt` this is the only event: the CLI emits it plus the
 final envelope and exits 0 without queuing.
+
+With `--output-node-ids` the event (and the `--print-prompt` envelope's
+`data`) also carries `partial_execution_targets`, the ids the submit sends in
+the request's top-level field of that name.
 
 ```json
 {"schema": "event/1", "type": "prompt_preview", "prompt": {"1": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}}}}
@@ -398,6 +487,113 @@ time. If the callback never arrives, the terminal envelope is an
 {"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
 ```
 
+### `upload_plan`, `upload_progress`, `upload_complete`, `upload_storing`
+
+Emitted by `comfy build push` while it uploads model files and packaged custom
+nodes, and by `comfy model upload` and `comfy assets library upload` while they
+upload one model file. They are part of the upload, not the `run` stream, and
+validate against `build_push_event.json`.
+
+Where they go depends on the mode. Under `--json-stream` they are on stdout,
+ahead of the envelope, like every other event. Under plain `--json` (which is
+what a caller with a piped stdout resolves to, so every agent) they are on
+**stderr**, because stdout in that mode is exactly one envelope. Read stderr line
+by line and keep the lines that parse as JSON with `schema: "event/1"`.
+
+A push opens with one `upload_plan`, sent before the first byte and sent even
+when there is nothing to upload. Each file that transfers gets an
+`upload_progress` as it starts and about every two seconds after, then one
+`upload_complete`. A file the builder already held gets only an
+`upload_complete` with `deduplicated: true`. A file whose upload fails gets no
+`upload_complete`; the error envelope is the next line.
+
+```json
+{"schema": "event/1", "type": "upload_plan", "files": 3, "bytes_total": 56908316672, "already_held": 2}
+{"schema": "event/1", "type": "upload_progress", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_done": 1288490188, "bytes_total": 23761671782, "bytes_per_second": 47500000, "eta_seconds": 473, "overall_bytes_done": 1288490188, "overall_bytes_total": 56908316672, "overall_eta_seconds": 1171}
+{"schema": "event/1", "type": "upload_complete", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_total": 23761671782, "seconds": 498.2, "bytes_per_second": 47695045, "deduplicated": false, "overall_bytes_done": 23761671782, "overall_bytes_total": 56908316672}
+```
+
+After transferring the bytes, `comfy model upload` and `comfy assets library
+upload` emit `upload_storing` as soon as Cloud returns a storage task id. It
+arrives before task polling and follows the same stdout/stderr rules above.
+If the wait is interrupted, look up that id at Cloud's
+`GET /api/tasks/<task_id>` endpoint.
+The final success envelope still requires a completed task and a matching
+stored hash. A closed progress pipe mutes progress reporting; task polling and
+the stored-hash check still run.
+
+```json
+{"schema": "event/1", "type": "upload_storing", "task_id": "task-1"}
+```
+
+`bytes_per_second` on a progress event is measured over the last ten seconds
+and is sampled on a timer, not on bytes moving, so a stalled connection keeps
+reporting and its rate falls to `0` with `eta_seconds: null`. That is how to
+tell a slow upload from a dead one. `bytes_done` counts bytes handed to the
+connection, which runs slightly ahead of bytes the server has acknowledged.
+
+At a terminal the same numbers render as one redrawn progress line; with output
+piped under `--no-json` they are plain lines every five seconds, with no
+carriage returns.
+### `deploy_progress`
+
+Emitted by `comfy deploy up --watch`, `comfy deploy promote --watch`,
+`comfy deploy rollback --watch` and `comfy deploy status --watch` while the deployment's status is `provisioning`
+or `starting`. It is part of those
+commands, not the `run` stream, and validates against
+`deploy_progress_event.json`.
+
+Where it goes depends on the mode, the same way upload progress does. Under
+`--json-stream` it is on stdout, ahead of the envelope. Under plain `--json`
+(what a caller with a piped stdout resolves to, so every agent) it is on
+**stderr**, because stdout in that mode is exactly one envelope.
+
+```json
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "provisioning", "stale": false, "progress": {"step": "staging_models", "modelsDone": 0, "modelsTotal": 2, "bytesDone": 3536540667, "bytesTotal": 7272719498, "currentModel": "models/checkpoints/sd_xl_base_1.0.safetensors", "bytesPerSecond": 44205525, "etaSeconds": 85, "attempt": 1, "startedAt": "2026-09-20T01:59:55Z", "updatedAt": "2026-09-20T02:01:15Z"}}
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "starting", "stale": false, "progress": {"step": "waiting_for_worker", "attempt": 1, "startedAt": "2026-09-20T02:02:46Z", "updatedAt": "2026-09-20T02:02:46Z"}}
+```
+
+The event's own fields are snake_case like every other event. `progress` is the
+deploy service's object, passed through unchanged, so its fields are the API's
+camelCase, the same as `computeConfig` and `endpointUrl` in the envelopes. The
+service computes `bytesPerSecond` and `etaSeconds`; the CLI computes nothing, so
+the portal and the CLI show the same numbers.
+
+One event per new sample: the CLI polls every two seconds and the service writes
+about every three, and a sample is keyed on its `updatedAt` (on its whole content
+where a sample carries no `updatedAt`). If a sample then goes
+a minute without being rewritten, one more event carries it with `stale: true`.
+The service's writes are best-effort, so a stale sample is not evidence that the
+deploy stopped; `status` remains the verdict. A service that sends no `progress`
+object produces no events, and the command behaves as it did before.
+
+`comfy deploy status --json` (with or without `--watch`) and `comfy deploy up
+--json` carry the same object as `data.progress` while the deployment is coming
+up, and omit the key otherwise.
+
+At a terminal the numbers render as one redrawn progress line; with output piped
+under `--no-json` they are plain lines, one per new sample, with no carriage
+returns. Ctrl-C during `--watch` exits 130 after printing that the deployment
+keeps coming up and the command that re-attaches, and in the JSON modes still
+writes the envelope for the last state it read.
+
+A watch rides out a deploy API that stops answering, as it does for a few
+seconds while a new version rolls out: a 5xx or a failed connection on its read
+is retried, backing off (2, 4, 8, then 15 seconds), for about a minute from the
+first failure, and the watch says once that it is retrying. A 4xx still ends the
+watch at once. If the API is still not answering when the window closes, the
+watch ends with the error code `deploy_watch_lost` and exit code **75**, never 1:
+only the watch ended, and the deployment may still be coming up. Its `hint`
+carries the command that re-attaches and `details.deployment_id` the deployment.
+
+A 401 on a watch's read triggers serialized session recovery: the client adopts
+a peer's newer token or refreshes the rejected one, then retries at most once.
+If recovery fails while a refreshable sign-in for the same environment remains
+stored, the watch ends with `watch_auth_lost`, again with exit code **75** and
+the same `details`. Its `hint` reattaches the watch without a re-login prompt.
+The remote work may continue. A 401 with no refreshable sign-in remaining, or
+on a workspace API key, stays `deploy_not_signed_in`.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:
@@ -413,11 +609,11 @@ On `--wait` success, `data` carries:
 | `outputs_by_item`   | dict            | The same outputs grouped by `compose` foreach item; `{}` when the workflow carried no item map |
 | `cached_node_ids`   | array of str    | **Local only.** Node IDs the server reported as cached  |
 | `executed_node_ids` | array of str    | **Local only.** Node IDs the executor *ran* — the union of every node that appeared in an `executing` or `executed` event, including intermediate compute nodes |
-| `warnings`          | array of dict   | **Cloud only.** Non-fatal warnings about the completed run — see [`partial_execution`](#partial_execution-warning). `[]` when there are none |
+| `warnings`          | array of dict   | **Cloud only.** Non-fatal warnings about the completed run — see [`partial_execution`](#partial_execution-warning) and [`partial_execution_targets_ignored`](#partial_execution_targets_ignored-warning). `[]` when there are none |
 | `elapsed_seconds`   | float \| null   | Wall-clock duration (null when not waiting)            |
 | `host` / `port`     | str / int       | **Local only.** Target server                          |
 | `base_url`          | str             | **Cloud only.** Target cloud endpoint                  |
-| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`) |
+| `state_file`        | str \| null     | Path of the job state file (poll with `comfy jobs status`); null when no record could be written — see [below](#known-limit-a-state-file-failure-is-never-a-run-failure) |
 
 `cached_node_ids` and `executed_node_ids` may overlap: a cached
 output-bearing node emits both `execution_cached` and `executed`. Agents
@@ -433,6 +629,39 @@ watcher keeps the state file updated; follow up with
 the same on both targets, `watcher_spawned` included (add `--where cloud` to
 the follow-up commands for a cloud job). The async envelope carries no
 `outputs_by_node` / `outputs_by_item` / `warnings` — nothing has run yet.
+
+### Known limit: a state-file failure is never a run failure
+
+Writing the job's state file is best-effort on an **async submit** (the default,
+no `--wait`, local or cloud) and on **local `--wait`**. If the state directory
+can't be written — a config root that resolved somewhere unreachable, a
+read-only or sandboxed home, a full disk — the run still reports `ok: true`,
+because by then the server has already accepted the prompt. What the envelope
+says depends on the path, and `data.state_file` is `null` on both:
+
+- **async submit** — `data.status: "queued"`, exactly as it would be with the
+  record written.
+- **local `--wait`** — the run goes on to completion in the foreground and
+  finishes `data.status: "completed"` with its outputs, so a failed state write
+  costs you only the on-disk record, not the result.
+
+**`state_file: null` is not a failed run**, and in particular it is not a
+transport error: there is nothing to retry, and re-submitting queues a second
+job for a prompt that is already running. Follow an async job by `prompt_id`
+(`comfy jobs status <prompt_id>`) and treat a missing record as "unknown", not
+"did not run".
+
+With no record there is also nothing for a background watcher to update, so the
+spawn is skipped and `data.watcher_spawned` is `false` — poll
+`comfy jobs status` yourself, as that field already instructs.
+
+Run with `LOG_LEVEL=DEBUG` to see the swallowed cause.
+
+**Cloud `--wait` is not yet covered.** That path still writes its state record
+directly, including inside its own error handlers, so an unwritable state
+directory there can surface as a traceback after the job was accepted rather
+than as a clean envelope. Treat the guarantee above as scoped to the paths
+named in the first paragraph.
 
 ### Known limit: `--wait` has no background watcher
 
@@ -458,7 +687,9 @@ crash the CLI hasn't established: when local `--wait` gives up on its *own*
 `--timeout` (`ws_timeout`), and when cloud `--wait` dies on a network error
 that escapes its handlers (a DNS failure or connection reset while polling, as
 opposed to the handled `cloud_timeout` / `cloud_unauthorized` /
-`cloud_http_error` exits, which record a terminal verdict of their own). In
+`cloud_http_error` exits, which record a terminal verdict of their own), or
+when cloud `--wait` gives up on a throttled status poll (`cloud_rate_limited`,
+recorded as the record's `error` until the next successful status poll). In
 both cases the record is left non-terminal with no pid, the reap never touches
 it, and `comfy jobs status <prompt_id>` can still consult the server for the
 real outcome.
@@ -510,10 +741,109 @@ lacks `api_node` flags the list is simply empty (fail-open). When
 `spends_credits` is `true`, pretty (non-`--json`) mode also prints a yellow
 `⚠ uses partner-API (paid) nodes …` line after the verdict.
 
+On a canvas whose ids `get_template` remapped (`insert:<op>:root:node:94`), an
+issue on such a node also carries `template_node_id` (`"94"`), the id the
+template showed; `workflow slots --node`, `set-widget` and the other edit
+commands accept it. It is absent when a literal node `94` exists or two
+inserts carry that id.
+
+A literal of the wrong JSON type is an error (`shape_mismatch`) unless the
+server converts it the way ComfyUI does (a lossless subset of its conversions) —
+an integer string on an INT input, a numeric string on a FLOAT input, a number
+on a STRING input. That one is a `coercible_type` warning: `value` is the stored
+literal, `coerced_value` the typed value the server runs with, and `hint` the
+`set-widget` command for non-link inputs when no catalog error or fatal finding
+refuses the converted value. Range checks judge `coerced_value`.
+
 Invalid workflows emit `ok: false` with the same `data` fields (`valid: false`,
 a populated `errors` array, `partner_nodes`/`spends_credits` still present) and
 exit code `1`. Structural failures (missing file, non-object JSON, an
 unconvertible UI export) emit an [error object](#error-object) instead.
+
+## `comfy workflow check --json` envelope
+
+`comfy --json workflow check <file> --where cloud` answers one question: can Comfy
+Cloud run this workflow with no custom build? It needs a sign-in, reads Cloud's
+node list and, for a model Cloud's dropdowns do not list, your uploaded models.
+The file is a ComfyUI save (with `nodes[]`, subgraphs included) or an API
+export. Muted and bypassed nodes load nothing and are listed in `skipped`. A save is read the way ComfyUI submits it,
+through the same converter as `comfy workflow decompose`: each subgraph instance's own value for a promoted widget is
+the one checked. Whether an input holds a model file comes from its input spec in Cloud's node list: a dropdown does, a
+text input does not, so a prompt that ends in `.safetensors` is not a model.
+
+| Field            | Type          | Description                                                                                         |
+| ---------------- | ------------- | --------------------------------------------------------------------------------------------------- |
+| `workflow`       | str           | Absolute path of the checked file. The check never changes it                                       |
+| `format`         | str           | `ui` (a ComfyUI save) or `api` (an API export)                                                      |
+| `verdict`        | str           | `covered`, `covered_with_remaps`, `covered_needs_check` or `needs_build` (below)                     |
+| `stale`          | bool          | `true` when Cloud's node list could not be refreshed and a cached copy answered (see `warnings`)     |
+| `blocking`       | array of dict | What stops the workflow running on Cloud; empty unless `needs_build`                                 |
+| `models`         | array of dict | Every model file the active nodes load, one row each                                                 |
+| `nodes`          | array of dict | `{class_type, node_ids, on_cloud}` for each node type used                                           |
+| `skipped`        | array of dict | `{node_id, class_type, why}` for each muted or bypassed node; `why` is `muted` or `bypassed`         |
+| `out`            | str or null   | Where `--apply-remaps --out` wrote the remapped copy                                                 |
+| `remaps_applied` | number        | Values changed in that copy; `0` without `--out`                                                     |
+| `warnings`       | array of dict | `{code, message, details?}`: `object_info_stale` (`details` has `source` and `reason`), `models_dir_not_found`, `local_model_unreadable`, `cloud_model_lookup_failed`, `remap_not_applied` (`details` has `node_id`, `class_type`, `widget`, `value` and `cloud_value`) |
+
+`verdict`, checked in this order:
+
+- `needs_build`: a node type or model is not on Cloud, or a model is proven a different file. `blocking[]` lists each.
+- `covered_with_remaps`: everything is on Cloud, but a model sits in another folder there, so the saved value must
+  change. Each such row has `status: "remap"` and the value Cloud runs in `cloud_value`; `--apply-remaps --out
+  <file>` writes a copy with those values changed. Each is changed only where that input's value is saved (the
+  node's own widget, or the subgraph instance slot that holds a promoted value), so the same file name in another
+  loader or in a text input stays as it is. A remap the copy does not carry (the place its value is saved is
+  unknown, or an input that needs another value reads the same place) adds a `remap_not_applied` warning.
+- `covered_needs_check`: nothing is missing, but a model is not proven the same file as Cloud's copy (`identity` is
+  not `same`).
+- `covered`: every node type and model is on Cloud, and each model is proven the same file.
+
+A model is proven the same file only when a local copy under `--models-dir` has the blake3 hash Cloud reports for
+its copy. The same name is not the same bytes. Without `--models-dir`, a model Cloud has is `unverified`. A local
+copy that cannot be read stays `unverified` and adds a `local_model_unreadable` warning.
+
+Your uploads are matched the way Cloud matches them when it runs the workflow: the upload named exactly the saved
+value, else the one upload whose name ends in `/<saved value>` (such as `Wan22_FunReward/model.safetensors` for a
+saved `model.safetensors`). Both run the saved value unchanged, so both are `present`. Several uploads ending that
+way are `missing` with `candidates` (blocking, `ambiguous`). Every page of your model list is read.
+
+Only your own uploads carry a content hash. Cloud's library models (`source: "cloud"`) report their folder and file
+name where the hash would be, so for them a local copy is compared by size alone: a different size is
+`different` (blocking, `different_file`), the same size stays `unverified`, and the local file is not hashed. A
+workflow that uses a library model is therefore at best `covered_needs_check`; running one real job on Cloud is the
+proof.
+
+Each `models[]` row:
+
+| Field         | Type          | Description                                                                                       |
+| ------------- | ------------- | ------------------------------------------------------------------------------------------------- |
+| `node_id`     | str           | Node id; inside a subgraph, `<instance id>:<inner id>`, one row per instance                      |
+| `class_type`  | str           | The node type                                                                                     |
+| `widget`      | str or null   | The input name; null only for a node type Cloud does not have                                     |
+| `value`       | str           | The value saved in the workflow                                                                   |
+| `status`      | str           | `present`, `remap`, `missing`, or `not_checked` when the node type itself is not on Cloud           |
+| `source`      | str or null   | `cloud` for Cloud's own models, `yours` for your uploads                                          |
+| `cloud_value` | str or null   | The value Cloud runs; differs from `value` on a remap                                             |
+| `identity`    | str or null   | `same`, `different` or `unverified` for a model Cloud has; null otherwise                         |
+| `candidates`  | array of str  | Present when several Cloud files or uploads fit the name, so none is picked                       |
+| `filename`    | str           | The file name, without folders                                                                    |
+| `folder`      | str or null   | The ComfyUI models folder it belongs in (`checkpoints`, `loras`, ...), from the workflow's own download notes or the stock loader; null when unknown |
+| `url`         | str or null   | The download link from the workflow's own download notes, if it has one                           |
+| `local_paths` | array of str  | Files of this name under `--models-dir`; empty without it                                         |
+
+Each `blocking[]` item has a `kind`:
+
+- `node`: `{kind, class_type, node_ids, reason: "not_on_cloud"}`.
+- `model`: `{kind, value, node_id, class_type, reason, filename, folder, url, local_paths}`, where `reason` is
+  `not_on_cloud`, `ambiguous` (several Cloud files share the name; see `candidates` in `models[]`) or
+  `different_file`. `folder` and `local_paths` say where the file goes and where a copy is on this machine.
+
+Every verdict exits `0`: the check is a report. `changed` is `true` only when `--out` wrote a file.
+Refusals emit an [error object](#error-object): `missing_argument` (`--apply-remaps` without `--out`, or the
+reverse), `workflow_out_is_input`, `workflow_not_found`, `workflow_read_error`, `workflow_invalid_json`,
+`workflow_format_unknown`, `workflow_conversion_failed` (the save could not be converted the way ComfyUI submits
+it), `cloud_only_command`, `auth_not_signed_in`, `cql_no_graph` (Cloud's node list could not be read),
+`cloud_unauthorized` / `cloud_http_error` (the model list could not be read) and `workflow_write_error`.
 
 ## Error object
 
@@ -540,6 +870,7 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `workflow_invalid_json`   | Workflow file is not valid JSON                                                 | —                                                  | 1 |
 | `workflow_read_error`     | Workflow file exists but isn't readable as text (`OSError`, `UnicodeDecodeError`) | —                                                | 1 |
 | `workflow_not_api_format` | File parses but is neither UI nor API format                                    | —                                                  | 1 |
+| `invalid_output_node_ids` | `--output-node-ids` named no ids, an id not in the submitted API-format workflow, or a node that is not an output node (checked only when the node catalog is available, so not under `--print-prompt` or when it failed to load); nothing was submitted | `unknown_node_ids` (array of str), `non_output_node_ids` (array of str) | 1 |
 | `workflow_empty`          | Workflow has no executable nodes (UI conversion produced `{}`, or API workflow is `{}`) | —                                          | 1 |
 | `conversion_error`        | UI→API converter raised `WorkflowConversionError`                               | —                                                  | 1 |
 | `conversion_crash`        | UI→API converter raised an unexpected exception                                 | `exception_type` (str)                             | 1 |
@@ -549,8 +880,9 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `workflow_unknown_nodes`  | Pre-submit validation found unknown class_types / shape mismatches              | `errors` (array), `warnings` (array)               | 1 |
 | `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`), `host`, `port` | 1 |
 | `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
+| `client_id_rejected`      | `--client-id` was combined with something it cannot serve. On `comfy run`: the flag was blank (`empty`), the effective target is cloud (`cloud` — the flag addresses a local ComfyUI socket, and cloud fans execution events out per user/workspace anyway), or `--wait` was passed (`wait` — the run's events go to the named client, so this invocation would watch a silent socket). Also raised by `comfy jobs watch` when the prompt is marked as having borrowed a live client's id (`borrowed`): that run is poll-only and no `--client-id` override is honoured. `comfy jobs watch` raises it with `indeterminate` when no job state file was readable and the prompt's own server record could not be read either (the `/queue` + `/history` fetch failed, returned the wrong shape, or simply never mentioned the prompt): nothing has ruled the marker out, so the override is refused rather than risking the eviction — retry once the server answers. `comfy jobs watch` also raises `empty` for a blank `--client-id`, as `comfy run` does. Refused before anything is submitted and before any socket is opened | `reason` (str, `"empty"`, `"cloud"`, `"wait"`, `"borrowed"` or `"indeterminate"`) | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
-| `client_error`            | Server returned another HTTP 4xx response                                       | `status` (int, 4xx), `body` (str)                  | 1 |
+| `client_error`            | Server returned another HTTP 4xx response (including 429; `cloud_rate_limited` is Cloud only) | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`         | `status` (int, 2xx)                                | 1 |
 | `ws_timeout`              | WebSocket `recv` idle past `--timeout`                                          | `timeout` (int, seconds)                           | 1 |
@@ -558,6 +890,56 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `cancelled`               | Run was interrupted — client `SIGINT` (Ctrl-C) or the server's `execution_interrupted` (e.g. `/interrupt`) | —                       | 130 |
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)               | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) | 1 |
 | `transient_auth`          | The `execution_error` cause was an API node's server-side session token expiring mid-execution — transient, so resubmitting the same workflow succeeds. Local credentials are fine; `comfy cloud login` does not help | Same fields as `execution_error` | 1 |
+
+### CLI-wide codes
+
+Two codes can end any command's `--json` stream, not only `comfy run`:
+
+| `code`           | Triggered when                                                                 | `details`                                                                                  | Exit |
+| ---------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ---- |
+| `usage_error`    | argv did not parse (unknown option or command, missing value); nothing ran     | `command` (str), `exit_code` (int); `option` and `did_you_mean` for a near-miss option     | 2 |
+| `internal_error` | The command crashed on an exception it did not handle (a comfy-cli bug)        | `exception` (str, the exception type), `command` (str), `traceback` (array of up to 3 `file:line:func` strings, innermost last) | 1 |
+
+`internal_error`'s `message` is `"<Type>: <text>"`, capped at 500 characters.
+URL query strings, bearer tokens, `key=value` token pairs and `user:pass@`
+userinfo are replaced with `***`. The full traceback still goes to stderr.
+Whether anything was written depends on where the command crashed, so re-read
+state before retrying.
+
+### Warning codes
+
+A warning is an object in `data.warnings[]` of a successful envelope
+(`ok: true`, exit `0`), with its own `code` and `message`. Registered error
+codes are failure categories, so a code a command only emits as a warning is
+not registered and is not listed in `comfy --json discover` under
+`data.error_codes`. `comfy which` and `comfy env` emit two such codes, and
+`comfy build init` and `update` one more:
+
+| `code`                      | Emitted when                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `workspace_not_found`       | The selected workspace does not exist on disk (`exists: false`); the message names the missing directory      |
+| `desktop_config_unreadable` | A Comfy Desktop record, settings file or path could not be read or checked; Desktop discovery may be incomplete |
+| `build_snapshot_empty`      | A `--from-snapshot` import carries no custom nodes or models; the message says whether the snapshot lists none (likely older than the install) or counts the listed packs left out by cause: disabled, or the importer's own advisory line for each cause, which is not warned again on its own; none is guessed where the report gives none |
+
+`build_comfy_version_missing` (the spec sets no `baseComfyVersion`) appears in
+`data.warnings[]` of `comfy build init`, `update` and `validate`. It is also
+the error code `comfy build release create` refuses that spec with, so it is
+registered.
+
+Some warning codes registered before this rule, such as `partial_execution`,
+are still listed under `data.error_codes`, because registered codes are never
+removed. Read a code inside `data.warnings[]` as a warning either way.
+
+### Workflow-edit refusal fields
+
+`workflow set-widget` / `set-slot` / `ls-nodes` add these fields for agents:
+
+| Where | Field | Meaning |
+| ----- | ----- | ------- |
+| `unknown_enum_value` finding (the `set-widget` error's `details`, `validate` findings) | `best_match` (str, optional) | The ONE option sharing the rejected value's leading token (`'16:9 (Landscape)'` → `'16:9 (Widescreen)'`). It is also first in `did_you_mean`. It is never auto-applied, and is absent for filenames and ambiguous tokens |
+| `unknown_dynamic_sub_input` warning (`set-slot`) | `revealed_by` (array of str, optional) | The options of the dynamic combo that reveal the requested sub-widget (`model.prompt_expansion_mode` → `["MiniMax H3 Max", "MiniMax H3 Max Turbo"]`). Set the selector to one of them first |
+| `workflow ls-nodes` rows | `ui_only` (true, optional) | A frontend-only node (Reroute, Note, MarkdownNote, PrimitiveNode, GetNode, SetNode). It is readable on the canvas but cannot be added with `add-node` or shown with `nodes show` |
+| `workflow ls-nodes` rows | `subgraph` (true, optional) | A subgraph instance: its `type` is the definition uuid, not a node class |
 
 ### `exception_type` field
 
@@ -615,6 +997,24 @@ are objects in the normal case; treat a non-object item as an opaque message.
 `node_id` is always taken from the payload's own map key, so a server-supplied
 `node_id` field inside a record cannot override it.
 
+### Incomplete model names
+
+`comfy knowledge resolve` resolves declared model ids and aliases. An incomplete
+family/version name such as `Qwen 2.1` still returns `knowledge_unknown_model`
+with exit code 1. When catalog ids or aliases contain the same family word and
+numeric components, in order, `error.details.candidate_ids` lists up to five
+sorted, distinct canonical ids. Omitted words are allowed for suggestions;
+substituted family words and different versions are not.
+Suggestions conservatively skip queries and catalog aliases containing non-ASCII
+letters or numbers rather than discard or normalize those qualifiers. Declared
+id and alias resolution still uses its existing rules.
+
+These are suggestions, even when there is only one. Ask which model is intended,
+then retry `comfy knowledge resolve <exact-id>`. They grant no permission to
+download or run a model. Successful full-name resolution and unknown-name errors
+without candidates retain their existing behavior; `close_matches` remains a
+separate spelling hint.
+
 ## Output object
 
 Entries of `executed.outputs`:
@@ -641,6 +1041,9 @@ should treat the run as failed when **both**:
   empty.
 
 Stderr may contain a Python traceback in these cases.
+
+An exception inside the CLI itself is not one of these. It ends the stream
+with an [`internal_error`](#cli-wide-codes) envelope.
 
 ## Examples
 
@@ -814,3 +1217,23 @@ per-kind error extras moved under `error.details`; stdout is now UTF-8
 (was ASCII-escaped); `--print-prompt` and `--no-wait` streams now end
 with an explicit `ok: true` envelope instead of ending at
 `prompt_preview` / `queued`.
+
+## Stopped release watches
+
+`comfy build release create --watch` polls through `stopping`. On `stopped`, it
+exits 1 with one terminal error envelope whose code is `build_stopped`, including
+when sibling targets are ready or failed. The error details preserve `releaseId`,
+`status: "stopped"` and the received `artifactCounts`. JSON emits only the terminal
+envelope on stdout; NDJSON may emit events before that envelope. Pretty mode
+prints one stopped error instead of a machine envelope.
+
+`comfy build release logs --follow` reads the final log after either `stopped` or
+`complete` and retains its successful log payload and exit 0. If the final
+request returns an unreadable log body, it returns the last whole log instead
+and warns on stderr in machine modes. That payload can omit final lines even
+when its `truncated` field is false; exit 0 does not guarantee the log is final.
+Transport errors still retry and exit 1 when the retry limit is reached.
+
+Release list and show pass through the received states. Older responses without
+a stopped count keep their existing behavior. Authentication loss, transport
+recovery and unknown-status errors retain their existing results.

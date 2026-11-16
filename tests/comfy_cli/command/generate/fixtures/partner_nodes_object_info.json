@@ -334,6 +334,219 @@
     "python_module": "comfy_api_nodes.nodes_bfl",
     "search_aliases": null
   },
+  "Flux2ImageNode": {
+    "input": {
+      "required": {
+        "prompt": [
+          "STRING",
+          {
+            "tooltip": "Prompt for the image generation or edit",
+            "default": "",
+            "multiline": true
+          }
+        ],
+        "model": [
+          "COMFY_DYNAMICCOMBO_V3",
+          {
+            "options": [
+              {
+                "key": "Flux.2 [pro]",
+                "inputs": {
+                  "required": {
+                    "width": [
+                      "INT",
+                      {
+                        "default": 1024,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "height": [
+                      "INT",
+                      {
+                        "default": 768,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "tooltip": "Optional reference image(s) for image-to-image generation. Up to 8 images.",
+                        "template": {
+                          "input": {
+                            "required": {
+                              "image": [
+                                "IMAGE",
+                                {}
+                              ]
+                            }
+                          },
+                          "names": [
+                            "image_1",
+                            "image_2",
+                            "image_3",
+                            "image_4",
+                            "image_5",
+                            "image_6",
+                            "image_7",
+                            "image_8"
+                          ],
+                          "min": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "key": "Flux.2 [max]",
+                "inputs": {
+                  "required": {
+                    "width": [
+                      "INT",
+                      {
+                        "default": 1024,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "height": [
+                      "INT",
+                      {
+                        "default": 768,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "tooltip": "Optional reference image(s) for image-to-image generation. Up to 8 images.",
+                        "template": {
+                          "input": {
+                            "required": {
+                              "image": [
+                                "IMAGE",
+                                {}
+                              ]
+                            }
+                          },
+                          "names": [
+                            "image_1",
+                            "image_2",
+                            "image_3",
+                            "image_4",
+                            "image_5",
+                            "image_6",
+                            "image_7",
+                            "image_8"
+                          ],
+                          "min": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "seed": [
+          "INT",
+          {
+            "tooltip": "The random seed used for creating the noise.",
+            "default": 0,
+            "min": 0,
+            "max": 18446744073709551615,
+            "control_after_generate": true
+          }
+        ]
+      },
+      "hidden": {
+        "auth_token_comfy_org": [
+          "AUTH_TOKEN_COMFY_ORG"
+        ],
+        "api_key_comfy_org": [
+          "API_KEY_COMFY_ORG"
+        ],
+        "unique_id": [
+          "UNIQUE_ID"
+        ],
+        "comfy_usage_source": [
+          "COMFY_USAGE_SOURCE"
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "prompt",
+        "model",
+        "seed"
+      ],
+      "hidden": [
+        "auth_token_comfy_org",
+        "api_key_comfy_org",
+        "unique_id",
+        "comfy_usage_source"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "IMAGE"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "IMAGE"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "Flux2ImageNode",
+    "display_name": "Flux.2 Image",
+    "description": "Generate images via Flux.2 [pro] or Flux.2 [max] from a prompt and optional reference images.",
+    "python_module": "comfy_api_nodes.nodes_bfl",
+    "category": "partner/image/BFL",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": true,
+    "price_badge": {
+      "engine": "jsonata",
+      "depends_on": {
+        "widgets": [
+          {
+            "name": "model",
+            "type": "COMFY_DYNAMICCOMBO_V3"
+          },
+          {
+            "name": "model.width",
+            "type": "INT"
+          },
+          {
+            "name": "model.height",
+            "type": "INT"
+          }
+        ],
+        "inputs": [],
+        "input_groups": [
+          "model.images"
+        ]
+      },
+      "expr": "\n                (\n                  $isMax := widgets.model = \"flux.2 [max]\";\n                  $MP := 1024 * 1024;\n                  $w := $lookup(widgets, \"model.width\");\n                  $h := $lookup(widgets, \"model.height\");\n                  $outMP := $max([1, $floor((($w * $h) + $MP - 1) / $MP)]);\n                  $outputCost := $isMax\n                    ? (0.07 + 0.03 * ($outMP - 1))\n                    : (0.03 + 0.015 * ($outMP - 1));\n                  $refMin := $isMax ? 0.03 : 0.015;\n                  $refMax := $isMax ? 0.24 : 0.12;\n                  $hasRefs := $lookup(inputGroups, \"model.images\") > 0;\n                  $hasRefs\n                    ? {\n                        \"type\": \"range_usd\",\n                        \"min_usd\": $outputCost + $refMin,\n                        \"max_usd\": $outputCost + $refMax,\n                        \"format\": { \"approximate\": true }\n                      }\n                    : {\"type\": \"usd\", \"usd\": $outputCost}\n                )\n                "
+    },
+    "search_aliases": null,
+    "essentials_category": null,
+    "has_intermediate_output": false
+  },
   "FluxProUltraImageNode": {
     "api_node": true,
     "category": "partner/image/BFL",
@@ -626,6 +839,182 @@
       },
       "engine": "jsonata",
       "expr": "{\"type\":\"usd\",\"usd\":0.039,\"format\":{\"suffix\":\"/Image (1K)\",\"approximate\":true}}"
+    },
+    "python_module": "comfy_api_nodes.nodes_gemini",
+    "search_aliases": null
+  },
+  "GeminiImage2Node": {
+    "api_node": true,
+    "category": "partner/image/Gemini",
+    "deprecated": false,
+    "description": "Generate or edit images synchronously via Google Vertex API.",
+    "dev_only": false,
+    "display_name": "Nano Banana Pro (Google Gemini Image)",
+    "essentials_category": null,
+    "experimental": false,
+    "has_intermediate_output": false,
+    "input": {
+      "hidden": {
+        "api_key_comfy_org": [
+          "API_KEY_COMFY_ORG"
+        ],
+        "auth_token_comfy_org": [
+          "AUTH_TOKEN_COMFY_ORG"
+        ],
+        "comfy_usage_source": [
+          "COMFY_USAGE_SOURCE"
+        ],
+        "unique_id": [
+          "UNIQUE_ID"
+        ]
+      },
+      "optional": {
+        "files": [
+          "GEMINI_INPUT_FILES",
+          {}
+        ],
+        "images": [
+          "IMAGE",
+          {}
+        ],
+        "system_prompt": [
+          "STRING",
+          {
+            "advanced": true,
+            "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input—regardless of format, intent, or abstraction—as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+            "multiline": true
+          }
+        ]
+      },
+      "required": {
+        "aspect_ratio": [
+          "COMBO",
+          {
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+              "auto",
+              "1:1",
+              "2:3",
+              "3:2",
+              "3:4",
+              "4:3",
+              "4:5",
+              "5:4",
+              "9:16",
+              "16:9",
+              "21:9"
+            ]
+          }
+        ],
+        "model": [
+          "COMBO",
+          {
+            "multiselect": false,
+            "options": [
+              "gemini-3-pro-image-preview",
+              "Nano Banana 2 (Gemini 3.1 Flash Image)"
+            ]
+          }
+        ],
+        "prompt": [
+          "STRING",
+          {
+            "default": "",
+            "multiline": true
+          }
+        ],
+        "resolution": [
+          "COMBO",
+          {
+            "multiselect": false,
+            "options": [
+              "1K",
+              "2K",
+              "4K"
+            ]
+          }
+        ],
+        "response_modalities": [
+          "COMBO",
+          {
+            "advanced": true,
+            "multiselect": false,
+            "options": [
+              "IMAGE+TEXT",
+              "IMAGE"
+            ]
+          }
+        ],
+        "seed": [
+          "INT",
+          {
+            "control_after_generate": true,
+            "default": 42,
+            "max": 18446744073709551615,
+            "min": 0
+          }
+        ]
+      }
+    },
+    "input_order": {
+      "hidden": [
+        "auth_token_comfy_org",
+        "api_key_comfy_org",
+        "unique_id",
+        "comfy_usage_source"
+      ],
+      "optional": [
+        "images",
+        "files",
+        "system_prompt"
+      ],
+      "required": [
+        "prompt",
+        "model",
+        "seed",
+        "aspect_ratio",
+        "resolution",
+        "response_modalities"
+      ]
+    },
+    "is_input_list": false,
+    "name": "GeminiImage2Node",
+    "output": [
+      "IMAGE",
+      "STRING"
+    ],
+    "output_is_list": [
+      false,
+      false
+    ],
+    "output_matchtypes": null,
+    "output_name": [
+      "IMAGE",
+      "STRING"
+    ],
+    "output_node": false,
+    "output_tooltips": [
+      null,
+      null
+    ],
+    "price_badge": {
+      "depends_on": {
+        "input_groups": [],
+        "inputs": [],
+        "widgets": [
+          {
+            "name": "model",
+            "type": "COMBO"
+          },
+          {
+            "name": "resolution",
+            "type": "COMBO"
+          }
+        ]
+      },
+      "engine": "jsonata",
+      "expr": "\n    (\n      $m := widgets.model;\n      $r := widgets.resolution;\n      $isFlash := $contains($m, \"nano banana 2\");\n      $flashPrices := {\"1k\": 0.0835, \"2k\": 0.1217, \"4k\": 0.1848};\n      $proPrices := {\"1k\": 0.1608, \"2k\": 0.1608, \"4k\": 0.288};\n      $prices := $isFlash ? $flashPrices : $proPrices;\n      {\"type\":\"usd\",\"usd\": $lookup($prices, $r), \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n    )\n    "
     },
     "python_module": "comfy_api_nodes.nodes_gemini",
     "search_aliases": null

@@ -21,7 +21,6 @@ to today's.
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 from test_workflow_edit import (  # type: ignore[import-not-found]
@@ -122,7 +121,7 @@ class TestAckDefaultUnchanged:
         """`--ack full` must be byte-identical to today's default payload.
 
         Soundness of the assertion: node ids (`mint_id`, `random.getrandbits`)
-        and op ids (`uuid.uuid4`) are the ONLY nondeterminism in the apply
+        and op ids (`_new_op_id`) are the ONLY nondeterminism in the apply
         path (layout is documented "no randomness, no clock"; the CRDT stamp
         is [base_version, actor]). We pin both to counters, run the same batch
         on the same file path twice — resetting the file content and the
@@ -138,18 +137,12 @@ class TestAckDefaultUnchanged:
             state["node"] += 1
             return (1 << 40) + state["node"]
 
-        class _FakeUUID:
-            def __init__(self, n: int):
-                self.hex = f"{n:032x}"
-
-        class _FakeUuidModule:
-            @staticmethod
-            def uuid4() -> Any:
-                state["op"] += 1
-                return _FakeUUID(state["op"])
+        def fake_op_id() -> str:
+            state["op"] += 1
+            return f"{state['op']:032x}"
 
         monkeypatch.setattr(workflow_ops, "mint_id", fake_mint)
-        monkeypatch.setattr(workflow_ops, "uuid", _FakeUuidModule)
+        monkeypatch.setattr(workflow_ops, "_new_op_id", fake_op_id)
 
         initial = json.dumps({"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}, indent=2)
         path = tmp_path / "wf.json"
@@ -186,6 +179,32 @@ class TestAckDefaultUnchanged:
 
 
 class TestAckSummaryPartialFailure:
+    def test_ack_summary_not_batchable_reports_index_and_code(self, patched_graph, tmp_path, capsys):
+        path = _empty(tmp_path)
+        ops_path = _ops_file(tmp_path, [{"op": "insert_workflow", "workflow": {}}])
+
+        env = _run(["apply", str(path), "--ops", str(ops_path), "--ack", "summary"], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert env["error"]["details"] == {
+            "failed": {
+                "index": 0,
+                "op": "insert_workflow",
+                "code": "workflow_insert_workflow_not_batchable",
+            },
+            "applied_count": 0,
+        }
+
+    def test_full_mode_not_batchable_failure_envelope_unchanged(self, patched_graph, tmp_path, capsys):
+        path = _empty(tmp_path)
+        ops_path = _ops_file(tmp_path, [{"op": "insert_workflow", "workflow": {}}])
+
+        env = _run(["apply", str(path), "--ops", str(ops_path)], capsys)
+
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert env["error"]["details"] is None
+
     def test_ack_summary_partial_failure_reports_index_and_code(self, patched_graph, tmp_path, capsys):
         """Op 2 of 3 (0-based index 1) fails → same code/atomicity as full
         mode, plus a structured receipt: failed.{index,op,code} + applied_count.

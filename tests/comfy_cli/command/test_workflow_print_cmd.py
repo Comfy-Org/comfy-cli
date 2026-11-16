@@ -119,6 +119,15 @@ def test_print_pretty_prints_source_verbatim(capsys):
     assert "ksampler = KSampler(" in result.output and "  # 3" in result.output
 
 
+def test_print_format_json_in_pretty_mode_prints_the_records():
+    _force_pretty_renderer()
+    result = CliRunner().invoke(workflow_cmd.app, ["print", str(SD15), "--input", str(SD15_OI), "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert "ksampler = KSampler(" in result.output
+    records = json.loads(result.output[result.output.index("\n[") + 1 :])
+    assert {r["id"] for r in records} == {"3", "4", "5", "6", "7", "8", "9"}
+
+
 def test_print_select_in_pretty_mode_prints_only_the_selection():
     _force_pretty_renderer()
     result = CliRunner().invoke(workflow_cmd.app, ["print", str(SD15), "--input", str(SD15_OI), "--select", "bindings"])
@@ -173,16 +182,15 @@ def test_print_unsupported_lists_reasons(tmp_path, capsys):
     }
     env = _run(["print", str(_write_workflow(tmp_path, wf)), "--input", str(SD15_OI)], capsys, expect_ok=False)
     assert env["error"]["code"] == "workflow_print_unsupported"
-    assert env["error"]["details"]["reasons"] == [
-        "node 1 is a legacy group node (workflow>Grp)",
-        "link 7 references missing node 99",
-    ]
+    # A broken link is rendered and marked, never a refusal; the legacy group
+    # node still is.
+    assert env["error"]["details"]["reasons"] == ["node 1 is a legacy group node (workflow>Grp)"]
 
 
 def test_print_rejects_unknown_format(capsys):
-    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "json"], capsys, expect_ok=False)
+    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "yaml"], capsys, expect_ok=False)
     assert env["error"]["code"] == "workflow_print_unsupported"
-    assert env["error"]["details"]["reasons"] == ["format 'json'"]
+    assert env["error"]["details"]["reasons"] == ["format 'yaml'"]
 
 
 def test_print_payload_validates_against_schema(capsys):
@@ -200,3 +208,48 @@ def test_print_help_mentions_only_real_commands():
     from comfy_cli.help_json import HELP_EXAMPLES
 
     assert "comfy workflow print" in HELP_EXAMPLES
+
+
+def test_print_renders_a_stale_input_slot_link_and_reports_it(tmp_path, capsys):
+    """A link whose target input slot is gone is reported in `warnings`, not a refusal."""
+    wf = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "EmptyLatentImage",
+                "inputs": [],
+                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [1]}],
+                "widgets_values": [512, 512, 1],
+            },
+            {
+                "id": 2,
+                "type": "VAEDecode",
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": 1},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "LATENT"], [7, 1, 0, 2, 6, "LATENT"]],
+        "version": 0.4,
+    }
+    env = _run(["print", str(_write_workflow(tmp_path, wf)), "--input", str(SD15_OI)], capsys)
+    d = env["data"]
+    assert d["node_count"] == 2
+    assert "samples=empty_latent_image" in d["source"]
+    assert d["warnings"] == [
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; a leftover row — input 'samples' already gets "
+        "that value from node 1 output 0 through another link, so nothing needs re-wiring"
+    ]
+
+
+def test_print_json_payload_validates_against_schema(capsys):
+    import jsonschema
+
+    schema = json.loads((Path(workflow_cmd.__file__).parent.parent / "schemas" / "workflow.json").read_text())
+    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "json"], capsys)
+    assert env["data"]["format"] == "json"
+    assert {n["id"] for n in env["data"]["nodes"]} == set(env["data"]["bindings"].values())
+    jsonschema.Draft202012Validator(schema).validate(env["data"])

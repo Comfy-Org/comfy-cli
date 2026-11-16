@@ -6,14 +6,13 @@ ComfyUI expresses a multi-type input as a comma-separated union
 whole strings, so a FILE_3D_GLB output was refused by an input that explicitly
 accepts FILE_3D_GLB.
 
-Measured on prod comfy-agent traces (2026-07-23 → 07-28): ~23 connect/apply_ops
-failures of this exact shape, e.g.
+connect/apply_ops could fail with errors of this shape, e.g.
 
-  type mismatch: FILE_3D_GLB output of node 4318783979958460 cannot connect to
+  type mismatch: FILE_3D_GLB output of node 4 cannot connect to
   MESH,FILE_3D_GLB,FILE_3D_GLTF,FILE_3D_OBJ,FILE_3D_FBX,FILE_3D_STL,FILE_3D_USDZ,
-  ... input 'mesh' of node 2451178264782280
+  ... input 'mesh' of node 7
 
-  type mismatch: FILE_3D output of node 890530584279986 cannot connect to
+  type mismatch: FILE_3D output of node 3 cannot connect to
   FILE_3D_GLB,FILE_3D_FBX,FILE_3D_OBJ,FILE_3D_STL,FILE_3D input 'model_3d' of ...
 
 Both name the source type inside the accepted list, so the agent reads the hint,
@@ -65,8 +64,8 @@ def graph() -> Graph:
 @pytest.mark.parametrize(
     "out_type,in_type",
     [
-        ("FILE_3D_GLB", MESH_UNION),  # prod: Load3D GLB -> mesh
-        ("FILE_3D", MODEL3D_UNION),  # prod: Load3D FILE_3D -> model_3d
+        ("FILE_3D_GLB", MESH_UNION),  # e.g. Load3D GLB -> mesh
+        ("FILE_3D", MODEL3D_UNION),  # e.g. Load3D FILE_3D -> model_3d
         ("MESH", MESH_UNION),  # first member of the union
         ("FILE_3D", MESH_UNION),  # last member of the union
     ],
@@ -91,3 +90,26 @@ def test_connect_union_matching_is_not_substring_based(graph):
     wf = _wf("FILE_3D_GL", "FILE_3D_GLTF,FILE_3D_GLB")
     with pytest.raises(ValueError, match="type mismatch"):
         workflow_ops.connect(wf, graph, 1, "OUT", 2, "slot")
+
+
+@pytest.mark.parametrize(
+    "out_type,in_type",
+    [
+        ("IMAGE", "COMFY_MATCHTYPE_V3"),  # e.g. LoadImage -> ResizeImageMaskNode.input
+        ("MASK", "COMFY_MATCHTYPE_V3"),
+        ("COMFY_MATCHTYPE_V3", "IMAGE"),  # and back out: .resized -> PreviewImage.images
+        ("COMFY_MATCHTYPE_V3", MESH_UNION),
+    ],
+)
+def test_connect_accepts_a_matchtype_slot_on_either_end(graph, out_type, in_type):
+    """`COMFY_MATCHTYPE_V3` is a wildcard that takes the type of whatever is
+    wired to it — the validator has always read it that way
+    (`_WILDCARD_TYPE_PREFIX`), but the connect gate had its own type test that
+    knew only `*`. Both directions were refused, so no node using a match-type
+    socket could be wired at all: an end-to-end run against the live agent
+    could not build a ResizeImageMaskNode graph by any route.
+    """
+    wf = _wf(out_type, in_type)
+    wf, op = workflow_ops.connect(wf, graph, 1, "OUT", 2, "slot")
+    assert op["op"] == "connect"
+    assert wf["nodes"][1]["inputs"][0]["link"] is not None, "the link must be wired"

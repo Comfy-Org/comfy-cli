@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
-from build_auth_support import BUILD_ID, RecordingTransport, write_snapshot
+from build_auth_support import BUILD_ID, RELEASE_ID, RecordingTransport, write_snapshot
 from build_push_support import make_workspace, write_spec
 from build_tree_support import leaf_commands
 from deploy_auth_support import (
@@ -53,16 +53,19 @@ class FixtureKind(Enum):
     VALIDATE_REMOTE_LOOKUP = "validate --remote (lookupable)"
     PUSH = "push"
     PUSH_DRY_RUN = "push --dry-run"
+    PUSH_DRY_RUN_PINNED = "push --dry-run (public pins)"
     PULL = "pull"
     STATUS = "status"
     LS = "ls"
     SHOW = "show"
+    QUOTA = "quota"
     DELETE = "delete"
     RELEASE_CREATE = "release create"
     RELEASE_LS = "release ls"
     RELEASE_SHOW = "release show"
     RELEASE_LOGS = "release logs"
     RELEASE_MANIFEST = "release manifest"
+    RELEASE_DELETE = "release delete"
     REFS_RESOLVE = "refs resolve"
     REFS_BASE_IMAGES = "refs base-images"
     REFS_BUILD_TARGETS = "refs build-targets"
@@ -89,20 +92,27 @@ BUILD_AUTH_CASES = (
     BuildAuthCase(FixtureKind.VALIDATE, "validate", False, _ZERO),
     BuildAuthCase(FixtureKind.INIT_SNAPSHOT, "init", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.UPDATE_SNAPSHOT, "update", True, _ONE_PLUS),
-    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 0),
-    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 1),
+    # One call each for the builder's model directories, which a spec with models reads
+    # to tell a case variant of a folder from a new one; the lookups come after it.
+    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_ZERO, "validate", True, _ZERO_PLUS, 1),
+    BuildAuthCase(FixtureKind.VALIDATE_REMOTE_LOOKUP, "validate", True, _ZERO_PLUS, 2),
     BuildAuthCase(FixtureKind.PUSH, "push", True, _ONE_PLUS),
+    # A dry run asks the builder only to place the spec's public pins, the read the
+    # push makes before it saves, so a spec without one stays signed out and silent.
     BuildAuthCase(FixtureKind.PUSH_DRY_RUN, "push", False, _ZERO),
+    BuildAuthCase(FixtureKind.PUSH_DRY_RUN_PINNED, "push", True, _ONE_PLUS, 1),
     BuildAuthCase(FixtureKind.PULL, "pull", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.STATUS, "status", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.LS, "ls", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.SHOW, "show", True, _ONE_PLUS),
+    BuildAuthCase(FixtureKind.QUOTA, "quota", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.DELETE, "delete", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_CREATE, "release create", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_LS, "release ls", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_SHOW, "release show", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_LOGS, "release logs", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_MANIFEST, "release manifest", True, _ONE_PLUS),
+    BuildAuthCase(FixtureKind.RELEASE_DELETE, "release delete", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_RESOLVE, "refs resolve", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_BASE_IMAGES, "refs base-images", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_BUILD_TARGETS, "refs build-targets", True, _ONE_PLUS),
@@ -161,6 +171,15 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
         case FixtureKind.PUSH_DRY_RUN:
             write_spec(root, models=[], nodes=[])
             return ["build", "push", "--dry-run", str(root)]
+        case FixtureKind.PUSH_DRY_RUN_PINNED:
+            write_spec(
+                root,
+                models=[],
+                nodes=[
+                    {"name": "registry-node", "id": "registry-node", "registryVersion": "1.0.0", "source": "registry"}
+                ],
+            )
+            return ["build", "push", "--dry-run", str(root)]
         case FixtureKind.PULL:
             write_spec(root, models=[], nodes=[])
             return ["build", "pull", "-y", "--id", BUILD_ID, str(root)]
@@ -171,6 +190,8 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
             return ["build", "ls"]
         case FixtureKind.SHOW:
             return ["build", "show", "--id", BUILD_ID]
+        case FixtureKind.QUOTA:
+            return ["build", "quota"]
         case FixtureKind.DELETE:
             return ["build", "delete", "-y", "--id", BUILD_ID]
         case FixtureKind.RELEASE_CREATE:
@@ -183,6 +204,8 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
             return ["build", "release", "logs", "--id", BUILD_ID, "--target", "linux/nvidia"]
         case FixtureKind.RELEASE_MANIFEST:
             return ["build", "release", "manifest", "--id", BUILD_ID]
+        case FixtureKind.RELEASE_DELETE:
+            return ["build", "release", "delete", RELEASE_ID, "-y"]
         case FixtureKind.REFS_RESOLVE:
             return ["build", "refs", "resolve", "base.safetensors"]
         case FixtureKind.REFS_BASE_IMAGES:
@@ -207,6 +230,7 @@ def _invoke(args: list[str], token: str | None):
             "NO_COLOR": "1",
             "COMFY_BUILDER_TOKEN": token,
             "COMFY_BUILDER_URL": "https://builder.test",
+            "COMFY_DEPLOY_URL": "https://control.test",
         },
     )
 
@@ -232,6 +256,9 @@ def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: p
     # Given
     recorder = RecordingTransport()
     monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    # `quota` also reads comfy-deploy, with the deploy commands' credential.
+    control = DeployRecordingTransport()
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", control)
 
     if case.requires_session:
         # When
@@ -241,6 +268,11 @@ def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: p
         assert signed_out.exit_code == 1
         assert _error_code(signed_out) == "build_not_signed_in"
         assert recorder.calls == []
+        assert control.calls == []
+
+    if case.fixture is FixtureKind.QUOTA:
+        # COMFY_BUILDER_TOKEN reaches the builder only; the deploy read signs in as `comfy deploy` does.
+        monkeypatch.setattr("comfy_cli.credentials.get_session", lambda *args, **kwargs: session("tok_test"))
 
     # When
     result = _invoke(_prepare(case.fixture, tmp_path / "signed-in"), "tok_test" if case.requires_session else None)
@@ -248,6 +280,8 @@ def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: p
     # Then
     assert result.exit_code == 0, result.stderr
     _assert_call_expectation(case.calls, len(recorder.calls))
+    if case.fixture is FixtureKind.QUOTA:
+        assert control.calls
     if case.exercised_calls is not None:
         assert len(recorder.calls) == case.exercised_calls
 

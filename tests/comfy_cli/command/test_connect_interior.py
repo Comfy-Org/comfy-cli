@@ -1,0 +1,559 @@
+"""`workflow connect` between two nodes INSIDE one subgraph definition.
+
+When interior links of a subgraph point at an input slot their target nodes
+no longer have, the inputs they should feed sit empty. The repair is a
+re-wire inside the definition (`70/2005.0` -> `70/2011.text_prompt`), but
+connect used to refuse every interior address ("a link cannot cross a
+subgraph boundary").
+
+A link between two interior nodes of the same definition crosses no
+boundary. connect now wires it and emits a `connect` op carrying the
+instance `path`, the shape the doc host's applier (comfy-multi-player
+applyInteriorConnect) already accepts. Crossing a boundary is still refused.
+"""
+
+from __future__ import annotations
+
+import copy
+
+import pytest
+from test_workflow_edit import (  # type: ignore[import-not-found]
+    _object_info,
+    _run,
+    _write,
+    reset_singleton,  # noqa: F401  (autouse fixture)
+)
+
+from comfy_cli import workflow_ops
+from comfy_cli.command import workflow_edit
+from comfy_cli.cql.engine import Graph
+
+SG = "5a1c362b-0000-4000-8000-000000000070"
+
+
+def _graph() -> Graph:
+    info = copy.deepcopy(_object_info())
+    info["StringSource"] = {
+        "input": {"required": {"value": ["STRING", {"default": ""}]}},
+        "input_order": {"required": ["value"]},
+        "output": ["STRING"],
+        "output_name": ["STRING"],
+        "category": "utils",
+        "display_name": "String Source",
+        "output_node": False,
+        "python_module": "nodes",
+    }
+    return Graph.from_object_info(info)
+
+
+@pytest.fixture(autouse=True)
+def patched_graph(monkeypatch):
+    monkeypatch.setattr(workflow_edit, "_get_graph", lambda *a, **kw: _graph())
+
+
+def _workflow(instances: int = 1) -> dict:
+    nodes = [{"id": 70 + i, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []} for i in range(instances)]
+    return {
+        "last_node_id": 80,
+        "last_link_id": 0,
+        "nodes": nodes,
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": SG,
+                    "name": "Region prompts",
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 2005,
+                            "type": "StringSource",
+                            "inputs": [{"name": "value", "type": "STRING", "widget": {"name": "value"}, "link": None}],
+                            "outputs": [{"name": "STRING", "type": "STRING", "links": [9001]}],
+                            "widgets_values": ["a red car"],
+                        },
+                        {
+                            "id": 2011,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": None},
+                            ],
+                            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": []}],
+                            "widgets_values": [""],
+                        },
+                        {
+                            "id": 2012,
+                            "type": "CheckpointLoaderSimple",
+                            "inputs": [],
+                            "outputs": [
+                                {"name": "MODEL", "type": "MODEL", "links": []},
+                                {"name": "CLIP", "type": "CLIP", "links": []},
+                                {"name": "VAE", "type": "VAE", "links": []},
+                            ],
+                            "widgets_values": ["a.safetensors"],
+                        },
+                    ],
+                    # The stale row: aimed at input slot 6, which 2011 does not have.
+                    "links": [
+                        {
+                            "id": 9001,
+                            "origin_id": 2005,
+                            "origin_slot": 0,
+                            "target_id": 2011,
+                            "target_slot": 6,
+                            "type": "STRING",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+
+def _sg(wf: dict) -> dict:
+    return wf["definitions"]["subgraphs"][0]
+
+
+def _node(wf: dict, nid: int) -> dict:
+    return next(n for n in _sg(wf)["nodes"] if n["id"] == nid)
+
+
+def test_connect_two_interior_nodes_wires_inside_the_definition(tmp_path, capsys):
+    path = _write(tmp_path, _workflow())
+    env = _run(["connect", str(path), "70/2005.STRING", "70/2011.text"], capsys)
+    assert env["ok"] is True, env
+    op = env["data"]["op"]
+    assert op["op"] == "connect"
+    assert op["path"] == ["70"]
+    assert (str(op["from_node"]), op["from_slot"], str(op["to_node"]), op["to_slot"]) == ("2005", 0, "2011", 1)
+    assert op["link_type"] == "STRING"
+    import json
+
+    wf = json.loads(path.read_text())
+    link_id = op["link_id"]
+    assert _node(wf, 2011)["inputs"][1]["link"] == link_id
+    assert link_id in _node(wf, 2005)["outputs"][0]["links"]
+    row = next(lk for lk in _sg(wf)["links"] if lk["id"] == link_id)
+    assert (row["origin_id"], row["origin_slot"], row["target_id"], row["target_slot"]) == (2005, 0, 2011, 1)
+    # Top level untouched.
+    assert wf["links"] == []
+
+
+def test_interior_connect_into_a_link_input_by_slot_name(tmp_path, capsys):
+    path = _write(tmp_path, _workflow())
+    env = _run(["connect", str(path), "70/2012.CLIP", "70/2011.clip"], capsys)
+    assert env["ok"] is True, env
+    assert env["data"]["op"]["to_slot"] == 0
+
+
+def test_interior_connect_replaces_the_incumbent_link(tmp_path, capsys):
+    import json
+
+    path = _write(tmp_path, _workflow())
+    first = _run(["connect", str(path), "70/2005.STRING", "70/2011.text", "--base-version", "1"], capsys)
+    second = _run(["connect", str(path), "70/2005.STRING", "70/2011.text", "--base-version", "2"], capsys)
+    first_id, second_id = first["data"]["op"]["link_id"], second["data"]["op"]["link_id"]
+    wf = json.loads(path.read_text())
+    ids = [lk["id"] for lk in _sg(wf)["links"]]
+    assert second_id in ids and first_id not in ids
+    assert _node(wf, 2011)["inputs"][1]["link"] == second_id
+    assert first_id not in _node(wf, 2005)["outputs"][0]["links"]
+
+
+def test_disconnect_interior_link_removes_both_endpoint_references(tmp_path, capsys):
+    import json
+
+    path = _write(tmp_path, _workflow())
+    connected = _run(["connect", str(path), "70/2005.STRING", "70/2011.text"], capsys)
+    link_id = connected["data"]["op"]["link_id"]
+
+    disconnected = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert disconnected["ok"] is True, disconnected
+    op = disconnected["data"]["op"]
+    assert op["path"] == ["70"]
+    assert (str(op["to_node"]), op["to_slot"], op["link_id"]) == ("2011", 1, link_id)
+    wf = json.loads(path.read_text())
+    assert link_id not in [link["id"] for link in _sg(wf)["links"]]
+    assert _node(wf, 2011)["inputs"][1]["link"] is None
+    assert link_id not in _node(wf, 2005)["outputs"][0]["links"]
+
+
+def test_interior_disconnect_op_replays_to_the_same_document():
+    base = _workflow()
+    graph = _graph()
+    wired, _ = workflow_ops.connect(copy.deepcopy(base), graph, "70/2005", "STRING", "70/2011", "text")
+    out, op = workflow_ops.disconnect(copy.deepcopy(wired), graph, "70/2011", "text")
+
+    replayed = workflow_ops.apply_op(copy.deepcopy(wired), op, graph)
+
+    assert replayed["definitions"] == out["definitions"]
+    assert workflow_ops._write_target(op) == ("input", ("70",), "2011", 1)
+
+
+def test_delete_interior_node_removes_it_and_its_definition_links(tmp_path, capsys):
+    import json
+
+    base = _workflow()
+    base["definitions"]["subgraphs"][0]["links"].append(
+        {"id": 9002, "origin_id": 2012, "origin_slot": 1, "target_id": 2011, "target_slot": 0, "type": "CLIP"}
+    )
+    _node(base, 2012)["outputs"][1]["links"] = [9002]
+    _node(base, 2011)["inputs"][0]["link"] = 9002
+    path = _write(tmp_path, base)
+
+    env = _run(["delete-node", str(path), "70/2012"], capsys)
+
+    assert env["ok"] is True, env
+    op = env["data"]["op"]
+    assert op["path"] == ["70"]
+    assert op["node_id"] == 2012
+    assert op["removed_links"] == [9002]
+    result = json.loads(path.read_text())
+    assert [node["id"] for node in _sg(result)["nodes"]] == [2005, 2011]
+    assert [link["id"] for link in _sg(result)["links"]] == [9001]
+    assert _node(result, 2011)["inputs"][0]["link"] is None
+    assert result["nodes"][0]["id"] == 70
+
+
+def test_delete_interior_node_scrubs_its_links_from_the_boundary_slots(tmp_path, capsys):
+    import json
+
+    base = _workflow()
+    sg = _sg(base)
+    sg["inputs"] = [{"id": "in-clip", "name": "clip", "type": "CLIP", "linkIds": [9101, 9103]}]
+    sg["outputs"] = [{"id": "out-cond", "name": "CONDITIONING", "type": "CONDITIONING", "linkIds": [9102]}]
+    sg["links"] += [
+        {"id": 9101, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 0, "type": "CLIP"},
+        {"id": 9102, "origin_id": 2011, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "CONDITIONING"},
+        # The same boundary input also feeds a surviving node; that id must stay.
+        {"id": 9103, "origin_id": -10, "origin_slot": 0, "target_id": 2005, "target_slot": 0, "type": "CLIP"},
+    ]
+    _node(base, 2011)["inputs"][0]["link"] = 9101
+    _node(base, 2011)["outputs"][0]["links"] = [9102]
+    _node(base, 2005)["inputs"][0]["link"] = 9103
+    path = _write(tmp_path, base)
+
+    env = _run(["delete-node", str(path), "70/2011"], capsys)
+
+    assert env["ok"] is True, env
+    result = _sg(json.loads(path.read_text()))
+    assert result["inputs"][0]["linkIds"] == [9103]
+    assert result["outputs"][0]["linkIds"] == []
+    assert [link["id"] for link in result["links"]] == [9103]
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), env["data"]["op"], _graph())
+    assert _sg(replayed)["inputs"] == result["inputs"]
+    assert _sg(replayed)["outputs"] == result["outputs"]
+
+
+def test_delete_interior_node_refuses_a_promoted_widget_source_without_writing(tmp_path, capsys):
+    base = _workflow()
+    sg = _sg(base)
+    sg["inputs"] = [{"id": "in-text", "name": "prompt", "type": "STRING", "linkIds": [9101]}]
+    sg["links"].append(
+        {"id": 9101, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(base, 2011)["inputs"][1]["link"] = 9101
+    legacy = copy.deepcopy(_workflow())
+    legacy["nodes"][0]["properties"] = {"proxyWidgets": [["2012", "ckpt_name"]]}
+
+    for workflow, target in ((base, "70/2011"), (legacy, "70/2012")):
+        path = _write(tmp_path, workflow)
+        before = path.read_bytes()
+
+        env = _run(["delete-node", str(path), target], capsys)
+
+        assert env["ok"] is False, env
+        assert "backs the promoted widget" in env["error"]["message"]
+        assert path.read_bytes() == before
+
+
+def test_interior_set_widget_after_interior_delete_is_a_no_op_in_either_order():
+    base = _workflow()
+    graph = _graph()
+    _, delete = workflow_ops.delete_node(copy.deepcopy(base), graph, "70/2012", actor="a", base_version=1)
+    _, write = workflow_ops.set_widget(copy.deepcopy(base), graph, "70/2012", "ckpt_name", "b.safetensors", actor="b")
+
+    results = []
+    for ops in ((delete, write), (write, delete)):
+        doc = copy.deepcopy(base)
+        for op in ops:
+            workflow_ops.apply_op(doc, copy.deepcopy(op), graph)
+        results.append(doc["definitions"])
+
+    assert results[0] == results[1]
+    assert [node["id"] for node in _sg({"definitions": results[0]})["nodes"]] == [2005, 2011]
+
+
+def test_interior_delete_op_replays_to_the_same_document():
+    base = _workflow()
+    graph = _graph()
+    out, op = workflow_ops.delete_node(copy.deepcopy(base), graph, "70/2012", actor="agent", base_version=4)
+
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), copy.deepcopy(op), graph)
+
+    assert replayed["definitions"] == out["definitions"]
+    assert workflow_ops._write_target(op) == ("node", ("70",), "2012")
+
+
+def test_delete_interior_node_refuses_a_shared_definition_without_writing(tmp_path, capsys):
+    path = _write(tmp_path, _workflow(instances=2))
+    before = path.read_bytes()
+
+    env = _run(["delete-node", str(path), "70/2012"], capsys)
+
+    assert env["ok"] is False
+    assert "shares its definition" in env["error"]["message"]
+    assert path.read_bytes() == before
+
+
+def test_interior_grown_reconnect_and_disconnect_share_path_register():
+    base = _workflow()
+    _node(base, 2011)["inputs"][1]["grow_id"] = 7001
+    wired, reconnect = workflow_ops.connect(
+        copy.deepcopy(base),
+        _graph(),
+        "70/2005",
+        "STRING",
+        "70/2011",
+        "text",
+        actor="agent",
+        base_version=5,
+    )
+    _, disconnect = workflow_ops.disconnect(
+        copy.deepcopy(wired),
+        _graph(),
+        "70/2011",
+        "text",
+        actor="human",
+        base_version=9,
+    )
+
+    assert reconnect["grow_id"] == disconnect["grow_id"] == 7001
+    target = ("input", ("70",), "2011", "grow_id", 7001)
+    assert workflow_ops._write_target(reconnect) == target
+    assert workflow_ops._write_target(disconnect) == target
+    results = []
+    for order in ((reconnect, disconnect), (disconnect, reconnect)):
+        result = copy.deepcopy(base)
+        for op in order:
+            workflow_ops.apply_op(result, copy.deepcopy(op), _graph())
+        results.append(result)
+    assert workflow_ops.canonical(results[0]) == workflow_ops.canonical(results[1])
+    assert _node(results[0], 2011)["inputs"][1]["link"] is None
+
+
+def test_interior_grown_disconnect_follows_identity_after_slot_shift():
+    base = _workflow()
+    _node(base, 2011)["inputs"][1]["grow_id"] = 7001
+    wired, _ = workflow_ops.connect(
+        copy.deepcopy(base), _graph(), "70/2005", "STRING", "70/2011", "text", base_version=5
+    )
+    _, disconnect = workflow_ops.disconnect(copy.deepcopy(wired), _graph(), "70/2011", "text", base_version=9)
+    link_id = disconnect["link_id"]
+    shifted = copy.deepcopy(wired)
+    _node(shifted, 2011)["inputs"].insert(0, {"name": "new", "type": "STRING", "link": None})
+    for link in _sg(shifted)["links"]:
+        if link["id"] == link_id:
+            link["target_slot"] = 2
+
+    workflow_ops.apply_op(shifted, disconnect, _graph())
+
+    assert _node(shifted, 2011)["inputs"][0]["link"] is None
+    grown = next(inp for inp in _node(shifted, 2011)["inputs"] if inp.get("grow_id") == 7001)
+    assert grown["link"] is None
+    assert link_id not in [link["id"] for link in _sg(shifted)["links"]]
+
+
+def test_disconnect_interior_link_from_boundary_is_refused(tmp_path, capsys):
+    wf = _workflow()
+    sg = _sg(wf)
+    sg["inputs"] = [{"id": "in-1", "name": "prompt", "type": "STRING", "linkIds": [8001]}]
+    sg["links"].append(
+        {"id": 8001, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(wf, 2011)["inputs"][1]["link"] = 8001
+    path = _write(tmp_path, wf)
+
+    env = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert env["ok"] is False
+    assert "crosses the subgraph boundary" in env["error"]["message"]
+
+
+def test_disconnect_shared_interior_definition_is_refused(tmp_path, capsys):
+    wf = _workflow(instances=2)
+    _node(wf, 2011)["inputs"][1]["link"] = 9001
+    path = _write(tmp_path, wf)
+
+    env = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert env["ok"] is False
+    assert "2 instances" in env["error"]["message"]
+
+
+def test_disconnect_legacy_name_keyed_shared_definition_is_refused(tmp_path, capsys):
+    wf = _workflow(instances=2)
+    definition = _sg(wf)
+    definition.pop("id")
+    definition["name"] = "Legacy region prompts"
+    for host in wf["nodes"]:
+        host["type"] = definition["name"]
+    _node(wf, 2011)["inputs"][1]["link"] = 9001
+    definition["links"][0]["target_slot"] = 1
+    path = _write(tmp_path, wf)
+
+    env = _run(["disconnect", str(path), "70/2011.text"], capsys)
+
+    assert env["ok"] is False
+    assert "2 instances" in env["error"]["message"]
+
+
+def test_replayed_disconnect_refuses_a_definition_that_became_shared():
+    graph = _graph()
+    wired, _ = workflow_ops.connect(copy.deepcopy(_workflow()), graph, "70/2005", "STRING", "70/2011", "text")
+    _, disconnect = workflow_ops.disconnect(copy.deepcopy(wired), graph, "70/2011", "text", base_version=9)
+    shared = copy.deepcopy(wired)
+    shared["nodes"].append({"id": 71, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []})
+
+    workflow_ops.apply_op(shared, disconnect, graph)
+
+    assert _node(shared, 2011)["inputs"][1]["link"] == disconnect["link_id"]
+
+
+def test_replayed_disconnect_does_not_remove_a_new_boundary_link():
+    graph = _graph()
+    wired, _ = workflow_ops.connect(copy.deepcopy(_workflow()), graph, "70/2005", "STRING", "70/2011", "text")
+    _, disconnect = workflow_ops.disconnect(copy.deepcopy(wired), graph, "70/2011", "text", base_version=9)
+    definition = _sg(wired)
+    link = next(row for row in definition["links"] if row["id"] == disconnect["link_id"])
+    link["origin_id"] = -10
+    definition["inputs"] = [{"id": "in-1", "name": "prompt", "type": "STRING", "linkIds": [disconnect["link_id"]]}]
+
+    workflow_ops.apply_op(wired, disconnect, graph)
+
+    assert _node(wired, 2011)["inputs"][1]["link"] == disconnect["link_id"]
+    assert disconnect["link_id"] in definition["inputs"][0]["linkIds"]
+
+
+def test_interior_connect_type_mismatch_is_refused(tmp_path, capsys):
+    path = _write(tmp_path, _workflow())
+    env = _run(["connect", str(path), "70/2012.MODEL", "70/2011.clip"], capsys)
+    assert env["ok"] is False
+    assert "type mismatch" in env["error"]["message"]
+
+
+def test_crossing_the_boundary_is_still_refused(tmp_path, capsys):
+    wf = _workflow()
+    wf["nodes"].append(
+        {"id": 9, "type": "EmptyLatentImage", "inputs": [], "outputs": [{"name": "LATENT", "type": "LATENT"}]}
+    )
+    path = _write(tmp_path, wf)
+    env = _run(["connect", str(path), "9.LATENT", "70/2011.text"], capsys)
+    assert env["ok"] is False
+    assert "inside subgraph 70" in env["error"]["message"]
+
+
+def test_a_shared_definition_is_refused(tmp_path, capsys):
+    path = _write(tmp_path, _workflow(instances=2))
+    env = _run(["connect", str(path), "70/2005.STRING", "70/2011.text"], capsys)
+    assert env["ok"] is False
+    assert "2 instances" in env["error"]["message"]
+
+
+def test_the_op_replays_to_the_same_document():
+    wf = _workflow()
+    graph = _graph()
+    out, op = workflow_ops.connect(copy.deepcopy(wf), graph, "70/2005", "STRING", "70/2011", "text")
+    replayed = workflow_ops.apply_op(copy.deepcopy(wf), op, graph)
+    assert replayed["definitions"] == out["definitions"]
+    assert workflow_ops._write_target(op) == ("input", ("70",), "2011", 1)
+
+
+def test_print_before_and_after_the_rewire():
+    """Before: print names the stale row and the exact re-wire. After: the
+    interior input renders from its source and the row is called a harmless
+    leftover, so a caller is not sent round the loop again."""
+    from comfy_cli.workflow_print import render_py
+
+    wf = _workflow()
+    graph = _graph()
+    before = render_py(copy.deepcopy(wf), graph)
+    (stale,) = [w for w in before.warnings if "link 9001" in w]
+    assert "`connect 70/2005.0 70/2011.<input>`" in stale
+    out, _op = workflow_ops.connect(wf, graph, "70/2005", "STRING", "70/2011", "text")
+    after = render_py(out, graph)
+    (leftover,) = [w for w in after.warnings if "link 9001" in w]
+    assert "nothing needs re-wiring" in leftover and "'text'" in leftover
+    assert "text=string_source" in after.source
+
+
+def test_replacing_a_boundary_link_drops_it_from_the_boundary_input():
+    wf = _workflow()
+    sg = _sg(wf)
+    sg["inputs"] = [{"id": "in-1", "name": "prompt", "type": "STRING", "linkIds": [8001, 8002]}]
+    sg["links"].append(
+        {"id": 8001, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(wf, 2011)["inputs"][1]["link"] = 8001
+    out, op = workflow_ops.connect(wf, _graph(), "70/2005", "STRING", "70/2011", "text")
+    assert _sg(out)["inputs"][0]["linkIds"] == [8002]
+    assert 8001 not in [lk["id"] for lk in _sg(out)["links"]]
+
+
+OUTER = "5a1c362b-0000-4000-8000-0000000000aa"
+
+
+def _nested_workflow(outer_instances: int) -> dict:
+    """``outer_instances`` top-level instances of OUTER, whose definition holds
+    ONE instance (node 300) of the inner definition SG. Each OUTER instance
+    therefore carries its own live SG instance, all sharing SG's one body."""
+    wf = _workflow(instances=0)
+    wf["nodes"] = [
+        {"id": 80 + i, "type": OUTER, "pos": [0, 0], "inputs": [], "outputs": []} for i in range(outer_instances)
+    ]
+    wf["definitions"]["subgraphs"].append(
+        {
+            "id": OUTER,
+            "name": "Outer",
+            "inputs": [],
+            "outputs": [],
+            "nodes": [{"id": 300, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []}],
+            "links": [],
+        }
+    )
+    return wf
+
+
+def test_a_definition_shared_through_its_ancestor_is_refused(tmp_path, capsys):
+    # Two OUTER instances each hold one SG instance: SG has 2 live instances,
+    # though its body appears once in OUTER's definition. Wiring inside it
+    # would rewire both, so connect must refuse as for a flat shared def.
+    path = _write(tmp_path, _nested_workflow(outer_instances=2))
+    before = path.read_text()
+    env = _run(["connect", str(path), "80/300/2005.STRING", "80/300/2011.text"], capsys)
+    assert env["ok"] is False, env
+    assert "2 instances" in env["error"]["message"]
+    assert path.read_text() == before
+
+
+def test_a_nested_single_instance_definition_is_wired(tmp_path, capsys):
+    path = _write(tmp_path, _nested_workflow(outer_instances=1))
+    env = _run(["connect", str(path), "80/300/2005.STRING", "80/300/2011.text"], capsys)
+    assert env["ok"] is True, env
+    assert env["data"]["op"]["path"] == ["80", "300"]
+
+
+def test_instance_count_multiplies_through_ancestors():
+    assert workflow_ops._definition_instance_count(_nested_workflow(3), SG) == 3
+    assert workflow_ops._definition_instance_count(_nested_workflow(3), OUTER) == 3
+
+
+def test_instance_count_terminates_on_a_self_instantiating_definition():
+    wf = _workflow(instances=1)
+    _sg(wf)["nodes"].append({"id": 2099, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []})
+    # A definition that names itself cannot be expanded; it must not hang and
+    # must report it as shared (more than one live instance).
+    assert workflow_ops._definition_instance_count(wf, SG) > 1

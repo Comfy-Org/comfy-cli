@@ -7,13 +7,14 @@ import json
 import time
 import urllib.error
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final, Literal
 
 from typing_extensions import assert_never
 
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.credentials import DataPlaneToken
 from comfy_cli.deploy_api_errors import DeployAPIError, assert_safe_deploy_url
 from comfy_cli.http import (
     ResponseTooLarge,
@@ -53,6 +54,14 @@ class JobWatchRequest:
     target: Target
     job_url: str
     events_url: str
+    # The bearer to send, re-read before each request so a watch outlives the
+    # sign-in token it started with. None sends target's own token unchanged.
+    token: DataPlaneToken | None = None
+
+    def current_target(self) -> Target:
+        if self.token is None:
+            return self.target
+        return replace(self.target, auth_token=self.token.current())
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,32 +200,40 @@ def _consume_stream(response, callbacks: JobEventCallbacks, rendered_outputs: se
 
 
 def _open_and_consume(request: JobWatchRequest, callbacks: JobEventCallbacks, rendered_outputs: set[str]) -> None:
-    stream_request = build_authed_request(request.events_url, request.target)
+    stream_request = build_authed_request(request.events_url, request.current_target())
     stream_request.add_header("Accept", "text/event-stream")
     with no_redirect_urlopen(stream_request, timeout=SSE_IDLE_TIMEOUT_SECONDS) as response:
         _consume_stream(response, callbacks, rendered_outputs)
 
 
 def _authoritative_get(request: JobWatchRequest, sleep_fn: Callable[[float], None]) -> JsonObject:
-    for attempt in range(MAX_AUTHORITATIVE_GET_ATTEMPTS):
+    attempt = 0
+    refreshed = False
+    while True:
         try:
-            _, parsed = request_json(request.job_url, request.target, max_bytes=MAX_JOB_JSON_BYTES)
+            _, parsed = request_json(request.job_url, request.current_target(), max_bytes=MAX_JOB_JSON_BYTES)
         except urllib.error.HTTPError as error:
+            # A 401 is the token, not the job: refresh once and read again, without
+            # spending a transient retry. The read is idempotent.
+            if error.code == 401 and not refreshed and request.token is not None and request.token.after_rejection():
+                refreshed = True
+                continue
             retryable = error.code == 429 or 500 <= error.code <= 599
-            if not retryable or attempt + 1 == MAX_AUTHORITATIVE_GET_ATTEMPTS:
+            if not retryable or attempt + 1 >= MAX_AUTHORITATIVE_GET_ATTEMPTS:
                 raise
             sleep_fn(_retry_after(error, GET_RETRY_BACKOFF_INITIAL_SECONDS * (2**attempt)))
+            attempt += 1
             continue
         except (TimeoutError, urllib.error.URLError):
-            if attempt + 1 == MAX_AUTHORITATIVE_GET_ATTEMPTS:
+            if attempt + 1 >= MAX_AUTHORITATIVE_GET_ATTEMPTS:
                 raise
             sleep_fn(min(GET_RETRY_BACKOFF_INITIAL_SECONDS * (2**attempt), MAX_IDLE_INTERVAL_SECONDS))
+            attempt += 1
             continue
         if not isinstance(parsed, dict):
             raise DeployAPIError("deploy_server_error", "the data-plane job response is not an object")
         _status(parsed)
         return parsed
-    raise AssertionError("authoritative GET retry loop exhausted without returning or raising")
 
 
 def _outputs(job: JsonObject) -> list[JsonObject]:

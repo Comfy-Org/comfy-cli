@@ -5,9 +5,8 @@ ONE selector implementation (``comfy_cli.selector``) projected onto:
   - ``comfy templates ls --select``
   - ``comfy nodes show --select``
   - ``comfy workflow slots --select``
-  - ``comfy generate list --select``  (the invocation the cloud agent's
-    ``list_generate_models`` tool shells — services/agent/internal/loop/tools.go
-    execs ``generate list --json``)
+  - ``comfy generate list --select``  (an agent tool that lists generate
+    models typically shells ``generate list --json``)
 
 Pinned here per command: the envelope's ``data`` becomes the selected slice,
 sibling ``selected_bytes``/``total_bytes`` fields appear, fail-open on a miss

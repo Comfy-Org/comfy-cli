@@ -3475,5 +3475,853 @@
   "essentials_category": "Video Tools",
   "has_intermediate_output": false,
   "description": ""
+ },
+ "EmptyLatentImage": {
+  "input": {
+   "required": {
+    "width": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 16,
+      "max": 16384,
+      "step": 8
+     }
+    ],
+    "height": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 16,
+      "max": 16384,
+      "step": 8
+     }
+    ],
+    "batch_size": [
+     "INT",
+     {
+      "default": 1,
+      "min": 1,
+      "max": 4096
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "width",
+    "height",
+    "batch_size"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "name": "EmptyLatentImage",
+  "display_name": "Empty Latent Image",
+  "description": "Create a new batch of empty latent images to be denoised via sampling.",
+  "python_module": "nodes",
+  "category": "model/latent",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "The empty latent image batch."
+  ],
+  "search_aliases": [
+   "empty",
+   "empty latent",
+   "new latent",
+   "create latent",
+   "blank latent",
+   "blank"
+  ]
+ },
+ "ImageCompare": {
+  "input": {
+   "required": {
+    "compare_view": [
+     "IMAGECOMPARE",
+     {
+      "socketless": true
+     }
+    ]
+   },
+   "optional": {
+    "image_a": [
+     "IMAGE",
+     {}
+    ],
+    "image_b": [
+     "IMAGE",
+     {}
+    ]
+   },
+   "hidden": {
+    "prompt": [
+     "PROMPT"
+    ],
+    "extra_pnginfo": [
+     "EXTRA_PNGINFO"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "compare_view"
+   ],
+   "optional": [
+    "image_a",
+    "image_b"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [],
+  "output_is_list": [],
+  "output_name": [],
+  "output_tooltips": [],
+  "output_matchtypes": null,
+  "name": "ImageCompare",
+  "display_name": "Compare Images",
+  "description": "Compares two images side by side with a slider.",
+  "python_module": "comfy_extras.nodes_image_compare",
+  "category": "image",
+  "output_node": true,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": "Image Tools",
+  "has_intermediate_output": false
+ },
+ "LoadImage": {
+  "input": {
+   "required": {
+    "image": [
+     [
+      "clothing_light_blue_denim_shirt.png",
+      "portrait_model_denim.png"
+     ],
+     {
+      "image_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "MASK"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "MASK"
+  ],
+  "name": "LoadImage",
+  "display_name": "Load Image",
+  "description": "",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "load image",
+   "open image",
+   "import image",
+   "image input",
+   "upload image",
+   "read image",
+   "image loader"
+  ],
+  "essentials_category": "Basics"
+ },
+ "PreviewAny": {
+  "input": {
+   "required": {
+    "source": [
+     "*",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "STRING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "STRING"
+  ],
+  "name": "PreviewAny",
+  "display_name": "Preview as Text",
+  "description": "Preview any input value as text.",
+  "python_module": "comfy_extras.nodes_preview_any",
+  "category": "utilities",
+  "output_node": true,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "preview",
+   "preview text",
+   "show output",
+   "inspect",
+   "debug",
+   "print value",
+   "show text"
+  ]
+ },
+ "QwenImage21Cache": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL",
+     {}
+    ],
+    "device": [
+     "COMBO",
+     {
+      "default": "auto",
+      "multiselect": false,
+      "options": [
+       "auto",
+       "gpu",
+       "cpu",
+       "off"
+      ]
+     }
+    ],
+    "dtype": [
+     "COMBO",
+     {
+      "default": "default",
+      "multiselect": false,
+      "options": [
+       "default",
+       "int8",
+       "int4"
+      ]
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "device",
+    "dtype"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MODEL"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MODEL"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "QwenImage21Cache",
+  "display_name": "Qwen Image 2.1 Cache",
+  "description": "Allows setting the KV cache device and quantization, by default the model uses the auto -option. Quantization potentially speeds up edit workflows when memory starved ",
+  "python_module": "comfy_extras.nodes_qwen",
+  "category": "model/conditioning/qwen image",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": true,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "SaveImageAdvanced": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "ComfyUI",
+      "multiline": false
+     }
+    ],
+    "format": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "png",
+        "inputs": {
+         "required": {
+          "bit_depth": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "8-bit",
+            "multiselect": false,
+            "options": [
+             "8-bit",
+             "16-bit"
+            ]
+           }
+          ],
+          "input_color_space": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "sRGB",
+            "multiselect": false,
+            "options": [
+             "sRGB"
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "exr",
+        "inputs": {
+         "required": {
+          "bit_depth": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "16-bit float",
+            "multiselect": false,
+            "options": [
+             "32-bit float",
+             "16-bit float"
+            ]
+           }
+          ],
+          "input_color_space": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "sRGB",
+            "multiselect": false,
+            "options": [
+             "sRGB",
+             "HDR",
+             "linear",
+             "linear ACEScg"
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "avif",
+        "inputs": {
+         "required": {
+          "bit_depth": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "8-bit YUV420",
+             "10-bit YUV420"
+            ]
+           }
+          ],
+          "input_color_space": [
+           "COMBO",
+           {
+            "advanced": true,
+            "default": "sRGB",
+            "multiselect": false,
+            "options": [
+             "sRGB",
+             "HDR",
+             "HDR PQ"
+            ]
+           }
+          ],
+          "crf": [
+           "INT",
+           {
+            "advanced": true,
+            "default": 18,
+            "min": 1,
+            "max": 63
+           }
+          ],
+          "save_mode": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "display_name": "save mode",
+            "options": [
+             {
+              "key": "still images",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "animated",
+              "inputs": {
+               "required": {
+                "fps": [
+                 "FLOAT",
+                 {
+                  "default": 6.0,
+                  "min": 0.01,
+                  "max": 1000.0,
+                  "step": 0.01
+                 }
+                ],
+                "loop_count": [
+                 "INT",
+                 {
+                  "advanced": true,
+                  "default": 0,
+                  "min": 0,
+                  "max": 1000
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": [
+     "PROMPT"
+    ],
+    "extra_pnginfo": [
+     "EXTRA_PNGINFO"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "filename_prefix",
+    "format"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "images"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "SaveImageAdvanced",
+  "display_name": "Save Image (Advanced)",
+  "description": "Saves the input images to your ComfyUI output directory.",
+  "python_module": "comfy_extras.nodes_images",
+  "category": "image",
+  "output_node": true,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "save",
+   "save image",
+   "export image",
+   "output image",
+   "write image"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false
+ },
+ "TextEncodeQwenImage21": {
+  "input": {
+   "required": {
+    "clip": [
+     "CLIP",
+     {}
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "negative_prompt": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "resolution": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 0,
+      "max": 4096,
+      "step": 32
+     }
+    ],
+    "images": [
+     "COMFY_AUTOGROW_V3",
+     {
+      "template": {
+       "input": {
+        "required": {
+         "image": [
+          "IMAGE",
+          {}
+         ]
+        }
+       },
+       "names": [
+        "image_1",
+        "image_2",
+        "image_3",
+        "image_4",
+        "image_5",
+        "image_6",
+        "image_7",
+        "image_8",
+        "image_9",
+        "image_10",
+        "image_11",
+        "image_12",
+        "image_13",
+        "image_14",
+        "image_15",
+        "image_16"
+       ],
+       "min": 0
+      }
+     }
+    ]
+   },
+   "optional": {
+    "vae": [
+     "VAE",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "clip",
+    "prompt",
+    "negative_prompt",
+    "resolution",
+    "images"
+   ],
+   "optional": [
+    "vae"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CONDITIONING",
+   "CONDITIONING",
+   "LATENT"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "positive",
+   "negative",
+   "latent"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   "Empty latent on the first reference image's size, to match with sampling as any other size shifts the edit."
+  ],
+  "output_matchtypes": null,
+  "name": "TextEncodeQwenImage21",
+  "display_name": "Text Encode Qwen Image 2.1",
+  "description": "",
+  "python_module": "comfy_extras.nodes_qwen",
+  "category": "model/conditioning/qwen image",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "TextGenerate": {
+  "input": {
+   "required": {
+    "clip": [
+     "CLIP",
+     {}
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "max_length": [
+     "INT",
+     {
+      "default": 512,
+      "min": 1,
+      "max": 32768
+     }
+    ],
+    "sampling_mode": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "display_name": "Sampling Mode",
+      "options": [
+       {
+        "key": "on",
+        "inputs": {
+         "required": {
+          "temperature": [
+           "FLOAT",
+           {
+            "default": 0.7,
+            "min": 0.01,
+            "max": 2.0,
+            "step": 1e-06
+           }
+          ],
+          "top_k": [
+           "INT",
+           {
+            "default": 64,
+            "min": 0,
+            "max": 1000
+           }
+          ],
+          "top_p": [
+           "FLOAT",
+           {
+            "default": 0.95,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01
+           }
+          ],
+          "min_p": [
+           "FLOAT",
+           {
+            "default": 0.05,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01
+           }
+          ],
+          "repetition_penalty": [
+           "FLOAT",
+           {
+            "default": 1.05,
+            "min": 0.0,
+            "max": 5.0,
+            "step": 0.01
+           }
+          ],
+          "seed": [
+           "INT",
+           {
+            "default": 0,
+            "min": 0,
+            "max": 18446744073709551615
+           }
+          ]
+         },
+         "optional": {
+          "presence_penalty": [
+           "FLOAT",
+           {
+            "default": 0.0,
+            "min": 0.0,
+            "max": 5.0,
+            "step": 0.01
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "off",
+        "inputs": {
+         "required": {}
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "image": [
+     "IMAGE",
+     {}
+    ],
+    "video": [
+     "IMAGE",
+     {}
+    ],
+    "audio": [
+     "AUDIO",
+     {}
+    ],
+    "thinking": [
+     "BOOLEAN",
+     {
+      "default": false
+     }
+    ],
+    "use_default_template": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": true
+     }
+    ],
+    "mtp": [
+     "COMBO",
+     {
+      "default": "auto",
+      "multiselect": false,
+      "options": [
+       "auto",
+       "off",
+       "2",
+       "3",
+       "4",
+       "5",
+       "tree2s1",
+       "tree2s2",
+       "tree3s1",
+       "tree4s1m8"
+      ]
+     }
+    ],
+    "system_prompt": [
+     "STRING",
+     {
+      "forceInput": true,
+      "multiline": false
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "clip",
+    "prompt",
+    "max_length",
+    "sampling_mode"
+   ],
+   "optional": [
+    "image",
+    "video",
+    "audio",
+    "thinking",
+    "use_default_template",
+    "mtp",
+    "system_prompt"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "STRING",
+   "STRING"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "generated_text",
+   "thinking"
+  ],
+  "output_tooltips": [
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "TextGenerate",
+  "display_name": "Generate Text",
+  "description": "",
+  "python_module": "comfy_extras.nodes_textgen",
+  "category": "text",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "LLM",
+   "gemma"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false
  }
 }

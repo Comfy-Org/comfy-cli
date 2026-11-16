@@ -10,15 +10,16 @@ from typing import Protocol, runtime_checkable
 import typer
 
 from comfy_cli.builder_api import BuilderAuthError
-from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
+from comfy_cli.command.build_paths import BuildPaths, BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue, read_build_spec
 from comfy_cli.command.deploy_resolve import BuildNotPushedError, DeployResolveError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import render_spec_error
-from comfy_cli.command.deploy_types import required_string, server_shape_error
+from comfy_cli.command.deploy_types import deployment_name, required_string, server_shape_error
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,47 @@ class DeploymentPageClient(Protocol):
     ) -> Iterator[JsonObject]: ...
 
 
+def _version_of(release: JsonObject) -> int | None:
+    version = release.get("version")
+    return version if isinstance(version, int) and not isinstance(version, bool) else None
+
+
+def _release_column(deployment: JsonObject) -> str:
+    version = deployment.get("releaseVersion")
+    if isinstance(version, int):
+        return f"  v{version}"
+    release_id = deployment.get("releaseId")
+    return f"  {release_id}" if isinstance(release_id, str) and release_id else ""
+
+
+def _editor_of(row: JsonObject) -> bool | None:
+    # A comfy-deploy older than the editor switch sends no `editor`.
+    editor = row.get("editor")
+    return editor if isinstance(editor, bool) else None
+
+
+def _editor_column(deployment: JsonObject) -> str:
+    editor = deployment.get("editor")
+    return "" if editor is None else f"  editor {'on' if editor else 'off'}"
+
+
+def _build_paths_or_workspace(path: str | None) -> BuildPaths | None:
+    """The Build's paths, or None to list the workspace.
+
+    A bare `deploy ls` with no spec in the current directory lists the
+    workspace, as `--workspace` does. A PATH the caller named still has to hold
+    a spec, so a typo is not read as "every Build". The note goes to stderr in
+    every mode, so a piped listing holds only the rows."""
+    try:
+        return resolve_build_paths(path)
+    except BuildSpecNotFoundError:
+        if path:
+            raise
+        note = "No build spec here, so this lists every Build's deployments (as --workspace)."
+        get_renderer().stderr_console().print(note)
+        return None
+
+
 def run_ls(request: ListRequest) -> None:
     renderer = get_renderer()
     try:
@@ -47,14 +89,21 @@ def run_ls(request: ListRequest) -> None:
         if not isinstance(candidate, DeploymentPageClient):
             raise server_shape_error("the deploy client cannot list deployment pages")
 
-        release_ids: set[str] | None = None
-        if not request.workspace:
-            paths = resolve_build_paths(request.path)
+        # The Build's own releases, each with its version where it has one;
+        # under `--workspace` rows span Builds, so each keeps only its release id.
+        versions: dict[str, int | None] | None = None
+        # What was listed, in the payload: the fallback note is on stderr only.
+        scope: JsonObject = {"scope": "workspace"}
+        paths = None if request.workspace else _build_paths_or_workspace(request.path)
+        if paths is not None:
             spec = read_build_spec(paths.spec_file)
             build_id = spec.get("id")
             if not isinstance(build_id, str) or not build_id:
                 raise BuildNotPushedError
-            release_ids = {required_string(release, "id") for release in builder.list_releases(build_id)}
+            scope = {"scope": "build", "buildId": build_id}
+            versions = {
+                required_string(release, "id"): _version_of(release) for release in builder.list_releases(build_id)
+            }
 
         deployments: list[JsonObject] = []
         for page in candidate.iter_deployments(status=request.status, limit=request.limit):
@@ -64,11 +113,16 @@ def run_ls(request: ListRequest) -> None:
             for row in page_rows:
                 if not isinstance(row, dict):
                     raise server_shape_error("the deployment list contains a non-object row")
-                if release_ids is not None and required_string(row, "releaseId") not in release_ids:
-                    continue
+                version: int | None = None
+                if versions is not None:
+                    release_id = required_string(row, "releaseId")
+                    if release_id not in versions:
+                        continue
+                    version = versions[release_id]
                 if not request.include_deleted and row.get("deletedAt") is not None:
                     continue
-                deployments.append(row)
+                named = {**row, "name": deployment_name(row), "editor": _editor_of(row)}
+                deployments.append(named if version is None else {**named, "releaseVersion": version})
                 if len(deployments) == request.limit:
                     break
             if len(deployments) == request.limit:
@@ -80,10 +134,12 @@ def run_ls(request: ListRequest) -> None:
             for deployment in deployments:
                 marker = " (deleted)" if deployment.get("deletedAt") is not None else ""
                 renderer.print(
-                    f"  {required_string(deployment, 'id')}  {required_string(deployment, 'status')}{marker}"
+                    f"  {sanitize_markup(deployment['name'] or '-')}  {required_string(deployment, 'id')}"
+                    f"  {required_string(deployment, 'status')}{_release_column(deployment)}"
+                    f"{_editor_column(deployment)}{marker}"
                 )
         payload_rows: list[JsonValue] = [*deployments]
-        renderer.emit({"deployments": payload_rows}, command="deploy ls", changed=False)
+        renderer.emit({"deployments": payload_rows, **scope}, command="deploy ls", changed=False)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)
         raise typer.Exit(code=1) from error

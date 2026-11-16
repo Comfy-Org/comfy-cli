@@ -94,7 +94,7 @@ def save_inline_blobs(blobs: list[tuple[str, bytes]], template: str, request_id:
 
 
 def save_binary_response(resp: httpx.Response, template: str, request_id: str) -> Path:
-    """Save a single binary response body (e.g. Stability returns image/* bytes)."""
+    """Save a single binary response body (some partners answer image/* inline instead of a URL)."""
     ext = _ext_from_response(resp)
     dest = _resolve_template(template, request_id, 0, ext)
     dest.parent.mkdir(parents=True, exist_ok=True)

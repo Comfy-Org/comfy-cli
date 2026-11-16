@@ -26,8 +26,9 @@ the ComfyUI nodes. ComfyUI logs such an import failure and carries on; **the
 builder treats it as fatal** — `exit_code 13`, `class user_error`, `declared
 custom nodes failed to import` — which cost a release. So check each clone
 declares `NODE_CLASS_MAPPINGS` before listing it in `customNodes`. A side-loaded
-library belongs nowhere in the definition, and `pipDependencies` cannot stand in
-for it: an override pins a version, it never adds a package.
+library is not a `customNodes` entry, and a version pin in `pipDependencies`
+cannot stand in for it: an ordinary pin adds no package (`comfy-build-pins`
+names the two kinds of line the builder installs on their own).
 
 When `comfy which` still names a path, say so and let the user settle it — a
 `workspace_type` of `recent` is a remembered directory, not a declared workspace.
@@ -214,7 +215,9 @@ definition:
   `null`** — absence selects the default, a null is refused. An unrecognized id
   is refused by the builder at push, not locally.
 - **`models`** — a list, max 512. Each entry needs `type`, and **exactly one** of
-  `sourceUri` or `blobId`; setting both, or neither, is refused. `sourceUri` must
+  `sourceUri` or `blobId`; setting both, or neither, is refused. `type` is a
+  folder under models/: one `comfy build refs model-dirs` lists, spelled as it
+  lists it (`loras`, never `Loras`), or a relative path of safe segments. `sourceUri` must
   be an `https` URL. `filename` is optional but becomes a path segment, so it must
   be a single safe segment — and a public model with no `filename` whose URL
   basename has no extension is refused, because it would build and then fail to
@@ -291,13 +294,33 @@ resolved at the cut to whatever it points at then, so two cuts of one definition
 can build different code. The registry pin check never covers a `repository`
 source either way.
 
-**`comfy build validate <dir>` runs offline and names the field it refuses.** It
+**`comfy build validate <dir>` runs offline and names the field it refuses.** For
+model entries it applies the builder's own rules (the folder, the filename, a link
+with no extension, the sha256) and names every entry that breaks one at once,
+each with the model it is about; only a case variant of a folder needs the
+builder's list, so `--remote` and `push` catch that one and offline does not
+(it says so, and `--json` carries `folder_case_checked: false`). A local model's
+link is left to `push`, which checks the link it keeps after hashing its file, so
+that one is reported once the other problems are fixed. It
 is the only check available on this path, because the conflict prediction in
 `comfy-build-pins` reads requirement files this machine does not have. It echoes
 the policy fields back unchecked, so a pass showing your `mode` is not
 confirmation the `mode` is valid — the builder is the first thing to refuse a bad
 one, at `push`. `--remote` additionally looks up public model-source candidates
-and needs the sign-in.
+and needs the sign-in. For a model with both an https `sourceUri` and a `sha256`, it first
+asks that link for its hash (Hugging Face states it on the download link): the
+lookup reads `declared_ok` when the hash matches and `declared_mismatch`, with
+the link's `sourceSha256`, when it does not. That one HEAD goes to the model's
+host, not the builder. It carries no credential beyond what the link itself
+holds and does not follow a redirect; a link with a user or password before its
+host (`https://user@host/...`, or encoded as `user%40host`) is not asked. All of them share a 15-second budget
+(5 seconds each, counted over the whole request); models past it get the filename lookup, and the command says
+how many. A link that states no hash, or does
+not answer, gets the filename lookup instead, unless the model has no `filename`:
+that one reads `not_lookupable`, with no lookup. Lookups follow
+`wire_definition.models`, which `validate` sorts by `type`, `filename` and
+`sha256`, so a lookup's `entry` index points into `wire_definition.models`, not
+at the spec file's order.
 
 ## Correcting a scanned pack id
 

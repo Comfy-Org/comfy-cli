@@ -18,14 +18,32 @@ or lists `scan` / `create` / `from-snapshot` — the verbs this surface replaced
 **A cut is not undoable and a build takes minutes**, so the user hears what is
 about to be sent, and agrees, before anything is created on the platform.
 
+**But a re-run of the same cut is not a second cut.** The builder dedupes a release
+on the definition's content hash, scoped to the Build: `release create` run twice
+over an unchanged spec returns the same release id both times, and re-drives the
+build of a release that was committed but never queued. So a retry after an
+*ambiguous* failure — a timeout, a 5xx, a dropped connection, an envelope you cannot
+tell landed — is the repair and not a risk, and `comfy build release ls` is the read
+that confirms which it was. The exception is a `push` in between: that moves the
+hash, so the next cut is genuinely a new release.
+
 ## What the platform is
 
 - **A Build is an editable definition; a release is an immutable cut of it.**
   Editing a Build changes nothing that already exists, so every fix is a new cut.
+- **What a cut spends is a slot, not metered time.** Nothing on this surface bills
+  by the minute or by the build: a workspace is capped on what it *holds*, and past
+  a cap the builder refuses the cut rather than charging for it. So the care a cap
+  asks for is "do not cut what nobody needs", never "do not leave it running" — a
+  finished release costs a slot, not a meter. *The two limits, and what clears
+  each* below is how a slot comes back.
 - **The definition lives in a file the user owns.** `comfy build init` writes
   `comfy-build.yaml` next to the install. That file is the working copy: it is
   what you edit, what the user commits, and what every later command reads. The
   platform holds a copy, and `comfy build status` says how far apart they are.
+  Before the first push it says `remote: not pushed` (`remote.state:
+  "not_pushed"` under `--json`, with no `build.id`) and still compares the spec
+  with the install, signed in or not.
 - **A cut names its targets explicitly.** `--target <os>/<gpu>` is repeatable
   and required, so nothing is built that nobody asked for. Read
   `comfy build refs build-targets` rather than promising an artifact from memory.
@@ -39,24 +57,33 @@ update    Rescan the local install and rewrite the spec's definition.
 push      Push the local spec to the builder.
 pull      Replace the local spec with a fetched Build, keeping local asset identities.
 status    Report how far the spec is from the remote Build and from the install.
-ls        List the workspace's builds.
+ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
+quota     Releases and active deployments the workspace holds, against its limits.
 validate  Validate the local spec without contacting the builder.
 delete    Delete a Build (soft-delete).
-release   create · ls · show · logs · manifest
+release   create · ls · show · logs · manifest · delete
 refs      resolve · base-images · build-targets · model-dirs
 blob      ls                                    (hidden; workspace private blobs)
 ```
 
 - **Every command that reads the spec takes the install directory or the spec
   path** as its argument, defaulting to the current directory. `ls`, `refs` and
-  `blob` are workspace-level and take none. Once the spec exists it carries the
-  Build id, so nothing after `init` needs an id from you. `--id` overrides it.
+  `blob` are workspace-level and take none, and `release delete` takes the
+  release id instead. Once the spec exists it carries the Build id, so nothing
+  after `init` needs an id from you. `--id` overrides it.
 - **`comfy which` names the install** when the user has not said where it is.
-- **Only sign in when told to.** Run `comfy cloud login` if a command answers
-  `build_not_signed_in`, and not before. Everything under `refs`, both importers
+- **Only sign in when told to.** On `build_not_signed_in`, do what its hint
+  says. Run `comfy cloud login` only when nobody is signed in or the sign-in
+  was refused, and not before. Everything under `refs`, both importers
   (`--from-snapshot`, `--from-workflow`), `validate --remote`, and every command
   that reaches the builder need it; a plain scan and a plain `validate` do not.
+  A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
+  key wins over a stored sign-in, so when the hint says that key was refused,
+  signing in cannot help: replace the key. `watch_auth_lost` (exit 75) means
+  `release create --watch` was refused after the cut despite session recovery,
+  while a refreshable sign-in remains stored. The release may still be building.
+  Read it with `comfy build release show <id>` before considering a new sign-in.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
@@ -83,6 +110,12 @@ the one the situation calls for rather than guessing at its contents:
 All four converge on the same file, then the same `validate → push → release`
 tail.
 
+If the goal is one workflow running on Comfy Cloud ("Run on Cloud", or "put this
+workflow on Cloud") rather than an environment, read
+`comfy skills show comfy-run-on-cloud` first: Comfy Cloud itself or an existing
+build may already run it, and a build it needs is made from the whole install
+(Path A).
+
 ---
 
 ## Path A — from a ComfyUI install
@@ -94,15 +127,28 @@ comfy build validate <install>
 comfy build push <install> --dry-run
 ```
 
-Everything above is offline and spends nothing. `validate` reads the spec, and
-`--dry-run` computes every upload without instantiating an HTTP client at all.
-Read what it plans, decide the pins, run the conflict prediction in
-`comfy-build-pins`, disclose, get a yes. Only then:
+Everything above spends nothing. `validate` reads the spec offline. `--dry-run`
+computes every upload locally and makes one read: it asks the builder to place
+each public pack, and refuses with `build_registry_pin_missing` exactly as `push`
+would, so a pin the push cannot save fails here, before you disclose the plan.
+A spec that pins a public pack therefore needs sign-in for the dry run; one whose
+packs are all local sends nothing. The `--json` payload's `public_pins_checked`
+says how many public pins the builder placed (0: there were none to check). Read what it plans, decide the pins, run the
+conflict prediction in `comfy-build-pins`, disclose, get a yes. Only then:
 
 ```shell
 comfy build push <install>
 comfy build release create <install> --target linux/nvidia --watch
 ```
+
+**A push that uploads models can run for a long time, and it tells you how it is
+going.** It opens with an `upload_plan` line (files, bytes, how many local files
+it already holds), then an `upload_progress` line per file about every two
+seconds with `bytes_done`, `bytes_per_second` and `eta_seconds`, then an
+`upload_complete` per file. Under `--json` these are JSON lines on **stderr**
+(stdout stays the one envelope); under `--json-stream` they are on stdout. Relay
+the rate and time left instead of waiting in silence. A `bytes_per_second` that
+falls to `0` means the connection stalled, not that the upload is slow.
 
 **What `init` does, and where it stops:**
 
@@ -112,13 +158,49 @@ comfy build release create <install> --target linux/nvidia --watch
   `--python <install>/.venv/bin/python` for split and Desktop layouts, where the
   code lives apart from the data dir. Neither is a warning you can push past.
 - **A missing ComfyUI version *is* only a warning.** `init` says so and writes a
-  spec without `baseComfyVersion`, and the cut is the first thing to refuse it.
-  Re-run with `--comfy-version <ref>`, or set it in the spec.
+  spec without `baseComfyVersion`; under `--json` it is the
+  `build_comfy_version_missing` entry in `data.warnings[]`, and `validate`
+  reports the same. `release create` refuses to cut from that spec with the same
+  code. Set it with `comfy build update <dir> --comfy-version <ref>`.
 - **It collects `.ckpt`, `.pt`, `.bin`, `.pth` and `.safetensors`**, and only
   from a folder under `models/`. It follows symlinks (and breaks cycles), so a
   `models/loras` pointed at a shared drive is scanned. A dotfile, a weight loose
   in `models/` with no folder, another extension, and anything cached outside the
   tree are all absent without a word — check the count against the install.
+- **It lists every folder under `custom_nodes/` as a pack**, whether or not it
+  declares nodes. The builder fails the release on one that does not
+  (`declared custom nodes failed to import`), though ComfyUI runs past it. A
+  library cloned there only to `pip install` it is one (`comfy-build-authoring`).
+  A folder declares nodes when `NODE_CLASS_MAPPINGS` (the V1 node API) or
+  `comfy_entrypoint` (the V3 node API) appears in any `.py` file in it,
+  subfolders included: a pack may build them in a submodule and re-export them
+  from `__init__.py` with a wildcard import. Search each folder with
+  `grep -rlE --include='*.py' 'NODE_CLASS_MAPPINGS|comfy_entrypoint' '<install>/custom_nodes/<folder>'`.
+  A folder where neither name appears is not dropped without asking: name it
+  in the disclosure as "declares no nodes" and ask before dropping its
+  `customNodes` entry. Name each dropped folder in the disclosure, with each
+  kept pack that imports its library (grep the kept packs for the import): the
+  build does not carry that library, so such a pack fails on Cloud unless a
+  wheel line installs it (`comfy-build-pins`).
+- **It lists a folder whose name ends in `.disabled`**, which ComfyUI does not
+  load. Drop that entry too, and name it in the disclosure.
+- **A `.disabled` symlink under `custom_nodes/` can stop `init` before it
+  writes a spec.** The scan follows the link. When the folder it points at is
+  neither a git checkout with a GitHub `origin` nor a registry pack, the scan
+  packages it as a local pack, and `build_package.py` refuses a symlinked pack
+  root (`build_spec_invalid`, `node root must not be a symlink`). Before
+  `init`, list such links:
+  `find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l`.
+  You cannot tell every case from outside. When it lists any, name each link
+  to the person, say `init` fails on it, and stop. Never move or delete the
+  link yourself: the person may move or delete it and ask again.
+- **It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as
+  a pack (it skips only other extensions and names ending in `.disabled`), but
+  `init` scans folders only, so no such file reaches the spec. List the single
+  `.py` files directly under `<install>/custom_nodes/` and name each in the
+  disclosure as not carried. When the node the workflow is missing on Cloud
+  comes from such a file, stop before the plan and tell the person: the build
+  cannot carry it, so it would fail on that node.
 - **A model's `type` is the directory under `models/` it was found in**, so
   placement comes out right on this path for free.
 - **It refuses to overwrite an existing spec.** `--force` overwrites;
@@ -139,6 +221,15 @@ The import goes through the builder, so it needs the sign-in, and it cannot be
 combined with `--models-dir`, `--custom-nodes-dir`, `--python` or `--comfy-url`
 — it is a different source for the same definition, not a scan you steer. It
 carries **no models**, so use the scan whenever private weights have to travel.
+An import with no custom nodes gets a warning (`build_snapshot_empty` in
+`data.warnings[]`). If the snapshot lists none, it is usually older than the
+install, and a newer snapshot is the fix. If it lists packs but every one was
+left out, the message counts each cause: disabled, or the importer's own
+advisory line for that cause (a pack still being published on the Comfy
+Registry means import again later), and gives no cause where the report has
+none. On stderr those advisory lines come inside this one warning, so each pack
+is named once; `--json` still carries them under `advisories` as well.
+A newer snapshot helps only after a disabled pack is enabled in the install.
 `--from-snapshot` and `--from-workflow` also refuse each other.
 
 ## Path B — from a workflow file
@@ -148,7 +239,7 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
 ```
 
 - **It writes a local spec and creates no Build.** `push` only uploads; `release
-  create` is the line that starts billable build minutes.
+  create` is the line that commits a release and spends the slot.
 - **Hand it the file unchanged.** It reads both the editing format and the API
   export, so converting first only refuses files it would have taken.
 - **Save the report.** The importer's findings arrive as `advisories` in the
@@ -163,9 +254,11 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
   never carries — `comfy-build-authoring` is that procedure.
 - **The pack pins are the registry's newest published version**, because a
   workflow names none. Importing the same file next week can then build something
-  else. Say that out loud.
+  else. Say that out loud. The newest can be a version the registry has Flagged,
+  which the builder will not place, so run `push --dry-run` before you disclose.
 - **A workflow names no ComfyUI version either**, so set one before cutting:
   `comfy build update <dir> --comfy-version <ref>`, or edit `baseComfyVersion`.
+  With no install beside the spec, that sets only the version; it does not rescan.
 - **`unresolvedClasses` is the list to take to the user.** Those node classes are
   ones nothing installable provides, so the graph will not run. Cutting anyway
   ships an environment that cannot execute the workflow it was built for.
@@ -197,8 +290,16 @@ show the user rather than as instructions to act on.
   an **upper bound**. Only the digest decides and the builder re-verifies it.
 - **Whether a registry pin exists.** `push` asks the builder to place every
   public pack before it saves, and refuses with `build_registry_pin_missing`
-  naming each identity it could not resolve. If that lookup itself fails, the
-  command **exits** — it does not warn and proceed.
+  naming each identity it could not resolve. If that lookup itself fails, or the
+  registry did not answer for a pack (`unverifiedPins`), the command **exits** —
+  it does not warn and proceed. `push --dry-run` makes the same check. A
+  `repository` that is not a public GitHub address (`https://github.com/<org>/<repo>`,
+  `git@github.com:<org>/<repo>.git` or `ssh://git@github.com/<org>/<repo>`, with no
+  user name or token) is refused with `build_spec_invalid` before anything is
+  sent, and so is one that does not parse. A version the registry has **Flagged** is refused this way too,
+  and the message does not say so: read the version's `status` from
+  `https://api.comfy.org/nodes/<id>/versions`, then pin a version that is not
+  `NodeVersionStatusFlagged`, or pin the pack by `repository` and a commit `gitRef`.
 
 **A local pack is uploaded from the spec.** `push` packages each custom node
 directory and uploads it, so a pack that publishes nothing still travels.
@@ -219,10 +320,11 @@ spec's `syncedRevision` belongs to another Build.
 ## The pins, in one rule
 
 `init` fills `pipDependencies` with the whole pip freeze, and the builder applies
-every line as a pip **override** — which *replaces* what packages declared rather
-than capping it, torch included. A freeze taken on macOS with Python 3.13 will
-force those versions onto a linux Python 3.12 build, and that is the usual reason
-a first build fails.
+each ordinary version pin as a pip **override** — which *replaces* what packages
+declared rather than capping it, torch included. `comfy-build-pins` names the
+two kinds of line it installs on their own. A freeze taken on macOS with
+Python 3.13 will force those versions onto a linux Python 3.12 build, and that is
+the usual reason a first build fails.
 
 **So cut the first build with `pipDependencies` emptied.** The build then
 resolves the packs' own requirements against the base image's torch, which is
@@ -256,9 +358,14 @@ Say all of this in plain words, and wait for a yes:
   count and the `--dry-run` upload size **as an upper bound**, because `push`
   rewrites a local entry into a fetch when a public candidate's digest matches —
   three promised uploads can report `uploaded: 0`. Offer to list the filenames.
+  Every file in each local pack's folder uploads, config files and keys such as
+  `.env` included. Run `git -C '<install>/custom_nodes/<folder>' status --porcelain`
+  for each Git pack: Cloud builds the recorded commit, so name each Git pack with
+  uncommitted changes and say those edits will not be in the build.
 - **Which targets you will cut**, since each is a separate build. Name them, and
   take the set from `comfy build refs build-targets`.
-- **What it takes**: any upload, then a build of several minutes.
+- **What it takes**: any upload, then a build of several minutes of wall clock —
+  and one of the workspace's release slots.
 - **What a failure means**: a fix and another build, and that you stop after three.
 - **The policy**, whichever path produced the definition: the release will record
   no restriction on which models or partner nodes it permits, and that record
@@ -267,28 +374,121 @@ Say all of this in plain words, and wait for a yes:
 
 **Under `--json`, nothing prompts.** A confirmation the command would have asked
 for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
-`build_pull_needs_confirm`, `build_delete_needs_confirm`, `build_missing_input`,
-`build_id_unknown`. Pass `--yes`, or the option it named, once the user has
-actually agreed. Do not pass `--yes` first and disclose after.
+`build_pull_needs_confirm`, `build_delete_needs_confirm`,
+`build_release_delete_needs_confirm`, `build_missing_input`, `build_id_unknown`.
+Pass `--yes`, or the option it named, once the user has actually agreed. Do not
+pass `--yes` first and disclose after.
+
+**`build_release_held` asks the same way, with its own option.** `comfy build push
+--release` saved the build but cut no release, because the save warned that a
+deployment could not download a model link. Under `--json` the error carries them
+in `details.warnings`; in text mode the tool printed each just above it. Tell the
+user which links fail and how, and pass `--release-despite-warnings` only after they say
+yes; a fixed link needs no option. `comfy build release create` cuts without this
+check.
+
+**Four other refusals block rather than ask: `--yes` does nothing for them.**
+Each is cleared by deleting something, and each exits 1:
+
+- **`build_limit`**: `comfy build push` could not create the build because the
+  workspace already holds as many builds as its limit allows. The limit counts
+  every member's builds, and `comfy build ls` lists only your own outside the
+  enterprise plan, so the list can look short or empty. The `message` is the
+  builder's own wording. Deleting a build frees a slot but takes its releases
+  with it, so ask the user first, or ask them to have a teammate delete one;
+  then push again.
+- **`build_release_limit`** — the cut was refused because the workspace already
+  holds as many releases as its limit allows. Under `--json`, `details.builds`
+  names each Build you can see with its release count, its newest release, and
+  `inUse` when a deployment references one of its releases. `inUse` is left out
+  when the deployments could not be read within 10 seconds, when
+  `COMFY_BUILDER_TOKEN` signs the builder reads with another credential than the
+  deploy commands', or when the builder URL is on another host than the deploy
+  URL. Free a slot, then cut again.
+- **`build_release_in_use`** — `comfy build release delete` was refused because a
+  deployment still references that release. The `message` is the builder's own
+  wording and names the blocking deployments, though on a long list it may name
+  only the first several and say so.
+- **`build_in_use`** — `comfy build delete` was refused because a deployment
+  still references one of that build's releases. The `message` is the builder's
+  own wording and names the blocking deployments, though on a long list it may
+  name only the first several and say so.
+
+## The two limits, and what clears each
+
+A workspace has a ceiling on **how many releases it may hold**, counting every
+status and whether or not anything deploys them, and a separate ceiling on **how
+many builds it may keep**. Beside them, comfy-deploy caps **how many deployments
+are active at once** per workspace; `comfy deploy stop` frees one of those slots.
+The numbers come from the workspace's plan and can be raised for one workspace,
+so never quote one from memory: **`comfy build quota`** reads the release and
+active-deployment limits and how much of each is used. Each count is the
+service's own when it sends one, and its note is then left out. Otherwise the
+release count covers only the Builds you can see (your own outside the
+enterprise plan), so it can read low; `comfy build release ls --id <build>`
+lists one Build's releases. Otherwise the active deployment count comes from the
+deploy list (`exact: false`, printed as "at least"): a stopped deployment moving
+to another release can hold a slot through its queued replacement. Past 100
+Builds a counted release total covers only the first 100 (`truncated: true`,
+said beside the count). The release and
+build ceilings are cleared the same way, by deleting:
+
+- **`comfy build release delete RELEASE`** gives up one release slot. RELEASE is
+  required — there is no default and no spec to fall back on, so name the id from
+  `comfy build release ls`. Repeating the same id is safe: the builder answers
+  success again for a release already deleted, so a retry after a dropped
+  connection costs nothing.
+- **`comfy build delete`** gives up the build slot *and* every release that build
+  held, so it is how to free several release slots at once. Say that plainly
+  before running it: the releases go with it.
+
+**A deployment blocking either delete has to be deleted, not stopped.** The
+builder counts a stopped or failed deployment exactly as it counts a serving one,
+so stopping one and retrying is refused a second time. It stops blocking only
+once it has been deleted *and* its teardown has released its compute, so a delete
+still tearing down keeps refusing. **A deleted deployment never starts again** —
+that is a decision for the user to make, not one to take on their behalf to clear
+a limit. Name the deployments the refusal message lists, say what deleting them
+costs, and wait.
 
 ## Watching the release
 
 `comfy build release create --watch` polls every 2 seconds until every target is
 terminal; `comfy build release show` reads it once. Both need the sign-in.
 
-A release `status` is `queued`, `building` or `complete`, and the first two are
-the build running normally. **`complete` means every target is terminal, not that
-any succeeded** — read `deployable` and `artifactCounts`. Per-target artifacts are
-`queued`, `building`, `ready` or `failed`.
+A release `status` is `queued`, `building`, `stopping`, `stopped` or `complete`.
+Watching continues through `stopping` until the release is terminal.
+**`complete` means every target is terminal, not that any succeeded**: read
+`deployable` and `artifactCounts`. Per-target artifacts are
+`queued`, `building`, `stopping`, `stopped`, `ready` or `failed`.
+`artifactCounts.stopped` is separate from ready, failed and pending; pending
+includes stopping. Older responses may omit stopped, meaning zero.
 
 **`deployable: true` is the green build**, and it means specifically that a
 `linux/nvidia` artifact reached `ready` with an image ref. It is an artifact fact,
 not a status fact: a release can be `deployable` while its rolled-up status
 carries a failed target, and a windows-only release reaches `complete` with
-nothing deployable. `--watch` exits 1 when any target failed.
+nothing deployable. `--watch` exits 1 with `build_stopped` when the release is
+`stopped`, even with ready or failed siblings. A `complete` release retains exit 1 for failed targets
+and exit 0 otherwise. JSON and NDJSON each end with one terminal envelope;
+pretty output says the release was stopped.
+
+`release logs --follow` continues through `stopping`, reads the log once more
+after `stopped` or `complete`, and exits 0 after a successful read. An unreadable
+final response body retains the last whole log and warns. Transport errors
+still retry and exit 1 when the retry limit is reached. Sign-in recovery
+retains its existing bounds; an unknown status remains an explicit error.
 
 Stop after 30 minutes and tell the user the build is still running rather than
 polling on. `--watch` itself polls without a cap.
+
+**A release sitting in `queued` with every artifact still `queued` and an empty log
+is the one case worth acting on rather than waiting out.** That is the shape of a
+cut the builder committed but never enqueued. Re-running the identical
+`release create` re-drives the enqueue for exactly this reason and returns the same
+release id, so it is the first thing to try — not an escalation, and not a second
+cut. Escalate with the release id, the artifact ids and the created-at only if a
+re-drive changes nothing.
 
 ## When something fails
 

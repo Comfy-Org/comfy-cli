@@ -9,8 +9,8 @@ the set-widget ERROR:
   widget 'prompt' not found on ByteDance2ReferenceNode;
   available: model, model.prompt, model.resolution
 
-i.e. the CLI knew the answer and would not advertise it. 102 catalog node types
-carry a dynamic combo; 4 prod set_widget failures in 6 days were this shape.
+i.e. the CLI knew the answer and would not advertise it. Over a hundred
+catalog node types carry a dynamic combo, so every one of them was affected.
 """
 
 from __future__ import annotations

@@ -15,7 +15,7 @@ from deploy_up_support import FakeBuilder, option_names, write_spec
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app
-from comfy_cli.command.build_spec import JsonObject, JsonValue
+from comfy_cli.command.build_spec import JsonObject, JsonValue, write_build_spec
 from comfy_cli.deploy_api import DeployClient
 
 
@@ -271,3 +271,297 @@ def test_ls_still_refuses_a_row_with_no_release(tmp_path: Path, monkeypatch) -> 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert envelope["error"]["code"] == "deploy_server_error"
     assert "releaseId" in envelope["error"]["message"]
+
+
+def _invoke_pretty(*args: str):
+    return CliRunner().invoke(app, ["--no-json", "deploy", "ls", *args], env={"COLUMNS": "400"})
+
+
+def test_a_builds_rows_carry_and_print_their_release_version(tmp_path: Path, monkeypatch) -> None:
+    # Given two deployments on two of the Build's releases
+    builder = FakeBuilder(
+        [
+            {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
+            {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        ]
+    )
+    deploy = PagedDeploy([[_summary("dep-old", "release-4"), _summary("dep-new", "release-5")]])
+    _install_clients(monkeypatch, builder, deploy)
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path))
+    pretty = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert {row["id"]: row["releaseVersion"] for row in _deployments(as_json)} == {"dep-old": 4, "dep-new": 5}
+    assert "dep-old  ready  v4" in pretty.stdout
+    assert "dep-new  ready  v5" in pretty.stdout
+
+
+def test_workspace_rows_keep_only_the_release_id(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[_summary("other-live", "release-other")]]))
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path), "--workspace")
+    pretty = _invoke_pretty(str(write_spec(tmp_path)), "--workspace")
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert "releaseVersion" not in _deployments(as_json)[0]
+    assert "other-live  ready  release-other" in pretty.stdout
+
+
+def test_a_release_without_a_version_still_lists(tmp_path: Path, monkeypatch) -> None:
+    # Given a Build release the builder sent with no version
+    builder = FakeBuilder([{"id": "release-5", "buildId": "build-1", "deployable": True}])
+    _install_clients(monkeypatch, builder, PagedDeploy([[_summary("dep-1", "release-5")]]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then the row prints its release id in place of a version
+    assert result.exit_code == 0, result.stderr
+    assert "dep-1  ready  release-5" in result.stdout
+
+
+def test_a_workspace_row_without_a_release_still_lists(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    row = _summary("other-live", "release-other")
+    row["releaseId"] = None
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[row]]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)), "--workspace")
+
+    # Then the row prints with no release column
+    assert result.exit_code == 0, result.stderr
+    assert "other-live  ready" in result.stdout
+
+
+def test_each_row_leads_with_the_deployments_name(tmp_path: Path, monkeypatch) -> None:
+    # Given production, staging, and one deployment from before names
+    rows = [
+        {**_summary("dep-a1", "release-5"), "name": "production"},
+        {**_summary("dep-b2", "release-5"), "name": "staging"},
+        {**_summary("dep-c3", "release-5"), "name": None},
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then the name comes first and the id stays beside it
+    assert result.exit_code == 0, result.stderr
+    assert "production  dep-a1  ready  v5" in result.stdout
+    assert "staging  dep-b2  ready  v5" in result.stdout
+    assert "-  dep-c3  ready  v5" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["prod [/]", "eu[red]x", "[link=http://evil]prod[/link]"])
+def test_a_name_holding_markup_prints_as_written(tmp_path: Path, monkeypatch, name: str) -> None:
+    # Given
+    rows = [{**_summary("dep-a1", "release-5"), "name": name}]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert f"{name}  dep-a1  ready  v5" in result.stdout
+
+
+def test_json_rows_carry_a_name_null_where_comfy_deploy_sent_none(tmp_path: Path, monkeypatch) -> None:
+    # Given a named row, one with no name field, and two whose name is malformed
+    rows = [
+        {**_summary("dep-a1", "release-5"), "name": "production"},
+        _summary("dep-c3", "release-5"),
+        {**_summary("dep-d4", "release-5"), "name": ""},
+        {**_summary("dep-e5", "release-5"), "name": 5},
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then a name that is not one reads as none, as status reads it
+    assert result.exit_code == 0, result.stderr
+    names = {row["id"]: row["name"] for row in _deployments(result)}
+    assert names == {"dep-a1": "production", "dep-c3": None, "dep-d4": None, "dep-e5": None}
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(_payload(result))
+
+
+def test_rows_carry_and_print_the_editor_value_and_blank_where_none_was_sent(tmp_path: Path, monkeypatch) -> None:
+    # Given one deployment with the editor on, one off, and one from a comfy-deploy that sends no editor
+    rows = [
+        {**_summary("dep-a1", "release-5"), "editor": True},
+        {**_summary("dep-b2", "release-5"), "editor": False},
+        _summary("dep-c3", "release-5"),
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path))
+    pretty = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert {row["id"]: row["editor"] for row in _deployments(as_json)} == {
+        "dep-a1": True,
+        "dep-b2": False,
+        "dep-c3": None,
+    }
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(_payload(as_json))
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "dep-a1  ready  v5  editor on" in pretty.stdout
+    assert "dep-b2  ready  v5  editor off" in pretty.stdout
+    assert "dep-c3  ready  v5\n" in pretty.stdout
+
+
+def _ls_schema() -> JsonObject:
+    return json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+
+
+_FALLBACK_NOTE = "No build spec here, so this lists every Build's deployments"
+
+
+def _two_builds() -> PagedDeploy:
+    return PagedDeploy([[_summary("build-live", "release-5"), _summary("other-live", "release-other")]])
+
+
+def _spec_here(root: Path, build_id: str | None) -> None:
+    """The spec a bare `deploy ls` finds: `comfy-build.yaml` in the current folder."""
+    spec: JsonObject = {
+        "schema": "comfy-build/1",
+        "id": build_id,
+        "name": "example",
+        "description": "",
+        "syncedRevision": None,
+        "definition": {},
+    }
+    write_build_spec(root / "comfy-build.yaml", spec)
+
+
+def test_bare_ls_with_no_spec_here_lists_the_workspace(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    builder = FakeBuilder()
+    _install_clients(monkeypatch, builder, _two_builds())
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls"])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert len([line for line in result.stdout.splitlines() if line.strip()]) == 1
+    assert [row["id"] for row in _deployments(result)] == ["build-live", "other-live"]
+    assert builder.calls == []
+    assert _FALLBACK_NOTE in result.stderr
+    assert _FALLBACK_NOTE not in result.stdout
+    payload = _payload(result)
+    assert payload["scope"] == "workspace"
+    assert "buildId" not in payload
+    jsonschema.Draft202012Validator(_ls_schema()).validate(payload)
+
+
+def test_bare_ls_with_no_spec_here_puts_the_note_on_stderr_in_pretty_mode(tmp_path: Path, monkeypatch) -> None:
+    # Given: a piped pretty listing must hold only the rows
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = _invoke_pretty()
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert "build-live  ready  release-5" in result.stdout
+    assert "other-live  ready  release-other" in result.stdout
+    assert _FALLBACK_NOTE in result.stderr
+    assert _FALLBACK_NOTE not in result.stdout
+
+
+def test_bare_ls_inside_a_pushed_spec_lists_only_that_builds_deployments(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    _spec_here(tmp_path, "build-1")
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls"])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert [row["id"] for row in _deployments(result)] == ["build-live"]
+    payload = _payload(result)
+    assert (payload["scope"], payload["buildId"]) == ("build", "build-1")
+    jsonschema.Draft202012Validator(_ls_schema()).validate(payload)
+
+
+def test_bare_ls_inside_a_spec_that_was_never_pushed_still_refuses(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    _spec_here(tmp_path, None)
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls"])
+
+    # Then
+    assert result.exit_code == 1
+    assert json.loads(result.stdout.splitlines()[-1])["error"]["code"] == "deploy_build_not_pushed"
+
+
+def test_a_named_path_with_no_spec_still_refuses(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+
+    # When
+    result = _invoke_json(tmp_path / "typo")
+
+    # Then
+    assert result.exit_code == 1
+    assert json.loads(result.stdout.splitlines()[-1])["error"]["code"] == "build_spec_not_found"
+
+
+def test_the_workspace_flag_payload_says_workspace_even_inside_a_spec(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), _two_builds())
+    _spec_here(tmp_path, "build-1")
+    monkeypatch.chdir(tmp_path)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "ls", "--workspace"])
+
+    # Then
+    assert result.exit_code == 0, result.output
+    payload = _payload(result)
+    assert payload["scope"] == "workspace"
+    assert "buildId" not in payload
+    jsonschema.Draft202012Validator(_ls_schema()).validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("payload", "valid"),
+    [
+        pytest.param({"deployments": []}, True, id="earlier-cli-without-scope"),
+        pytest.param({"scope": "workspace", "deployments": []}, True, id="workspace"),
+        pytest.param({"scope": "build", "buildId": "build-1", "deployments": []}, True, id="build"),
+        pytest.param({"scope": "build", "deployments": []}, False, id="build-without-build-id"),
+        pytest.param(
+            {"scope": "workspace", "buildId": "build-1", "deployments": []}, False, id="workspace-with-build-id"
+        ),
+    ],
+)
+def test_the_schema_still_accepts_a_payload_from_before_scope(payload: JsonObject, valid: bool) -> None:
+    # Given: scope is an additive optional field (docs/json-output.md "Stability"),
+    # so an earlier CLI's payload without it must still validate under the same id
+
+    # When
+    errors = list(jsonschema.Draft202012Validator(_ls_schema()).iter_errors(payload))
+
+    # Then
+    assert (not errors) == valid, errors

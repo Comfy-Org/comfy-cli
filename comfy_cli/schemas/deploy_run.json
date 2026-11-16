@@ -21,7 +21,12 @@
       "additionalProperties": false,
       "properties": {
         "id": {"type": "string", "minLength": 1},
-        "status": {"enum": ["queued", "running", "succeeded", "canceling", "canceled", "failed", "expired"]}
+        "status": {"enum": ["queued", "running", "succeeded", "canceling", "canceled", "failed", "expired"]},
+        "releaseVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The version of the release that ran the job. Absent where the gateway names none, as an older gateway or a failed lookup does."
+        }
       }
     },
     "assets": {

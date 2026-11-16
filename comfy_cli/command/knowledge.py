@@ -2,7 +2,7 @@
 
     comfy knowledge status [--refresh]
     comfy knowledge resolve <alias-or-id>
-    comfy knowledge pick [capability]
+    comfy knowledge pick [capability] [--check-local]
 
 Backed by :mod:`comfy_cli.knowledge`. JSON mode is the contract; pretty mode
 is a short courtesy view.
@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import difflib
 import os
+from enum import Enum
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, Any
 
 import typer
@@ -21,6 +23,33 @@ from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Inspect the curated model-knowledge bundle.")
+
+_AUTHORING_FALLBACKS = {
+    "invocation": "comfy-custom-nodes-invocation",
+    "ecosystem-reference": "comfy-custom-nodes-search",
+    "api-schema": "comfy-custom-nodes-api-schema",
+    "validation": "comfy-custom-nodes-validation",
+    "dependencies-capabilities": "comfy-custom-nodes-dependencies",
+    "troubleshooting": "comfy-custom-nodes-troubleshooting",
+    "packaging-publishing": "comfy-custom-nodes-packaging",
+    "frontend-extension": "comfy-custom-nodes-frontend",
+    "v1-to-v3-migration": "comfy-custom-nodes-migration",
+    "execution-caching": "comfy-custom-nodes-caching",
+}
+assert set(_AUTHORING_FALLBACKS) == set(knowledge.AUTHORING_CLASSES)
+
+
+class AuthoringClass(str, Enum):
+    invocation = "invocation"
+    ecosystem_reference = "ecosystem-reference"
+    api_schema = "api-schema"
+    validation = "validation"
+    dependencies_capabilities = "dependencies-capabilities"
+    troubleshooting = "troubleshooting"
+    packaging_publishing = "packaging-publishing"
+    frontend_extension = "frontend-extension"
+    v1_to_v3_migration = "v1-to-v3-migration"
+    execution_caching = "execution-caching"
 
 
 def _env_context() -> dict[str, Any]:
@@ -93,6 +122,7 @@ def status_cmd(
                 "capabilities": len(bundle.capabilities),
                 "aliases": len(bundle.aliases),
                 "deprecations": len(bundle.deprecations),
+                "custom_node_authoring": len(bundle.custom_node_authoring),
             },
         }
     if renderer.is_pretty():
@@ -101,6 +131,87 @@ def status_cmd(
                 value = ", ".join(f"{k}={v}" for k, v in value.items())
             rprint(f"[bold]{key}[/bold]: {sanitize_markup(value)}")
     renderer.emit(payload, command="knowledge status")
+
+
+@app.command("authoring", help="Load one bounded custom-node authoring knowledge slice.")
+@tracking.track_command("knowledge")
+def authoring_cmd(
+    knowledge_class: Annotated[
+        AuthoringClass,
+        typer.Argument(help="One of: " + ", ".join(knowledge.AUTHORING_CLASSES)),
+    ],
+    api_generation: Annotated[
+        str | None,
+        typer.Option(
+            "--api-generation", help="Restrict guidance to v1 or v3; omitted returns applicable slices for both."
+        ),
+    ] = None,
+):
+    """Return canonical JIT guidance, with an explicit packaged fallback."""
+    renderer = get_renderer()
+    knowledge_class = knowledge_class.value
+    if api_generation not in (None, "v1", "v3"):
+        raise typer.BadParameter("--api-generation must be v1 or v3")
+    bundle = knowledge.load_bundle()
+    rows = (
+        []
+        if bundle is None or bundle.stale
+        else [
+            row
+            for row in bundle.custom_node_authoring
+            if knowledge_class in row["retrieval_classes"]
+            and (api_generation is None or api_generation in row["api_generations"])
+        ]
+    )
+    if rows:
+        generations = sorted({generation for row in rows for generation in row["api_generations"]})
+        payload = {
+            "class": knowledge_class,
+            "content": "\n".join(row["content"].rstrip() for row in rows) + "\n",
+            "applies_to": {"api_generations": [api_generation] if api_generation else generations},
+            "provenance": {
+                "playbook": "custom-node-authoring",
+                "slice_ids": [row["id"] for row in rows],
+            },
+            "bundle_version": bundle.version,
+            "compiled_at": bundle.compiled_at,
+            "source": "comfy-knowledge",
+            "degraded": False,
+        }
+    else:
+        from comfy_cli.skills import skill_content
+
+        reason = (
+            f"knowledge bundle unavailable ({knowledge.last_reason() or 'unknown reason'})"
+            if bundle is None
+            else "knowledge bundle is stale"
+            if bundle.stale
+            else f"bundle has no usable {knowledge_class!r} authoring slice (missing or failed schema/size validation)"
+        )
+        fallback = _AUTHORING_FALLBACKS[knowledge_class]
+        try:
+            cli_version = version("comfy-cli")
+        except PackageNotFoundError:
+            cli_version = "unknown"
+        payload = {
+            "class": knowledge_class,
+            "content": skill_content(fallback),
+            "applies_to": {
+                "api_generations": [api_generation] if api_generation else ["v1", "v3"],
+                "cli_version": cli_version,
+            },
+            "provenance": {"kind": "packaged-fallback", "skill": fallback},
+            "bundle_version": f"packaged-cli/{cli_version}",
+            "compiled_at": None,
+            "source": "packaged-fallback",
+            "degraded": True,
+            "degraded_reason": reason,
+        }
+    if renderer.is_pretty():
+        rprint(sanitize_markup(payload["content"]))
+        if payload["degraded"]:
+            rprint(f"[yellow]degraded:[/yellow] {sanitize_markup(payload['degraded_reason'])}")
+    renderer.emit(payload, command="knowledge authoring")
 
 
 @app.command("resolve", help="Resolve a model alias or id (e.g. 'Kling 3.0', minimax-h3) to its knowledge row.")
@@ -120,14 +231,23 @@ def resolve_cmd(
     if model_id is None:
         knowledge.log_query("knowledge resolve", logged, hit_ids=[], zero_hit=True, bundle=bundle)
         q = query.strip().lower()
+        candidates = knowledge.model_candidates(bundle, query)
+        hint = "run `comfy knowledge status` to confirm a bundle is loaded; try a different alias"
+        details = {
+            "query": query,
+            "close_matches": difflib.get_close_matches(q, list(bundle.aliases), n=5, cutoff=0.6),
+        }
+        if candidates:
+            details["candidate_ids"] = candidates
+            hint = (
+                f"possible model ids (up to 5): {', '.join(candidates)}; "
+                "ask which model is intended, then retry `comfy knowledge resolve <exact-id>`"
+            )
         renderer.error(
             code="knowledge_unknown_model",
             message=f"no knowledge row matches {query!r}",
-            hint="run `comfy knowledge status` to confirm a bundle is loaded; try a different alias",
-            details={
-                "query": query,
-                "close_matches": difflib.get_close_matches(q, list(bundle.aliases), n=5, cutoff=0.6),
-            },
+            hint=hint,
+            details=details,
         )
         raise typer.Exit(code=1)
     knowledge.log_query("knowledge resolve", logged, hit_ids=[model_id], zero_hit=False, bundle=bundle)
@@ -181,13 +301,80 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
     renderer.emit(payload, command="knowledge pick")
 
 
-@app.command("pick", help="Ranked model picks for a capability; omit it to list every capability.")
+def _check_picks_locally(picks: list[dict[str, Any]]) -> str:
+    """Flag each ``oss`` pick whose template the local ComfyUI cannot run.
+
+    Returns ``ok`` when the check ran. A pick that could not be checked carries
+    its own ``local_check`` instead of a flag. A failure that would repeat for
+    every pick (server down, no gallery) returns its error code instead and
+    marks nothing.
+    """
+    from comfy_cli.command import templates as templates_cmd
+
+    marks: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    listings: dict[str, list[str] | None] = {}
+    rows: list[dict[str, Any]] | None = None
+    index_fresh = False
+    try:
+        for pick in picks:
+            template = pick.get("template")
+            if pick.get("route") != "oss" or not template:
+                continue
+            if rows is None:
+                rows = templates_cmd._gallery_rows(None, refresh=False)
+                # A failed re-fetch serves the stale cache, which cannot show that
+                # a template is absent upstream.
+                index_fresh = not templates_cmd._cache_is_stale(templates_cmd._cache_path())
+            try:
+                _row, wf = templates_cmd._template_workflow(template, rows, refresh=False)
+            except templates_cmd.TemplateCheckError as e:
+                if e.code == "template_not_found" and index_fresh:
+                    flag = {"available_locally": False, "unavailable_reason": knowledge.UNAVAILABLE_TEMPLATE_NOT_FOUND}
+                    marks.append((pick, flag))
+                else:
+                    marks.append((pick, {"local_check": e.code}))
+                continue
+            required = templates_cmd._collect_model_requirements(wf)
+            _present, missing, _warnings = templates_cmd._match_local_models(required, listings)
+            verdict = templates_cmd._compute_verdict(
+                api_dependent=False,
+                missing=missing,
+                required_count=len(required),
+                node_types=templates_cmd._collect_node_class_types(wf),
+            )
+            if verdict == "unknown":
+                marks.append((pick, {"local_check": "unknown"}))
+            elif missing:
+                if all(listings.get(m["directory"]) is None for m in missing):
+                    reason = knowledge.UNAVAILABLE_MODEL_FOLDER_NOT_FOUND
+                else:
+                    reason = knowledge.UNAVAILABLE_MISSING_MODELS
+                flag = {"available_locally": False, "unavailable_reason": reason, "missing_models": len(missing)}
+                marks.append((pick, flag))
+    except templates_cmd.TemplateCheckError as e:
+        return e.code
+    for pick, mark in marks:
+        pick.update(mark)
+    return "ok"
+
+
+@app.command("pick", help="Ranked model picks or unranked discovery routes; omit it to list every capability.")
 @tracking.track_command("knowledge")
 def pick_cmd(
     capability: Annotated[
         str | None,
         typer.Argument(help="Capability id (e.g. lipsync, text-to-video). Omit to list every capability."),
     ] = None,
+    check_local: Annotated[
+        bool,
+        typer.Option(
+            "--check-local",
+            help=(
+                "Check each oss pick's template against the local ComfyUI's model folders and flag "
+                "the picks it cannot run. Fetches uncached template workflows and calls the local server."
+            ),
+        ),
+    ] = False,
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
@@ -208,6 +395,7 @@ def pick_cmd(
         if "fits" in p:
             entry["fits"] = p["fits"]
         picks.append(entry)
+    discovery = knowledge.discovery_entries(cap)
     payload = {
         "capability": capability_id,
         "zero_hit": False,
@@ -218,15 +406,47 @@ def pick_cmd(
         "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
+    if discovery:
+        payload["discovery"] = discovery
+    if failure_policy := knowledge.discovery_failure_policy(cap):
+        payload["failure_policy"] = failure_policy
+    if check_local:
+        payload["local_check"] = _check_picks_locally(picks)
+        if discovery and payload["local_check"] == "ok":
+            payload["local_check"] = "discovery_not_checked"
     if renderer.is_pretty():
         from rich.table import Table
 
-        columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
-        tbl = Table(show_header=True, header_style="bold")
-        for col in columns:
-            tbl.add_column(col)
-        for p in picks:
-            cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
-            tbl.add_row(*(sanitize_markup("" if cells[c] is None else cells[c]) for c in columns))
-        renderer.console().print(tbl)
+        if picks:
+            columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
+            if check_local:
+                columns += ("unavailable_reason", "local_check")
+            tbl = Table(show_header=True, header_style="bold")
+            for col in columns:
+                tbl.add_column(col)
+            for p in picks:
+                cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
+                tbl.add_row(*(sanitize_markup("" if cells.get(c) is None else cells[c]) for c in columns))
+            renderer.console().print(tbl)
+        if discovery:
+            tbl = Table(show_header=True, header_style="bold", title="Unranked discovery routes")
+            for col in ("route", "templates", "nodes", "description"):
+                tbl.add_column(col)
+            for route in discovery:
+                cells = {
+                    **route,
+                    "templates": ", ".join(route.get("templates") or []),
+                    "nodes": ", ".join(node["id"] for node in route.get("nodes") or []),
+                }
+                tbl.add_row(
+                    *(
+                        sanitize_markup("" if cells.get(col) is None else cells[col])
+                        for col in ("route", "templates", "nodes", "description")
+                    )
+                )
+            renderer.console().print(tbl)
+        if failure_policy := payload.get("failure_policy"):
+            rprint(f"[bold]Authored failure policy:[/bold] {sanitize_markup(failure_policy)}")
+        if check_local and payload["local_check"] != "ok":
+            rprint(f"[yellow]local check did not finish:[/yellow] {payload['local_check']}")
     renderer.emit(payload, command="knowledge pick")

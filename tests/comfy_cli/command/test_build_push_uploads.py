@@ -8,6 +8,7 @@ asking a second time reported every completed node as still pending.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,7 @@ class _RecordingClient:
         self.created.append((kind, filename))
         return f"blob-{filename}", self.upload_url
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         self.uploaded.append(upload_url)
 
 

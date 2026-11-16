@@ -32,7 +32,7 @@
     },
     "effective_balance_micros": {
       "type": ["integer", "null"],
-      "description": "Raw micro-dollar balance chosen by the zero-masking chain (effective_balance_micros, then amount_micros, then prepaid_balance_micros, then cloud_credit_balance_micros), skipping present-but-zero fields so a literal 0 cannot mask a positive component."
+      "description": "Raw balance in cents (the server's field names say micros, the values are cents) chosen by the zero-masking chain (effective_balance_micros, then amount_micros, then prepaid_balance_micros, then cloud_credit_balance_micros), skipping present-but-zero fields so a literal 0 cannot mask a positive component."
     },
     "currency": {"type": "string", "const": "USD"},
     "subscription": {

@@ -19,7 +19,7 @@ workflows, and call hosted partner image models, all from your terminal.
 ## Features
 
 - 🚀 One-command ComfyUI install and launch
-- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Stability, Gemini/nano-banana, Kling, Luma, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
+- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Reve, Gemini/nano-banana, Kling, Luma, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
 - 🔧 Custom node management — install, update, snapshot, bisect
 - 📦 Fast dependency resolution with `uv` (`--fast-deps`, `--uv-compile`)
 - 🗄️ Model downloads from CivitAI, Hugging Face, and direct URLs
@@ -440,6 +440,20 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
   `comfy model list ?[--relative-path <PATH>]`
 
+- Model upload to Comfy Cloud
+
+  `comfy model upload <FILE> --type <FOLDER> --where cloud ?[--dry-run] ?[--workspace <ID>] ?[--expected-sha256 <SHA256>] ?[--yes]`
+
+  - Puts one local `.safetensors` file (up to 25 GB on servers with resumable uploads) into your Comfy Cloud model library, so a workflow run on Comfy Cloud can load it. `--type` is the model folder, e.g. `loras` or `checkpoints`; `comfy model list-folders --where cloud` lists them.
+  - Uploads use 64 MiB pieces when the server supports them. A dropped connection retries from the bytes storage holds. If the command stops, run it again with the same file, model folder, account and workspace to continue while its saved session remains valid. Sessions expire no later than seven days after creation; the server can expire them earlier. A paused upload tells you whether its session was saved. Without saved state, a rerun starts a new upload. The CLI hashes the file again before resuming. Older servers keep using one PUT and enforce their own size limit. Upload sessions are credentials, kept in a private `model-uploads` directory under the CLI config folder and removed after completion.
+  - After 30 minutes without progress, the command exits with the held byte count. The final check on Comfy Cloud can take longer than fifteen minutes; the command waits until it ends. It reports the task id before waiting. In JSON mode, the `upload_storing` event goes to stderr; in streaming mode it goes to stdout. If the wait is interrupted, the id identifies the task at Cloud's `GET /api/tasks/<task_id>` endpoint.
+  - Only the file you name is uploaded, and only the bytes hashed before the upload: each block is checked against its hash before it is sent. The upload succeeds only once Comfy Cloud's hash of the stored file matches your file's.
+  - `--dry-run` uploads nothing. It reports the file's `sha256` and whether Comfy Cloud already has the file.
+  - The output's `loader_path` is the value a loader node takes for the model on Comfy Cloud, as Comfy Cloud's record of the model gives it. It is null for a dry run that would upload, or when Comfy Cloud gives none.
+  - `--workspace` and `--expected-sha256` tie an approval to one workspace and one set of bytes. If you are signed in to another workspace, or the file changed since the dry run, nothing is uploaded.
+  - It asks before uploading, unless you pass `--yes`.
+  - It refuses a name that the folder already holds with different bytes in your workspace's model library (any member's upload), since a second file under that name would change what the name loads in every workflow.
+
 ### Running on Comfy Cloud (`--where cloud`)
 
 Comfy Cloud runs your workflow on Comfy's GPUs — no local ComfyUI install and no GPU required. The same verbs you use locally take `--where cloud`; the only extra step is signing in once.
@@ -476,8 +490,8 @@ Notes:
 `comfy generate` calls Comfy's partner nodes directly from the terminal — no
 local ComfyUI or workflow JSON required. It hits the same hosted partner nodes
 you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls. Image
-models (Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok,
-Google Gemini Flash Image aka **nano-banana**, …) and video models (Kling,
+models (Flux, Ideogram, DALL·E, Recraft, Runway, Reve, xAI Grok, Google
+Gemini Flash Image aka **nano-banana**, …) and video models (Kling,
 Luma, Runway Gen-3, Pika, Vidu, Moonvalley, Hailuo, Grok video, ByteDance
 **Seedance**) are all covered; video jobs run async and the CLI polls until
 the result is ready.
@@ -667,9 +681,9 @@ refreshes during `comfy skills install` and in the background during
 
 ## Analytics
 
-Analytics are **opt-in and off by default**. The first time you run the CLI in an
-interactive terminal it asks whether to enable tracking, and that prompt defaults
-to no. Nothing is sent unless you answer yes. A non-interactive run (a pipe, CI,
+Product analytics (Mixpanel) are **opt-in and off by default**. The first time you
+run the CLI in an interactive terminal it asks whether to enable tracking, and
+that prompt defaults to no. No product analytics are sent unless you answer yes. A non-interactive run (a pipe, CI,
 an agent) never enables it on its own. Setting `DO_NOT_TRACK` or
 `COMFY_NO_TELEMETRY` in the environment overrides the setting and suppresses
 everything.
@@ -680,6 +694,12 @@ Change your mind at any time:
 comfy tracking enable
 comfy tracking disable
 ```
+
+Uploads to Comfy Cloud (`comfy assets library upload` and `comfy model upload`)
+send Comfy Cloud an upload status with the upload by default: which client sent it,
+whether the transfer resumed, and why a transfer stopped. The tracking setting
+does not cover it, because it is part of the upload request to Comfy Cloud,
+not product tracking. `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns it off.
 
 When tracking is on, we use Mixpanel to understand usage patterns and know where
 to prioritize our efforts.

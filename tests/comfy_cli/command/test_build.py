@@ -599,7 +599,7 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
 
     c = BuilderClient("https://builder.test/", "jwt-token")
     assert c.create_blob("model", "f.safetensors", "hash", 5) == ("b1", "https://put")
-    assert c.create_build("n", {"models": [], "customNodes": []}) == "d1"
+    assert c.create_build_response("n", {"models": [], "customNodes": []})["id"] == "d1"
     assert c.create_release("d1", [{"os": "linux", "gpu": "nvidia"}]) == ("v1", "https://s")
     results = c.resolve_models(["a.safetensors"])
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"
@@ -821,13 +821,15 @@ def test_delete_command_needs_confirm_non_interactive():
 
 
 class _RecordingRenderer:
-    """Minimal renderer stand-in that records the error code emitted."""
+    """Minimal renderer stand-in that records the error code and hint emitted."""
 
     def __init__(self):
         self.codes = []
+        self.hints = []
 
-    def error(self, code, message, details=None):
+    def error(self, code, message, *, hint=None, details=None):
         self.codes.append(code)
+        self.hints.append(hint)
 
 
 def test_builder_client_uses_injected_token(monkeypatch):
@@ -887,6 +889,48 @@ def test_builder_call_maps_other_errors_to_builder_error():
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_500)
     assert r.codes == ["build_builder_error"]
+
+
+@pytest.mark.parametrize("failure", ["server-error", "transport-failure"])
+def test_a_failed_cut_says_the_retry_cannot_double_cut(failure):
+    # The two outcomes where the caller cannot tell whether the release landed. Left
+    # unexplained, the safe-looking read is "do not retry", which strands a release
+    # the builder would have re-driven — so the idempotency has to reach the envelope.
+    import io
+    import urllib.error
+
+    from comfy_cli.command.build import _CUT_RETRY_HINT, _builder_call
+
+    def raise_it():
+        if failure == "server-error":
+            raise urllib.error.HTTPError("https://x", 500, "Server Error", None, io.BytesIO(b"boom"))
+        raise urllib.error.URLError("connection reset")
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_it, hint=_CUT_RETRY_HINT)
+    assert r.codes == ["build_builder_error"]
+    assert r.hints == [_CUT_RETRY_HINT]
+
+
+def test_the_limited_beta_403_keeps_its_own_hint_over_the_cut_hint():
+    # build_not_enabled is a dead end, not an ambiguous write: telling that caller to
+    # re-run the cut would be advice for a different failure.
+    import io
+    import urllib.error
+
+    from comfy_cli.command.build import _CUT_RETRY_HINT, _builder_call
+
+    def raise_403():
+        raise urllib.error.HTTPError(
+            "https://x", 403, "Forbidden", None, io.BytesIO(b'{"error":"FEATURE_NOT_ENABLED"}')
+        )
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_403, hint=_CUT_RETRY_HINT)
+    assert r.codes == ["build_not_enabled"]
+    assert r.hints == [None]
 
 
 def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
@@ -1149,12 +1193,19 @@ def test_snapshot_from_definition_carries_no_models():
 
 
 def test_report_advisories_names_every_thing_the_import_could_not_carry():
-    lines = build.report_advisories(
-        {"notInRegistry": ["was-node-suite-comfyui"], "unpinnablePins": ["torch"], "pythonSatisfied": True}
-    )
-    assert any("was-node-suite-comfyui" in line and "does not publish" in line for line in lines)
-    assert any("torch" in line and "not a public PyPI release" in line for line in lines)
-    assert len(lines) == 2  # pythonSatisfied True says nothing
+    report = {"notInRegistry": ["was-node-suite-comfyui"], "unpinnablePins": ["torch"], "pythonSatisfied": True}
+    (pack,) = build._pack_lines(report)[0]
+    assert "was-node-suite-comfyui" in pack and "does not publish" in pack
+    (line,) = build.report_advisories(report)  # pythonSatisfied True says nothing
+    assert "torch" in line and "not a public PyPI release" in line
+
+
+def test_report_advisories_leaves_every_pack_line_to_pack_lines():
+    """Each pack key renders in `_pack_lines` alone, whatever order the tables
+    hold, so no pack is named twice."""
+    report = {key: [f"{key}-pack"] for key, _ in build._PACK_ADVISORIES}
+    assert build.report_advisories(report) == []
+    assert len(build._pack_lines(report)[0]) == len(build._PACK_ADVISORIES)
 
 
 def test_report_advisories_says_when_no_base_image_matches_the_python():
@@ -1221,7 +1272,7 @@ def test_report_advisories_reads_the_refused_release_as_one_value():
 
 
 def test_report_advisories_names_a_folder_collision():
-    (line,) = build.report_advisories({"collidingNodes": ["ComfyUI-Easy-Use"]})
+    (line,), _ = build._pack_lines({"collidingNodes": ["ComfyUI-Easy-Use"]})
     assert "already claimed the folder" in line and "ComfyUI-Easy-Use" in line
 
 
@@ -1368,6 +1419,6 @@ def test_report_advisories_scrubs_the_newlines_a_crafted_workflow_could_carry():
 
 def test_report_advisories_leaves_a_snapshot_report_unchanged():
     """`comfy build from-snapshot` shares the renderer, so its output must not move."""
-    assert build.report_advisories({"notInRegistry": ["was-node-suite-comfyui"]}) == [
+    assert build._pack_lines({"notInRegistry": ["was-node-suite-comfyui"]})[0] == [
         "1 pinned to something the Comfy Registry does not publish: was-node-suite-comfyui"
     ]

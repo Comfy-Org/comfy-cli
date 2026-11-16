@@ -28,14 +28,11 @@ class ApiError(RuntimeError):
 def resolve_api_key(explicit: str | None = None) -> str:
     """Resolve a credential for the partner-API proxy.
 
-    OAuth-first: when a live OAuth session is present it is preferred over
-    ambient API keys (``COMFY_API_KEY`` env / stored key), because OAuth is
-    the CLI's primary auth path and API keys are on a deprecation path. The
-    only thing that outranks the session is an explicit ``--api-key`` flag —
-    a deliberate per-call override. Resolution order (shared chain in
-    ``comfy_cli.credentials``, ``purpose="partner"``):
-    explicit flag → live OAuth session (refreshed if near expiry) →
-    ``COMFY_API_KEY`` env → stored key. Raise if none resolve.
+    Resolution order (shared chain in ``comfy_cli.credentials``,
+    ``purpose="partner"``): explicit ``--api-key`` flag → ``COMFY_API_KEY`` env
+    (handed in for this run, so it outranks a stored sign-in, which is then not
+    refreshed) → live OAuth session (refreshed if near expiry) → stored key.
+    Empty or whitespace-only env values count as unset. Raise if none resolve.
 
     The proxy validates a non-``comfyui-`` bearer token as a Firebase JWT
     (see ``_auth_headers``), so the same session that powers
@@ -58,7 +55,11 @@ def resolve_api_key(explicit: str | None = None) -> str:
 
 def _split_payload(
     values: dict[str, Any], flags: list[FlagDef], content_type: str
-) -> tuple[dict[str, Any] | None, list[tuple[str, Any]] | None, dict[str, Any] | None]:
+) -> tuple[
+    dict[str, Any] | None,
+    list[tuple[str, Any]] | None,
+    dict[str, Any] | list[tuple[str, str]] | None,
+]:
     """Return (json_body, multipart_files, multipart_data).
 
     For JSON endpoints: json_body is the dict, others are None.
@@ -66,19 +67,48 @@ def _split_payload(
     and data is the non-file form fields (stringified or JSON-encoded as needed).
     """
     flag_by_name = {f.name: f for f in flags}
-    if content_type != "multipart/form-data":
+    base_content_type = content_type.partition(";")[0].strip().lower()
+    json_content_type = base_content_type == "application/json" or base_content_type.endswith("+json")
+    if json_content_type:
         return values, None, None
+    if base_content_type not in {"multipart/form-data", "application/x-www-form-urlencoded"}:
+        raise ApiError(0, "", f"Unsupported request content type: {content_type}")
 
     files: list[tuple[str, Any]] = []
     data: dict[str, Any] = {}
+
+    def form_scalar(name: str, item: Any) -> str:
+        if isinstance(item, (dict, list, tuple)):
+            raise ApiError(0, "", f"--{name}: nested form values are not supported")
+        if isinstance(item, bool):
+            return "true" if item else "false"
+        return str(item)
+
     for name, value in values.items():
         flag = flag_by_name.get(name)
-        if flag and flag.kind == "binary":
+        if (
+            base_content_type == "application/x-www-form-urlencoded"
+            and flag
+            and (flag.kind == "binary" or (flag.kind == "array" and flag.item_kind == "binary"))
+        ):
+            raise ApiError(0, "", f"--{name}: binary values require multipart/form-data")
+        if base_content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "array":
+            if not isinstance(value, (list, tuple)):
+                raise ApiError(0, "", f"--{name}: expected an array value")
+            data[name] = [form_scalar(name, item) for item in value]
+        elif base_content_type == "application/x-www-form-urlencoded" and flag and flag.kind == "object":
+            if not isinstance(value, dict):
+                raise ApiError(0, "", f"--{name}: expected an object value")
+            for key, item in value.items():
+                data[str(key)] = form_scalar(name, item)
+        elif base_content_type == "multipart/form-data" and flag and flag.kind == "binary":
             path = Path(value) if not isinstance(value, Path) else value
             if not path.is_file():
                 raise ApiError(0, "", f"--{name}: file not found: {path}")
             files.append((name, (path.name, path.open("rb"), "application/octet-stream")))
-        elif flag and flag.kind == "array" and flag.item_kind == "binary":
+        elif (
+            base_content_type == "multipart/form-data" and flag and flag.kind == "array" and flag.item_kind == "binary"
+        ):
             for p in value:
                 p = Path(p) if not isinstance(p, Path) else p
                 if not p.is_file():
@@ -89,11 +119,18 @@ def _split_payload(
             import json as _json
 
             data[name] = _json.dumps(value)
-        elif flag and flag.kind == "boolean":
-            data[name] = "true" if value else "false"
         else:
-            data[name] = str(value)
-    return None, files, data
+            data[name] = form_scalar(name, value)
+    if base_content_type == "multipart/form-data" and not files:
+        # httpx falls back to application/x-www-form-urlencoded when ``files``
+        # is empty. Filename-less file tuples force the declared multipart
+        # wire format for endpoints whose optional binary fields were omitted.
+        parts = [(name, (None, value)) for name, value in data.items()]
+        # An empty list is an internal sentinel: ``send_request`` emits a true
+        # zero-part multipart body rather than inventing a field the API did
+        # not declare.
+        return None, parts, None
+    return None, files or None, data
 
 
 def _auth_headers(api_key: str, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -130,11 +167,25 @@ def send_request(
         json_body, files, data = _split_payload(values, flags, endpoint.request_content_type)
     headers = _auth_headers(api_key)
     try:
-        if endpoint.method.lower() == "get":
+        method = endpoint.method.lower()
+        if method == "get":
             return httpx.get(url, params=values, headers=headers, timeout=timeout)
-        if endpoint.request_content_type == "application/json":
+        base_content_type = endpoint.request_content_type.partition(";")[0].strip().lower()
+        json_content_type = base_content_type == "application/json" or base_content_type.endswith("+json")
+        if base_content_type == "multipart/form-data" and files == []:
+            boundary = "comfy-cli-empty"
+            empty_headers = {**headers, "Content-Type": f"multipart/form-data; boundary={boundary}"}
+            kwargs = {"content": f"--{boundary}--\r\n".encode(), "headers": empty_headers, "timeout": timeout}
+            if method == "post":
+                return httpx.post(url, **kwargs)
+            return httpx.request(method.upper(), url, **kwargs)
+        if method == "post" and json_content_type:
             return httpx.post(url, json=json_body, headers=headers, timeout=timeout)
-        return httpx.post(url, files=files, data=data, headers=headers, timeout=timeout)
+        if method == "post":
+            return httpx.post(url, files=files, data=data, headers=headers, timeout=timeout)
+        if json_content_type:
+            return httpx.request(method.upper(), url, json=json_body, headers=headers, timeout=timeout)
+        return httpx.request(method.upper(), url, files=files, data=data, headers=headers, timeout=timeout)
     finally:
         # Ensure file handles from multipart are closed even on httpx errors.
         if files:
