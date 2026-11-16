@@ -2967,6 +2967,7 @@ class TestPollRateLimitedIsNotTerminal:
         assert error["details"]["required_scope"] == "comfy-cloud:jobs:read"
         assert error["details"]["prompt_id"] == "cloud-pid"
 
+
 # ---------------------------------------------------------------------------
 # --output-node-ids → partial_execution_targets
 # ---------------------------------------------------------------------------
