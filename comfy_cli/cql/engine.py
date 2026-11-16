@@ -242,6 +242,12 @@ _MAX_PATH_SEARCH_STATES = 20_000
 # than by `int()`, which raises above 4300 digits.
 _MAX_AUTOGROW_INDEX_DIGITS = 6
 
+# The server's `Autogrow._MaxNames` cap: a group never grows more than this many
+# slots. Required-name expansion (`[f"{prefix}{i}" for i in range(min)]`) must
+# honour it, or a prompt-influenced / catalog `min` of 1e9 with no `max` would
+# allocate a billion-element list inside validation.
+_MAX_AUTOGROW_NAMES = 100
+
 
 def _finite_int(value: Any) -> int | None:
     """``int(value)`` for a real, finite JSON number, else ``None``.
@@ -392,15 +398,31 @@ class Port:
             return None
         # Declaration order, not a hardcoded ("required", "optional"): the
         # server's `_expand_schema_for_dynamic` iterates `input.items()` and
-        # takes the first non-empty section, so a template that lists
-        # `optional` first is read from `optional`.
+        # takes the first value of the first non-empty section, so a template
+        # that lists `optional` first is read from `optional`. Scanning later
+        # inputs for a string `type_id` would skip a classic list-form COMBO
+        # (`[["a", "b"], {}]`) and could return a *later* input's spec.
         for section_def in inputs.values():
-            if not isinstance(section_def, dict):
+            if not isinstance(section_def, dict) or not section_def:
                 continue
-            for spec in section_def.values():
-                type_id = spec[0] if isinstance(spec, (list, tuple)) and spec else spec
-                if isinstance(type_id, str) and type_id:
-                    return spec
+            spec = next(iter(section_def.values()))
+            # `_parse_input_spec` only understands str / list; a tuple wrapper
+            # would otherwise yield a Port typed UNKNOWN and a false
+            # `edge_type_mismatch`.
+            if isinstance(spec, tuple):
+                spec = list(spec)
+            type_id = spec[0] if isinstance(spec, list) and spec else spec
+            # A classic list-form COMBO is a usable spec. A nested autogrow or
+            # dynamic-combo type is not: there is no socket type to check a
+            # slot against, and inventing one would be the reject-what-you-
+            # cannot-read mistake the sibling autogrow accessors all avoid.
+            if isinstance(type_id, list):
+                return spec
+            if not isinstance(type_id, str) or not type_id:
+                return None
+            if type_id.startswith("COMFY_AUTOGROW") or _is_dynamic_combo_type(type_id):
+                return None
+            return spec
         return None
 
     @property
@@ -579,6 +601,10 @@ class Port:
         hi = self.autogrow_limits[1]
         if hi is not None:
             count = min(count, hi)
+        # `Autogrow._MaxNames` is 100: a prefix template with no `max` and a
+        # huge `min` (or a caller-supplied count) must not allocate a
+        # billion-element list inside validation.
+        count = min(count, _MAX_AUTOGROW_NAMES)
         # `autogrow_template` yields `names` or `prefix` and nothing else.
         return [f"{t['prefix']}{i}" for i in range(count)]
 
@@ -2518,7 +2544,12 @@ class Graph:
                 # Where the catalog names no slots there is nothing to filter
                 # against and the historical prefix match stands.
                 declared = agp.autogrow_declared_slot_keys(matched)
-                slot_ports.update(_autogrow_slot_ports(base, agp, matched if declared is None else declared))
+                # Only synthesize ports for keys the catalog actually names.
+                # When there is no naming template (`declared is None`), a
+                # prefix match would invent a type for typos (`images.bogus`)
+                # and invert "don't reject what you cannot read".
+                if declared is not None:
+                    slot_ports.update(_autogrow_slot_ports(base, agp, declared))
             # Nested groups are typed by the dynamic-combo walk, which is the
             # only pass that knows which option expanded them.
             slot_ports.update(dyn_slot_ports)
@@ -3977,7 +4008,10 @@ def _check_dynamic_combo_sub(
         # loop edge/shape/catalog-checks a nested slot exactly as it does a
         # top-level one. Only the valid keys: an undeclared `model.images.bogus`
         # stays an `unknown_input` warning and gets no synthesized diagnostic.
-        if slot_ports is not None:
+        # And only when the catalog names slots — a `declared is None`
+        # prefix match would invent a type for typo keys the same way the
+        # top-level path used to.
+        if slot_ports is not None and declared is not None:
             slot_ports.update(_autogrow_slot_ports(dotted, port, valid))
         # The valid keys stay valid even when the count is short, so the slots
         # that ARE wired don't regress into `unknown_input` noise on top of the
@@ -4138,16 +4172,23 @@ def _autogrow_slot_ports(field: str, port: Port, slots: Iterable[str]) -> dict[s
 
     Empty for a group whose template declares no inner input — there is no type
     to check a slot against, so it keeps the pre-existing "no port, no
-    diagnostic" behaviour rather than guessing one.
+    diagnostic" behaviour rather than guessing one. Empty immediately when
+    there are no slots to type, so a huge ``min`` is never expanded just to
+    build a required-names set that nothing would use.
+
+    Slot Ports share one parsed template Port (``enum_values`` / ``options``
+    by reference) and differ only in ``name`` / ``required`` — one parse, not
+    one copy of the enum per slot.
     """
+    slots = list(slots)
+    if not slots:
+        return {}
     names = port.autogrow_required_slot_names(port.autogrow_effective_min)
     required_keys = set() if names is None else {f"{field}.{name}" for name in names}
-    out: dict[str, Port] = {}
-    for key in slots:
-        slot_port = port.autogrow_slot_port(key, required=key in required_keys)
-        if slot_port is not None:
-            out[key] = slot_port
-    return out
+    prototype = port.autogrow_slot_port(slots[0], required=False)
+    if prototype is None:
+        return {}
+    return {key: replace(prototype, name=key, required=key in required_keys) for key in slots}
 
 
 def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node_data: dict) -> list[dict]:
