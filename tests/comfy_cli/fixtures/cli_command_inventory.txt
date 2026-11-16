@@ -9,6 +9,7 @@ comfy assets
 comfy assets library
 comfy assets library ensure
 comfy assets library ls
+comfy assets library upload
 comfy assets push
 comfy auth
 comfy auth list
@@ -22,6 +23,7 @@ comfy build init
 comfy build ls
 comfy build pull
 comfy build push
+comfy build quota
 comfy build refs
 comfy build refs base-images
 comfy build refs build-targets
@@ -46,6 +48,7 @@ comfy cloud set-key
 comfy cloud status
 comfy cloud whoami
 comfy code-search
+comfy code-search-context
 comfy cs	[hidden]
 comfy dependency	[hidden]
 comfy deploy
@@ -82,6 +85,7 @@ comfy jobs status
 comfy jobs wait
 comfy jobs watch
 comfy knowledge
+comfy knowledge authoring
 comfy knowledge pick
 comfy knowledge resolve
 comfy knowledge status
@@ -107,6 +111,7 @@ comfy model list-folders
 comfy model remove
 comfy model search
 comfy model show
+comfy model upload
 comfy models	[hidden]
 comfy models list-folder
 comfy models list-folders
@@ -202,6 +207,7 @@ comfy workflow
 comfy workflow add-node
 comfy workflow apply
 comfy workflow capture
+comfy workflow check
 comfy workflow clear
 comfy workflow compose
 comfy workflow connect
@@ -209,6 +215,7 @@ comfy workflow decompose
 comfy workflow delete
 comfy workflow delete-node
 comfy workflow delete-nodes
+comfy workflow disconnect
 comfy workflow foreach
 comfy workflow fragment
 comfy workflow fragment ls
