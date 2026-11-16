@@ -931,7 +931,6 @@ def ls_nodes_cmd(
     subgraph_ids = {node_type for node_type in node_types if node_type in resolved_subgraphs}
     rows = []
     for n in nodes:
-        properties = n.get("properties")
         row = {
             "id": n.get("id"),
             "type": n.get("type"),
@@ -974,7 +973,6 @@ def ls_nodes_cmd(
         payload["subgraph_truncated"] = True
     if renderer.is_pretty():
         from rich.table import Table
-        from rich.text import Text
 
         # Every cell below is copied verbatim out of the workflow file, and
         # `Table.add_row` interprets a `str` as Rich MARKUP: an unbalanced `[/]`
@@ -997,7 +995,7 @@ def ls_nodes_cmd(
                 )
                 if value
             )
-            tbl.add_row(Text(str(r["id"])), Text(str(r["type"])), Text(str(r["title"] or "")), state)
+            tbl.add_row(sanitize_markup(r["id"]), sanitize_markup(r["type"]), sanitize_markup(r["title"] or ""), state)
         renderer.console().print(tbl)
         if interior:
             sub = Table(show_header=True, header_style="bold", title="subgraph interiors")
