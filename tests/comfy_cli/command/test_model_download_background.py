@@ -2173,7 +2173,7 @@ class TestWorkerReleasesTheClaim:
         monkeypatch.setattr(
             models,
             "download_file",
-            lambda url, filepath, headers, downloader, progress_callback: filepath.write_bytes(b"ok"),
+            lambda url, filepath, headers, downloader, progress_callback, part_tag=None: filepath.write_bytes(b"ok"),
         )
 
         models._download_worker(state_file=str(path))
@@ -2196,7 +2196,7 @@ class TestWorkerReleasesTheClaim:
         monkeypatch.setattr(
             models,
             "download_file",
-            lambda url, filepath, headers, downloader, progress_callback: filepath.write_bytes(b"ok"),
+            lambda url, filepath, headers, downloader, progress_callback, part_tag=None: filepath.write_bytes(b"ok"),
         )
 
         models._download_worker(state_file=str(path))
@@ -2234,7 +2234,7 @@ class TestWorkerReleasesTheClaim:
         monkeypatch.setattr(
             models,
             "download_file",
-            lambda url, filepath, headers, downloader, progress_callback: filepath.write_bytes(b"ok"),
+            lambda url, filepath, headers, downloader, progress_callback, part_tag=None: filepath.write_bytes(b"ok"),
         )
 
         models._download_worker(state_file=str(path))
