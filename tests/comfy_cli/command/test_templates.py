@@ -1655,8 +1655,9 @@ def test_workflow_node_types_skips_a_subgraph_with_non_list_nodes(nodes):
     }
     assert templates_cmd._workflow_node_types(wf) == {"KSampler", "VAEDecode"}
 
+
 # ---------------------------------------------------------------------------
-# templates ls --local-only / --runnable  (BE-3377)
+# templates ls --local-only / --runnable
 # ---------------------------------------------------------------------------
 
 
