@@ -4454,7 +4454,7 @@ def test_watch_stream_fans_execution_cached_out_per_node(monkeypatch, capsys):
     from comfy_cli import jobs_state
 
     jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
-    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
+    monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid, *, deadline=None: {"prompt_id": pid, "status": "running", "outputs": []})
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
 
     messages = [
