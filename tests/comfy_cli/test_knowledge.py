@@ -1877,6 +1877,40 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, "Qwen 2.1") is None
         assert knowledge.model_candidates(b, "Qwen VL 2.1") == ["qwen-vl-2-1"]
 
+    def test_candidates_exclude_ids_that_do_not_resolve_to_themselves(self):
+        # Ids that differ only by case share one lowercase lookup key, so the
+        # second id is unreachable by `resolve <id>`; suggesting it would send
+        # the caller to retry an id that resolves to a different model.
+        b = knowledge._index(
+            {
+                "models": {
+                    "Acme-2-1": {"id": "Acme-2-1"},
+                    "acme-2-1": {"id": "acme-2-1", "aliases": ["Acme Turbo 2.1"]},
+                }
+            },
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0.0,
+        )
+        assert knowledge.resolve_id(b, "acme-2-1") == "Acme-2-1"
+        assert knowledge.model_candidates(b, "Acme 2.1") == ["Acme-2-1"]
+
+    def test_candidates_skip_aliases_that_target_a_missing_row(self):
+        b = knowledge._index(
+            {
+                "models": {"acme-2-1": {"id": "acme-2-1"}},
+                "aliases": {"Acme Missing 2.1": "missing-row"},
+            },
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0.0,
+        )
+        assert knowledge.model_candidates(b, "Acme 2.1") == ["acme-2-1"]
+
     def test_candidates_are_general_sorted_bounded_and_deduplicated(self):
         ids = [f"acme-variant{letter}-2-1" for letter in "hgfedcba"]
         b = knowledge._index(
