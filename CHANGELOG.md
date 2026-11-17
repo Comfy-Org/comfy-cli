@@ -60,6 +60,12 @@ history.
 
 ### Changed
 
+- **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
+  `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
+  `where_invalid` envelope and a non-zero exit. Before, `comfy --json
+  nodes show --where bogus` printed a traceback with nothing on stdout,
+  and `comfy --json jobs ls --where bogus` printed a successful local
+  listing for a target the caller never named.
 - **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
   following poll) now emits `cloud_unauthorized` instead of
   `cloud_http_error`. The message says the login predates a permission
