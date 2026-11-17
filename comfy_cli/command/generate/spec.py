@@ -163,8 +163,9 @@ _ALIASES: dict[str, str] = {
 
 # Router v2 id for each alias. None = proxy-only today: the operation has no
 # Router id (non-JSON encoding, or an unbound model family). A value ending in
-# "/{model}" is a family: the alias's --model becomes the id suffix, and the
-# second element is the default when --model is omitted.
+# "/{model}" is a family: the alias's model choice becomes the id suffix, and
+# the second element is the default when no model is chosen. A plain id pins
+# one model; `router_id` returns None for any other model choice.
 # This table is data only — nothing in `comfy generate` consumes it yet; the
 # Router client that will read it is separate work. Keep it exhaustive over
 # `_ALIASES` (the test in test_spec.py enforces that).
@@ -212,19 +213,33 @@ _ROUTER_IDS: dict[str, tuple[str, str | None] | None] = {
 }
 
 
+# One segment of a Router id: lowercase alphanumerics joined by `.`, `_` or `-`.
+_ROUTER_SEGMENT_RE = _re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+
+
 def router_id(alias: str, model: str | None = None) -> str | None:
     """Router v2 id for an alias, or None when the alias is proxy-only.
 
     For a family id (one whose template contains ``{model}``) the suffix is
-    ``model`` when given, else the table's default; a non-family id is returned
-    unchanged. An alias absent from the table is treated as proxy-only (None),
-    so callers never raise on a stray key."""
+    ``model`` when given, else the table's default. A non-family id pins one
+    model, so it is returned only when ``model`` is omitted or names that same
+    model; any other ``model`` has no Router id and gets None, rather than being
+    silently swapped for the pinned one. A resolved suffix that is not a valid
+    Router segment (empty, or carrying ``/``, ``..``, whitespace, uppercase, …)
+    also gets None. An alias absent from the table is treated as proxy-only
+    (None), so callers never raise on a stray key."""
     entry = _ROUTER_IDS.get(alias)
     if entry is None:
         return None
     template, default = entry
-    if "{model}" in template:
-        return template.replace("{model}", model or default or "")
+    provider, _, pinned = template.partition("/")
+    if pinned == "{model}":
+        suffix = model or default
+        if not suffix or not _ROUTER_SEGMENT_RE.match(suffix):
+            return None
+        return f"{provider}/{suffix}"
+    if model is not None and model != pinned:
+        return None
     return template
 
 

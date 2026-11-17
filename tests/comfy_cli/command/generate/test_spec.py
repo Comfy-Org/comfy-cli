@@ -646,10 +646,33 @@ def test_router_id_resolves_families_and_proxy_only():
     assert spec.router_id("vidu") is None
     # i2v shares the base alias's id — Router selects image2video from the payload.
     assert spec.router_id("kling-i2v") == spec.router_id("kling")
-    # A plain (non-family) id ignores --model.
-    assert spec.router_id("flux-pro", "anything") == "bfl/flux-pro-1.1"
+    # A plain (non-family) id pins one model: naming that model resolves to it,
+    # any other model has no Router id rather than being swapped for the pinned one.
+    assert spec.router_id("runway-i2v") == "runway/gen4_turbo"
+    assert spec.router_id("runway-i2v", "gen4_turbo") == "runway/gen4_turbo"
+    assert spec.router_id("runway-i2v", "gen3a_turbo") is None
+    assert spec.router_id("grok", "grok-imagine-image-pro") is None
+    assert spec.router_id("flux-pro", "anything") is None
     # An alias not in the table is treated as proxy-only.
     assert spec.router_id("not-an-alias") is None
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", "x?y", "x#y", "has space", "Upper", "trailing-"])
+def test_router_id_rejects_malformed_family_model(bad):
+    """A model choice that is not a valid Router segment never yields an id."""
+    assert spec.router_id("recraft", bad) is None
+
+
+def test_router_id_defaults_resolve_to_valid_ids():
+    """Every row resolves, with no model given, to an id matching the Router
+    segment pattern — the template test alone cannot catch a bad default."""
+    pattern = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$")
+    for alias, entry in spec._ROUTER_IDS.items():
+        if entry is None:
+            continue
+        resolved = spec.router_id(alias)
+        assert resolved is not None, f"{alias}: family row has no default"
+        assert pattern.match(resolved), f"{alias}: {resolved!r} fails the Router segment pattern"
 
 
 # ── allowlist / alias drift against the bundled spec ──────────────────────
