@@ -532,9 +532,9 @@ with `comfy generate resume <model> <job_id>`. Examples:
 comfy generate kling --prompt "a paper boat drifting on a river at dusk" \
     --duration 5 --download boat.mp4
 
-comfy generate luma --prompt "..." --aspect_ratio 16:9 --async
+comfy generate vidu --prompt "..." --async
 # → prints job id; resume with:
-comfy generate resume luma <job_id> --download out.mp4
+comfy generate resume vidu <job_id> --download out.mp4
 ```
 
 **Gemini Flash Image (nano-banana)** — text-to-image and image edits in one

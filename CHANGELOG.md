@@ -55,6 +55,16 @@ history.
   (`exact: true` for deployments, no `truncated` for releases), and the note
   saying it can read low is left out. `note` is empty when nothing is left to say.
 
+### Removed
+
+- `comfy generate` drops five model aliases whose cloud routes are retired, so
+  every submit was already refused: `kling-extend` (Kling retired the V1.x
+  models the video-extend route accepts), `luma` and `luma-i2v` (Luma retired
+  its Ray video models and shut Photon down), and `moonvalley-t2v` /
+  `moonvalley-i2v` (Moonvalley exited and its `/proxy` routes were removed).
+  Typing one now returns the usual unknown-model error with suggestions rather
+  than failing at the proxy.
+
 ### Fixed
 
 - The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and

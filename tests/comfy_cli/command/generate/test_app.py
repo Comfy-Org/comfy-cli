@@ -775,34 +775,6 @@ def test_video_kling_async_path(runner, api_key, monkeypatch):
     assert "https://cdn.example/k.mp4" in r.stdout
 
 
-def test_video_luma_async_path(runner, api_key, monkeypatch):
-    submit = httpx.Response(200, json={"id": "luma-1", "state": "queued"})
-    done = httpx.Response(200, json={"id": "luma-1", "state": "completed", "assets": {"video": "https://cdn/l.mp4"}})
-    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: submit)
-    monkeypatch.setattr("comfy_cli.command.generate.client.get", lambda *a, **kw: done)
-    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
-
-    r = runner.invoke(
-        cli_app,
-        [
-            "generate",
-            "luma",
-            "--prompt",
-            "a cat",
-            "--aspect_ratio",
-            "16:9",
-            "--model",
-            "ray-2",
-            "--resolution",
-            "{}",
-            "--duration",
-            "{}",
-        ],
-    )
-    assert r.exit_code == 0, r.stdout
-    assert "https://cdn/l.mp4" in r.stdout
-
-
 def test_video_runway_failure_surfaces(runner, api_key, monkeypatch):
     submit = httpx.Response(200, json={"id": "rw-1"})
     fail = httpx.Response(200, json={"id": "rw-1", "status": "FAILED"})
@@ -861,7 +833,7 @@ def test_list_video_filter(runner):
     r = runner.invoke(cli_app, ["generate", "list", "--style", "text-to-video"])
     assert r.exit_code == 0
     assert "kling" in r.stdout
-    assert "luma" in r.stdout
+    assert "seedance" in r.stdout
     assert "pika" in r.stdout
 
 
