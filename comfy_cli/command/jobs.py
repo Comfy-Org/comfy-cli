@@ -2592,7 +2592,12 @@ def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
     # special-case a list-shaped `nodes` here. `title`/`class_type` are omitted:
     # watch has no workflow map to resolve them from, and both are optional in
     # the run dialect's own emission.
-    nodes = data.get("nodes") or []
+    nodes = data.get("nodes")
+    # A non-list (e.g. the string "34") is not a node list: iterating it
+    # would invent ids from its characters and seat them in completed_nodes.
+    # The /history path already ignores this shape; the live handler must too.
+    if not isinstance(nodes, list):
+        return
     for n in nodes:
         state.completed_nodes.add(str(n))
     renderer = state.renderer

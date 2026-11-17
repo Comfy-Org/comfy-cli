@@ -3880,6 +3880,14 @@ def test_watch_execution_cached_empty_list_emits_nothing():
     assert r.events == []
 
 
+def test_watch_execution_cached_ignores_a_non_list_nodes_value():
+    """A string like "34" must not be walked as node ids "3" and "4"."""
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": "34"})
+    assert r.events == []
+    assert st.completed_nodes == set()
+
+
 def test_watch_progress_uses_throttled_event():
     st, r = _watch_state()
     jobs_mod._watch_progress(st, {"node": "3", "value": 2, "max": 10})
