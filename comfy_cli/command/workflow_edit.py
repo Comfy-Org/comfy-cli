@@ -772,12 +772,17 @@ def _mode_label(node: dict) -> str | None:
 
     ``_MODE_LABELS.get`` HASHES its argument, so a node serialized with
     ``"mode": []`` or ``{}`` would raise ``TypeError: unhashable type`` and abort
-    the command with a traceback instead of an error envelope. Only an ``int``
-    can be a litegraph mode; ``bool`` is an int subclass but matches neither 2
-    nor 4, so it falls through to None like any other non-mode value.
+    the command with a traceback instead of an error envelope. Litegraph modes
+    are ints (2 = mute, 4 = bypass), but a JSON file may write them as the
+    integral floats ``2.0`` / ``4.0`` — those must still hash to the int keys
+    (``4 == 4.0``) the way the previous inline check did. ``bool`` is an int
+    subclass but matches neither 2 nor 4, so it falls through to None like any
+    other non-mode value.
     """
     mode = node.get("mode")
-    return _MODE_LABELS.get(mode) if isinstance(mode, int) else None
+    if isinstance(mode, bool) or not isinstance(mode, (int, float)):
+        return None
+    return _MODE_LABELS.get(mode)
 
 
 def _node_title(node: dict) -> Any:
