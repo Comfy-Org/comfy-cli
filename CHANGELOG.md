@@ -99,6 +99,9 @@ history.
 
 ### Fixed
 
+- `comfy knowledge resolve` no longer suggests, in `candidate_ids`, a model id
+  that differs from another id only by letter case. Such an id resolves to the
+  other model, so retrying it would pick the wrong one.
 - The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and
   `comfy-build-failures` skills say an ordinary version pin in
   `pipDependencies` adds no package, where they said any line never does. They
