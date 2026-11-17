@@ -17,6 +17,18 @@ history.
 
 ### Added
 
+- `comfy templates ls --local-only` drops partner-API templates from the
+  index (a name starting with `api_`, or an API tag) with no network
+  beyond the index. `--runnable` implies `--local-only`, then checks
+  each remaining template against the local install and annotates every
+  row with a verdict and `missing_count`. A single template's fetch or
+  parse failure becomes `verdict: "unknown"` with a warning and does not
+  abort the list. A workflow body with no `nodes` list is `unknown`, not
+  `runnable`. A model folder whose listing fails with an HTTP error other
+  than 404 is reported missing with a warning. When the local server's
+  object_info is unavailable, a run-level warning says verdicts rely on
+  the index heuristic alone. The JSON payload adds `local_only_dropped`.
+  An oversized folder listing is `model_listing_too_large`.
 - `comfy models search`, `list-folders`, `list-folder` and `show` take
   `--host`/`--port` the same way `comfy upload` does, so they can point
   at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
