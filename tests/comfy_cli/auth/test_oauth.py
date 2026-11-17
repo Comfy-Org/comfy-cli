@@ -569,7 +569,7 @@ class TestEnsureFreshSession:
         seen: dict = {}
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
         monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: None)
-        monkeypatch.setattr(oauth, "_post_form", lambda url, body: seen.update(body) or {"access_token": "NEW"})
+        monkeypatch.setattr(oauth, "_post_form", lambda url, body, **_kw: seen.update(body) or {"access_token": "NEW"})
         oauth.ensure_fresh_session()
         assert seen["grant_type"] == "refresh_token"
         assert "scope" not in seen
