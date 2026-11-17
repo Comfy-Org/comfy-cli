@@ -54,6 +54,16 @@ history.
 
 ### Changed
 
+- **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
+  following poll) now emits `cloud_unauthorized` instead of
+  `cloud_http_error`. The message says the login predates a permission
+  change and `comfy cloud login` fixes it, and the envelope carries
+  `details.reason` and `details.required_scope`. `comfy cloud login` now
+  also requests the `comfy-cloud:secrets:write` and
+  `comfy-cloud:agent:write` default OAuth scopes, so a new login can
+  call the Cloud secrets and agent APIs. A refresh does not widen an
+  existing grant; a session minted before this change needs a re-login
+  for those scopes.
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
   install (Path A of `comfy-build`), not from the workflow alone
   (`--from-workflow`). Its custom build step is short and uploads nothing
