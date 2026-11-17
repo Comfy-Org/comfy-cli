@@ -362,7 +362,8 @@ class TestMalformedLinks:
 class TestAutogrowAnchor:
     """An autogrow group with `min: 1` requires the index-0 slot by name: the
     server answers `required_input_missing: image0` for a group wired from
-    image1 upwards. The validator counted slots and never checked which."""
+    image1 upwards. `autogrow_below_min` reports the missing required slot
+    names (unified with the count shortfall), not a separate first-slot code."""
 
     def test_missing_index_zero_slot_is_rejected(self, graph: Graph) -> None:
         wf = {
@@ -375,7 +376,7 @@ class TestAutogrowAnchor:
         }
         result = graph.validate_workflow(wf)
         assert not result["valid"]
-        assert "autogrow_missing_first_slot" in _codes(result)
+        assert "autogrow_below_min" in _codes(result)
 
     def test_slots_from_index_zero_validate(self, graph: Graph) -> None:
         wf = {
@@ -725,7 +726,7 @@ class TestAutogrowRealSchemas:
         }
         result = graph.validate_workflow(wf)
         assert not result["valid"]
-        assert "autogrow_missing_first_slot" in _codes(result)
+        assert "autogrow_below_min" in _codes(result)
 
     def test_a_group_with_min_zero_may_have_no_slots(self, graph: Graph) -> None:
         """GLSLShader.floats sits under `required` with min 0: a shader using no
