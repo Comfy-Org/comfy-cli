@@ -1106,6 +1106,22 @@ class TestHostPortRouting:
         assert env["ok"] is True, env
         assert env["data"]["url"] == "http://[::1]:8189/models"
 
+    def test_unicode_host_is_forwarded_as_idna_ascii(self, monkeypatch, capsys):
+        # urllib copies the authority into the Host header, which http.client
+        # encodes as Latin-1 — a raw Unicode host would raise UnicodeEncodeError
+        # before connecting. The request reaching the opener must carry the
+        # punycode form, and its Host header must encode the way http.client does.
+        import urllib.request
+
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        ascii_host = "例え.test".encode("idna").decode("ascii")
+        calls = _patch_urlopen(monkeypatch, {f"{ascii_host}:8188/models/loras": _LOCAL_FILES_BY_FOLDER["loras"]})
+        env = _run(["search", "--where", "local", "--host", "例え.test", "--type", "lora"], capsys)
+        assert env["ok"] is True, env
+        url = calls[0]["url"]
+        assert url == f"http://{ascii_host}:8188/models/loras"
+        urllib.request.Request(url).host.encode("latin-1")
+
     def test_search_threads_host_port_to_resolve_target(self, monkeypatch, capsys):
         # The other verbs route through the same helper; assert `search` in
         # particular hands the pair to `resolve_target`.
