@@ -436,8 +436,12 @@ nodes, which is the point — `workflow_to_api` silently drops those, so this is
 only place a reader sees them. To decide what actually runs, check `mode` on the row
 AND on every ancestor: a live `10/3/7` under a muted `10/3` (or under a disabled
 instance `10`, whose `mode` is on its `nodes[]` row) does not execute. Rarely,
-`data.subgraph_truncated: true` appears — the walk hit its row ceiling, so the listing
-is incomplete and `subgraph_count` is a floor; re-read the graph in smaller pieces.
+`data.subgraph_truncated: true` appears — the walk hit its row ceiling (10,000
+interior rows), so the listing is incomplete and `subgraph_count` is a floor;
+re-read the graph in smaller pieces. Traversal also has a depth cap of 32 (the
+same cap as the slot walker). An instance deeper than that is omitted, and
+unlike the row ceiling this does **not** set `subgraph_truncated` — a deep
+narrow graph can be incomplete with no truncation flag.
 
 **Building more than one or two nodes? Use `apply` — one batch, one catalog load,
 and `as` aliases so you never capture a minted id by hand:**
