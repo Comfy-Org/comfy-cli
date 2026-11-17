@@ -29,6 +29,12 @@ history.
   object_info is unavailable, a run-level warning says verdicts rely on
   the index heuristic alone. The JSON payload adds `local_only_dropped`.
   An oversized folder listing is `model_listing_too_large`.
+- `comfy models search`, `list-folders`, `list-folder` and `show` take
+  `--host`/`--port` the same way `comfy upload` does, so they can point
+  at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
+  rejected against an effective cloud target with `host_flag_cloud`, and
+  a bad host or port yields `host_port_invalid` instead of a traceback.
+  With no flags, behavior is unchanged.
 - `comfy workflow slots` rows for a subgraph's promoted widgets carry
   `source_address`, the interior node and widget the row stands for
   (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
@@ -66,6 +72,16 @@ history.
 
 ### Changed
 
+- **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
+  following poll) now emits `cloud_unauthorized` instead of
+  `cloud_http_error`. The message says the login predates a permission
+  change and `comfy cloud login` fixes it, and the envelope carries
+  `details.reason` and `details.required_scope`. `comfy cloud login` now
+  also requests the `comfy-cloud:secrets:write` and
+  `comfy-cloud:agent:write` default OAuth scopes, so a new login can
+  call the Cloud secrets and agent APIs. A refresh does not widen an
+  existing grant; a session minted before this change needs a re-login
+  for those scopes.
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
   install (Path A of `comfy-build`), not from the workflow alone
   (`--from-workflow`). Its custom build step is short and uploads nothing
