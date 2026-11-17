@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy models search`, `list-folders`, `list-folder` and `show` take
+  `--host`/`--port` the same way `comfy upload` does, so they can point
+  at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
+  rejected against an effective cloud target with `host_flag_cloud`, and
+  a bad host or port yields `host_port_invalid` instead of a traceback.
+  With no flags, behavior is unchanged.
 - `comfy workflow slots` rows for a subgraph's promoted widgets carry
   `source_address`, the interior node and widget the row stands for
   (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
