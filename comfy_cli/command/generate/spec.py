@@ -234,8 +234,8 @@ def router_id(alias: str, model: str | None = None) -> str | None:
     template, default = entry
     provider, _, pinned = template.partition("/")
     if pinned == "{model}":
-        suffix = model or default
-        if not suffix or not _ROUTER_SEGMENT_RE.match(suffix):
+        suffix = default if model is None else model
+        if not suffix or not _ROUTER_SEGMENT_RE.fullmatch(suffix):
             return None
         return f"{provider}/{suffix}"
     if model is not None and model != pinned:

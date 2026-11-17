@@ -657,7 +657,7 @@ def test_router_id_resolves_families_and_proxy_only():
     assert spec.router_id("not-an-alias") is None
 
 
-@pytest.mark.parametrize("bad", ["../x", "a/b", "x?y", "x#y", "has space", "Upper", "trailing-"])
+@pytest.mark.parametrize("bad", ["", "../x", "a/b", "x?y", "x#y", "has space", "Upper", "trailing-", "recraftv3\n"])
 def test_router_id_rejects_malformed_family_model(bad):
     """A model choice that is not a valid Router segment never yields an id."""
     assert spec.router_id("recraft", bad) is None
