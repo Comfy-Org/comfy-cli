@@ -684,8 +684,9 @@ def ls_cmd(
     # with a verdict. Runs on the full post-pre-filter set so the cache warms and
     # the counts are stable; `--limit` is applied to the result below.
     checked: dict[str, dict[str, Any]] = {}
+    run_warnings: list[str] = []
     if runnable:
-        checked = _batch_check_rows(renderer, rows, refresh=refresh)
+        checked, run_warnings = _batch_check_rows(renderer, rows, refresh=refresh)
 
     # `--limit` applies AFTER all filtering (flag filters + the local-only
     # pre-filter) so a small limit never truncates ahead of the pre-filter and
@@ -710,12 +711,14 @@ def ls_cmd(
             out["missing_count"] = len(res["models"]["missing"]) if res else 0
         return out
 
-    ls_warnings: list[str] = []
+    ls_warnings: list[str] = list(run_warnings)
     if runnable:
         for r in rows:
             res = checked.get(r["name"])
             if res:
                 ls_warnings.extend(res.get("warnings") or [])
+        # A folder shared by many templates warns once per template; report it once.
+        ls_warnings = list(dict.fromkeys(ls_warnings))
 
     payload = {
         "total_in_gallery": total,
@@ -746,6 +749,8 @@ def ls_cmd(
     if renderer.is_pretty():
         from rich.table import Table
 
+        from comfy_cli.output.sanitize import sanitize_markup
+
         if not rows:
             rprint("[dim]0 templates matched.[/dim]")
         else:
@@ -764,11 +769,12 @@ def ls_cmd(
                 "unknown": "dim",
             }
             for r in rows:
+                # Gallery text is untrusted: a stray `[/bold]` would raise MarkupError.
                 cells = [
-                    r["name"],
-                    r["output_type"],
-                    r["title"] or "(untitled)",
-                    ", ".join(r["tags"]),
+                    sanitize_markup(r["name"]),
+                    sanitize_markup(r["output_type"]),
+                    sanitize_markup(r["title"] or "(untitled)"),
+                    sanitize_markup(", ".join(r["tags"])),
                 ]
                 if runnable:
                     res = checked.get(r["name"])
@@ -782,17 +788,15 @@ def ls_cmd(
             tail = f" (of {matched} matched, {total} in gallery)" if (matched != len(rows) or matched != total) else ""
             rprint(f"[dim]{len(rows)} template(s){tail}[/dim]")
             if runnable and ls_warnings:
-                from rich.markup import escape
-
                 for w in ls_warnings:
-                    rprint(f"  [yellow]⚠[/yellow] {escape(w)}")
+                    rprint(f"  [yellow]⚠[/yellow] {sanitize_markup(w)}")
     knowledge.attach(
         payload,
         command="templates ls",
         queries=[x for x in (tag, name_sub, model) if x],
         templates=[r["name"] for r in rows],
         catalog_templates=all_names,
-        thin=(matched == 0),
+        thin=(matched - local_only_dropped == 0),
         qualified=any(payload["filters"].values()),
     )
     renderer.emit(payload, command="templates ls")
@@ -1708,16 +1712,21 @@ def _persist_template_workflow(cache_path: Path, body: bytes) -> None:
 def _parse_workflow_body(body: bytes) -> tuple[dict[str, Any] | None, str | None]:
     """Decode a per-template workflow body into ``(workflow, error)``.
 
-    ``error`` is a human string when the body is not a JSON object (malformed,
-    non-UTF-8, or a JSON non-object) — the batch ``ls --runnable`` path turns
-    that into a per-template ``unknown`` verdict rather than aborting the listing.
+    ``error`` is a human string when the body is not a UI-format workflow
+    (malformed, non-UTF-8, too deeply nested, a JSON non-object, or an object with
+    no ``nodes`` list — an error payload like ``{"error": "rate limited"}`` would
+    otherwise check as a zero-node ``runnable`` template). The batch
+    ``ls --runnable`` path turns that into a per-template ``unknown`` verdict
+    rather than aborting the listing.
     """
     try:
         wf = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
+    except (ValueError, RecursionError) as e:  # JSONDecodeError/UnicodeDecodeError are ValueErrors
         return None, f"workflow is not valid JSON: {e}"
     if not isinstance(wf, dict):
         return None, "workflow is not a JSON object"
+    if not isinstance(wf.get("nodes"), list):
+        return None, "workflow has no `nodes` list (not a ComfyUI workflow)"
     return wf, None
 
 
@@ -1771,7 +1780,8 @@ def _batch_load_workflows(names: list[str], *, refresh: bool) -> dict[str, tuple
         to_fetch.append(name)
 
     if to_fetch:
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        pool = ThreadPoolExecutor(max_workers=8)
+        try:
             futures = {pool.submit(_fetch_and_cache_workflow, name): name for name in to_fetch}
             for fut in as_completed(futures):
                 name = futures[fut]
@@ -1780,18 +1790,25 @@ def _batch_load_workflows(names: list[str], *, refresh: bool) -> dict[str, tuple
                 except Exception as e:
                     # A worker crash is one template's `unknown`, never a run abort.
                     results[name] = (None, f"failed to fetch workflow: {e}")
+        finally:
+            # Ctrl-C mid-run drops the queued fetches instead of draining them all.
+            pool.shutdown(wait=True, cancel_futures=True)
     return results
 
 
-def _list_model_folders(target, directories: list[str]) -> dict[str, list[str] | None]:
+def _list_model_folders(
+    target, directories: list[str], warnings: list[str] | None = None
+) -> dict[str, list[str] | None]:
     """List each distinct model directory ONCE on the local server.
 
     ``directories`` is deduped by the caller; unaddressable names (any that
     ``_is_walkable_folder_name`` rejects) are skipped here and left out of the
     returned mapping — :func:`_check_template` re-derives the "isn't a valid model
     folder" warning for them from the directory string, so listing them would only
-    waste a request. A folder that 404s maps to ``None`` (custom-node folder).
-    Server-unreachable errors propagate to the caller.
+    waste a request. A folder that 404s maps to ``None`` (custom-node folder). Any
+    other HTTP error degrades just that folder to ``None`` too, with a warning
+    naming the status appended to ``warnings``. Server-unreachable errors
+    propagate to the caller.
     """
     from comfy_cli.command.models.search import _is_walkable_folder_name
 
@@ -1799,7 +1816,15 @@ def _list_model_folders(target, directories: list[str]) -> dict[str, list[str] |
     for directory in directories:
         if not _is_walkable_folder_name(directory):
             continue
-        listings[directory] = _list_local_folder(target, directory)
+        try:
+            listings[directory] = _list_local_folder(target, directory)
+        except urllib.error.HTTPError as e:
+            # The server answered, so it is reachable: one folder's error is not a run abort.
+            listings[directory] = None
+            if warnings is not None:
+                warnings.append(
+                    f"listing model folder {directory!r} failed with HTTP {e.code} — its files are reported missing"
+                )
     return listings
 
 
@@ -1922,10 +1947,12 @@ def _unknown_verdict(row: dict[str, Any], reason: str) -> dict[str, Any]:
     }
 
 
-def _batch_check_rows(renderer, rows: list[dict[str, Any]], *, refresh: bool) -> dict[str, dict[str, Any]]:
+def _batch_check_rows(
+    renderer, rows: list[dict[str, Any]], *, refresh: bool
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """Run the phase-1 check over every row, batching the two network fan-outs.
 
-    Returns ``{name: verdict_dict}``. Two batching wins the per-template ``check``
+    Returns ``({name: verdict_dict}, run_warnings)``. Two batching wins the per-template ``check``
     can't get: workflows are fetched through one bounded ThreadPool with the
     phase-1 cache reused, and every distinct model directory across the whole run
     is listed on the local server exactly ONCE.
@@ -1955,11 +1982,12 @@ def _batch_check_rows(renderer, rows: list[dict[str, Any]], *, refresh: bool) ->
                 seen_dirs.add(directory)
                 distinct_dirs.append(directory)
 
+    run_warnings: list[str] = []
     listings: dict[str, list[str] | None] = {}
     if distinct_dirs:
         target = resolve_target(where="local")
         try:
-            listings = _list_model_folders(target, distinct_dirs)
+            listings = _list_model_folders(target, distinct_dirs, run_warnings)
         except ResponseTooLarge as e:
             renderer.error(
                 code="model_listing_too_large",
@@ -1983,6 +2011,11 @@ def _batch_check_rows(renderer, rows: list[dict[str, Any]], *, refresh: bool) ->
         graph = Graph.load(mode="local")
     except Exception:
         graph = None
+    if names and graph is None:
+        run_warnings.append(
+            "object_info unavailable from the local server — partner-API nodes and uninstalled custom nodes "
+            "were not detected; verdicts rely on the index `api_`/`API` heuristic alone"
+        )
 
     results: dict[str, dict[str, Any]] = {}
     for name in names:
@@ -1992,7 +2025,7 @@ def _batch_check_rows(renderer, rows: list[dict[str, Any]], *, refresh: bool) ->
             results[name] = _unknown_verdict(row, err or "unknown error")
         else:
             results[name] = _check_template(row, wf, listings, graph=graph)
-    return results
+    return results, run_warnings
 
 
 @app.command(

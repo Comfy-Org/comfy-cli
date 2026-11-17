@@ -23,8 +23,12 @@ history.
   each remaining template against the local install and annotates every
   row with a verdict and `missing_count`. A single template's fetch or
   parse failure becomes `verdict: "unknown"` with a warning and does not
-  abort the list. The JSON payload adds `local_only_dropped`. An
-  oversized folder listing is `model_listing_too_large`.
+  abort the list. A workflow body with no `nodes` list is `unknown`, not
+  `runnable`. A model folder whose listing fails with an HTTP error other
+  than 404 is reported missing with a warning. When the local server's
+  object_info is unavailable, a run-level warning says verdicts rely on
+  the index heuristic alone. The JSON payload adds `local_only_dropped`.
+  An oversized folder listing is `model_listing_too_large`.
 - `comfy workflow slots` rows for a subgraph's promoted widgets carry
   `source_address`, the interior node and widget the row stands for
   (`57/28.unet_name`), resolved through nested promotions and renamed inputs.

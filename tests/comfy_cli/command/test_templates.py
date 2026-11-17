@@ -1952,3 +1952,86 @@ def test_ls_runnable_unparseable_fetched_body_is_not_cached(gallery_file, tmp_pa
     assert result.exit_code == 0, result.output
     assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "unknown"
     assert not templates_cmd._template_workflow_cache_path("image_z_image").exists()
+
+
+@pytest.mark.parametrize("body", [b"{}", b'{"error": "rate limited"}', b'{"nodes": [], "n": ' + b"9" * 5000 + b"}"])
+def test_ls_runnable_non_workflow_body_is_unknown_not_runnable(gallery_file, tmp_path, monkeypatch, body):
+    # An error payload / nodes-less object must not check as a zero-node `runnable`,
+    # and an over-long int literal (a plain ValueError) must not escape as a traceback.
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": body})
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "unknown"
+    assert not templates_cmd._template_workflow_cache_path("image_z_image").exists()
+
+
+def test_ls_runnable_warns_when_object_info_unavailable(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert any("object_info unavailable" in w for w in data["warnings"])
+    assert data["rows"][0]["verdict"] == "runnable"
+
+
+def test_ls_runnable_folder_http_error_degrades_that_folder_and_dedupes_warning(tmp_path, monkeypatch):
+    import urllib.error
+
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [
+                {"name": "local_a", "title": "A", "tags": ["Local"], "models": []},
+                {"name": "local_b", "title": "B", "tags": ["Local"], "models": []},
+            ],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    wf = json.dumps(_TOP_LEVEL_WF).encode()
+    _count_workflow_fetches(monkeypatch, body_by_name={"local_a": wf, "local_b": wf})
+    _stub_folder_listing(monkeypatch, urllib.error.HTTPError("http://x", 500, "boom", {}, None))
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    # A non-404 HTTP error means the server answered: one folder degrades, the run continues.
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert {r["name"]: r["verdict"] for r in data["rows"]} == {"local_a": "missing-models", "local_b": "missing-models"}
+    assert sum("HTTP 500" in w for w in data["warnings"]) == 1
+    # Both templates share the folder; its per-template warning is reported once.
+    assert sum("not found on the local server" in w for w in data["warnings"]) == 1
+
+
+def test_ls_runnable_pretty_table_escapes_gallery_markup(tmp_path, monkeypatch):
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [{"name": "local_a", "title": "Bad [/bold] title", "tags": ["Local"], "models": []}],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    reset_renderer_for_testing()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    assert "Bad [/bold] title" in result.output
