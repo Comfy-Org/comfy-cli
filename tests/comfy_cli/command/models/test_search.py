@@ -1122,6 +1122,24 @@ class TestHostPortRouting:
         assert url == f"http://{ascii_host}:8188/models/loras"
         urllib.request.Request(url).host.encode("latin-1")
 
+    def test_host_whose_idna_form_is_unsafe_is_a_usage_error(self, monkeypatch, capsys):
+        # Fullwidth ``％`` NFKC-folds to ``%`` during IDNA conversion, so the
+        # ASCII form carries a percent-encoded CRLF the Unicode input did not.
+        # It must surface as the host_port_invalid usage envelope, not escape
+        # from the request layer as a traceback.
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        calls = _patch_urlopen(monkeypatch, {})
+        _force_json_renderer()
+        result = CliRunner().invoke(
+            search_cmd.app, ["search", "--where", "local", "--host", "localhost％0d％0a", "--type", "lora"]
+        )
+        assert result.exit_code == 2, result.output
+        out = capsys.readouterr().out or result.stdout
+        env = json.loads(out.strip().splitlines()[-1])
+        assert env["ok"] is False
+        assert env["error"]["code"] == "host_port_invalid"
+        assert calls == []
+
     def test_search_threads_host_port_to_resolve_target(self, monkeypatch, capsys):
         # The other verbs route through the same helper; assert `search` in
         # particular hands the pair to `resolve_target`.

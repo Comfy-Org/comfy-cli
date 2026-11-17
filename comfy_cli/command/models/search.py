@@ -238,9 +238,12 @@ def _resolve_and_stamp(renderer, where: str | None, *, command: str, host: str |
             # into the ``Host`` header, which ``http.client`` encodes as
             # Latin-1, so ``--host 例え.test`` would raise an uncaught
             # ``UnicodeEncodeError`` before connecting. Forward the ASCII
-            # (punycode) form instead; IP literals are already ASCII.
+            # (punycode) form instead; IP literals are already ASCII. IDNA's
+            # NFKC step can fold characters into ones ``validate_host`` rejects
+            # (fullwidth ``％`` becomes ``%``, so ``localhost％0d％0a`` turns into
+            # a percent-encoded CRLF), so validate the converted form too.
             if not host.isascii():
-                host = host.encode("idna").decode("ascii")
+                host = validate_host(host.encode("idna").decode("ascii"))
         if port is not None and not (1 <= port <= 65535):
             raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
 
