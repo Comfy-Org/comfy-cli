@@ -17,6 +17,14 @@ history.
 
 ### Added
 
+- `comfy templates ls --local-only` drops partner-API templates from the
+  index (a name starting with `api_`, or an API tag) with no network
+  beyond the index. `--runnable` implies `--local-only`, then checks
+  each remaining template against the local install and annotates every
+  row with a verdict and `missing_count`. A single template's fetch or
+  parse failure becomes `verdict: "unknown"` with a warning and does not
+  abort the list. The JSON payload adds `local_only_dropped`. An
+  oversized folder listing is `model_listing_too_large`.
 - `comfy workflow slots` rows for a subgraph's promoted widgets carry
   `source_address`, the interior node and widget the row stands for
   (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
