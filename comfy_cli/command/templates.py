@@ -674,8 +674,11 @@ def ls_cmd(
 
     # `--runnable` implies the `--local-only` index pre-filter (drop templates
     # that need partner-API access before spending any network on workflows).
+    local_only_dropped = 0
     if local_only or runnable:
+        pre_filter_count = len(rows)
         rows = [r for r in rows if not _template_is_api_by_index(r["name"], r.get("tags") or [])]
+        local_only_dropped = pre_filter_count - len(rows)
 
     # `--runnable`: fetch + check every surviving row (batched), annotating each
     # with a verdict. Runs on the full post-pre-filter set so the cache warms and
@@ -730,6 +733,7 @@ def ls_cmd(
     }
     if local_only or runnable:
         payload["local_only"] = True
+        payload["local_only_dropped"] = local_only_dropped
     if runnable:
         payload["runnable"] = True
         payload["warnings"] = ls_warnings
@@ -1710,7 +1714,7 @@ def _parse_workflow_body(body: bytes) -> tuple[dict[str, Any] | None, str | None
     """
     try:
         wf = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
         return None, f"workflow is not valid JSON: {e}"
     if not isinstance(wf, dict):
         return None, "workflow is not a JSON object"
@@ -1775,16 +1779,18 @@ def _batch_load_workflows(names: list[str], *, refresh: bool) -> dict[str, tuple
 def _list_model_folders(target, directories: list[str]) -> dict[str, list[str] | None]:
     """List each distinct model directory ONCE on the local server.
 
-    ``directories`` is deduped by the caller; unaddressable names (empty, or
-    containing ``..`` / a path separator) are skipped here and left out of the
+    ``directories`` is deduped by the caller; unaddressable names (any that
+    ``_is_walkable_folder_name`` rejects) are skipped here and left out of the
     returned mapping — :func:`_check_template` re-derives the "isn't a valid model
     folder" warning for them from the directory string, so listing them would only
     waste a request. A folder that 404s maps to ``None`` (custom-node folder).
     Server-unreachable errors propagate to the caller.
     """
+    from comfy_cli.command.models.search import _is_walkable_folder_name
+
     listings: dict[str, list[str] | None] = {}
     for directory in directories:
-        if not directory or ".." in directory or "/" in directory or "\\" in directory:
+        if not _is_walkable_folder_name(directory):
             continue
         listings[directory] = _list_local_folder(target, directory)
     return listings
@@ -1841,10 +1847,12 @@ def _check_template(
     warnings: list[str] = []
     present: list[str] = []
     missing: list[dict[str, str]] = []
+    from comfy_cli.command.models.search import _is_walkable_folder_name
+
     warned_dirs: set[str] = set()
     for req in required:
         directory = req["directory"]
-        if not directory or ".." in directory or "/" in directory or "\\" in directory:
+        if not _is_walkable_folder_name(directory):
             if directory not in warned_dirs:
                 warnings.append(
                     f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
@@ -1945,6 +1953,13 @@ def _batch_check_rows(renderer, rows: list[dict[str, Any]], *, refresh: bool) ->
         target = resolve_target(where="local")
         try:
             listings = _list_model_folders(target, distinct_dirs)
+        except ResponseTooLarge as e:
+            renderer.error(
+                code="model_listing_too_large",
+                message=f"a local model folder listing is over the response size cap: {e}",
+                hint="check that the server on this host:port is ComfyUI",
+            )
+            raise typer.Exit(code=1) from e
         except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
             renderer.error(
                 code="server_not_running",

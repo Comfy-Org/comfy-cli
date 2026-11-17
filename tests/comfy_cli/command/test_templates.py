@@ -1718,6 +1718,8 @@ def test_ls_local_only_drops_api_rows_without_any_fetch(gallery_file, tmp_path, 
     assert env["data"]["matched"] == 3
     assert env["data"]["shown"] == 1
     assert env["data"]["local_only"] is True
+    # The two API rows removed by the pre-filter are counted separately from truncation.
+    assert env["data"]["local_only_dropped"] == 2
     # Index-only pre-filter: zero network beyond the index.
     assert fetches["count"] == 0
 
@@ -1852,3 +1854,68 @@ def test_check_template_helper_is_pure_over_shared_listings():
     assert res_missing["verdict"] == "missing-models"
     assert res_missing["models"]["missing"][0]["name"] == "v1-5-pruned-emaonly.safetensors"
     assert any("checkpoints" in w for w in res_missing["warnings"])
+
+
+def test_ls_local_only_dropped_distinguishes_prefilter_from_limit(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _count_workflow_fetches(monkeypatch)
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only", "--limit", "0"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert (data["matched"], data["local_only_dropped"], data["shown"]) == (3, 2, 0)
+
+
+def test_ls_without_new_flags_omits_local_only_dropped(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, [])
+    assert result.exit_code == 0, result.output
+    assert "local_only_dropped" not in _envelope(result.output)["data"]
+
+
+def test_ls_runnable_deeply_nested_cached_workflow_degrades_to_unknown(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    depth = 100_000
+    cache_path.write_bytes(b'{"a":' + b"[" * depth + b"]" * depth + b"}")
+    _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert env["data"]["rows"][0]["verdict"] == "unknown"
+    assert any("image_z_image" in w for w in env["data"]["warnings"])
+
+
+def test_ls_runnable_oversized_folder_listing_is_structured_error(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": json.dumps(_TOP_LEVEL_WF).encode()})
+    _stub_folder_listing(monkeypatch, ResponseTooLarge("too big"))
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 1
+    assert _envelope(result.output)["error"]["code"] == "model_listing_too_large"
+
+
+@pytest.mark.parametrize(
+    "directory, listed, valid",
+    [("model..v2", True, True), (".", False, False), ("..", False, False), ("a/b", False, False)],
+)
+def test_batch_folder_checks_use_shared_validator(monkeypatch, directory, listed, valid):
+    calls = _count_folder_listings(monkeypatch, {directory: ["m.safetensors"]})
+    listings = templates_cmd._list_model_folders(None, [directory])
+    assert (directory in listings) is listed
+    assert calls["folders"] == ([directory] if listed else [])
+
+    row = {"name": "x", "title": "X", "tags": ["Local"], "requires_custom_nodes": []}
+    wf = {"nodes": [], "models": [{"name": "m.safetensors", "directory": directory}]}
+    monkeypatch.setattr(
+        templates_cmd, "_collect_model_requirements", lambda _wf: [{"name": "m.safetensors", "directory": directory}]
+    )
+    res = templates_cmd._check_template(row, wf, listings)
+    assert (res["models"]["present"] == ["m.safetensors"]) is valid
+    assert any("isn't a valid model folder" in w for w in res["warnings"]) is (not valid)
