@@ -20,8 +20,11 @@ def test_resolve_api_key_missing(monkeypatch):
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
     # No OAuth session in the isolated test config and no env key -> "no credential"
     # path. OAuth-over-env precedence is intentional; assert the current message.
-    with pytest.raises(client.ApiError, match="Not signed in"):
+    with pytest.raises(client.ApiError, match="Not signed in") as exc:
         client.resolve_api_key()
+    # The hint links the platform's real key page (``/profile/api-keys``), with the
+    # onboarding query that opens the create-key dialog.
+    assert "https://platform.comfy.org/profile/api-keys?onboarding=router" in str(exc.value)
 
 
 def test_split_payload_json_pass_through():
