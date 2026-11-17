@@ -437,7 +437,10 @@ class Port:
         spec = self.autogrow_template_input_spec
         if spec is None:
             return None
-        return spec[0] if isinstance(spec, (list, tuple)) and spec else spec
+        # Through `_parse_input_spec`, not `spec[0]`: a classic list-form COMBO
+        # (`[["a", "b"], {}]`) has its choice LIST in position 0, and handing
+        # that to `Port.type` crashes every hashing type check downstream.
+        return _parse_input_spec(spec)[0]
 
     def autogrow_slot_port(self, slot_key: str, *, required: bool) -> Port | None:
         """A :class:`Port` for one grown slot of this group, parsed from the
@@ -2741,12 +2744,13 @@ class Graph:
                     # a wildcard, a union overlap, or a blank/unknown type on
                     # either end still yields no finding at all.
                     port = port_by_name.get(input_name) or slot_ports.get(input_name)
-                    if port is None and not any(input_name.startswith(f"{base}.") for base in autogrow_ports):
-                        # Autogrow suffixes are typed only via slot_ports, so a
-                        # key the template never declared (`images.bogus`) gets
-                        # no synthesized type. Other dotted keys (combo sub-inputs)
-                        # still resolve through _dotted_slot_port.
-                        port = _dotted_slot_port(port_by_name, input_name, node_inputs)
+                    if port is None:
+                        # Autogrow suffixes — top-level or nested under a
+                        # dynamic combo — are typed only via slot_ports, so a
+                        # key the template never declared (`images.bogus`,
+                        # `model.images.bogus`) gets no synthesized type. Other
+                        # dotted keys (combo sub-inputs) still resolve here.
+                        port = _dotted_slot_port(port_by_name, input_name, node_inputs, autogrow_slots=False)
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
@@ -2800,10 +2804,8 @@ class Graph:
                 # undeclared autogrow suffixes must not gain a synthesized type.
                 if port is not None:
                     link_port = port
-                elif any(input_name.startswith(f"{base}.") for base in autogrow_ports):
-                    link_port = None
                 else:
-                    link_port = _dotted_slot_port(port_by_name, input_name, node_inputs)
+                    link_port = _dotted_slot_port(port_by_name, input_name, node_inputs, autogrow_slots=False)
                 # A literal on a socket that only carries a node's output. The
                 # server does not type-check custom types (only INT/FLOAT/
                 # STRING/BOOLEAN/COMBO), so it hands the string to the node,
@@ -4906,7 +4908,9 @@ def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
     return targets
 
 
-def _resolve_dotted_slot(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> tuple[Port | None, bool]:
+def _resolve_dotted_slot(
+    port_by_name: dict[str, Port], dotted: str, node_inputs: dict, *, autogrow_slots: bool = True
+) -> tuple[Port | None, bool]:
     """``(port, unresolved)`` for a dotted wire key.
 
     ``unresolved`` is True only when a dynamic combo on the path gave no basis
@@ -4917,6 +4921,10 @@ def _resolve_dotted_slot(port_by_name: dict[str, Port], dotted: str, node_inputs
     selector that is absent. It is False for a key the current schema and
     selections genuinely do NOT declare, which is the case a caller may treat
     as stale.
+
+    ``autogrow_slots=False`` returns ``(None, False)`` for a key that lands in
+    an autogrow group at any depth, for a caller that types those slots from
+    the template instead (:func:`_autogrow_slot_ports`).
     """
     base, _, leaf = dotted.partition(".")
     if not leaf:
@@ -4924,10 +4932,12 @@ def _resolve_dotted_slot(port_by_name: dict[str, Port], dotted: str, node_inputs
     port = port_by_name.get(base)
     if port is None:
         return None, False
-    return _resolve_dotted_under(port, dotted, node_inputs, 0)
+    return _resolve_dotted_under(port, dotted, node_inputs, 0, autogrow_slots=autogrow_slots)
 
 
-def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:
+def _dotted_slot_port(
+    port_by_name: dict[str, Port], dotted: str, node_inputs: dict, *, autogrow_slots: bool = True
+) -> Port | None:
     """The port a dotted wire key targets: an autogrow slot or a combo sub-input.
 
     The server type-checks every entry in a node's ``inputs`` by name, dotted
@@ -4945,12 +4955,16 @@ def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: d
 
     An autogrow slot whose group declares no element type is NOT one of those
     cases: it comes back as a ``"*"``-typed port, so the slot keeps its
-    structural link checks and accepts any source type.
+    structural link checks and accepts any source type — unless
+    ``autogrow_slots=False``, which yields ``None`` for every autogrow slot
+    (see :func:`_resolve_dotted_slot`).
     """
-    return _resolve_dotted_slot(port_by_name, dotted, node_inputs)[0]
+    return _resolve_dotted_slot(port_by_name, dotted, node_inputs, autogrow_slots=autogrow_slots)[0]
 
 
-def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> tuple[Port | None, bool]:
+def _resolve_dotted_under(
+    port: Port, dotted: str, node_inputs: dict, depth: int, *, autogrow_slots: bool = True
+) -> tuple[Port | None, bool]:
     """Walk ``dotted`` down from ``port``, whose name is a prefix of it.
 
     Returns ``(port, unresolved)`` as :func:`_resolve_dotted_slot` defines them.
@@ -4972,6 +4986,8 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
             return next((p for p in fields if p.name == dotted), None), False
         return None, False
     if port.is_autogrow:
+        if not autogrow_slots:
+            return None, False
         element = port.autogrow_element_type
         if not element:
             # Older/partial catalogs can omit the element schema while still
@@ -5015,7 +5031,7 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
             if sub.name == dotted:
                 return sub, False
             if dotted.startswith(f"{sub.name}."):
-                return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1)
+                return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1, autogrow_slots=autogrow_slots)
         # The selection resolved and does not declare this key: genuinely stale.
         return None, False
     return None, False

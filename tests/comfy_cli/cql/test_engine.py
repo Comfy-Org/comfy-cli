@@ -5640,6 +5640,78 @@ class TestAutogrowSlotPorts:
             "display_name": "GrowListCombo",
             "python_module": "nodes",
         },
+        # A group nested under a dynamic combo's selected option, with an
+        # inner type but no names/prefix: the nested twin of GrowNoNames.
+        "NestedNoNames": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "m1",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": ["IMAGE", {}]}},
+                                                        "min": 0,
+                                                    }
+                                                },
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "NestedNoNames",
+            "python_module": "nodes",
+        },
+        # Same shape, list-form COMBO inner input: the slot type must read as
+        # the string "COMBO", never the choice list itself.
+        "NestedNoNamesListCombo": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "m1",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": [["a", "b"], {}]}},
+                                                        "min": 0,
+                                                    }
+                                                },
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "NestedNoNamesListCombo",
+            "python_module": "nodes",
+        },
     }
 
     def _graph(self) -> Graph:
@@ -5830,6 +5902,35 @@ class TestAutogrowSlotPorts:
         assert errs[0]["field"] == "opts.opt0"
         clean = self._graph().validate_workflow(self._wf("GrowListCombo", {"opts.opt0": "a"}))
         assert clean["valid"] is True, clean["errors"]
+
+    def test_nested_no_naming_template_does_not_infer_a_slot_type(self):
+        """The nested twin of the no-naming case: `model.images.bogus` under a
+        group with no names/prefix gets no inferred IMAGE type, so an INT link
+        into it is not an `edge_type_mismatch`, and a literal on it is not a
+        `literal_on_link_input`."""
+        wf = self._wf("NestedNoNames", {"model": "m1", "model.images.bogus": ["0", 0]})
+        result = self._graph().validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+        assert [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == []
+        assert result["valid"] is True, result["errors"]
+        literal = self._graph().validate_workflow(self._wf("NestedNoNames", {"model": "m1", "model.images.bogus": "x"}))
+        codes = {f["code"] for f in literal["errors"] + literal["warnings"]}
+        assert "literal_on_link_input" not in codes
+
+    def test_nested_list_form_combo_slot_link_does_not_crash(self):
+        """A linked nested slot under a no-naming list-form COMBO template used
+        to reach `Port.type = ["a", "b"]` and raise `TypeError: unhashable
+        type: 'list'` in the edge check."""
+        wf = self._wf("NestedNoNamesListCombo", {"model": "m1", "model.images.image0": ["1", 0]})
+        result = self._graph().validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+
+    def test_list_form_combo_element_type_is_the_combo_type_string(self):
+        graph = self._graph()
+        grow = graph.node("GrowListCombo")
+        assert grow is not None
+        opts = next(p for p in grow.inputs if p.name == "opts")
+        assert opts.autogrow_element_type == "COMBO"
 
     def test_slot_ports_are_empty_when_there_are_no_slots(self):
         """A prefix template with a huge min and no max must not expand a
