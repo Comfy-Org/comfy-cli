@@ -1872,7 +1872,7 @@ def test_ls_without_new_flags_omits_local_only_dropped(gallery_file, tmp_path, m
     assert "local_only_dropped" not in _envelope(result.output)["data"]
 
 
-def test_ls_runnable_deeply_nested_cached_workflow_degrades_to_unknown(gallery_file, tmp_path, monkeypatch):
+def test_ls_runnable_deeply_nested_cached_workflow_does_not_abort(gallery_file, tmp_path, monkeypatch):
     _force_json_renderer()
     _no_local_server(monkeypatch)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -1880,12 +1880,16 @@ def test_ls_runnable_deeply_nested_cached_workflow_degrades_to_unknown(gallery_f
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     depth = 100_000
     cache_path.write_bytes(b'{"a":' + b"[" * depth + b"]" * depth + b"}")
-    _count_workflow_fetches(monkeypatch)
+    # Re-fetch also returns over-deep JSON, so the row must degrade to `unknown`.
+    deep = b'{"a":' + b"[" * depth + b"]" * depth + b"}"
+    fetches = _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": deep})
     _count_folder_listings(monkeypatch, {})
 
     result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
     assert result.exit_code == 0, result.output
     env = _envelope(result.output)
+    # The RecursionError cache entry is a miss (re-fetched), never a listing abort.
+    assert fetches["names"] == ["image_z_image"]
     assert env["data"]["rows"][0]["verdict"] == "unknown"
     assert any("image_z_image" in w for w in env["data"]["warnings"])
 
@@ -1919,3 +1923,32 @@ def test_batch_folder_checks_use_shared_validator(monkeypatch, directory, listed
     res = templates_cmd._check_template(row, wf, listings)
     assert (res["models"]["present"] == ["m.safetensors"]) is valid
     assert any("isn't a valid model folder" in w for w in res["warnings"]) is (not valid)
+
+
+def test_ls_runnable_unparseable_cache_entry_is_refetched(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"{truncated")
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    assert fetches["names"] == ["image_z_image"]
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "runnable"
+    assert json.loads(cache_path.read_bytes()) == {"nodes": []}
+
+
+def test_ls_runnable_unparseable_fetched_body_is_not_cached(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": b"<html>oops</html>"})
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "unknown"
+    assert not templates_cmd._template_workflow_cache_path("image_z_image").exists()

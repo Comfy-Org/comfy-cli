@@ -1733,8 +1733,12 @@ def _fetch_and_cache_workflow(name: str) -> tuple[dict[str, Any] | None, str | N
         body = _fetch_template_workflow(name)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
         return None, f"failed to fetch workflow: {e}"
-    _persist_template_workflow(_template_workflow_cache_path(name), body)
-    return _parse_workflow_body(body)
+    wf, err = _parse_workflow_body(body)
+    # Only a parseable body earns a cache slot, so a bad upstream response is
+    # re-fetched next run instead of being served from cache forever.
+    if wf is not None:
+        _persist_template_workflow(_template_workflow_cache_path(name), body)
+    return wf, err
 
 
 def _batch_load_workflows(names: list[str], *, refresh: bool) -> dict[str, tuple[dict[str, Any] | None, str | None]]:
@@ -1759,9 +1763,12 @@ def _batch_load_workflows(names: list[str], *, refresh: bool) -> dict[str, tuple
             except OSError:
                 body = None
         if body is not None:
-            results[name] = _parse_workflow_body(body)
-        else:
-            to_fetch.append(name)
+            wf, err = _parse_workflow_body(body)
+            if wf is not None:
+                results[name] = (wf, err)
+                continue
+        # Miss, --refresh, or an unparseable (corrupt/truncated) cache entry → fetch.
+        to_fetch.append(name)
 
     if to_fetch:
         with ThreadPoolExecutor(max_workers=8) as pool:
