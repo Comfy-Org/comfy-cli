@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
 import typer
@@ -1126,9 +1126,10 @@ def _submit_background_download(
     # it pointing at a record of ours that does not exist yet — it would read as
     # stale and be stolen out from under us.
     #
-    # Unchanged non-goal: the claim lives under `get_workspace()`, so two
-    # invocations run from different workspaces at one destination still consult
-    # different claim directories (the documented cross-workspace residual).
+    # The claim lives in one host-global directory, not under `get_workspace()`
+    # (comfy-cli#1095), so two invocations run from different workspaces at one
+    # destination contend for the same lock. The advisory re-scan below is still
+    # per-workspace; it only matters when the claim degraded.
     #
     # Which is why the advisory re-scan survives, and runs *first*, before the
     # claim. It is the only thing that sees a competitor holding no claim lock —
@@ -1227,14 +1228,16 @@ def _download_worker(
     # and losing the destination to that would be a spurious refusal.
     #
     # Derived defensively, never carried in the record — the claim is addressed
-    # by destination, not by download. `state.dest` is read back off disk, so
+    # by destination, not by download, through the same resolver the submitter
+    # used (`download_state.claim_path`), so the two cannot disagree.
+    # `state.dest` is read back off disk, so
     # `_dest_key` (`realpath`) is being handed untrusted text and can raise on a
     # shape the submitter's own `dest` never had. Bookkeeping must never be what
     # stops a transfer from recording its result, so a claim we cannot address is
     # a claim we proceed without.
     claim_file: pathlib.Path | None
     try:
-        claim_file = download_state.claim_marker_for(path, _dest_key(state.dest))
+        claim_file = download_state.claim_path(_dest_key(state.dest), path.parent)
     except (OSError, ValueError):
         claim_file = None
 
@@ -1268,12 +1271,15 @@ def _download_worker(
             # competitor. Anything else is adopted.
             payload = claim_lock.read_payload() if claim_lock is not None else None
             owner = payload.get("download_id") if payload is not None else None
-            if owner is not None and owner != state.id and not _claim_owner_live(path, owner):
-                owner = None
+            if owner is not None and owner != state.id and not _claim_owner_live(path, payload):
+                # Adopting another download's finished claim. If that download
+                # already produced the file, we started too late: writing now
+                # would replace a file someone else just finished.
+                owner = None if not _dest_exists(state.dest) else owner
             claim_lost = claim_lock is None or (owner is not None and owner != state.id)
             if claim_lock is not None and owner is None:
                 with contextlib.suppress(OSError):
-                    claim_lock.write_payload(state.id, state.dest)
+                    claim_lock.write_payload(state.id, state.dest, path.absolute())
 
     def release() -> None:
         nonlocal claim_lock
@@ -1525,17 +1531,12 @@ def _active_download_for(
     ``exclude_id`` skips one record: :func:`_submit_background_download` re-runs
     this scan *after* writing its own claim and must not find itself.
 
-    The scan is scoped to ``get_workspace()``'s state directory, and that is the
-    residual neither this nor the claim lock closes — the claim lives in
-    the same per-workspace state directory. A destination can sit outside the
-    workspace (``--relative-path`` is only ``expanduser``-ed, so it accepts
-    ``..`` and absolute paths), so two invocations run against *different*
-    workspaces but aimed at the same file consult disjoint
-    ``<workspace>/.comfy-downloads`` directories and are invisible to each other
-    — both claim, both win, both write. Closing it needs a claim that lives next
-    to the destination rather than next to the workspace, or a refusal of
-    workspace-escaping ``--relative-path``; both are design calls with their own
-    tradeoffs and neither is made here.
+    The scan is scoped to ``get_workspace()``'s state directory. Two invocations
+    run against *different* workspaces but aimed at one file (a shared Comfy
+    Desktop model library, or a ``--relative-path`` outside the workspace) do not
+    see each other's records here. The claim lock is what refuses them: it lives
+    in one host-global directory (comfy-cli#1095). This scan only stands alone
+    when the claim degraded, and then the cross-workspace case is open again.
     """
     wanted = _dest_key(dest)
     winner: download_state.DownloadState | None = None
@@ -1562,7 +1563,11 @@ def _active_download_for(
     return winner
 
 
-def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.Path) -> typer.Exit:
+def _in_flight_failure(
+    competitor: download_state.DownloadState,
+    dest: pathlib.Path,
+    workspace: pathlib.Path | None = None,
+) -> typer.Exit:
     """The ``model_download_in_flight`` refusal, worded for the claim we hit.
 
     Both halves vary by ``kind``. A background download really can be cancelled
@@ -1570,62 +1575,167 @@ def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.P
     refuses it, because the recorded pid is a user CLI process sharing the
     terminal's foreground process group — so pointing at it would be advice that
     fails. Ctrl-C in the owning terminal is the honest instruction.
+
+    ``workspace`` is the competitor's workspace when it is not ours
+    (comfy-cli#1095). `download-status` and `download-cancel` look an id up in
+    the selected workspace, so the hint has to select the competitor's.
     """
     kind = "foreground" if competitor.is_foreground else "background"
+    comfy = f'comfy --workspace "{workspace}"' if workspace is not None else "comfy"
     stop = (
         "interrupt it with Ctrl-C in the terminal running it"
         if competitor.is_foreground
-        else f"cancel it with `comfy model download-cancel {competitor.id}`"
+        else f"cancel it with `{comfy} model download-cancel {competitor.id}`"
     )
+    details = {
+        "path": str(dest),
+        "download_id": competitor.id,
+        "status": competitor.status,
+        "kind": competitor.kind,
+    }
+    if workspace is not None:
+        details["workspace"] = str(workspace)
     return _download_failure(
         code="model_download_in_flight",
         message=f"A {kind} download ({competitor.id}) is already writing to {dest}.",
-        hint=f"track it with `comfy model download-status {competitor.id}`, or {stop}",
-        details={
-            "path": str(dest),
-            "download_id": competitor.id,
-            "status": competitor.status,
-            "kind": competitor.kind,
-        },
+        hint=f"track it with `{comfy} model download-status {competitor.id}`, or {stop}",
+        details=details,
     )
+
+
+def _holder_workspace(payload: dict | None) -> pathlib.Path | None:
+    """The workspace a claim payload's record lives in, when it is not the selected one."""
+    if payload is None:
+        return None
+    try:
+        own = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        record_file = download_state.claim_holder_state_file(payload, own)
+    except (OSError, ValueError, KeyError):
+        return None
+    if record_file is None or record_file.parent == own:
+        return None
+    return record_file.parent.parent
 
 
 def _dest_claim_path(dest: pathlib.Path) -> pathlib.Path | None:
     """Where ``dest``'s claim file lives, or None when claims are unavailable.
 
-    Inside the state directory rather than next to the model file: the state dir
-    is already owner-only, and a sidecar in `models/loras` would be something
-    users (and `comfy model downloads`) trip over. Keyed by :func:`_dest_key`,
-    the same canonical spelling `_active_download_for` compares on, so a symlink
-    and its target hash to one claim.
+    In the host-global claims directory (:func:`download_state.claims_dir`),
+    which every workspace shares, rather than next to the model file: it is
+    owner-only, and a sidecar in `models/loras` would be something users (and
+    `comfy model downloads`) trip over. Keyed by :func:`_dest_key`, the same
+    canonical spelling `_active_download_for` compares on, so a symlink and its
+    target hash to one claim.
 
     None rather than a raise when the directory cannot be made: claims are
     bookkeeping, and the caller degrades to the advisory guard.
     """
     try:
-        return download_state.claim_path(get_workspace(), _dest_key(dest))
+        state_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        key = _dest_key(dest)
     except (OSError, ValueError):
-        return None
-
-
-def _record_or_none(download_id: str | None) -> download_state.DownloadState | None:
-    """``download_id``'s record, or None for every way the lookup can fail.
-
-    :func:`download_state.read` resolves (and creates) the state directory, so it
-    can raise ``OSError`` as well as ``ValueError`` on a malformed id. Both are
-    tolerated here because every caller is on a *refusal* path, where the record
-    is only wanted to word a message: a lookup that fails must not turn a clean
-    refusal into a traceback.
-    """
-    if not download_id:
         return None
     try:
-        return download_state.read(get_workspace(), download_id)
+        return download_state.claim_path(key)
+    except OSError as e:
+        _report_shared_claims_unavailable(e)
+    try:
+        return download_state.claim_path(key, state_dir)
     except (OSError, ValueError):
         return None
 
 
-def _spawn_gap_holder(holder_id: str) -> download_state.DownloadState | None:
+_shared_claims_unavailable_reported = False
+
+
+def _report_shared_claims_unavailable(exc: OSError) -> None:
+    """Warn once per process that claims fell back to this workspace's directory.
+
+    Downloads in this workspace still refuse each other; a download from another
+    workspace into the same file is not seen (comfy-cli#1095).
+    """
+    global _shared_claims_unavailable_reported
+    if _shared_claims_unavailable_reported:
+        return
+    _shared_claims_unavailable_reported = True
+    logger.warning(
+        "the shared download claims directory is unavailable (%s); using this workspace's own, "
+        "which does not see downloads started from other workspaces. Set %s to an absolute, "
+        "writable directory to share claims.",
+        exc,
+        download_state.CLAIMS_DIR_ENV,
+    )
+
+
+def _own_state_file(state: download_state.DownloadState) -> pathlib.Path | None:
+    """The state file ``state`` was written to, for a claim payload to point at.
+
+    None when it cannot be named. The payload is then written without a pointer,
+    and a reader in this workspace still finds the record by id.
+    """
+    try:
+        return download_state.state_path(get_workspace(), state.id).absolute()
+    except (OSError, ValueError):
+        return None
+
+
+# What a claim holder lookup returns when the payload names a record it cannot
+# resolve: a pointer that fails validation, or a state directory it cannot stat.
+# Not "no record" (which reads as stale), because a download in another
+# workspace may sit behind it. See :func:`_spawn_gap_holder`.
+_UNRESOLVED_HOLDER: Any = object()
+
+
+def _claim_holder(payload: dict | None, default_dir: pathlib.Path) -> tuple[Any, pathlib.Path | None]:
+    """The record a claim payload names, unreconciled, and the file it came from.
+
+    The record is a ``DownloadState``, None, or ``_UNRESOLVED_HOLDER``. None for
+    no payload, a record that is not there, or one that will not parse; every
+    reader has always treated those as stale. Never raises.
+    """
+    if payload is None:
+        return None, None
+    record_file = download_state.claim_holder_state_file(payload, default_dir)
+    if record_file is None:
+        return _UNRESOLVED_HOLDER, None
+    try:
+        return download_state.read_path_strict(record_file), record_file
+    except FileNotFoundError:
+        return None, record_file
+    except (OSError, ValueError):
+        # Unreadable is not gone (EACCES, EIO): it proves nothing about the holder.
+        return _UNRESOLVED_HOLDER, record_file
+
+
+def _payload_in_spawn_gap(payload: dict) -> bool:
+    """Whether an unresolvable holder's payload was stamped within the startup grace.
+
+    The payload's own ``created_at`` stands in for the record we could not read.
+    Bounded by the same grace as :func:`_in_spawn_gap`, so an unresolvable claim
+    can refuse a destination for a minute at most, never forever.
+    """
+    age = download_state.claim_payload_age_s(payload)
+    return age is not None and 0.0 <= age < download_state.STARTUP_GRACE_S
+
+
+def _holder_record_or_none(payload: dict | None) -> download_state.DownloadState | None:
+    """The record a claim payload names, wherever it lives, or None. Never raises.
+
+    Every caller is on a *refusal* path, where the record is only wanted to word
+    a message, so a lookup that fails must not turn a clean refusal into a
+    traceback. The payload may name a download in another workspace
+    (comfy-cli#1095), and the refusal should still say what kind it is and how
+    to stop it. Not reconciled, as before: wording a refusal rewrites nothing.
+    """
+    try:
+        default_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        holder, _ = _claim_holder(payload, default_dir)
+    except (OSError, ValueError):
+        return None
+    return None if holder is _UNRESOLVED_HOLDER else holder
+
+
+def _spawn_gap_holder(holder_id: str, payload: dict | None = None) -> Any:
     """The record ``holder_id`` names, when it is a submit still inside its spawn gap.
 
     The one case a held lock cannot arbitrate on its own. Between a submitter's
@@ -1646,30 +1756,58 @@ def _spawn_gap_holder(holder_id: str) -> download_state.DownloadState | None:
     replaced. The residual is the same one the grace has always had: a submitter
     that dies between writing its record and spawning its worker wedges its
     destination for up to a minute.
+
+    The record is found through the payload's state-file pointer, because the
+    holder can be a submit in another workspace (comfy-cli#1095). A payload
+    whose record cannot be resolved at all is judged on its own ``created_at``:
+    inside the grace it returns ``_UNRESOLVED_HOLDER`` (refuse), after it None
+    (stale). Reading it as stale outright would steal a destination from another
+    workspace's submit whose worker has not come up yet.
     """
-    record = _record_or_none(holder_id)
+    if payload is None:
+        payload = {"download_id": holder_id}
+    try:
+        default_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+    except (OSError, ValueError):
+        return None
+    record, record_file = _claim_holder(payload, default_dir)
+    if record is _UNRESOLVED_HOLDER:
+        return _UNRESOLVED_HOLDER if _payload_in_spawn_gap(payload) else None
     if record is None:
         return None
-    fresh, _ = _reconciled(record)
+    if record_file is not None and record_file.parent == default_dir:
+        fresh, _ = _reconciled(record)
+    else:
+        # Another workspace's record is that workspace's to rewrite.
+        fresh = download_state.reconcile(record)
     return fresh if _in_spawn_gap(fresh) else None
 
 
-def _claim_owner_live(state_file: pathlib.Path, owner_id: str) -> bool:
-    """Whether ``owner_id``, found in a claim a worker just locked, is a live competitor.
+def _claim_owner_live(state_file: pathlib.Path, payload: dict) -> bool:
+    """Whether the payload's owner, found in a claim a worker just locked, is a live competitor.
 
-    The worker-side twin of :func:`_spawn_gap_holder`. Resolved next to the
-    worker's own state file rather than through :func:`get_workspace`, for the
-    same reason the claim itself is (see :func:`download_state.claim_marker_for`),
-    and reconciled without persisting: the worker writes only its own record.
-    An unreadable record is not live.
+    The worker-side twin of :func:`_spawn_gap_holder`, with the same rules. A
+    payload naming no state file is resolved next to the worker's own state
+    file, because the worker is handed ``--state <file>`` and never re-resolves a
+    workspace. The record is reconciled without persisting: the worker writes
+    only its own record. A record that is not there, or will not parse, is not
+    live; one that cannot be resolved at all is live while its payload is
+    inside the startup grace.
     """
-    try:
-        record = download_state.read_path(pathlib.Path(state_file).parent / f"{owner_id}.json")
-    except (OSError, ValueError):
-        return False
+    record, _ = _claim_holder(payload, pathlib.Path(state_file).parent)
+    if record is _UNRESOLVED_HOLDER:
+        return _payload_in_spawn_gap(payload)
     if record is None:
         return False
     return _in_spawn_gap(download_state.reconcile(record))
+
+
+def _dest_exists(dest: str) -> bool:
+    """Whether a file is already at ``dest``. An unreadable path reads as absent."""
+    try:
+        return pathlib.Path(dest).exists()
+    except (OSError, ValueError):
+        return False
 
 
 def _in_spawn_gap(fresh: download_state.DownloadState) -> bool:
@@ -1711,11 +1849,12 @@ def _refuse_held_claim(
     when it failed to stop the worker, and a held lock is that worker still
     writing.
     """
-    holder_id = download_state.read_claim(claim_file)
-    holder = _record_or_none(holder_id)
+    payload = download_state.read_claim_payload(claim_file)
+    holder_id = payload["download_id"] if payload is not None else None
+    holder = _holder_record_or_none(payload)
     _withdraw_record(state, dest, holder_id)
     if holder is not None and holder.status not in _HOLDER_FINISHED_STATUSES:
-        return _in_flight_failure(holder, dest)
+        return _in_flight_failure(holder, dest, _holder_workspace(payload))
     named = f" ({holder_id})" if holder_id else ""
     return _download_failure(
         code="model_download_claim_contested",
@@ -1900,7 +2039,7 @@ def _acquire_dest_claim(
             holder_id = payload.get("download_id") if payload is not None else None
             if holder_id is None or holder_id == state.id or holder_id == judged_stale:
                 try:
-                    lock.write_payload(state.id, str(dest))
+                    lock.write_payload(state.id, str(dest), _own_state_file(state))
                 except OSError as e:
                     write_error = e
                 else:
@@ -1915,10 +2054,14 @@ def _acquire_dest_claim(
         # and psutil query behind `_spawn_gap_holder` are slow next to a payload
         # read, and a worker that legitimately owns this destination may be
         # waiting on the lock to start its transfer.
-        holder = _spawn_gap_holder(holder_id)
+        holder = _spawn_gap_holder(holder_id, payload)
+        if holder is _UNRESOLVED_HOLDER:
+            # Stamped moments ago by a download whose record we cannot read. Not
+            # ours to take, and not one we can describe beyond its id.
+            raise _refuse_held_claim(state, dest, claim_file)
         if holder is not None:
             _withdraw_record(state, dest, holder.id)
-            raise _in_flight_failure(holder, dest)
+            raise _in_flight_failure(holder, dest, _holder_workspace(payload))
         judged_stale = holder_id
     else:
         # The payload changed under us on every round: somebody keeps stamping
