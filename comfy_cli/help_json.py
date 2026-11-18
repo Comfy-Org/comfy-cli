@@ -12,6 +12,7 @@ docstrings. Phase 2 will hoist this alongside ``comfy discover`` and add a
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, get_args
 
 import typer
@@ -151,19 +152,34 @@ def _type_from_descriptor(td: Any) -> dict[str, Any]:
             "type": "choice",
             "choices": [str(getattr(c, "value", c)) for c in choices],
         }
-    annotation = td.annotation
-    # ``multiple`` options carry a ``list[...]`` / ``tuple[...]`` annotation; the
-    # click path reported the element type, so unwrap to it.
-    if _descriptor_flag(td, "is_list") or _descriptor_flag(td, "is_tuple"):
-        args = get_args(annotation)
-        if args:
-            annotation = args[0]
+    args = get_args(td.annotation)
+    # A ``tuple[...]`` option is one composite value; the click path named every
+    # component (``click.Tuple`` -> ``"<str int>"``), so do the same.
+    if _descriptor_flag(td, "is_tuple") and args:
+        return {"type": "<" + " ".join(_element_type_name(td, a) for a in args) + ">"}
+    # ``multiple`` options carry a ``list[...]`` annotation; the click path
+    # reported the element type, so unwrap to it.
+    if _descriptor_flag(td, "is_list") and args:
+        return {"type": _element_type_name(td, args[0])}
+    return {"type": _element_type_name(td, td.annotation)}
+
+
+def _element_type_name(td: Any, annotation: Any) -> str:
+    """Name one scalar ``annotation`` the way its ``click.ParamType`` would.
+
+    Re-checks the flags against ``annotation`` with the parameter's own
+    ``min``/``max`` metadata (``td.parameter_info``), as the click path did per
+    element: ``list[int]`` with ``min=1`` is ``"int range"``, without it ``"int"``.
+    """
+    elem = replace(td, annotation=annotation)
+    if _descriptor_flag(elem, "is_choice"):
+        return "choice"
     base = {bool: "boolean", int: "int", float: "float", str: "str"}.get(
         annotation, getattr(annotation, "__name__", str(annotation)).lower()
     )
-    if _descriptor_flag(td, "is_ranged"):
-        return {"type": f"{base} range"}
-    return {"type": base}
+    if _descriptor_flag(elem, "is_ranged"):
+        return f"{base} range"
+    return base
 
 
 def _type_to_dict(t: click.ParamType) -> dict[str, Any]:

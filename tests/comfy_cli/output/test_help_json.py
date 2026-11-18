@@ -1,8 +1,10 @@
 """Help JSON coverage: every visible Typer command appears."""
 
 import json
+from typing import Annotated
 
 import pytest
+import typer
 
 from comfy_cli.cmdline import app
 from comfy_cli.help_json import build_help_json, iter_command_paths
@@ -99,6 +101,45 @@ def _find_param(doc, command_path, param_name):
 def test_param_type_contract(command_path, param_name, expected_type):
     doc = build_help_json(app)
     param = _find_param(doc, command_path, param_name)
+    assert param["type"] == expected_type
+
+
+# Shapes no comfy command declares today, but which the ``type_descriptor`` path
+# must still name exactly as ``click.ParamType`` did: tuples are composite
+# (``click.Tuple``), and ``min``/``max`` bound each element of a list or tuple.
+_shape_app = typer.Typer()
+
+
+@_shape_app.command()
+def _shapes(
+    pair: Annotated[tuple[str, int], typer.Option()] = ("a", 1),
+    bounded_pair: Annotated[tuple[int, float], typer.Option(min=0)] = (1, 1.0),
+    bounded_ints: Annotated[list[int] | None, typer.Option(min=1)] = None,
+    ints: Annotated[list[int] | None, typer.Option()] = None,
+    bounded_floats: Annotated[list[float] | None, typer.Option(max=2.0)] = None,
+) -> None:
+    pass
+
+
+@_shape_app.command()
+def _other() -> None:
+    pass
+
+
+@pytest.mark.parametrize(
+    ("param_name", "expected_type"),
+    [
+        ("pair", "<str int>"),
+        ("bounded_pair", "<int range float range>"),
+        ("bounded_ints", "int range"),
+        ("ints", "int"),
+        ("bounded_floats", "float range"),
+    ],
+)
+def test_composite_and_bounded_element_types(param_name, expected_type):
+    doc = build_help_json(_shape_app)
+    (cmd,) = [c for name, c in doc["commands"].items() if "shapes" in name]
+    (param,) = [p for p in cmd["params"] if p["name"] == param_name]
     assert param["type"] == expected_type
 
 
