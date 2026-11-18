@@ -27,8 +27,9 @@ requires another approval.
 Implicit approval avoids a question but can spend money unexpectedly. A blanket
 execution ban prevents testing even when requested. Explicit job consent adds a
 chat turn and supports both outcomes. It is an agent instruction, not a new
-CLI-wide enforcement mechanism. The frontend retains an explicit consent rule
-so its handoff also works safely with older skill versions.
+CLI-wide enforcement mechanism. The frontend handoff delegates execution and
+reporting policy to the installed skill, so this behavior requires the updated
+skill rather than a duplicated frontend rule.
 
 ## Validation
 
