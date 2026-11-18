@@ -13,8 +13,10 @@ docstrings. Phase 2 will hoist this alongside ``comfy discover`` and add a
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, get_args
+from uuid import UUID
 
 import typer
 
@@ -175,13 +177,16 @@ def _element_type_name(td: Any, annotation: Any) -> str:
     elem = replace(td, annotation=annotation)
     if _descriptor_flag(elem, "is_choice"):
         return "choice"
-    if isinstance(annotation, type):
+    if isinstance(annotation, type) and annotation not in _NOT_PATH_ROUTED:
+        # typer < 0.29 built a ``click.Path`` (named from ``file_okay`` /
+        # ``dir_okay``) for a path annotation *or* any parameter carrying path
+        # metadata, checked before its file markers: a ``FileText`` option with
+        # ``resolve_path=True`` was ``"path"``, not ``"filename"``.
+        if issubclass(annotation, PurePath) or _has_path_routing(td.parameter_info):
+            return _path_type_name(td.parameter_info)
         # typer's file markers built a ``click.File``, named ``"filename"``.
         if issubclass(annotation, _FILE_MARKERS):
             return "filename"
-        # ``click.Path`` named itself from ``file_okay`` / ``dir_okay``.
-        if issubclass(annotation, PurePath):
-            return _path_type_name(td.parameter_info)
     base = {bool: "boolean", int: "int", float: "float", str: "str"}.get(
         annotation, getattr(annotation, "__name__", str(annotation)).lower()
     )
@@ -191,6 +196,16 @@ def _element_type_name(td: Any, annotation: Any) -> str:
 
 
 _FILE_MARKERS = (typer.FileText, typer.FileTextWrite, typer.FileBinaryRead, typer.FileBinaryWrite)
+
+# typer < 0.29 resolved these annotations to their own click types before it
+# considered path metadata, so ``allow_dash`` / ``resolve_path`` never made them
+# a ``click.Path``.
+_NOT_PATH_ROUTED = (bool, int, float, str, UUID, datetime)
+
+
+def _has_path_routing(parameter_info: Any) -> bool:
+    """Whether typer < 0.29 would have built a ``click.Path`` from this metadata."""
+    return any(getattr(parameter_info, k, None) for k in ("allow_dash", "path_type", "resolve_path"))
 
 
 def _path_type_name(parameter_info: Any) -> str:

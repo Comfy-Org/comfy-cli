@@ -121,6 +121,10 @@ def _shapes(
     text_file: Annotated[typer.FileText | None, typer.Option()] = None,
     binary_files: Annotated[list[typer.FileBinaryRead] | None, typer.Option()] = None,
     file_and_int: Annotated[tuple[typer.FileText, int] | None, typer.Option()] = None,
+    resolved_text_file: Annotated[typer.FileText | None, typer.Option(resolve_path=True)] = None,
+    dash_text_file: Annotated[typer.FileText | None, typer.Option(allow_dash=True, dir_okay=False)] = None,
+    resolved_file_and_int: Annotated[tuple[typer.FileText, int] | None, typer.Option(resolve_path=True)] = None,
+    resolved_str: Annotated[str | None, typer.Option(resolve_path=True)] = None,
     file_only: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
     dir_only: Annotated[Path | None, typer.Option(file_okay=False)] = None,
     dir_list: Annotated[list[Path] | None, typer.Option(file_okay=False)] = None,
@@ -145,6 +149,12 @@ def _other() -> None:
         ("text_file", "filename"),
         ("binary_files", "filename"),
         ("file_and_int", "<filename int>"),
+        # ...unless path metadata routed them to ``click.Path`` first; that
+        # metadata never re-typed a primitive like ``str``.
+        ("resolved_text_file", "path"),
+        ("dash_text_file", "file"),
+        ("resolved_file_and_int", "<path int>"),
+        ("resolved_str", "str"),
         # ``click.Path`` names itself from ``file_okay`` / ``dir_okay``.
         ("file_only", "file"),
         ("dir_only", "directory"),
