@@ -14,6 +14,7 @@ and regular expressions. Findings are advice and never fail validation.
 
 from __future__ import annotations
 
+import bisect
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -21,30 +22,34 @@ from pathlib import Path
 
 INSTALL_RECORD_NAME = ".comfy-agent-install"
 MAX_FILE_BYTES = 1 << 20
-_WEB_DIRECTORY = re.compile(r"""^\s*WEB_DIRECTORY\s*=\s*["']([^"']+)["']""", re.MULTILINE)
+_WEB_DIRECTORY = re.compile(r"""^\s*WEB_DIRECTORY\s*=\s*["']([^"']+)["']\s*(?:#.*)?$""", re.MULTILINE)
+_TRIPLE_QUOTED = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
 _REGISTER = re.compile(r"registerExtension\s*\(\s*\{")
 _TOP_KEY_NAME = re.compile(r"""(?:^|[,{]\s*)name\s*:\s*["'`]([^"'`]+)["'`]""")
 _PROVENANCE = re.compile(r"""(?:^|[,{]\s*)provenance\s*:\s*\{[^}]*createdBy\s*:\s*["'`]comfy-agent["'`]""", re.DOTALL)
 # Initializers that run nothing worth reporting.
 _HARMLESS_CALL = re.compile(r"\bnew\s+[A-Za-z_$][\w$.]*\s*\(|\bSymbol\s*\(|\bObject\.freeze\s*\(")
 _DECLARATION_RHS = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+[^=]*?=(?!=)(.*)$", re.DOTALL)
+_EXPORT_DEFAULT_EXPR = re.compile(r"^export\s+default\s+(?!(?:async\s+)?function\b|class\b)(.*)$", re.DOTALL)
 # Statements a module may run at top level without side effects the switch misses.
 _ALLOWED_STATEMENT = re.compile(
     r"""^(?:
-        import\b | export\b | (?:async\s+)?function\b | class\b | (?:const|let|var)\b
+        import\s*[\w${*"'] | export\b | (?:async\s+)?function\b | class\b | (?:const|let|var)\b
         | ["']use\ strict["']
         | (?:window\.)?(?:app|comfyApp)\s*\.\s*registerExtension\s*\(
     )""",
     re.VERBOSE,
 )
-# Selectors that reach the whole page rather than the pack's own elements.
-_PAGE_WIDE_SELECTOR = re.compile(
-    r"""(?:^|[\s,}>~+(])(\*|html|body|:root|canvas|\.litegraph\b[\w-]*|\.lgraph[\w-]*|\.comfy-[\w-]+)\s*(?=[,{:])"""
-)
-_LOCAL_DECLARATION = re.compile(r"^(?:export\s+)?(?:async\s+)?(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)")
+# The first compound of a selector that reaches the whole page rather than the pack's own elements.
+_PAGE_WIDE_START = re.compile(r"^(?:\*|(?:html|body|canvas)(?![\w-])|:root(?![\w-])|\.litegraph|\.lgraph|\.comfy-)")
+_CSS_COMMENT = re.compile(r"/\*[\s\S]*?\*/")
+_DECLARED_NAME = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:class|function\*?)\s+([A-Za-z_$][\w$]*)")
+_SIMPLE_DECLARATION = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)(.*)$", re.DOTALL)
 # `X.prop = …` / `X[key] = …` on a class or value the module itself declares.
-_LOCAL_ASSIGNMENT = re.compile(r"^([A-Za-z_$][\w$]*)\s*(?:\.[\w$]+|\[[^\]]*\])+\s*=[^=]")
+_LOCAL_ASSIGNMENT = re.compile(r"^([A-Za-z_$][\w$]*)\s*(?:\.[\w$]+|\[[^\]]*\])+\s*=(?!=)(.*)$", re.DOTALL)
 _CSS_BLOCK = re.compile(r"([^{}]+)\{[^{}]*:[^{}]*\}")
+# After these words a `/` starts a regular expression, not a division.
+_REGEX_AFTER_WORD = frozenset("return typeof case throw yield in of void delete instanceof new else do await".split())
 
 
 @dataclass(frozen=True)
@@ -55,30 +60,42 @@ class Finding:
     message: str
 
 
+class _Lines:
+    """Line numbers for offsets in one source, without rescanning it each time."""
+
+    def __init__(self, src: str):
+        self._starts = [i for i, c in enumerate(src) if c == "\n"]
+
+    def at(self, offset: int) -> int:
+        return bisect.bisect_left(self._starts, offset) + 1
+
+
 def top_level_statements(src: str) -> list[tuple[int, str]]:
     """Statements at brace depth zero, with the 1-based line each starts on."""
+    lines = _Lines(src)
     statements: list[tuple[int, str]] = []
     depth = 0
     start = 0
     i = 0
     n = len(src)
     last = ""  # last significant character, to tell a regex from a division
+    word_start = -1  # where the identifier ending at `last` began
 
     def flush(end: int) -> None:
         offset = _code_start(src, start, end)
         text = src[offset:end].strip()
         if text:
-            statements.append((src.count("\n", 0, offset) + 1, text))
+            statements.append((lines.at(offset), text))
 
     while i < n:
         c = src[i]
         if c in "\"'":
             i = _skip_string(src, i, c)
-            last = c
+            last, word_start = "x", -1
             continue
         if c == "`":
             i = _skip_template(src, i)
-            last = c
+            last, word_start = "x", -1
             continue
         if src.startswith("//", i):
             end = src.find("\n", i)
@@ -88,10 +105,12 @@ def top_level_statements(src: str) -> list[tuple[int, str]]:
             end = src.find("*/", i + 2)
             i = n if end == -1 else end + 2
             continue
-        if c == "/" and (last == "" or last in "(,=:[!&|?{};+-*%<>~^"):
-            i = _skip_regex(src, i)
-            last = "/"
-            continue
+        if c == "/":
+            after_word = word_start >= 0 and src[word_start:i].strip() in _REGEX_AFTER_WORD
+            if last == "" or last in "(,=:[!&|?{};+-*%<>~^" or after_word:
+                i = _skip_regex(src, i)
+                last, word_start = "x", -1
+                continue
         if c in "({[":
             depth += 1
         elif c in ")}]":
@@ -99,15 +118,20 @@ def top_level_statements(src: str) -> list[tuple[int, str]]:
             if depth == 0 and c == "}" and _ends_block(src, start, i):
                 flush(i + 1)
                 start = i + 1
-                last = ";"
+                last, word_start = ";", -1
                 i += 1
                 continue
-        elif depth == 0 and (c == ";" or (c == "\n" and _statement_complete(src, start, i))):
+        elif depth == 0 and (c == ";" or (c == "\n" and _statement_complete(src, start, i, last))):
             flush(i)
             start = i + 1
-            last = ";"
+            last, word_start = ";", -1
             i += 1
             continue
+        if c.isalnum() or c in "_$":
+            if not (last.isalnum() or last in "_$") or word_start < 0:
+                word_start = i
+        elif not c.isspace():
+            word_start = -1
         if not c.isspace():
             last = c
         i += 1
@@ -137,15 +161,18 @@ def _ends_block(src: str, start: int, close: int) -> bool:
     return re.match(r"(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function|class)\b", head) is not None
 
 
-def _statement_complete(src: str, start: int, newline: int) -> bool:
-    """Treat a newline at depth zero as a statement end unless the line obviously continues."""
-    text = src[_code_start(src, start, newline) : newline].rstrip()
-    if not text:
+def _statement_complete(src: str, start: int, newline: int, last: str) -> bool:
+    """Treat a newline at depth zero as a statement end unless the code obviously continues.
+
+    ``last`` is the last code character before the newline (comments excluded).
+    """
+    if _code_start(src, start, newline) >= newline:
         return False
-    if text[-1] in "=+-*/%&|^!?:,.([{<>":
+    if last in "=+-*/%&|^!?:,.([{<>":
         return False
-    rest = src[newline + 1 :].lstrip()
-    return not (rest[:1] in (".", "?", ")", "]", "}", ",") or rest.startswith(("&&", "||", "+", "-", "*", "/")))
+    nxt = _code_start(src, newline + 1, len(src))
+    rest = src[nxt : nxt + 2]
+    return not (rest[:1] in (".", "?", ")", "]", "}", ",", ":", "{") or rest in ("&&", "||") or rest[:1] in "+-*")
 
 
 def _skip_string(src: str, i: int, quote: str) -> int:
@@ -161,29 +188,41 @@ def _skip_string(src: str, i: int, quote: str) -> int:
 
 
 def _skip_template(src: str, i: int) -> int:
+    """Index just past the template literal starting at ``i``; nested templates without recursion."""
+    stack = [-1]  # -1: inside template text; n >= 0: inside `${`, at brace depth n
     i += 1
-    while i < len(src):
-        if src[i] == "\\":
-            i += 2
-            continue
-        if src[i] == "`":
-            return i + 1
-        if src.startswith("${", i):
-            depth = 1
-            i += 2
-            while i < len(src) and depth:
-                c = src[i]
-                if c in "\"'":
-                    i = _skip_string(src, i, c)
-                    continue
-                if c == "`":
-                    i = _skip_template(src, i)
-                    continue
-                depth += c == "{"
-                depth -= c == "}"
+    while i < len(src) and stack:
+        c = src[i]
+        if stack[-1] < 0:
+            if c == "\\":
+                i += 2
+                continue
+            if c == "`":
+                stack.pop()
                 i += 1
+                continue
+            if src.startswith("${", i):
+                stack.append(0)
+                i += 2
+                continue
+            i += 1
             continue
-        i += 1
+        if c in "\"'":
+            i = _skip_string(src, i, c)
+        elif c == "`":
+            stack.append(-1)
+            i += 1
+        elif c == "{":
+            stack[-1] += 1
+            i += 1
+        elif c == "}":
+            if stack[-1] == 0:
+                stack.pop()
+            else:
+                stack[-1] -= 1
+            i += 1
+        else:
+            i += 1
     return i
 
 
@@ -210,62 +249,83 @@ def _skip_regex(src: str, i: int) -> int:
     return i
 
 
-def web_directory(pack: Path) -> Path | None:
-    """The folder the pack serves frontend files from, per ``WEB_DIRECTORY`` in ``__init__.py``."""
+def web_directory(pack: Path, notes: list[str] | None = None) -> Path | None:
+    """The folder the pack serves frontend files from, per ``WEB_DIRECTORY`` in ``__init__.py``.
+
+    ``notes`` collects why nothing could be scanned, so the caller never reports an all-clear for it.
+    """
+    notes = notes if notes is not None else []
     try:
         init = (pack / "__init__.py").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    match = _WEB_DIRECTORY.search(init)
+    match = _WEB_DIRECTORY.search(_TRIPLE_QUOTED.sub("", init))
     if match is None:
+        if "WEB_DIRECTORY" in init:
+            notes.append("WEB_DIRECTORY in __init__.py is not a plain string, so the frontend code was not scanned")
         return None
     try:
         web = (pack / match.group(1)).resolve()
         web.relative_to(pack.resolve())
-        return web if web.is_dir() else None
+        if web.is_dir():
+            return web
+        notes.append(f"WEB_DIRECTORY {match.group(1)!r} is not a folder, so nothing was scanned")
+        return None
     except ValueError:
-        return None  # Outside the pack: not ours to read.
+        notes.append(f"WEB_DIRECTORY {match.group(1)!r} points outside the pack, so it was not scanned")
+        return None
     except (OSError, RuntimeError):
-        return None  # A symlink loop or an unreadable path: nothing to scan.
+        notes.append(f"WEB_DIRECTORY {match.group(1)!r} could not be resolved (a symlink loop?), so it was not scanned")
+        return None
 
 
-def _frontend_files(pack: Path) -> Iterator[tuple[str, str]]:
-    web = web_directory(pack)
+def _frontend_files(pack: Path, notes: list[str] | None = None) -> Iterator[tuple[str, str]]:
+    notes = notes if notes is not None else []
+    web = web_directory(pack, notes)
     if web is None:
         return
     try:
         paths = sorted(web.rglob("*"))
     except (OSError, RuntimeError):
+        notes.append("the web folder could not be walked, so it was not scanned")
         return
+    root = pack.resolve()
     for path in paths:
-        if path.suffix not in (".js", ".mjs", ".css") or not path.is_file() or path.is_symlink():
+        if path.suffix not in (".js", ".mjs", ".css"):
+            continue
+        rel = path.relative_to(root).as_posix() if path.is_relative_to(root) else path.name
+        if path.is_symlink() or not path.is_file():
+            notes.append(f"skipped {rel}: a symlink or not a regular file")
             continue
         try:
             if path.stat().st_size > MAX_FILE_BYTES:
+                notes.append(f"skipped {rel}: larger than 1 MiB")
                 continue
             text = path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
+            notes.append(f"skipped {rel}: unreadable or not UTF-8")
             continue
-        yield path.relative_to(pack.resolve()).as_posix(), text
+        yield rel, text
 
 
 def _page_wide_css(rel: str, css: str, base_line: int) -> list[Finding]:
     findings = []
+    css = _CSS_COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), css)
     for block in _CSS_BLOCK.finditer(css):
         for selector in block.group(1).split(","):
-            match = _PAGE_WIDE_SELECTOR.search(" " + selector.strip() + " {")
-            # A selector that starts from the pack's own element is scoped.
-            first = selector.strip().split()[0] if selector.strip() else ""
-            component = re.split(r"(?<!^)[:\[>+~]", first, maxsplit=1)[0]
-            if match and component == match.group(1):
+            selector = selector.strip()
+            if selector.startswith("@") or ";" in selector:
+                selector = selector.rsplit(";", 1)[-1].strip()
+            # A selector that starts from the pack's own element is scoped; one that starts at
+            # the page (or the shared LiteGraph / Comfy UI classes) reaches every node.
+            if selector and _PAGE_WIDE_START.match(selector):
                 selector_start = block.start(1) + len(block.group(1)) - len(block.group(1).lstrip())
-                line = base_line + css.count("\n", 0, selector_start)
                 findings.append(
                     Finding(
                         rel,
-                        line,
+                        base_line + css.count("\n", 0, selector_start),
                         "page-wide-css",
-                        f"CSS selector `{selector.strip()}` styles the whole page; scope it to the pack's own class",
+                        f"CSS selector `{selector}` styles the whole page; scope it to the pack's own class",
                     )
                 )
                 break
@@ -274,8 +334,9 @@ def _page_wide_css(rel: str, css: str, base_line: int) -> list[Finding]:
 
 def _string_literals(src: str) -> Iterator[tuple[int, str]]:
     """(start line, body) of each string and template literal in a JS source."""
+    lines = _Lines(src)
     for match in re.finditer(r"`(?:\\.|[^`\\])*`|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", src):
-        yield src.count("\n", 0, match.start()) + 1, match.group(0)[1:-1]
+        yield lines.at(match.start()), match.group(0)[1:-1]
 
 
 def _blank_nested(src: str) -> str:
@@ -310,7 +371,9 @@ def _blank_nested(src: str) -> str:
 def _runs_code(rhs: str) -> bool:
     """True when a declaration's initializer calls something at import time."""
     flat = _HARMLESS_CALL.sub(" ", _blank_nested(rhs))
-    flat = flat.split("=>", 1)[0]  # an arrow function's body runs later
+    if re.match(r"\s*(?:async\s*)?(?:\([^()]*\)|[\w$]+)\s*=>", flat):
+        return False  # the whole initializer is an arrow function; its body runs later
+    flat = re.sub(r"(?:\([^()]*\)|[\w$]+)\s*=>", " ", flat)  # inner arrows' parameters
     flat = re.sub(r"\bfunction\b[^(]*\([^)]*\)", " ", flat)  # a function expression's parameters
     return re.search(r"[\w$)\]]\s*\(", flat) is not None
 
@@ -361,21 +424,43 @@ def _registrations(text: str) -> Iterator[tuple[int, str, bool]]:
         yield start + name.start(1), name.group(1), _PROVENANCE.search(body) is not None
 
 
-def check_pack(pack: Path) -> list[Finding]:
-    """Hygiene findings for the pack at ``pack``. Empty when it serves no frontend code."""
+def _own_names(statements: list[tuple[int, str]]) -> set[str]:
+    """Classes, functions and plain values the module declares itself (not aliases of globals)."""
+    names = set()
+    for _, stmt in statements:
+        if m := _DECLARED_NAME.match(stmt):
+            names.add(m.group(1))
+        elif (m := _SIMPLE_DECLARATION.match(stmt)) and "." not in _blank_nested(m.group(2)):
+            if not _runs_code(m.group(2)):
+                names.add(m.group(1))
+    return names
+
+
+def _top_level_finding(statement: str, own: set[str]) -> bool:
+    """True when ``statement`` runs code at import time that the extension switch cannot stop."""
+    if (assignment := _LOCAL_ASSIGNMENT.match(statement)) and assignment.group(1) in own:
+        return _runs_code(assignment.group(2))
+    if (declaration := _DECLARATION_RHS.match(statement)) and _runs_code(declaration.group(1)):
+        return True
+    if (default := _EXPORT_DEFAULT_EXPR.match(statement)) and _runs_code(default.group(1)):
+        return True
+    return not _ALLOWED_STATEMENT.match(statement)
+
+
+def check_pack(pack: Path, notes: list[str] | None = None) -> list[Finding]:
+    """Hygiene findings for the pack at ``pack``. Empty when it serves no frontend code.
+
+    Anything that could not be scanned is appended to ``notes``.
+    """
     findings: list[Finding] = []
-    for rel, text in _frontend_files(pack):
+    for rel, text in _frontend_files(pack, notes):
         if rel.endswith(".css"):
             findings += _page_wide_css(rel, text, 1)
             continue
         statements = top_level_statements(text)
-        local_names = {m.group(1) for _, stmt in statements if (m := _LOCAL_DECLARATION.match(stmt))}
+        own = _own_names(statements)
         for line, statement in statements:
-            assignment = _LOCAL_ASSIGNMENT.match(statement)
-            if assignment and assignment.group(1) in local_names:
-                continue  # Configures the module's own class or value, not the page.
-            declaration = _DECLARATION_RHS.match(statement)
-            if (declaration and _runs_code(declaration.group(1))) or not _ALLOWED_STATEMENT.match(statement):
+            if _top_level_finding(statement, own):
                 first = statement.splitlines()[0][:60]
                 findings.append(
                     Finding(
@@ -389,12 +474,13 @@ def check_pack(pack: Path) -> list[Finding]:
         for line, literal in _string_literals(text):
             if "{" in literal and ":" in literal:
                 findings += _page_wide_css(rel, literal, line)
+        lines = _Lines(text)
         for offset, name, has_provenance in _registrations(text):
             if not name.startswith("agent.") and not has_provenance:
                 findings.append(
                     Finding(
                         rel,
-                        text.count("\n", 0, offset) + 1,
+                        lines.at(offset),
                         "extension-name",
                         f"extension `{name}` has no `agent.` prefix and no provenance, "
                         "so the frontend will not mark it as made by the agent",

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.agent_pack_hygiene import (
@@ -178,6 +179,70 @@ class TestReviewRound:
         assert [(f.file, f.kind) for f in findings] == [("web/style.css", "page-wide-css")]
 
 
+class TestCursorReviewRound:
+    def _top(self, tmp_path, extra):
+        return [f for f in check_pack(_pack(tmp_path, GOOD_JS + extra)) if f.kind == "top-level-code"]
+
+    def test_regex_after_return_does_not_unbalance_braces(self, tmp_path):
+        js = "function f(s) { return /^\\s*[{(]/.test(s) }\nboom();\n"
+        assert [t for _, t in top_level_statements(js)] == ["function f(s) { return /^\\s*[{(]/.test(s) }", "boom()"]
+
+    def test_comment_line_between_statements_without_semicolons(self, tmp_path):
+        extra = "\nconst orig = LGraphCanvas.prototype.drawNode\n// Wrap the draw.\nLGraphCanvas.prototype.drawNode = function () {}\n"
+        assert [f.line for f in self._top(tmp_path, extra)] == [21]
+
+    def test_multi_line_ternary_is_one_statement(self, tmp_path):
+        extra = "\nconst mode = window.devicePixelRatio > 1\n  ? 'hi'\n  : 'lo'\n"
+        assert self._top(tmp_path, extra) == []
+
+    def test_export_default_iife_and_dynamic_import_are_reported(self, tmp_path):
+        extra = "\nexport default (() => { boom() })()\nimport('./x.js').then(run)\n"
+        assert len(self._top(tmp_path, extra)) == 2
+
+    def test_an_alias_of_a_global_does_not_exempt_assignments(self, tmp_path):
+        extra = "\nconst proto = LGraphCanvas.prototype;\nproto.drawNode = f;\n"
+        assert len(self._top(tmp_path, extra)) == 1
+
+    def test_own_class_assignment_that_runs_code_is_reported(self, tmp_path):
+        extra = "\nclass N {}\nN.x = document.head.appendChild(s);\nexport default class D {}\nD.title = 'd';\n"
+        assert len(self._top(tmp_path, extra)) == 1
+
+    def test_deeply_nested_templates_do_not_crash(self, tmp_path):
+        js = "const t = " + "`${" * 2000 + "1" + "}`" * 2000 + ";\n"
+        assert len(top_level_statements(js)) == 1
+
+    @pytest.mark.parametrize(
+        "css",
+        [
+            "body div { a: b }",
+            "html body { a: b }",
+            "*::before { a: b }",
+            "body.dark { a: b }",
+            "/* reset */\n* { a: b }",
+        ],
+    )
+    def test_more_page_wide_selectors(self, tmp_path, css):
+        findings = check_pack(_pack(tmp_path, files={"s.css": css}))
+        assert [f.kind for f in findings] == ["page-wide-css"]
+
+    def test_unscannable_web_directory_is_noted(self, tmp_path):
+        notes = []
+        init = 'import os\nWEB_DIRECTORY = os.path.join(os.path.dirname(__file__), "web")\n'
+        assert check_pack(_pack(tmp_path, init=init), notes) == []
+        assert notes and "not scanned" in notes[0]
+
+    def test_a_docstring_does_not_name_the_web_directory(self, tmp_path):
+        init = '"""\nWEB_DIRECTORY = "./nope"\n"""\nWEB_DIRECTORY = "./web"\n'
+        assert [f.file for f in check_pack(_pack(tmp_path, GOOD_JS + "\nboom();\n", init=init))] == ["web/main.js"]
+
+    def test_skipped_files_are_noted(self, tmp_path):
+        pack = _pack(tmp_path)
+        (pack / "web" / "bad.js").write_bytes(b"\xff\xfe\x00")
+        notes = []
+        check_pack(pack, notes)
+        assert any("bad.js" in n for n in notes)
+
+
 class TestIsAgentPack:
     def test_install_record_marks_an_agent_pack(self, tmp_path):
         assert is_agent_pack(_pack(tmp_path))
@@ -211,3 +276,25 @@ class TestValidateCommand:
         result, _ = self._invoke(monkeypatch, pack, "--agent-pack")
         assert "top-level" in result.output
         assert result.exit_code == 0
+
+    def test_a_crash_in_the_check_does_not_stop_validation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "comfy_cli.command.custom_nodes.agent_pack_hygiene.check_pack",
+            lambda pack, notes=None: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        result, publish_check = self._invoke(monkeypatch, _pack(tmp_path))
+        assert result.exit_code == 0, result.output
+        assert "could not run" in result.output
+        publish_check.assert_called_once()
+
+    def test_unscanned_files_are_not_reported_as_clean(self, tmp_path, monkeypatch):
+        pack = _pack(tmp_path)
+        (pack / "web" / "bad.js").write_bytes(b"\xff\xfe\x00")
+        result, _ = self._invoke(monkeypatch, pack)
+        assert "no findings" not in result.output
+        assert "bad.js" in result.output
+
+    def test_long_reports_are_capped(self, tmp_path, monkeypatch):
+        pack = _pack(tmp_path, GOOD_JS + "".join(f"boom{i}();\n" for i in range(80)))
+        result, _ = self._invoke(monkeypatch, pack)
+        assert "and 30 more" in result.output

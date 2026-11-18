@@ -1144,25 +1144,40 @@ def validate_node_for_publishing():
     return config
 
 
+MAX_HYGIENE_FINDINGS_SHOWN = 50
+
+
 def _report_agent_pack_hygiene(force: bool) -> None:
     """Advisory: what Settings > Extensions cannot turn off in an agent pack. Never fails."""
-    from comfy_cli.command.custom_nodes.agent_pack_hygiene import check_pack, is_agent_pack
+    from comfy_cli.command.custom_nodes import agent_pack_hygiene
     from comfy_cli.output.sanitize import sanitize_markup
 
     pack = pathlib.Path.cwd()
-    if not (force or is_agent_pack(pack)):
+    notes: list[str] = []
+    try:
+        if not (force or agent_pack_hygiene.is_agent_pack(pack)):
+            return
+        findings = agent_pack_hygiene.check_pack(pack, notes)
+    except Exception as e:  # noqa: BLE001 - advisory only: never block the publishing checks
+        print(f"[yellow]Agent pack hygiene check could not run: {sanitize_markup(str(e))}[/yellow]")
         return
-    findings = check_pack(pack)
-    if not findings:
+    if not findings and not notes:
         print("[green]Agent pack hygiene: no findings.[/green]")
         return
-    print(
-        f"[yellow]Agent pack hygiene: {len(findings)} advisory finding(s) (validation does not fail on these):[/yellow]"
-    )
-    for finding in findings:
+    if findings:
         print(
-            f"[yellow]  {sanitize_markup(finding.file)}:{finding.line} {finding.kind}: {sanitize_markup(finding.message)}[/yellow]"
+            f"[yellow]Agent pack hygiene: {len(findings)} advisory finding(s) "
+            "(validation does not fail on these):[/yellow]"
         )
+    for finding in findings[:MAX_HYGIENE_FINDINGS_SHOWN]:
+        print(
+            f"[yellow]  {sanitize_markup(finding.file)}:{finding.line} {finding.kind}: "
+            f"{sanitize_markup(finding.message)}[/yellow]"
+        )
+    if len(findings) > MAX_HYGIENE_FINDINGS_SHOWN:
+        print(f"[yellow]  ... and {len(findings) - MAX_HYGIENE_FINDINGS_SHOWN} more[/yellow]")
+    for note in notes:
+        print(f"[yellow]Agent pack hygiene: not checked: {sanitize_markup(note)}[/yellow]")
 
 
 @app.command("validate", help="Validate this custom node for registry publishing")
