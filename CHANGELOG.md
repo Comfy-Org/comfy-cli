@@ -15,6 +15,21 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- Two `comfy model download` runs from different workspaces aimed at the same
+  file now refuse each other. Before, each workspace kept its own download
+  claims, so both runs wrote the file. This is the default case on Comfy
+  Desktop, where every install saves into one shared model library. Claims
+  now live in `download-claims/` in comfy-cli's config directory, or inside
+  the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
+  downloads before upgrading, since an older version keeps its claims per
+  workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+
+## [1.28.0] - 2026-11-18
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.28.0) · 2 commits since v1.27.0.
+
 ### Added
 
 - `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
@@ -24,6 +39,13 @@ history.
   nodes outside the targets. An async targeted run records its targets on the
   job state file, and its `queued` envelope carries a `data.note` naming the
   watch command.
+
+## [1.27.0] - 2026-11-18
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.27.0) · 24 commits since v1.26.0.
+
+### Added
+
 - `comfy templates ls --local-only` drops partner-API templates from the
   index (a name starting with `api_`, or an API tag) with no network
   beyond the index. `--runnable` implies `--local-only`, then checks
@@ -106,14 +128,6 @@ history.
 
 ### Fixed
 
-- Two `comfy model download` runs from different workspaces aimed at the same
-  file now refuse each other. Before, each workspace kept its own download
-  claims, so both runs wrote the file. This is the default case on Comfy
-  Desktop, where every install saves into one shared model library. Claims
-  now live in `download-claims/` in comfy-cli's config directory, or inside
-  the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
-  downloads before upgrading, since an older version keeps its claims per
-  workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
@@ -1655,7 +1669,9 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.28.0...HEAD
+[1.28.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.27.0...v1.28.0
+[1.27.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...v1.25.0
 [1.24.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...v1.24.0
