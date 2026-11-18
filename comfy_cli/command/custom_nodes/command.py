@@ -11,9 +11,11 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from comfy_cli import constants, logging, tracking, ui, utils
 from comfy_cli._safe_exec import BinaryNotFoundError
+from comfy_cli.command.custom_nodes.agent_packs import find_agent_packs
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
 from comfy_cli.command.custom_nodes.cm_cli_util import (
     execute_cm_cli,
@@ -57,6 +59,35 @@ class ShowTarget(str, Enum):
     ALL = "all"
     SNAPSHOT = "snapshot"
     SNAPSHOT_LIST = "snapshot-list"
+    AGENT_CREATED = "agent-created"
+
+
+def _show_agent_created(simple: bool) -> None:
+    """List the packs the local Comfy agent says it created. Read from disk, not cm-cli."""
+    if not workspace_manager.workspace_path:
+        print("[bold red]No ComfyUI workspace found.[/bold red]")
+        raise typer.Exit(code=1)
+    custom_nodes = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
+    packs = find_agent_packs(custom_nodes)
+    renderer = get_renderer()
+    if renderer.is_pretty():
+        if not packs:
+            print("No agent-created packs found.")
+        elif simple:
+            for pack in packs:
+                print(f"{pack.pack} ({pack.state})")
+        else:
+            table = Table(title="Agent-created packs (record found, not verified)")
+            for column in ("Pack", "State", "Folder", "Created", "Route"):
+                table.add_column(column)
+            for pack in packs:
+                table.add_row(pack.pack, pack.state, pack.folder, pack.created_at, pack.route)
+            console.print(table)
+            print(
+                "These packs carry the local agent's install record. comfy-cli cannot verify its signature; "
+                "ask the agent to confirm."
+            )
+    renderer.emit({"packs": [pack.to_dict() for pack in packs], "verified": False})
 
 
 def _resolve_uv_compile(uv_compile: bool | None, fast_deps: bool = False, no_deps: bool = False) -> bool:
@@ -557,6 +588,10 @@ def show(
 ):
     validate_mode(mode)
 
+    if arg is ShowTarget.AGENT_CREATED:
+        _show_agent_created(simple=False)
+        return
+
     execute_cm_cli(["show", arg.value], channel=channel, mode=mode)
 
 
@@ -581,6 +616,10 @@ def simple_show(
     ),
 ):
     validate_mode(mode)
+
+    if arg is ShowTarget.AGENT_CREATED:
+        _show_agent_created(simple=True)
+        return
 
     execute_cm_cli(["simple-show", arg.value], channel=channel, mode=mode)
 
