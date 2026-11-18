@@ -1702,7 +1702,7 @@ def _claim_holder(payload: dict | None, default_dir: pathlib.Path) -> tuple[Any,
         return download_state.read_path_strict(record_file), record_file
     except FileNotFoundError:
         return None, record_file
-    except OSError:
+    except (OSError, ValueError):
         # Unreadable is not gone (EACCES, EIO): it proves nothing about the holder.
         return _UNRESOLVED_HOLDER, record_file
 

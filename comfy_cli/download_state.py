@@ -421,6 +421,9 @@ def claim_holder_state_file(payload: dict[str, Any], default_dir: Path) -> Path 
         return Path(default_dir) / f"{download_id}.json"
     if not isinstance(pointer, str):
         return None
+    if "\x00" in pointer:
+        # No filesystem call accepts it; `open` would raise ValueError, not OSError.
+        return None
     path = Path(pointer)
     if not path.is_absolute() or path.name != f"{download_id}.json" or path.parent.name != STATE_DIRNAME:
         return None

@@ -5001,6 +5001,22 @@ class TestCrossWorkspaceClaims:
         assert json_renderer()["error"]["code"] == "model_download_claim_contested"
         assert download_state.read_claim(self._claim(env.dest)) == holder.id
 
+    def test_a_pointer_with_a_nul_byte_is_unresolved_not_a_crash(self, env, json_renderer):
+        claim = self._claim(env.dest)
+        _write_claim_payload(
+            claim,
+            {
+                "download_id": "aaaaaaaaaaaa",
+                "dest": str(env.dest),
+                "created_at": _stamp(1),
+                "state": "/x\x00/.comfy-downloads/aaaaaaaaaaaa.json",
+            },
+        )
+        env.use(env.ws_b)
+        with pytest.raises(typer.Exit):
+            self._submit(env.dest)
+        assert json_renderer()["error"]["code"] == "model_download_claim_contested"
+
     def test_a_late_worker_does_not_overwrite_a_file_another_download_finished(self, env):
         """A's worker boots after the grace; B took the claim, finished, and wrote
         the file. A must not adopt B's finished claim and replace the file."""
