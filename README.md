@@ -307,8 +307,10 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   These write the frontend's `Comfy.Extension.DisabledPacks` setting through the running local
   ComfyUI (frontend 1.59 or later), so the pack's scripts are not loaded after the next page
-  reload. The pack's Python nodes stay installed. To turn off the whole pack, use
-  `comfy node disable`, which needs a ComfyUI restart.
+  reload. Reload every open ComfyUI page, so none of them saves an older copy of the setting.
+  The pack's Python nodes stay installed. To turn off the whole pack, use `comfy node disable`,
+  which needs a ComfyUI restart. `--host`/`--port` pick the server (default: the running local
+  one), and `--user <user id>` is required when ComfyUI runs with `--multi-user`.
 
 #### `install` vs `registry-install`
 

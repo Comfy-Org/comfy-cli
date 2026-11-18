@@ -58,14 +58,30 @@ class _FakeResp:
 class _FakeComfy:
     """A ComfyUI that serves `/extensions` and one settings key, and records writes."""
 
-    def __init__(self, served=SERVED, disabled=None):
+    def __init__(self, served=SERVED, disabled=None, users=None, frontend="1.59.6", changed_before_write=None):
         self.served = served
         self.disabled = disabled
+        self.users = users if users is not None else {"storage": "server", "migrated": True}
+        self.frontend = frontend
+        self.changed_before_write = changed_before_write
+        self.setting_reads = 0
         self.writes: list = []
+        self.user_headers: list = []
 
     def open(self, req, timeout=None):
         url = req.full_url
         method = req.get_method()
+        if url == "http://127.0.0.1:8188/users" and method == "GET":
+            return _FakeResp(json.dumps(self.users).encode())
+        if url == "http://127.0.0.1:8188/system_stats" and method == "GET":
+            return _FakeResp(json.dumps({"system": {"required_frontend_version": self.frontend}}).encode())
+        if url.startswith(SETTING_URL):
+            self.user_headers.append(req.get_header("Comfy-user"))
+        if url == SETTING_URL and method == "GET":
+            self.setting_reads += 1
+            if self.setting_reads == 2 and self.changed_before_write is not None:
+                self.disabled = self.changed_before_write
+            return _FakeResp(json.dumps(self.disabled).encode())
         if url == "http://127.0.0.1:8188/extensions" and method == "GET":
             return _FakeResp(json.dumps(self.served).encode())
         if url == SETTING_URL and method == "GET":
@@ -99,7 +115,7 @@ def _envelope(capsys: pytest.CaptureFixture[str]) -> dict:
 def _run(fn, fake, *args, **kwargs):
     renderer = _force_renderer()
     with (
-        patch("comfy_cli.command.extensions.resolve_target", return_value=LOCAL_TARGET),
+        patch("comfy_cli.command.extensions._target", return_value=LOCAL_TARGET),
         patch.object(comfy_client._OPENER, "open", side_effect=fake.open),
     ):
         fn(renderer, *args, **kwargs)
@@ -152,7 +168,7 @@ class TestList:
     def test_server_down_is_server_not_running(self, capsys):
         renderer = _force_renderer()
         with (
-            patch("comfy_cli.command.extensions.resolve_target", return_value=LOCAL_TARGET),
+            patch("comfy_cli.command.extensions._target", return_value=LOCAL_TARGET),
             patch.object(comfy_client._OPENER, "open", side_effect=urllib.error.URLError("Connection refused")),
         ):
             with pytest.raises(typer.Exit) as exc_info:
@@ -223,6 +239,90 @@ class TestDisable:
             _run(ext_cmd.toggle_execute, fake, "agent-cushions", enabled=False)
         assert fake.writes == []
         assert _envelope(capsys)["error"]["code"] == "invalid_response"
+
+
+class TestReviewFindings:
+    def test_non_canonical_disabled_entries_do_not_crash_or_match(self, capsys):
+        fake = _FakeComfy(disabled=["my-pack", "", "/foo", "/x/agent-cushions/bar"])
+        with pytest.raises(typer.Exit):
+            _run(ext_cmd.toggle_execute, fake, "my-pack", enabled=True)
+        assert _envelope(capsys)["error"]["code"] == "invalid_argument"
+        assert fake.writes == []
+
+    def test_enable_of_an_unknown_folder_is_refused(self, capsys):
+        fake = _FakeComfy(disabled=["/extensions/agent-cushions/"])
+        with pytest.raises(typer.Exit):
+            _run(ext_cmd.toggle_execute, fake, "agent-cushion", enabled=True)
+        assert fake.writes == []
+        assert _envelope(capsys)["error"]["code"] == "invalid_argument"
+
+    def test_path_form_with_extra_slashes_is_normalized(self, capsys):
+        fake = _FakeComfy(disabled=[])
+        _run(ext_cmd.toggle_execute, fake, "/extensions/agent-cushions//", enabled=False)
+        assert fake.writes == [["/extensions/agent-cushions/"]]
+
+    def test_non_json_reply_is_invalid_response(self, capsys):
+        renderer = _force_renderer()
+        with (
+            patch("comfy_cli.command.extensions._target", return_value=LOCAL_TARGET),
+            patch.object(comfy_client._OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp(b"<html>")),
+        ):
+            with pytest.raises(typer.Exit):
+                ext_cmd.list_execute(renderer)
+        assert _envelope(capsys)["error"]["code"] == "invalid_response"
+
+    def test_http_status_is_not_reported_as_server_down(self, capsys):
+        def _raise(req, timeout=None):
+            if req.full_url.endswith("/users"):
+                return _FakeResp(b'{"storage": "server"}')
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+        renderer = _force_renderer()
+        with (
+            patch("comfy_cli.command.extensions._target", return_value=LOCAL_TARGET),
+            patch.object(comfy_client._OPENER, "open", side_effect=_raise),
+        ):
+            with pytest.raises(typer.Exit):
+                ext_cmd.list_execute(renderer)
+        err = _envelope(capsys)["error"]
+        assert err["code"] == "client_error"
+        assert err["details"]["status"] == 403
+
+    def test_a_change_made_before_the_write_is_kept(self, capsys):
+        fake = _FakeComfy(disabled=[], changed_before_write=["/extensions/ComfyUI-VideoHelperSuite/"])
+        _run(ext_cmd.toggle_execute, fake, "agent-cushions", enabled=False)
+        assert fake.writes == [["/extensions/ComfyUI-VideoHelperSuite/", "/extensions/agent-cushions/"]]
+
+    def test_multi_user_without_user_is_refused(self, capsys):
+        fake = _FakeComfy(disabled=[], users={"storage": "server", "users": {"alice_1": "alice"}})
+        with pytest.raises(typer.Exit):
+            _run(ext_cmd.toggle_execute, fake, "agent-cushions", enabled=False)
+        assert fake.writes == []
+        err = _envelope(capsys)["error"]
+        assert err["code"] == "usage_error"
+        assert "alice_1" in err["hint"]
+
+    def test_multi_user_with_user_sends_the_header(self, capsys):
+        fake = _FakeComfy(disabled=[], users={"storage": "server", "users": {"alice_1": "alice"}})
+        _run(ext_cmd.toggle_execute, fake, "agent-cushions", enabled=False, user="alice_1")
+        assert fake.writes == [["/extensions/agent-cushions/"]]
+        assert set(fake.user_headers) == {"alice_1"}
+
+    def test_old_frontend_pin_warns(self, capsys):
+        fake = _FakeComfy(disabled=[], frontend="1.58.5")
+        _run(ext_cmd.toggle_execute, fake, "agent-cushions", enabled=False)
+        env = _envelope(capsys)
+        assert env["ok"] is True
+        assert "1.59" in env["data"]["warnings"][0]
+
+    def test_current_frontend_pin_does_not_warn(self, capsys):
+        _run(ext_cmd.toggle_execute, _FakeComfy(disabled=[]), "agent-cushions", enabled=False)
+        assert "warnings" not in _envelope(capsys)["data"]
+
+    def test_messages_are_not_markup_escaped_in_json(self, capsys):
+        with pytest.raises(typer.Exit):
+            _run(ext_cmd.toggle_execute, _FakeComfy(disabled=[]), "[pack]", enabled=False)
+        assert "\\[" not in _envelope(capsys)["error"]["message"]
 
 
 class TestEnable:
