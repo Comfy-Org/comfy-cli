@@ -318,7 +318,7 @@ class TestPrune:
         claims directory is an `mkdir`, and its record and lock calls can raise.
         """
 
-        def boom(*_args):
+        def boom(*_args, **_kwargs):
             raise OSError("Read-only file system")
 
         monkeypatch.setattr(download_state, "_sweep_claims", boom)
@@ -1166,7 +1166,14 @@ def _claims_root() -> Path:
     Claims are host-global (comfy-cli#1095); `tests/conftest.py` redirects the
     directory into the test's tmp_path through the environment.
     """
-    return Path(os.environ[download_state.CLAIMS_DIR_ENV])
+    return Path(os.environ[download_state.CLAIMS_DIR_ENV]) / download_state.GLOBAL_CLAIMS_DIRNAME
+
+
+def _squat_every_claims_directory(workspace) -> None:
+    """Put a file where the shared claims directory and the workspace fallback go."""
+    for squatter in (_claims_root(), download_state.workspace_claims_dir(workspace)):
+        squatter.parent.mkdir(parents=True, exist_ok=True)
+        squatter.write_text("not a directory", encoding="utf-8")
 
 
 def _claim_files(workspace) -> list[Path]:
@@ -2732,7 +2739,9 @@ class TestClaimSweep:
         """A `.tmp` staging file is residue from the previous implementation's
         write-then-link publish; nothing writes them any more, but a workspace
         upgraded from that version can still be carrying one."""
-        claims = download_state.claims_dir()
+        # Only a workspace's own claims directory ever held them.
+        claims = download_state.workspace_claims_dir(workspace)
+        claims.mkdir(parents=True)
         old_tmp = claims / f"x.claim.123.aaaaaaaaaaaa{download_state.CLAIM_TMP_SUFFIX}"
         old_tmp.write_text("{}", encoding="utf-8")
         stale_stamp = time.time() - download_state.CLAIM_TMP_MAX_AGE_S * 2
@@ -3555,8 +3564,7 @@ class TestForegroundAtomicDestinationClaim:
         """Bookkeeping must not turn a working download into an error. With
         something squatting where `claims/` should be, the foreground path
         degrades to the advisory guard — the behavior that shipped before this."""
-        squatter = _claims_root()
-        squatter.write_text("not a directory", encoding="utf-8")
+        _squat_every_claims_directory(workspace)
         calls = self._transfer(monkeypatch)
 
         self._download()
@@ -3584,8 +3592,7 @@ class TestForegroundAtomicDestinationClaim:
 
     def test_an_unusable_claims_directory_keeps_the_advisory_guard(self, workspace, monkeypatch, json_renderer):
         """...and the guard it degrades to still refuses an earlier live rival."""
-        squatter = _claims_root()
-        squatter.write_text("not a directory", encoding="utf-8")
+        _squat_every_claims_directory(workspace)
         rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
         rival.started_at = "2000-01-01T00:00:00+00:00"
         real_write = download_state.write
@@ -4705,14 +4712,27 @@ class TestCrossWorkspaceClaims:
     # -- the shared root --------------------------------------------------------
 
     def test_the_override_redirects_the_claims_directory_owner_only(self, tmp_path, monkeypatch):
-        root = tmp_path / "elsewhere" / "claims"
-        monkeypatch.setenv(download_state.CLAIMS_DIR_ENV, str(root))
+        """The override names a parent: comfy-cli owns, chmods and sweeps only its
+        own subdirectory, never a directory the user pointed at."""
+        parent = tmp_path / "elsewhere"
+        parent.mkdir()
+        parent.chmod(0o755)
+        monkeypatch.setenv(download_state.CLAIMS_DIR_ENV, str(parent))
+        root = parent / download_state.GLOBAL_CLAIMS_DIRNAME
 
         assert download_state.global_state_dir() == root
         assert download_state.claims_dir() == root
         assert root.is_dir()
         if sys.platform != "win32":
             assert root.stat().st_mode & 0o777 == download_state.STATE_DIR_MODE
+            assert parent.stat().st_mode & 0o777 == 0o755
+
+    def test_a_relative_override_is_refused_rather_than_resolved_per_directory(self, monkeypatch):
+        """Two shells in different directories would resolve `claims` to two
+        directories, both win, and both write: the race this closes."""
+        monkeypatch.setenv(download_state.CLAIMS_DIR_ENV, "claims")
+        with pytest.raises(OSError):
+            download_state.global_state_dir()
 
     def test_the_suite_never_claims_outside_its_own_tmp_path(self, tmp_path):
         """The autouse fixture in tests/conftest.py, checked: a case that forgets
@@ -4728,7 +4748,22 @@ class TestCrossWorkspaceClaims:
 
         with pytest.raises(OSError):
             download_state.global_state_dir()
-        assert models._dest_claim_path(Path("/tmp/m.safetensors")) is None
+
+    def test_with_no_shared_directory_the_workspace_keeps_its_own_claims(self, env, monkeypatch, caplog):
+        """No home (or a read-only one) must not cost the in-workspace refusal:
+        submitter and worker both fall back to the workspace's own directory."""
+        monkeypatch.setenv(download_state.CLAIMS_DIR_ENV, "relative")
+        monkeypatch.setattr(models, "_shared_claims_unavailable_reported", False)
+        env.use(env.ws_a)
+        state_dir = download_state.state_dir(env.ws_a)
+        expected = download_state.workspace_claims_dir(env.ws_a) / download_state.claim_filename(
+            models._dest_key(env.dest)
+        )
+
+        with caplog.at_level(logging.WARNING):
+            assert models._dest_claim_path(env.dest) == expected
+        assert download_state.claim_path(models._dest_key(env.dest), state_dir) == expected
+        assert "shared download claims directory is unavailable" in caplog.text
 
     def test_every_workspace_resolves_one_claim_for_one_destination(self, env):
         """One resolver for submitter and worker, and no workspace in it."""
@@ -4773,9 +4808,17 @@ class TestCrossWorkspaceClaims:
                     self._submit(env.dest)
 
         err = json_renderer()["error"]
+        assert download_state.list_all(env.ws_b) == []
+        if sys.platform == "win32":
+            # The holder's byte-range lock blocks the unlocked payload read, so
+            # the refusal cannot name the holder (see `_refuse_held_claim`).
+            assert err["code"] in {"model_download_in_flight", "model_download_claim_contested"}
+            return
         assert err["code"] == "model_download_in_flight"
         assert err["details"]["download_id"] == holder.id
-        assert download_state.list_all(env.ws_b) == []
+        # The hint selects A's workspace: `download-status` looks ids up there.
+        assert err["details"]["workspace"] == str(env.ws_a)
+        assert f'--workspace "{env.ws_a}"' in err["hint"]
 
     @pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL has no Windows equivalent")
     def test_a_sigkilled_holder_in_another_workspace_frees_the_destination(self, env, json_renderer):
@@ -4876,9 +4919,13 @@ class TestCrossWorkspaceClaims:
         _reset_envelope()
         self._foreground(env.dest)
 
+        assert download_state.list_all(env.ws_b) == []
+        if sys.platform == "win32":
+            # Same byte-range lock limit as above: the refusal may be unnamed.
+            assert {r["code"] for r in refusals} <= {"model_download_in_flight", "model_download_claim_contested"}
+            return
         assert [r["code"] for r in refusals] == ["model_download_in_flight"] * 2
         assert {r["details"]["kind"] for r in refusals} == {"foreground"}
-        assert download_state.list_all(env.ws_b) == []
 
     # -- the worker and the sweep ---------------------------------------------------
 
@@ -4915,7 +4962,7 @@ class TestCrossWorkspaceClaims:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="a claim file is never unlinked on Windows")
     def test_prune_drains_the_pre_1095_per_workspace_claims(self, env):
-        legacy = download_state.legacy_claims_dir(env.ws_a)
+        legacy = download_state.workspace_claims_dir(env.ws_a)
         legacy.mkdir(parents=True)
         old = legacy / download_state.claim_filename(models._dest_key(env.dest))
         _plant_claim(old, "dddddddddddd", str(env.dest))
@@ -4923,6 +4970,86 @@ class TestCrossWorkspaceClaims:
         download_state.prune(env.ws_a)
 
         assert not old.exists()
+
+    def test_an_unreadable_or_corrupt_holder_record_never_crashes_the_submit(self, env, json_renderer):
+        """A pointer into another workspace reaches a file we did not write. Bytes
+        that are not UTF-8 JSON read as no record (stale); the submit goes on."""
+        env.use(env.ws_a)
+        bad = download_state.state_dir(env.ws_a) / "aaaaaaaaaaaa.json"
+        bad.write_bytes(b"\xff\xfe not json")
+        _plant_claim_with_state(self._claim(env.dest), "aaaaaaaaaaaa", str(env.dest), bad)
+
+        env.use(env.ws_b)
+        self._submit(env.dest)
+        assert download_state.read_claim(self._claim(env.dest)) == json_renderer()["data"]["download_id"]
+
+    @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permission bits")
+    def test_a_holder_record_we_cannot_open_is_refused_inside_the_grace(self, env, json_renderer):
+        """Unreadable is not gone. A fresh payload whose record we cannot open is
+        held for the startup grace, exactly like one we cannot resolve."""
+        env.use(env.ws_a)
+        holder = _state(id="aaaaaaaaaaaa", dest=str(env.dest), status="starting", pid=None)
+        state_file = download_state.write(env.ws_a, holder)
+        _plant_claim_with_state(self._claim(env.dest), holder.id, str(env.dest), state_file)
+        state_file.chmod(0)
+        try:
+            env.use(env.ws_b)
+            with pytest.raises(typer.Exit):
+                self._submit(env.dest)
+        finally:
+            state_file.chmod(0o600)
+        assert json_renderer()["error"]["code"] == "model_download_claim_contested"
+        assert download_state.read_claim(self._claim(env.dest)) == holder.id
+
+    def test_a_late_worker_does_not_overwrite_a_file_another_download_finished(self, env):
+        """A's worker boots after the grace; B took the claim, finished, and wrote
+        the file. A must not adopt B's finished claim and replace the file."""
+        env.use(env.ws_a)
+        late = _state(id="aaaaaaaaaaaa", dest=str(env.dest), status="starting", pid=None)
+        late_file = download_state.write(env.ws_a, late)
+        done = _state(id="bbbbbbbbbbbb", dest=str(env.dest), status="completed")
+        done_file = download_state.write(env.ws_b, done)
+        _plant_claim_with_state(self._claim(env.dest), done.id, str(env.dest), done_file)
+        env.dest.parent.mkdir(parents=True)
+        env.dest.write_bytes(b"B's finished file")
+
+        transfer = MagicMock(side_effect=AssertionError("a transfer started"))
+        with patch.object(models, "download_file", transfer):
+            with pytest.raises(typer.Exit):
+                models._download_worker(str(late_file))
+
+        transfer.assert_not_called()
+        assert env.dest.read_bytes() == b"B's finished file"
+        record = download_state.read_path(late_file)
+        assert record.status == "failed"
+        assert record.error == "another download claimed this destination first"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="a claim file is never unlinked on Windows")
+    def test_the_sweep_keeps_a_claim_whose_record_it_cannot_open(self, env):
+        if os.geteuid() == 0:
+            pytest.skip("root reads any file")
+        env.use(env.ws_a)
+        holder = _state(id="aaaaaaaaaaaa", dest=str(env.dest), status="starting", pid=None)
+        state_file = download_state.write(env.ws_a, holder)
+        claim = self._claim(env.dest)
+        _plant_claim_with_state(claim, holder.id, str(env.dest), state_file)
+        state_file.chmod(0)
+        try:
+            download_state.prune(env.ws_b)
+        finally:
+            state_file.chmod(0o600)
+        assert claim.exists()
+
+    def test_the_shared_sweep_leaves_temp_files_alone(self, env):
+        """Only a workspace's own claims directory ever held the old staging files."""
+        stray = download_state.claims_dir() / "someone-elses.tmp"
+        stray.write_text("x", encoding="utf-8")
+        old = time.time() - download_state.CLAIM_TMP_MAX_AGE_S - 60
+        os.utime(stray, (old, old))
+
+        download_state.prune(env.ws_a)
+
+        assert stray.exists()
 
 
 def _plant_claim_with_state(path: Path, download_id: str, dest: str, state_file: Path) -> None:

@@ -1237,7 +1237,7 @@ def _download_worker(
     # a claim we proceed without.
     claim_file: pathlib.Path | None
     try:
-        claim_file = download_state.claim_path(_dest_key(state.dest))
+        claim_file = download_state.claim_path(_dest_key(state.dest), path.parent)
     except (OSError, ValueError):
         claim_file = None
 
@@ -1272,11 +1272,14 @@ def _download_worker(
             payload = claim_lock.read_payload() if claim_lock is not None else None
             owner = payload.get("download_id") if payload is not None else None
             if owner is not None and owner != state.id and not _claim_owner_live(path, payload):
-                owner = None
+                # Adopting another download's finished claim. If that download
+                # already produced the file, we started too late: writing now
+                # would replace a file someone else just finished.
+                owner = None if not _dest_exists(state.dest) else owner
             claim_lost = claim_lock is None or (owner is not None and owner != state.id)
             if claim_lock is not None and owner is None:
                 with contextlib.suppress(OSError):
-                    claim_lock.write_payload(state.id, state.dest, path)
+                    claim_lock.write_payload(state.id, state.dest, path.absolute())
 
     def release() -> None:
         nonlocal claim_lock
@@ -1560,7 +1563,11 @@ def _active_download_for(
     return winner
 
 
-def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.Path) -> typer.Exit:
+def _in_flight_failure(
+    competitor: download_state.DownloadState,
+    dest: pathlib.Path,
+    workspace: pathlib.Path | None = None,
+) -> typer.Exit:
     """The ``model_download_in_flight`` refusal, worded for the claim we hit.
 
     Both halves vary by ``kind``. A background download really can be cancelled
@@ -1568,24 +1575,46 @@ def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.P
     refuses it, because the recorded pid is a user CLI process sharing the
     terminal's foreground process group — so pointing at it would be advice that
     fails. Ctrl-C in the owning terminal is the honest instruction.
+
+    ``workspace`` is the competitor's workspace when it is not ours
+    (comfy-cli#1095). `download-status` and `download-cancel` look an id up in
+    the selected workspace, so the hint has to select the competitor's.
     """
     kind = "foreground" if competitor.is_foreground else "background"
+    comfy = f'comfy --workspace "{workspace}"' if workspace is not None else "comfy"
     stop = (
         "interrupt it with Ctrl-C in the terminal running it"
         if competitor.is_foreground
-        else f"cancel it with `comfy model download-cancel {competitor.id}`"
+        else f"cancel it with `{comfy} model download-cancel {competitor.id}`"
     )
+    details = {
+        "path": str(dest),
+        "download_id": competitor.id,
+        "status": competitor.status,
+        "kind": competitor.kind,
+    }
+    if workspace is not None:
+        details["workspace"] = str(workspace)
     return _download_failure(
         code="model_download_in_flight",
         message=f"A {kind} download ({competitor.id}) is already writing to {dest}.",
-        hint=f"track it with `comfy model download-status {competitor.id}`, or {stop}",
-        details={
-            "path": str(dest),
-            "download_id": competitor.id,
-            "status": competitor.status,
-            "kind": competitor.kind,
-        },
+        hint=f"track it with `{comfy} model download-status {competitor.id}`, or {stop}",
+        details=details,
     )
+
+
+def _holder_workspace(payload: dict | None) -> pathlib.Path | None:
+    """The workspace a claim payload's record lives in, when it is not the selected one."""
+    if payload is None:
+        return None
+    try:
+        own = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        record_file = download_state.claim_holder_state_file(payload, own)
+    except (OSError, ValueError, KeyError):
+        return None
+    if record_file is None or record_file.parent == own:
+        return None
+    return record_file.parent.parent
 
 
 def _dest_claim_path(dest: pathlib.Path) -> pathlib.Path | None:
@@ -1602,9 +1631,40 @@ def _dest_claim_path(dest: pathlib.Path) -> pathlib.Path | None:
     bookkeeping, and the caller degrades to the advisory guard.
     """
     try:
-        return download_state.claim_path(_dest_key(dest))
+        state_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        key = _dest_key(dest)
     except (OSError, ValueError):
         return None
+    try:
+        return download_state.claim_path(key)
+    except OSError as e:
+        _report_shared_claims_unavailable(e)
+    try:
+        return download_state.claim_path(key, state_dir)
+    except (OSError, ValueError):
+        return None
+
+
+_shared_claims_unavailable_reported = False
+
+
+def _report_shared_claims_unavailable(exc: OSError) -> None:
+    """Warn once per process that claims fell back to this workspace's directory.
+
+    Downloads in this workspace still refuse each other; a download from another
+    workspace into the same file is not seen (comfy-cli#1095).
+    """
+    global _shared_claims_unavailable_reported
+    if _shared_claims_unavailable_reported:
+        return
+    _shared_claims_unavailable_reported = True
+    logger.warning(
+        "the shared download claims directory is unavailable (%s); using this workspace's own, "
+        "which does not see downloads started from other workspaces. Set %s to an absolute, "
+        "writable directory to share claims.",
+        exc,
+        download_state.CLAIMS_DIR_ENV,
+    )
 
 
 def _own_state_file(state: download_state.DownloadState) -> pathlib.Path | None:
@@ -1614,7 +1674,7 @@ def _own_state_file(state: download_state.DownloadState) -> pathlib.Path | None:
     and a reader in this workspace still finds the record by id.
     """
     try:
-        return download_state.state_path(get_workspace(), state.id)
+        return download_state.state_path(get_workspace(), state.id).absolute()
     except (OSError, ValueError):
         return None
 
@@ -1639,11 +1699,12 @@ def _claim_holder(payload: dict | None, default_dir: pathlib.Path) -> tuple[Any,
     if record_file is None:
         return _UNRESOLVED_HOLDER, None
     try:
-        if not record_file.exists():
-            return None, record_file
+        return download_state.read_path_strict(record_file), record_file
+    except FileNotFoundError:
+        return None, record_file
     except OSError:
+        # Unreadable is not gone (EACCES, EIO): it proves nothing about the holder.
         return _UNRESOLVED_HOLDER, record_file
-    return download_state.read_path(record_file), record_file
 
 
 def _payload_in_spawn_gap(payload: dict) -> bool:
@@ -1741,6 +1802,14 @@ def _claim_owner_live(state_file: pathlib.Path, payload: dict) -> bool:
     return _in_spawn_gap(download_state.reconcile(record))
 
 
+def _dest_exists(dest: str) -> bool:
+    """Whether a file is already at ``dest``. An unreadable path reads as absent."""
+    try:
+        return pathlib.Path(dest).exists()
+    except (OSError, ValueError):
+        return False
+
+
 def _in_spawn_gap(fresh: download_state.DownloadState) -> bool:
     """True for an already-reconciled record whose worker may still be booting."""
     return (
@@ -1785,7 +1854,7 @@ def _refuse_held_claim(
     holder = _holder_record_or_none(payload)
     _withdraw_record(state, dest, holder_id)
     if holder is not None and holder.status not in _HOLDER_FINISHED_STATUSES:
-        return _in_flight_failure(holder, dest)
+        return _in_flight_failure(holder, dest, _holder_workspace(payload))
     named = f" ({holder_id})" if holder_id else ""
     return _download_failure(
         code="model_download_claim_contested",
@@ -1992,7 +2061,7 @@ def _acquire_dest_claim(
             raise _refuse_held_claim(state, dest, claim_file)
         if holder is not None:
             _withdraw_record(state, dest, holder.id)
-            raise _in_flight_failure(holder, dest)
+            raise _in_flight_failure(holder, dest, _holder_workspace(payload))
         judged_stale = holder_id
     else:
         # The payload changed under us on every round: somebody keeps stamping

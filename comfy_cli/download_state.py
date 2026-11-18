@@ -292,12 +292,16 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 
 
-# Redirects the host-global claims directory. Tests point it at a per-test
-# directory (see tests/conftest.py) so no case shares locks with the developer's
-# machine; a user can point it elsewhere when the default location cannot lock.
+# Moves the host-global claims directory into this (absolute) directory. Tests
+# point it at a per-test directory (see tests/conftest.py) so no case shares
+# locks with the developer's machine; a user can point it elsewhere when the
+# default location cannot lock. It names a parent, not the claims directory
+# itself: comfy-cli owns, chmods and sweeps only its own subdirectory, never a
+# directory the user named.
 CLAIMS_DIR_ENV = "COMFY_DOWNLOAD_CLAIMS_DIR"
 
-# The default claims directory's name inside comfy-cli's config directory.
+# The claims directory's name inside comfy-cli's config directory, or inside
+# the directory :data:`CLAIMS_DIR_ENV` names.
 GLOBAL_CLAIMS_DIRNAME = "download-claims"
 
 
@@ -316,24 +320,22 @@ def global_state_dir() -> Path:
     """The host-global claims directory, created owner-only on first use.
 
     One per user and host, so every workspace that user runs a download from
-    consults the same claims. :data:`CLAIMS_DIR_ENV` overrides it; otherwise it
-    sits in comfy-cli's config directory.
+    consults the same claims: ``download-claims/`` in comfy-cli's config
+    directory, or in the directory :data:`CLAIMS_DIR_ENV` names.
 
-    Raises ``OSError`` when there is no home directory to put it in, or it cannot
-    be made. Every caller already treats that as "claims unavailable" and
-    degrades to the advisory scan, so a download never fails over it.
+    Raises ``OSError`` when the parent is not an absolute path (an override
+    given as a relative path, or no home directory, which leaves ``~`` in
+    place), or the directory cannot be made. A relative one would resolve
+    against each process's working directory, which is a per-cwd claim: two
+    shells in different directories would both win, the race this directory
+    exists to close. Callers fall back to the workspace's own claims directory
+    (see :func:`claims_dir`), so a download never fails over it.
     """
     explicit = os.environ.get(CLAIMS_DIR_ENV, "").strip()
-    if explicit:
-        base = Path(os.path.abspath(os.path.expanduser(explicit)))
-    else:
-        config_dir = _default_config_dir()
-        if not os.path.isabs(config_dir):
-            # `expanduser` leaves `~` in place when there is no home directory.
-            # A relative claims directory would differ per working directory,
-            # which is a per-cwd claim: no better than the per-workspace one.
-            raise OSError(errno.ENOENT, "no home directory to hold download claims", config_dir)
-        base = Path(config_dir) / GLOBAL_CLAIMS_DIRNAME
+    parent = os.path.expanduser(explicit) if explicit else _default_config_dir()
+    if not os.path.isabs(parent):
+        raise OSError(errno.ENOENT, "the download claims directory is not an absolute path", parent)
+    base = Path(parent) / GLOBAL_CLAIMS_DIRNAME
     base.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
     if sys.platform != "win32":
         # Same reason as `state_dir`: mkdir's mode is masked by the umask and
@@ -343,16 +345,35 @@ def global_state_dir() -> Path:
     return base
 
 
-def claims_dir() -> Path:
-    """The directory every destination claim lives in. See :func:`global_state_dir`."""
-    return global_state_dir()
+def claims_dir(fallback_state_dir: Path | None = None) -> Path:
+    """The directory destination claims live in.
+
+    The host-global one (:func:`global_state_dir`). When that is unavailable and
+    ``fallback_state_dir`` is given, ``<fallback_state_dir>/claims`` instead:
+    the workspace's own directory, where claims lived before #1095. That keeps
+    two downloads in one workspace refusing each other on a host with no usable
+    config directory (no home, a read-only one); only the cross-workspace case
+    is lost there. The submitter and its worker pass the same state directory
+    and inherit the same environment, so they make the same choice.
+    """
+    try:
+        return global_state_dir()
+    except OSError:
+        if fallback_state_dir is None:
+            raise
+    base = Path(fallback_state_dir) / CLAIMS_DIRNAME
+    base.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            base.chmod(STATE_DIR_MODE)
+    return base
 
 
-def legacy_claims_dir(workspace: Path) -> Path:
-    """``<workspace>/.comfy-downloads/claims``, where claims lived before #1095.
+def workspace_claims_dir(workspace: Path) -> Path:
+    """``<workspace>/.comfy-downloads/claims``: claims from before #1095, and the fallback.
 
-    Nothing claims there any more. :func:`prune` still sweeps it so a workspace
-    upgraded from that version does not keep its old claim files forever.
+    :func:`prune` sweeps it so a workspace upgraded from that version does not
+    keep its old claim files forever.
     """
     return Path(workspace) / STATE_DIRNAME / CLAIMS_DIRNAME
 
@@ -369,15 +390,16 @@ def claim_filename(dest_key: str) -> str:
     return f"{hashlib.sha256(dest_key.encode('utf-8')).hexdigest()}.claim"
 
 
-def claim_path(dest_key: str) -> Path:
+def claim_path(dest_key: str, fallback_state_dir: Path | None = None) -> Path:
     """The claim path for ``dest_key``, creating the claims directory.
 
     The one resolver both sides use: the submitter, and the worker it hands
-    ``--state <file>`` to. Neither passes a workspace, so they cannot disagree
-    about where a destination's claim is. The worker inherits the submitter's
-    environment, so :data:`CLAIMS_DIR_ENV` reaches it too.
+    ``--state <file>`` to. The worker inherits the submitter's environment, so
+    :data:`CLAIMS_DIR_ENV` reaches it too, and both pass the same state
+    directory as ``fallback_state_dir`` (see :func:`claims_dir`), so they cannot
+    disagree about where a destination's claim is.
     """
-    return claims_dir() / claim_filename(dest_key)
+    return claims_dir(fallback_state_dir) / claim_filename(dest_key)
 
 
 def claim_holder_state_file(payload: dict[str, Any], default_dir: Path) -> Path | None:
@@ -835,8 +857,23 @@ _TOLERANT_FALLBACKS: dict[str, Any] = {"kind": "foreground"}
 
 def read_path(path: Path) -> DownloadState | None:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return read_path_strict(path)
+    except OSError:
+        return None
+
+
+def read_path_strict(path: Path) -> DownloadState | None:
+    """Like :func:`read_path`, but a file that cannot be read raises ``OSError``.
+
+    None still means "not a record": bytes that are not UTF-8 JSON of the right
+    shape. Callers that judge a claim holder need the difference, because a
+    record that is gone proves its claim stale and one that could not be read
+    proves nothing (``FileNotFoundError`` is the "gone" case).
+    """
+    raw = Path(path).read_bytes()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
@@ -937,11 +974,13 @@ def _remove_record(path: Path) -> bool:
     return True
 
 
-def _sweep_claims(base: Path, default_dir: Path) -> None:
+def _sweep_claims(base: Path, default_dir: Path, *, sweep_tmp: bool = False) -> None:
     """Drop claim files in ``base`` nothing owns any more, and legacy temp leftovers.
 
     ``default_dir`` is the state directory a payload naming no state file is
-    resolved in (see :func:`claim_holder_state_file`).
+    resolved in (see :func:`claim_holder_state_file`). ``sweep_tmp`` removes the
+    previous implementation's temp files; only a workspace's own claims
+    directory can hold them, so the shared one is never swept for them.
 
     A claim file is never unlinked on release (see :class:`ClaimLock`), so this
     is the only thing that bounds the claims directory below "every destination
@@ -981,6 +1020,8 @@ def _sweep_claims(base: Path, default_dir: Path) -> None:
     tmp_cutoff = time.time() - CLAIM_TMP_MAX_AGE_S
     for path in entries:
         if path.name.endswith(CLAIM_TMP_SUFFIX):
+            if not sweep_tmp:
+                continue
             with contextlib.suppress(OSError):
                 if path.stat().st_mtime < tmp_cutoff:
                     path.unlink()
@@ -1001,8 +1042,12 @@ def _sweep_claims(base: Path, default_dir: Path) -> None:
                 # A pointer we will not follow is not one we can prove dead.
                 continue
             try:
-                record = read_path(record_file)
+                record = read_path_strict(record_file)
+            except FileNotFoundError:
+                record = None
             except (OSError, ValueError):
+                # Unreadable is not gone: the holder may be a submit in its
+                # spawn gap, and unlinking would hand its worker an empty claim.
                 continue
             if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
                 continue
@@ -1085,9 +1130,9 @@ def prune(workspace: Path) -> int:
     # contract above promises never happens.
     default_dir = Path(workspace) / STATE_DIRNAME
     with contextlib.suppress(OSError):
-        _sweep_claims(legacy_claims_dir(workspace), default_dir)
+        _sweep_claims(workspace_claims_dir(workspace), default_dir, sweep_tmp=True)
     with contextlib.suppress(OSError):
-        _sweep_claims(claims_dir(), default_dir)
+        _sweep_claims(global_state_dir(), default_dir)
     base = Path(workspace) / STATE_DIRNAME
     try:
         if not base.is_dir():
