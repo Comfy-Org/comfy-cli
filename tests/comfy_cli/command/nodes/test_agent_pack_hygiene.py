@@ -137,6 +137,47 @@ class TestCheckPack:
         assert check_pack(pack) == []
 
 
+class TestReviewRound:
+    def test_name_after_a_nested_property_is_found(self, tmp_path):
+        js = "app.registerExtension({provenance: {createdBy: 'x'}, name: \"agent.example\", setup() {}});\n"
+        assert is_agent_pack(_pack(tmp_path, js, record=False))
+
+    def test_a_nested_name_is_not_taken_for_the_extension_name(self, tmp_path):
+        js = 'app.registerExtension({commands: [{name: "agent.cmd"}], name: "Legacy"});\n'
+        assert not is_agent_pack(_pack(tmp_path, js, record=False))
+
+    def test_provenance_exempts_only_its_own_registration(self, tmp_path):
+        js = (
+            "app.registerExtension({name: \"Marked\", provenance: {createdBy: 'comfy-agent'}});\n"
+            'app.registerExtension({name: "Legacy"});\n'
+        )
+        findings = check_pack(_pack(tmp_path, js))
+        assert [f.message.split("`")[1] for f in findings if f.kind == "extension-name"] == ["Legacy"]
+
+    def test_declaration_with_an_executable_initializer_is_reported(self, tmp_path):
+        js = GOOD_JS + '\nconst style = document.head.appendChild(document.createElement("style"));\n'
+        assert _kinds(check_pack(_pack(tmp_path, js))) == ["top-level-code"]
+
+    def test_declarations_without_effects_are_allowed(self, tmp_path):
+        js = GOOD_JS + (
+            "\nconst A = 1;\nconst B = { a: 1, b: [2] };\nconst f = (x) => x.call();\n"
+            'const g = function (y) { return y(); };\nconst m = new Map();\nconst s = Symbol("k");\n'
+        )
+        assert check_pack(_pack(tmp_path, js)) == []
+
+    def test_a_self_referencing_web_directory_does_not_stop_validation(self, tmp_path):
+        pack = tmp_path / "loop"
+        pack.mkdir()
+        (pack / "__init__.py").write_text('WEB_DIRECTORY = "./web"\n')
+        (pack / "web").symlink_to(pack / "web")
+        assert check_pack(pack) == []
+
+    def test_page_wide_selector_with_a_pseudo_class_is_reported(self, tmp_path):
+        files = {"style.css": "body:hover { color: red }\n.mine:hover { color: red }\n"}
+        findings = check_pack(_pack(tmp_path, files=files))
+        assert [(f.file, f.kind) for f in findings] == [("web/style.css", "page-wide-css")]
+
+
 class TestIsAgentPack:
     def test_install_record_marks_an_agent_pack(self, tmp_path):
         assert is_agent_pack(_pack(tmp_path))

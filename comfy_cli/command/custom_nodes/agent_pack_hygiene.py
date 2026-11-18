@@ -22,8 +22,12 @@ from pathlib import Path
 INSTALL_RECORD_NAME = ".comfy-agent-install"
 MAX_FILE_BYTES = 1 << 20
 _WEB_DIRECTORY = re.compile(r"""^\s*WEB_DIRECTORY\s*=\s*["']([^"']+)["']""", re.MULTILINE)
-_EXTENSION_NAME = re.compile(r"""registerExtension\s*\(\s*\{[^}]*?\bname\s*:\s*["'`]([^"'`]+)["'`]""", re.DOTALL)
-_PROVENANCE = re.compile(r"""\bprovenance\s*:\s*\{[^}]*createdBy\s*:\s*["'`]comfy-agent["'`]""", re.DOTALL)
+_REGISTER = re.compile(r"registerExtension\s*\(\s*\{")
+_TOP_KEY_NAME = re.compile(r"""(?:^|[,{]\s*)name\s*:\s*["'`]([^"'`]+)["'`]""")
+_PROVENANCE = re.compile(r"""(?:^|[,{]\s*)provenance\s*:\s*\{[^}]*createdBy\s*:\s*["'`]comfy-agent["'`]""", re.DOTALL)
+# Initializers that run nothing worth reporting.
+_HARMLESS_CALL = re.compile(r"\bnew\s+[A-Za-z_$][\w$.]*\s*\(|\bSymbol\s*\(|\bObject\.freeze\s*\(")
+_DECLARATION_RHS = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+[^=]*?=(?!=)(.*)$", re.DOTALL)
 # Statements a module may run at top level without side effects the switch misses.
 _ALLOWED_STATEMENT = re.compile(
     r"""^(?:
@@ -215,19 +219,25 @@ def web_directory(pack: Path) -> Path | None:
     match = _WEB_DIRECTORY.search(init)
     if match is None:
         return None
-    web = (pack / match.group(1)).resolve()
     try:
+        web = (pack / match.group(1)).resolve()
         web.relative_to(pack.resolve())
+        return web if web.is_dir() else None
     except ValueError:
         return None  # Outside the pack: not ours to read.
-    return web if web.is_dir() else None
+    except (OSError, RuntimeError):
+        return None  # A symlink loop or an unreadable path: nothing to scan.
 
 
 def _frontend_files(pack: Path) -> Iterator[tuple[str, str]]:
     web = web_directory(pack)
     if web is None:
         return
-    for path in sorted(web.rglob("*")):
+    try:
+        paths = sorted(web.rglob("*"))
+    except (OSError, RuntimeError):
+        return
+    for path in paths:
         if path.suffix not in (".js", ".mjs", ".css") or not path.is_file() or path.is_symlink():
             continue
         try:
@@ -245,7 +255,9 @@ def _page_wide_css(rel: str, css: str, base_line: int) -> list[Finding]:
         for selector in block.group(1).split(","):
             match = _PAGE_WIDE_SELECTOR.search(" " + selector.strip() + " {")
             # A selector that starts from the pack's own element is scoped.
-            if match and selector.strip().split()[0] == match.group(1):
+            first = selector.strip().split()[0] if selector.strip() else ""
+            component = re.split(r"(?<!^)[:\[>+~]", first, maxsplit=1)[0]
+            if match and component == match.group(1):
                 selector_start = block.start(1) + len(block.group(1)) - len(block.group(1).lstrip())
                 line = base_line + css.count("\n", 0, selector_start)
                 findings.append(
@@ -266,6 +278,89 @@ def _string_literals(src: str) -> Iterator[tuple[int, str]]:
         yield src.count("\n", 0, match.start()) + 1, match.group(0)[1:-1]
 
 
+def _blank_nested(src: str) -> str:
+    """``src`` with every string, template and bracketed group blanked out, keeping offsets."""
+    out = list(src)
+    i = 0
+    while i < len(src):
+        c = src[i]
+        if c in "\"'`":
+            end = _skip_string(src, i, c) if c != "`" else _skip_template(src, i)
+            out[i:end] = " " * (end - i)
+            i = end
+            continue
+        if c in "{[":
+            close, depth, j = {"{": "}", "[": "]"}[c], 0, i
+            while j < len(src):
+                if src[j] in "\"'`":
+                    j = _skip_string(src, j, src[j]) if src[j] != "`" else _skip_template(src, j)
+                    continue
+                depth += src[j] == c
+                depth -= src[j] == close
+                j += 1
+                if depth == 0:
+                    break
+            out[i:j] = " " * (j - i)
+            i = j
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _runs_code(rhs: str) -> bool:
+    """True when a declaration's initializer calls something at import time."""
+    flat = _HARMLESS_CALL.sub(" ", _blank_nested(rhs))
+    flat = flat.split("=>", 1)[0]  # an arrow function's body runs later
+    flat = re.sub(r"\bfunction\b[^(]*\([^)]*\)", " ", flat)  # a function expression's parameters
+    return re.search(r"[\w$)\]]\s*\(", flat) is not None
+
+
+def _matching_close(text: str, start: int) -> int:
+    """Index just past the bracket that closes the one at ``start``, skipping strings."""
+    depth = 0
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c in "\"'`":
+            i = _skip_string(text, i, c) if c != "`" else _skip_template(text, i)
+            continue
+        depth += c in "{(["
+        depth -= c in "})]"
+        i += 1
+        if depth == 0:
+            return i
+    return len(text)
+
+
+def _depth_one(body: str) -> str:
+    """An object literal with every value nested deeper than its own keys blanked, offsets kept."""
+    out = list(body)
+    i = 1
+    while i < len(body) - 1:
+        c = body[i]
+        if c in "\"'`":
+            i = _skip_string(body, i, c) if c != "`" else _skip_template(body, i)
+            continue
+        if c in "{[(":
+            end = min(_matching_close(body, i), len(body) - 1)
+            out[i:end] = " " * (end - i)
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _registrations(text: str) -> Iterator[tuple[int, str, bool]]:
+    """(offset, name, has agent provenance) for each ``registerExtension({...})`` with a top-level name."""
+    for match in _REGISTER.finditer(text):
+        start = match.end() - 1
+        body = text[start : _matching_close(text, start)]
+        name = _TOP_KEY_NAME.search(_depth_one(body))
+        if name is None:
+            continue
+        yield start + name.start(1), name.group(1), _PROVENANCE.search(body) is not None
+
+
 def check_pack(pack: Path) -> list[Finding]:
     """Hygiene findings for the pack at ``pack``. Empty when it serves no frontend code."""
     findings: list[Finding] = []
@@ -279,7 +374,8 @@ def check_pack(pack: Path) -> list[Finding]:
             assignment = _LOCAL_ASSIGNMENT.match(statement)
             if assignment and assignment.group(1) in local_names:
                 continue  # Configures the module's own class or value, not the page.
-            if not _ALLOWED_STATEMENT.match(statement):
+            declaration = _DECLARATION_RHS.match(statement)
+            if (declaration and _runs_code(declaration.group(1))) or not _ALLOWED_STATEMENT.match(statement):
                 first = statement.splitlines()[0][:60]
                 findings.append(
                     Finding(
@@ -293,12 +389,12 @@ def check_pack(pack: Path) -> list[Finding]:
         for line, literal in _string_literals(text):
             if "{" in literal and ":" in literal:
                 findings += _page_wide_css(rel, literal, line)
-        for name in _EXTENSION_NAME.findall(text):
-            if not name.startswith("agent.") and not _PROVENANCE.search(text):
+        for offset, name, has_provenance in _registrations(text):
+            if not name.startswith("agent.") and not has_provenance:
                 findings.append(
                     Finding(
                         rel,
-                        text.count("\n", 0, text.find(name)) + 1,
+                        text.count("\n", 0, offset) + 1,
                         "extension-name",
                         f"extension `{name}` has no `agent.` prefix and no provenance, "
                         "so the frontend will not mark it as made by the agent",
@@ -315,5 +411,5 @@ def is_agent_pack(pack: Path) -> bool:
         name.startswith("agent.")
         for rel, text in _frontend_files(pack)
         if not rel.endswith(".css")
-        for name in _EXTENSION_NAME.findall(text)
+        for _, name, _ in _registrations(text)
     )
