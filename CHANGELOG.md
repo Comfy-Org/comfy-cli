@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy node show agent-created` (and `simple-show agent-created`) lists the
+  custom node packs the local Comfy agent says it created, read from the
+  `.comfy-agent-install` record in each pack: enabled, switched off with a
+  `.disabled` suffix, or moved to `custom_nodes/.disabled` by ComfyUI-Manager.
+  The record's signature cannot be checked by comfy-cli, so the output (and
+  `data.verified` in `--json`) says the packs are unverified.
 - `comfy node validate` runs an advisory hygiene check on packs the local
   Comfy agent writes (an install record or an `agent.` extension name), or on
   any pack with `--agent-pack`. It reports what Settings > Extensions cannot
