@@ -2397,7 +2397,7 @@ def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True):
 
 
 def test_cloud_status_snapshot_warns_when_a_targeted_job_ran_untargeted_nodes(monkeypatch):
-    """BE-24608: an async `comfy run --output-node-ids` is judged when it is
+    """An async `comfy run --output-node-ids` is judged when it is
     watched. Node 12 is outside target 9's run graph and still produced an
     output, so the server ignored the targets."""
     monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())

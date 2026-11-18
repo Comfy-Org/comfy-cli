@@ -3101,7 +3101,7 @@ class TestOutputNodeIdsCloud:
         """Without --wait nothing checks the returned outputs at submit time,
         so the job record keeps the targets and their subgraph for
         `comfy jobs watch` / `jobs status` to judge, and the queued envelope
-        says the check happens there (BE-24608)."""
+        says the check happens there."""
         import comfy_cli.jobs_state as jobs_state_mod
 
         _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
