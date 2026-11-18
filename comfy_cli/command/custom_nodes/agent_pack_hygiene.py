@@ -15,6 +15,7 @@ and regular expressions. Findings are advice and never fail validation.
 from __future__ import annotations
 
 import bisect
+import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -25,8 +26,6 @@ MAX_FILE_BYTES = 1 << 20
 _WEB_DIRECTORY = re.compile(r"""^\s*WEB_DIRECTORY\s*=\s*["']([^"']+)["']\s*(?:#.*)?$""", re.MULTILINE)
 _TRIPLE_QUOTED = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
 _REGISTER = re.compile(r"registerExtension\s*\(\s*\{")
-_TOP_KEY_NAME = re.compile(r"""(?:^|[,{]\s*)name\s*:\s*["'`]([^"'`]+)["'`]""")
-_PROVENANCE = re.compile(r"""(?:^|[,{]\s*)provenance\s*:\s*\{[^}]*createdBy\s*:\s*["'`]comfy-agent["'`]""", re.DOTALL)
 # Initializers that run nothing worth reporting.
 _HARMLESS_CALL = re.compile(r"\bnew\s+[A-Za-z_$][\w$.]*\s*\(|\bSymbol\s*\(|\bObject\.freeze\s*\(")
 _DECLARATION_RHS = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+[^=]*?=(?!=)(.*)$", re.DOTALL)
@@ -47,7 +46,10 @@ _DECLARED_NAME = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:clas
 _SIMPLE_DECLARATION = re.compile(r"^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?!=)(.*)$", re.DOTALL)
 # `X.prop = …` / `X[key] = …` on a class or value the module itself declares.
 _LOCAL_ASSIGNMENT = re.compile(r"^([A-Za-z_$][\w$]*)\s*(?:\.[\w$]+|\[[^\]]*\])+\s*=(?!=)(.*)$", re.DOTALL)
-_CSS_BLOCK = re.compile(r"([^{}]+)\{[^{}]*:[^{}]*\}")
+# An initializer that creates a new value of the module's own: a literal, object, array, function or class.
+_OWN_INITIALIZER = re.compile(
+    r"""\s*(?:[{\["'`]|-?\d|true\b|false\b|null\b|new\s|(?:async\s+)?function\b|class\b|(?:async\s*)?\([^()]*\)\s*=>)"""
+)
 # After these words a `/` starts a regular expression, not a division.
 _REGEX_AFTER_WORD = frozenset("return typeof case throw yield in of void delete instanceof new else do await".split())
 
@@ -106,7 +108,11 @@ def top_level_statements(src: str) -> list[tuple[int, str]]:
             i = n if end == -1 else end + 2
             continue
         if c == "/":
-            after_word = word_start >= 0 and src[word_start:i].strip() in _REGEX_AFTER_WORD
+            after_word = (
+                word_start >= 0
+                and src[word_start:i].strip() in _REGEX_AFTER_WORD
+                and src[:word_start].rstrip()[-1:] != "."
+            )
             if last == "" or last in "(,=:[!&|?{};+-*%<>~^" or after_word:
                 i = _skip_regex(src, i)
                 last, word_start = "x", -1
@@ -255,9 +261,13 @@ def web_directory(pack: Path, notes: list[str] | None = None) -> Path | None:
     ``notes`` collects why nothing could be scanned, so the caller never reports an all-clear for it.
     """
     notes = notes if notes is not None else []
+    init_path = pack / "__init__.py"
+    if not init_path.exists():
+        return None
     try:
-        init = (pack / "__init__.py").read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        init = init_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        notes.append(f"__init__.py could not be read ({e.strerror or e}), so the frontend code was not scanned")
         return None
     match = _WEB_DIRECTORY.search(_TRIPLE_QUOTED.sub("", init))
     if match is None:
@@ -284,11 +294,12 @@ def _frontend_files(pack: Path, notes: list[str] | None = None) -> Iterator[tupl
     web = web_directory(pack, notes)
     if web is None:
         return
-    try:
-        paths = sorted(web.rglob("*"))
-    except (OSError, RuntimeError):
-        notes.append("the web folder could not be walked, so it was not scanned")
-        return
+    failures: list[OSError] = []
+    paths = sorted(
+        Path(folder) / name for folder, _dirs, files in os.walk(web, onerror=failures.append) for name in files
+    )
+    for failure in failures:
+        notes.append(f"could not list {failure.filename or 'a folder'}: {failure.strerror or failure}")
     root = pack.resolve()
     for path in paths:
         if path.suffix not in (".js", ".mjs", ".css"):
@@ -308,22 +319,45 @@ def _frontend_files(pack: Path, notes: list[str] | None = None) -> Iterator[tupl
         yield rel, text
 
 
+def _css_rules(css: str) -> Iterator[tuple[int, str]]:
+    """(offset, selector text) of each rule whose body holds a declaration; one linear pass."""
+    start = 0
+    i = 0
+    while i < len(css):
+        c = css[i]
+        if c == "{":
+            close = css.find("}", i)
+            nested = css.find("{", i + 1)
+            if close == -1:
+                return
+            if nested != -1 and nested < close:  # an @media-style wrapper: look inside it
+                start = i + 1
+                i += 1
+                continue
+            if ":" in css[i:close]:
+                yield start, css[start:i]
+            start = i = close + 1
+            continue
+        if c in "};":
+            start = i + 1
+        i += 1
+
+
 def _page_wide_css(rel: str, css: str, base_line: int) -> list[Finding]:
     findings = []
     css = _CSS_COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), css)
-    for block in _CSS_BLOCK.finditer(css):
-        for selector in block.group(1).split(","):
+    lines = _Lines(css)
+    for offset, selectors in _css_rules(css):
+        for selector in selectors.split(","):
             selector = selector.strip()
-            if selector.startswith("@") or ";" in selector:
-                selector = selector.rsplit(";", 1)[-1].strip()
             # A selector that starts from the pack's own element is scoped; one that starts at
             # the page (or the shared LiteGraph / Comfy UI classes) reaches every node.
             if selector and _PAGE_WIDE_START.match(selector):
-                selector_start = block.start(1) + len(block.group(1)) - len(block.group(1).lstrip())
+                lead = len(selectors) - len(selectors.lstrip())
                 findings.append(
                     Finding(
                         rel,
-                        base_line + css.count("\n", 0, selector_start),
+                        base_line + lines.at(offset + lead) - 1,
                         "page-wide-css",
                         f"CSS selector `{selector}` styles the whole page; scope it to the pack's own class",
                     )
@@ -379,13 +413,16 @@ def _runs_code(rhs: str) -> bool:
 
 
 def _matching_close(text: str, start: int) -> int:
-    """Index just past the bracket that closes the one at ``start``, skipping strings."""
+    """Index just past the bracket that closes the one at ``start``, skipping strings and comments."""
     depth = 0
     i = start
     while i < len(text):
         c = text[i]
         if c in "\"'`":
             i = _skip_string(text, i, c) if c != "`" else _skip_template(text, i)
+            continue
+        if text.startswith(("//", "/*"), i):
+            i = _code_start(text, i, len(text))
             continue
         depth += c in "{(["
         depth -= c in "})]"
@@ -395,22 +432,51 @@ def _matching_close(text: str, start: int) -> int:
     return len(text)
 
 
-def _depth_one(body: str) -> str:
-    """An object literal with every value nested deeper than its own keys blanked, offsets kept."""
-    out = list(body)
+def _top_level_keys(body: str) -> dict[str, tuple[int, str]]:
+    """``key -> (offset, raw value text)`` for the top-level keys of an object literal ``body``."""
+    keys: dict[str, tuple[int, str]] = {}
     i = 1
+    expect_key = True
     while i < len(body) - 1:
+        i = _code_start(body, i, len(body) - 1)
+        if i >= len(body) - 1:
+            break
+        c = body[i]
+        if expect_key:
+            key = re.match(r"""([A-Za-z_$][\w$]*|"[^"]*"|'[^']*')\s*:""", body[i:])
+            if key:
+                name = key.group(1).strip("\"'")
+                value_start = _code_start(body, i + key.end(), len(body) - 1)
+                value_end = _value_end(body, value_start)
+                keys.setdefault(name, (value_start, body[value_start:value_end]))
+                i = value_end
+                expect_key = False
+                continue
+        if c == ",":
+            expect_key = True
+            i += 1
+            continue
+        i = _value_end(body, i)
+        expect_key = False
+    return keys
+
+
+def _value_end(body: str, i: int) -> int:
+    """Index of the ``,`` (or closing brace) that ends the value starting at ``i``."""
+    end = len(body) - 1
+    while i < end:
         c = body[i]
         if c in "\"'`":
             i = _skip_string(body, i, c) if c != "`" else _skip_template(body, i)
-            continue
-        if c in "{[(":
-            end = min(_matching_close(body, i), len(body) - 1)
-            out[i:end] = " " * (end - i)
-            i = end
-            continue
-        i += 1
-    return "".join(out)
+        elif body.startswith(("//", "/*"), i):
+            i = _code_start(body, i, end)
+        elif c in "{[(":
+            i = _matching_close(body, i)
+        elif c == ",":
+            return i
+        else:
+            i += 1
+    return end
 
 
 def _registrations(text: str) -> Iterator[tuple[int, str, bool]]:
@@ -418,10 +484,16 @@ def _registrations(text: str) -> Iterator[tuple[int, str, bool]]:
     for match in _REGISTER.finditer(text):
         start = match.end() - 1
         body = text[start : _matching_close(text, start)]
-        name = _TOP_KEY_NAME.search(_depth_one(body))
-        if name is None:
+        keys = _top_level_keys(body)
+        if "name" not in keys:
             continue
-        yield start + name.start(1), name.group(1), _PROVENANCE.search(body) is not None
+        offset, raw = keys["name"]
+        literal = re.fullmatch(r"""\s*["'`]([^"'`]*)["'`]\s*""", raw)
+        if literal is None:
+            continue
+        provenance = keys.get("provenance", (0, ""))[1]
+        has_provenance = re.search(r"""\bcreatedBy\s*:\s*["'`]comfy-agent["'`]""", provenance) is not None
+        yield start + offset, literal.group(1), has_provenance
 
 
 def _own_names(statements: list[tuple[int, str]]) -> set[str]:
@@ -430,8 +502,8 @@ def _own_names(statements: list[tuple[int, str]]) -> set[str]:
     for _, stmt in statements:
         if m := _DECLARED_NAME.match(stmt):
             names.add(m.group(1))
-        elif (m := _SIMPLE_DECLARATION.match(stmt)) and "." not in _blank_nested(m.group(2)):
-            if not _runs_code(m.group(2)):
+        elif (m := _SIMPLE_DECLARATION.match(stmt)) and _OWN_INITIALIZER.match(m.group(2)):
+            if not _runs_code(m.group(2)) and "." not in _blank_nested(m.group(2)):
                 names.add(m.group(1))
     return names
 

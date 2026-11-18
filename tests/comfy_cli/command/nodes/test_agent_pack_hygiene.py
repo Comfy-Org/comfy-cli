@@ -243,6 +243,54 @@ class TestCursorReviewRound:
         assert any("bad.js" in n for n in notes)
 
 
+class TestCodeRabbitRound3:
+    def test_comment_with_a_brace_inside_a_registration(self, tmp_path):
+        js = 'app.registerExtension({\n  // ended here: }\n  name: "agent.example"\n});\n'
+        assert is_agent_pack(_pack(tmp_path, js, record=False))
+
+    def test_a_name_inside_a_string_value_is_not_the_name(self, tmp_path):
+        js = 'app.registerExtension({description: ", name: \'Legacy\'", name: "agent.example"});\n'
+        assert is_agent_pack(_pack(tmp_path, js, record=False))
+
+    def test_a_member_named_like_a_keyword_is_division(self, tmp_path):
+        js = "function f() { return options.of / 2; }\nboom();\n"
+        assert [t for _, t in top_level_statements(js)] == ["function f() { return options.of / 2; }", "boom()"]
+
+    def test_unreadable_init_is_noted(self, tmp_path):
+        pack = _pack(tmp_path)
+        (pack / "__init__.py").unlink()
+        (pack / "__init__.py").mkdir()
+        notes = []
+        check_pack(pack, notes)
+        assert notes and "__init__.py" in notes[0]
+
+    def test_unlistable_folder_is_noted(self, tmp_path, monkeypatch):
+        import os as _os
+
+        pack = _pack(tmp_path)
+
+        def failing_walk(top, onerror=None, **kwargs):
+            onerror(PermissionError(13, "denied", str(top)))
+            return iter(())
+
+        monkeypatch.setattr(_os, "walk", failing_walk)
+        notes = []
+        check_pack(pack, notes)
+        assert notes and "could not" in notes[0]
+
+    def test_a_long_css_comment_is_fast(self, tmp_path):
+        import time
+
+        css = "/*" + " " * 500_000 + "*/ .mine"
+        started = time.monotonic()
+        check_pack(_pack(tmp_path, files={"s.css": css}))
+        assert time.monotonic() - started < 2
+
+    def test_an_alias_of_a_global_object_is_not_owned(self, tmp_path):
+        js = GOOD_JS + '\nconst page = document;\npage.title = "changed";\n'
+        assert _kinds(check_pack(_pack(tmp_path, js))) == ["top-level-code"]
+
+
 class TestIsAgentPack:
     def test_install_record_marks_an_agent_pack(self, tmp_path):
         assert is_agent_pack(_pack(tmp_path))
