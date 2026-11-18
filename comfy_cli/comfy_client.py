@@ -274,9 +274,10 @@ class Client:
         method: str,
         path_parts: tuple[str, ...],
         *,
-        body: dict | None = None,
+        body: Any = None,
         body_factory: Callable[[], dict] | None = None,
         timeout: float | None = None,
+        headers: dict[str, str] | None = None,
         _retried: bool = False,
         _attempt: int = 0,
     ) -> Any:
@@ -302,6 +303,8 @@ class Client:
         # It also carries the `is_cloud` gate, so a stray auth_token on a
         # local target can't leak credentials to a plaintext server.
         for header, value in target_auth_headers(self.target).items():
+            req.add_header(header, value)
+        for header, value in (headers or {}).items():
             req.add_header(header, value)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
@@ -342,6 +345,7 @@ class Client:
                     body=body,
                     body_factory=body_factory,
                     timeout=timeout,
+                    headers=headers,
                     _retried=True,
                 )
             # Transient: back off and retry, for idempotent requests only.
@@ -354,6 +358,7 @@ class Client:
                     body=body,
                     body_factory=body_factory,
                     timeout=timeout,
+                    headers=headers,
                     _retried=_retried,
                     _attempt=_attempt + 1,
                 )
@@ -525,6 +530,31 @@ class Client:
             body={"unload_models": unload_models, "free_memory": free_memory},
             timeout=timeout,
         )
+
+    # ----- frontend extensions and settings -----
+
+    def get_extensions(self, *, timeout: float | None = None) -> Any:
+        """GET {prefix}/extensions: the frontend script URLs ComfyUI serves, core ones included."""
+        return self._request("GET", ("extensions",), timeout=timeout)
+
+    def get_users(self, *, timeout: float | None = None) -> Any:
+        """GET {prefix}/users: carries a ``users`` map only when ComfyUI runs with --multi-user."""
+        return self._request("GET", ("users",), timeout=timeout)
+
+    def get_setting(self, setting_id: str, *, user: str | None = None, timeout: float | None = None) -> Any:
+        """GET {prefix}/settings/{id}: one frontend setting value, or None when it was never set.
+
+        ``user`` is sent as the ``comfy-user`` header, which picks the settings file under --multi-user.
+        """
+        headers = {"comfy-user": user} if user else None
+        return self._request("GET", ("settings", setting_id), timeout=timeout, headers=headers)
+
+    def post_setting(
+        self, setting_id: str, value: Any, *, user: str | None = None, timeout: float | None = None
+    ) -> None:
+        """POST {prefix}/settings/{id}: replace one frontend setting value (``user`` as for get_setting)."""
+        headers = {"comfy-user": user} if user else None
+        self._request("POST", ("settings", setting_id), body=value, timeout=timeout, headers=headers)
 
     # ----- polling helpers -----
 

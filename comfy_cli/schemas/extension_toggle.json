@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/extension_toggle.json",
+  "title": "comfy extension enable | disable",
+  "description": "Result of switching one custom node folder's frontend code on or off in Comfy.Extension.DisabledPacks. changed=false means it was already in that state and nothing was written. The change applies on the next page reload.",
+  "type": "object",
+  "required": ["folder", "path", "enabled", "changed", "disabled_paths", "note"],
+  "additionalProperties": true,
+  "properties": {
+    "folder": { "type": "string" },
+    "path": { "type": "string" },
+    "enabled": { "type": "boolean" },
+    "changed": { "type": "boolean" },
+    "disabled_paths": { "type": "array", "items": { "type": "string" } },
+    "note": { "type": "string" }
+  }
+}
