@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy node show agent-created` (and `simple-show agent-created`) lists the
+  custom node packs the local Comfy agent says it created, read from the
+  `.comfy-agent-install` record in each pack: enabled, switched off with a
+  `.disabled` suffix, or moved to `custom_nodes/.disabled` by ComfyUI-Manager.
+  The record's signature cannot be checked by comfy-cli, so the output (and
+  `data.verified` in `--json`) says the packs are unverified.
 - `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
   finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
   `data.warnings` reports `partial_execution` for a target that returned
