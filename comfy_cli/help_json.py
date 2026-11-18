@@ -109,10 +109,15 @@ def _param_type_info(param: click.Parameter) -> dict[str, Any]:
     td = getattr(param, "type_descriptor", None)
     if td is not None:
         return _type_from_descriptor(td)
-    # Unknown typer internals (a future refactor): keep the required ``type``
-    # string present rather than crashing the whole document. The newest-typer
-    # CI lane (see .github/workflows/pytest.yml) is what surfaces this early.
-    return {"type": "str"}
+    # Unknown typer internals (a future refactor). pyproject.toml caps typer below
+    # 0.29; name the fix when an install bypasses that cap (``pip install
+    # --no-deps``, a resolver override) instead of an AttributeError. The
+    # newest-typer CI lane (see .github/workflows/pytest.yml) surfaces this early.
+    raise RuntimeError(
+        f"comfy --help --json cannot read option {param.name!r}: the installed typer "
+        "exposes neither a click parameter type nor a type descriptor. comfy-cli needs "
+        "typer<0.29: pip install 'typer<0.29'"
+    )
 
 
 def _descriptor_flag(td: Any, name: str) -> bool:

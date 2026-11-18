@@ -46,8 +46,9 @@ jobs:
   # The `build` job pins dependencies via uv.lock (currently typer 0.27.2), so a
   # breaking typer release can land on users long before CI notices. This lane
   # resolves dependencies from pyproject *without* the lockfile and force-upgrades
-  # typer/click to the newest published versions, so an incompatibility (e.g. the
-  # help JSON surface in comfy_cli/help_json.py) fails here first. It is an early
+  # typer/click to the newest published versions, deliberately past pyproject's
+  # typer<0.29 cap, so an incompatibility (e.g. the help JSON surface in
+  # comfy_cli/help_json.py) fails here first. It is an early
   # signal, not a required check: a breaking upstream release turns this lane red
   # on every PR until comfy-cli is fixed, but it does not gate merges.
   #
