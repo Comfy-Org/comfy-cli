@@ -1144,12 +1144,43 @@ def validate_node_for_publishing():
     return config
 
 
+def _report_agent_pack_hygiene(force: bool) -> None:
+    """Advisory: what Settings > Extensions cannot turn off in an agent pack. Never fails."""
+    from comfy_cli.command.custom_nodes.agent_pack_hygiene import check_pack, is_agent_pack
+    from comfy_cli.output.sanitize import sanitize_markup
+
+    pack = pathlib.Path.cwd()
+    if not (force or is_agent_pack(pack)):
+        return
+    findings = check_pack(pack)
+    if not findings:
+        print("[green]Agent pack hygiene: no findings.[/green]")
+        return
+    print(
+        f"[yellow]Agent pack hygiene: {len(findings)} advisory finding(s) (validation does not fail on these):[/yellow]"
+    )
+    for finding in findings:
+        print(
+            f"[yellow]  {sanitize_markup(finding.file)}:{finding.line} {finding.kind}: {sanitize_markup(finding.message)}[/yellow]"
+        )
+
+
 @app.command("validate", help="Validate this custom node for registry publishing")
 @tracking.track_command("publish")
-def validate():
+def validate(
+    agent_pack: Annotated[
+        bool,
+        typer.Option(
+            "--agent-pack",
+            help="Also run the advisory agent-pack hygiene check. It runs on its own when the pack "
+            "carries the local agent's install record or an `agent.` extension name.",
+        ),
+    ] = False,
+):
     """
     Run validation checks that would be performed during publishing.
     """
+    _report_agent_pack_hygiene(agent_pack)
     validate_node_for_publishing()
 
 

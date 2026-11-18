@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy node validate` runs an advisory hygiene check on packs the local
+  Comfy agent writes (an install record or an `agent.` extension name), or on
+  any pack with `--agent-pack`. It reports what Settings > Extensions cannot
+  turn off: code at module top level and CSS aimed at the whole page, plus an
+  extension name with no `agent.` prefix or provenance. Findings never fail
+  validation.
 - `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
   finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
   `data.warnings` reports `partial_execution` for a target that returned
