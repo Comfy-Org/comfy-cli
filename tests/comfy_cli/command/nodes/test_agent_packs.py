@@ -264,3 +264,21 @@ def test_rejects_a_record_swapped_for_a_symlink_between_check_and_open(tmp_path,
     _swap_record_before_open(monkeypatch, to_symlink)
 
     assert find_agent_packs(custom_nodes) == []
+
+
+def test_rejects_a_symlink_to_the_checked_record_swapped_in_before_open(tmp_path, monkeypatch):
+    # Rename the checked record away and leave a link to it under the old name:
+    # device and inode still match, so only the name check after the read catches it.
+    if os.name == "nt":
+        pytest.skip("creating a symlink needs privileges on Windows")
+    custom_nodes = tmp_path / "custom_nodes"
+    _make_pack(custom_nodes, "raced", _record("raced"))
+    moved = tmp_path / "moved.json"
+
+    def rename_and_link(path):
+        os.replace(path, moved)
+        os.symlink(moved, path)
+
+    _swap_record_before_open(monkeypatch, rename_and_link)
+
+    assert find_agent_packs(custom_nodes) == []

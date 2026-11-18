@@ -60,6 +60,12 @@ def _read_record(pack_path: Path) -> dict | None:
             if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
                 return None
             raw = f.read(MAX_RECORD_BYTES + 1)
+        if not hasattr(os, "O_NOFOLLOW"):
+            # No atomic no-follow open here: confirm the name still points at
+            # the same regular file, not at a link to it, after the read.
+            after = os.lstat(record_path)
+            if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (checked.st_dev, checked.st_ino):
+                return None
     except OSError:
         return None
     if len(raw) > MAX_RECORD_BYTES:
