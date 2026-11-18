@@ -137,7 +137,8 @@ def _frontend_warning(client: Client) -> str | None:
         stats = client.get_system_stats()
     except (HTTPError, urllib.error.URLError, OSError, ValueError):
         return None
-    version = ((stats or {}).get("system") or {}).get("required_frontend_version") if isinstance(stats, dict) else None
+    system = stats.get("system") if isinstance(stats, dict) else None
+    version = system.get("required_frontend_version") if isinstance(system, dict) else None
     match = _VERSION.match(version) if isinstance(version, str) else None
     if match and (int(match.group(1)), int(match.group(2))) < MIN_FRONTEND:
         return (
@@ -219,12 +220,11 @@ def list_execute(renderer, *, host: str | None = None, port: int | None = None, 
     renderer.emit(data, command=command)
 
 
-def _resolve_path(bare: str, served: dict[str, int], disabled: list[str]) -> str | None:
-    """Match a folder name (or the folder of a ``/extensions/<folder>/`` path) to a known path."""
+def _resolve_path(bare: str, served: dict[str, int], disabled: list[str], *, as_path: bool) -> str | None:
+    """Match a known path: by exact path for the ``/extensions/<folder>/`` form, else by decoded folder name."""
     candidates = [*served, *(p for p in disabled if _is_folder_path(p))]
-    canonical = f"/extensions/{bare}/"
     for path in candidates:
-        if path == canonical or folder_name(path) == bare:
+        if (path == f"/extensions/{bare}/") if as_path else (folder_name(path) == bare):
             return path
     return None
 
@@ -257,7 +257,7 @@ def toggle_execute(
     client = Client(target)
     try:
         served, disabled = _read_state(client, user, command)
-        path = _resolve_path(bare, served, disabled)
+        path = _resolve_path(bare, served, disabled, as_path=name.startswith("/extensions/"))
         if path is None:
             known = ", ".join(sorted(folder_name(p) for p in served)) or "none"
             raise _Failed(

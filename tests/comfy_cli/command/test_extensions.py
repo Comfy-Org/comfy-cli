@@ -325,6 +325,35 @@ class TestReviewFindings:
         assert "\\[" not in _envelope(capsys)["error"]["message"]
 
 
+class TestSecondReviewRound:
+    def test_odd_system_stats_shape_keeps_the_result(self, capsys):
+        fake = _FakeComfy(disabled=[])
+        real_open = fake.open
+
+        def odd_stats(req, timeout=None):
+            if req.full_url.endswith("/system_stats"):
+                return _FakeResp(b'{"system": "unknown"}')
+            return real_open(req, timeout)
+
+        fake.open = odd_stats
+        _run(ext_cmd.toggle_execute, fake, "agent-cushions", enabled=False)
+        env = _envelope(capsys)
+        assert env["ok"] is True
+        assert env["changed"] is True
+
+    def test_a_folder_name_matches_by_decoded_name_not_by_raw_path(self, capsys):
+        served = ["/extensions/My%20Pack/a.js", "/extensions/My%2520Pack/b.js"]
+        fake = _FakeComfy(served=served, disabled=[])
+        _run(ext_cmd.toggle_execute, fake, "My%20Pack", enabled=False)
+        assert fake.writes == [["/extensions/My%2520Pack/"]]
+
+    def test_the_path_form_matches_the_exact_path(self, capsys):
+        served = ["/extensions/My%20Pack/a.js", "/extensions/My%2520Pack/b.js"]
+        fake = _FakeComfy(served=served, disabled=[])
+        _run(ext_cmd.toggle_execute, fake, "/extensions/My%20Pack/", enabled=False)
+        assert fake.writes == [["/extensions/My%20Pack/"]]
+
+
 class TestEnable:
     def test_removes_only_that_folder(self, capsys):
         fake = _FakeComfy(disabled=["/extensions/other/", "/extensions/agent-cushions/"])
