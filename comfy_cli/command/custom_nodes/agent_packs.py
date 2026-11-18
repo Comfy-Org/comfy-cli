@@ -44,14 +44,15 @@ class AgentPack:
 
 def _read_record(pack_path: Path) -> dict | None:
     record_path = pack_path / INSTALL_RECORD_NAME
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        info = os.lstat(record_path)
+        fd = os.open(record_path, flags)
     except OSError:
         return None
-    if not stat.S_ISREG(info.st_mode):
-        return None
     try:
-        with open(record_path, "rb") as f:
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return None
             raw = f.read(MAX_RECORD_BYTES + 1)
     except OSError:
         return None
@@ -59,14 +60,21 @@ def _read_record(pack_path: Path) -> dict | None:
         return None
     try:
         record = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
-    if not isinstance(record, dict) or record.get("v") != RECORD_VERSION:
+    if not isinstance(record, dict):
         return None
-    for field in ("pack", "route", "created_at"):
+    version = record.get("v")
+    if type(version) is not int or version != RECORD_VERSION:
+        return None
+    for field in ("pack", "route", "created_at", "mac"):
         if not isinstance(record.get(field), str) or not record[field]:
             return None
     return record
+
+
+def _optional_str(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 def _names_pack(recorded: str, entry: str, under_manager_folder: bool) -> bool:
@@ -81,6 +89,8 @@ def _names_pack(recorded: str, entry: str, under_manager_folder: bool) -> bool:
 def _scan(folder: Path, under_manager_folder: bool, prefix: str) -> list[AgentPack]:
     packs: list[AgentPack] = []
     try:
+        if not stat.S_ISDIR(os.lstat(folder).st_mode):
+            return packs
         entries = sorted(folder.iterdir(), key=lambda p: p.name)
     except OSError:
         return packs
@@ -103,8 +113,8 @@ def _scan(folder: Path, under_manager_folder: bool, prefix: str) -> list[AgentPa
                 state=state,
                 route=record["route"],
                 created_at=record["created_at"],
-                thread_id=str(record.get("thread_id") or ""),
-                tool_call_id=str(record.get("tool_call_id") or ""),
+                thread_id=_optional_str(record.get("thread_id")),
+                tool_call_id=_optional_str(record.get("tool_call_id")),
             )
         )
     return packs

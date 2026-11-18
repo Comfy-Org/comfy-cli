@@ -65,6 +65,10 @@ def test_lists_enabled_and_both_kinds_of_disabled_agent_packs(tmp_path):
         ("missing_created", json.dumps(_record("missing_created", created_at=""))),
         ("renamed", json.dumps(_record("someone_else"))),
         ("oversized", json.dumps(_record("oversized", thread_id="x" * 9000))),
+        ("deeply_nested", "[" * 4000 + "]" * 4000),
+        ("bool_version", json.dumps(_record("bool_version", v=True))),
+        ("float_version", json.dumps(_record("float_version", v=1.0))),
+        ("unsigned", json.dumps({k: v for k, v in _record("unsigned").items() if k != "mac"})),
     ],
 )
 def test_ignores_records_that_do_not_name_this_pack_or_are_malformed(tmp_path, folder, raw):
@@ -148,3 +152,48 @@ def test_show_agent_created_json_envelope_lists_packs_as_unverified(tmp_path, _r
             "tool_call_id": "call-1",
         }
     ]
+
+
+def test_non_string_ids_are_left_empty(tmp_path):
+    custom_nodes = tmp_path / "custom_nodes"
+    _make_pack(custom_nodes, "odd_ids", _record("odd_ids", thread_id=["a"], tool_call_id={"k": 1}))
+
+    [pack] = find_agent_packs(custom_nodes)
+
+    assert (pack.thread_id, pack.tool_call_id) == ("", "")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_ignores_a_manager_disabled_folder_that_is_a_symlink(tmp_path):
+    custom_nodes = tmp_path / "custom_nodes"
+    custom_nodes.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    _make_pack(elsewhere, "moved", _record("moved"))
+    (custom_nodes / ".disabled").symlink_to(elsewhere)
+
+    assert find_agent_packs(custom_nodes) == []
+
+
+def test_show_agent_created_escapes_markup_from_the_record(tmp_path):
+    custom_nodes = tmp_path / "custom_nodes"
+    _make_pack(custom_nodes, "restyler", _record("restyler", route="[/]", created_at="[link=http://x]y[/link]"))
+    with patch("comfy_cli.command.custom_nodes.command.workspace_manager") as mock_ws:
+        mock_ws.workspace_path = str(tmp_path)
+        result = runner.invoke(app, ["show", "agent-created"])
+
+    assert result.exit_code == 0, result.output
+    assert "[/]" in result.output
+    assert "[link=http://x]y[/link]" in result.output
+
+
+def test_show_agent_created_json_errors_when_custom_nodes_is_missing(tmp_path, _reset_renderer):
+    from comfy_cli import cmdline
+
+    with patch("comfy_cli.command.custom_nodes.command.workspace_manager") as mock_ws:
+        mock_ws.workspace_path = str(tmp_path)
+        result = CliRunner().invoke(cmdline.app, ["--json", "node", "show", "agent-created"])
+
+    assert result.exit_code == 1
+    envelope = json.loads(result.stdout.strip().splitlines()[-1])
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "not_in_workspace"

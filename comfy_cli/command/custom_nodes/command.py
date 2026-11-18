@@ -33,6 +33,7 @@ from comfy_cli.file_utils import (
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.registry import (
     RegistryAPI,
     RegistryAPIError,
@@ -64,24 +65,35 @@ class ShowTarget(str, Enum):
 
 def _show_agent_created(simple: bool) -> None:
     """List the packs the local Comfy agent says it created. Read from disk, not cm-cli."""
-    if not workspace_manager.workspace_path:
-        print("[bold red]No ComfyUI workspace found.[/bold red]")
-        raise typer.Exit(code=1)
-    custom_nodes = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
-    packs = find_agent_packs(custom_nodes)
     renderer = get_renderer()
+    workspace = workspace_manager.workspace_path
+    custom_nodes = pathlib.Path(workspace) / "custom_nodes" if workspace else None
+    if custom_nodes is None or not custom_nodes.is_dir():
+        renderer.error(
+            code="not_in_workspace",
+            message=f"No custom_nodes folder found in {sanitize_markup(workspace or 'any ComfyUI workspace')}.",
+            hint="run `comfy install`, or pass `--workspace`",
+            command="node show",
+        )
+        raise typer.Exit(code=1)
+    packs = find_agent_packs(custom_nodes)
     if renderer.is_pretty():
         if not packs:
             print("No agent-created packs found.")
         elif simple:
             for pack in packs:
-                print(f"{pack.pack} ({pack.state})")
+                print(f"{sanitize_markup(pack.pack)} ({pack.state})")
         else:
             table = Table(title="Agent-created packs (record found, not verified)")
             for column in ("Pack", "State", "Folder", "Created", "Route"):
                 table.add_column(column)
             for pack in packs:
-                table.add_row(pack.pack, pack.state, pack.folder, pack.created_at, pack.route)
+                table.add_row(
+                    *(
+                        sanitize_markup(value)
+                        for value in (pack.pack, pack.state, pack.folder, pack.created_at, pack.route)
+                    )
+                )
             console.print(table)
             print(
                 "These packs carry the local agent's install record. comfy-cli cannot verify its signature; "
