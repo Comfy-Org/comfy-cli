@@ -79,6 +79,10 @@ history.
 
 ### Changed
 
+- The Run on Cloud skill asks before submitting one paid test job, including
+  validation and preflight runs. Declining still saves the prepared workflow
+  and returns its Cloud link with execution marked unverified. Upload, build,
+  and deployment approvals remain separate from job consent.
 - **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
   `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
   `where_invalid` envelope and a non-zero exit. Before, `comfy --json
