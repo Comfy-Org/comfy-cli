@@ -106,6 +106,13 @@ history.
 
 ### Fixed
 
+- Two `comfy model download` runs from different workspaces aimed at the same
+  file now refuse each other. Before, each workspace kept its own download
+  claims, so both runs wrote the file. This is the default case on Comfy
+  Desktop, where every install saves into one shared model library. Claims
+  now live in `download-claims/` in comfy-cli's config directory, or in the
+  directory `COMFY_DOWNLOAD_CLAIMS_DIR` names
+  ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
