@@ -310,9 +310,11 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy extension disable <folder>` / `comfy extension enable <folder>`
 
-  These write the frontend's `Comfy.Extension.DisabledPacks` setting through the running local
-  ComfyUI (frontend 1.59 or later), so the pack's scripts are not loaded after the next page
-  reload. Reload every open ComfyUI page, so none of them saves an older copy of the setting.
+  `list` reads the frontend's `Comfy.Extension.DisabledPacks` setting from the running local
+  ComfyUI (frontend 1.59 or later) and shows which folders are off. `disable` adds a folder to
+  that setting, so its scripts are not loaded after the next page reload; `enable` removes it, so
+  they load again after a reload. Reload every open ComfyUI page, so none of them saves an older
+  copy of the setting.
   The pack's Python nodes stay installed. To turn off the whole pack, use `comfy node disable`,
   which needs a ComfyUI restart. `--host`/`--port` pick the server (default: the running local
   one), and `--user <user id>` is required when ComfyUI runs with `--multi-user`.
