@@ -291,6 +291,20 @@ class TestCodeRabbitRound3:
         assert _kinds(check_pack(_pack(tmp_path, js))) == ["top-level-code"]
 
 
+class TestCodeRabbitRound4:
+    def test_parent_rule_with_declarations_and_nested_rules(self, tmp_path):
+        files = {"s.css": "body { color: red; .child { color: blue; } }\n"}
+        assert _kinds(check_pack(_pack(tmp_path, files=files))) == ["page-wide-css"]
+
+    def test_comment_after_a_literal_name(self, tmp_path):
+        js = 'app.registerExtension({name: "agent.example" /* extension id */});\n'
+        assert is_agent_pack(_pack(tmp_path, js, record=False))
+
+    def test_quoted_provenance_key(self, tmp_path):
+        js = 'app.registerExtension({name: "Marked", provenance: {"createdBy": "comfy-agent"}});\n'
+        assert check_pack(_pack(tmp_path, js)) == []
+
+
 class TestIsAgentPack:
     def test_install_record_marks_an_agent_pack(self, tmp_path):
         assert is_agent_pack(_pack(tmp_path))

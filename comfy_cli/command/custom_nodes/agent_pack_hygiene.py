@@ -330,7 +330,10 @@ def _css_rules(css: str) -> Iterator[tuple[int, str]]:
             nested = css.find("{", i + 1)
             if close == -1:
                 return
-            if nested != -1 and nested < close:  # an @media-style wrapper: look inside it
+            if nested != -1 and nested < close:  # a wrapper (@media, or a rule with nested rules)
+                own = css[i + 1 : nested]
+                if not css[start:i].lstrip().startswith("@") and re.search(r":[^;{}]*;", own):
+                    yield start, css[start:i]  # the parent's own declarations apply to it
                 start = i + 1
                 i += 1
                 continue
@@ -488,11 +491,12 @@ def _registrations(text: str) -> Iterator[tuple[int, str, bool]]:
         if "name" not in keys:
             continue
         offset, raw = keys["name"]
-        literal = re.fullmatch(r"""\s*["'`]([^"'`]*)["'`]\s*""", raw)
+        literal = re.fullmatch(r"""\s*["'`]([^"'`]*)["'`]\s*""", _CSS_COMMENT.sub(" ", re.sub(r"//[^\n]*", " ", raw)))
         if literal is None:
             continue
-        provenance = keys.get("provenance", (0, ""))[1]
-        has_provenance = re.search(r"""\bcreatedBy\s*:\s*["'`]comfy-agent["'`]""", provenance) is not None
+        provenance = keys.get("provenance", (0, ""))[1].strip()
+        created_by = _top_level_keys(provenance).get("createdBy", (0, ""))[1] if provenance.startswith("{") else ""
+        has_provenance = re.fullmatch(r"""\s*["'`]comfy-agent["'`]\s*""", created_by) is not None
         yield start + offset, literal.group(1), has_provenance
 
 
