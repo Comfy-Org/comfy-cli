@@ -843,3 +843,26 @@ def test_execution_error_inputs_are_redacted_in_machine_output(capsys, mode):
     out = capsys.readouterr().out
     assert "sk-redact-me" not in out
     assert "frame0" in out
+
+
+def test_cloud_status_and_watch_print_the_targets_warning(pretty):
+    """Pretty `jobs status` and `jobs watch --where cloud` show the
+    --output-node-ids verdict, as `comfy run --wait` does; the async run's
+    note sends people to exactly these commands."""
+    from comfy_cli.command import jobs
+
+    snap = _cloud_snap(status="completed")
+    snap["warnings"] = [{"code": "partial_execution_targets_ignored", "message": "node(s) 12 ran [/] too"}]
+    client = MagicMock()
+    client.target.base_url = "https://cloud.example"
+    with (
+        patch.object(jobs, "cloud_preflight_or_exit"),
+        patch.object(jobs, "_cloud_client", return_value=client),
+        patch.object(jobs, "_cloud_status_snapshot", side_effect=lambda _pid: dict(snap)),
+    ):
+        jobs._cloud_status("p" * 12)
+        assert "node(s) 12 ran [/] too" in assert_inert(pretty)
+        pretty.seek(0)
+        pretty.truncate()
+        jobs._cloud_watch("p" * 12, poll_interval=0.0, max_wait=1.0)
+        assert "node(s) 12 ran [/] too" in assert_inert(pretty)
