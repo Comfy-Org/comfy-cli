@@ -114,6 +114,18 @@ history.
   the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
   downloads before upgrading, since an older version keeps its claims per
   workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- The two dynamic-combo mismatch reports in UI→API conversion are logged at
+  ERROR, so the CLI's default `LOG_LEVEL` no longer drops them. A saved
+  `COMFY_DYNAMICCOMBO_V3` selector that names no option in the current schema
+  (a partner model renamed or removed server-side) leaves its sub-input slots
+  unconsumed and shifts every later widget — on a Seedance text-to-video graph
+  the prompt string lands in `seed` and a resolution string in `watermark`.
+  The converter cannot recover that alignment and reported it so the corruption
+  would not be silent, but the report was a WARNING and `setup_logging`
+  defaults the level to ERROR, so nothing was printed. The same applied to a
+  nesting chain past the expansion depth limit. Both tests asserted the record
+  was created under a forced `caplog` floor rather than that it survived the
+  level the CLI runs at; a third test now pins that.
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
