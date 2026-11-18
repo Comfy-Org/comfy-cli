@@ -1,6 +1,7 @@
 """Help JSON coverage: every visible Typer command appears."""
 
 import json
+from pathlib import Path
 from typing import Annotated
 
 import pytest
@@ -117,6 +118,12 @@ def _shapes(
     bounded_ints: Annotated[list[int] | None, typer.Option(min=1)] = None,
     ints: Annotated[list[int] | None, typer.Option()] = None,
     bounded_floats: Annotated[list[float] | None, typer.Option(max=2.0)] = None,
+    text_file: Annotated[typer.FileText | None, typer.Option()] = None,
+    binary_files: Annotated[list[typer.FileBinaryRead] | None, typer.Option()] = None,
+    file_and_int: Annotated[tuple[typer.FileText, int] | None, typer.Option()] = None,
+    file_only: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+    dir_only: Annotated[Path | None, typer.Option(file_okay=False)] = None,
+    dir_list: Annotated[list[Path] | None, typer.Option(file_okay=False)] = None,
 ) -> None:
     pass
 
@@ -134,6 +141,14 @@ def _other() -> None:
         ("bounded_ints", "int range"),
         ("ints", "int"),
         ("bounded_floats", "float range"),
+        # typer's file markers are a ``click.File`` (``"filename"``), per element.
+        ("text_file", "filename"),
+        ("binary_files", "filename"),
+        ("file_and_int", "<filename int>"),
+        # ``click.Path`` names itself from ``file_okay`` / ``dir_okay``.
+        ("file_only", "file"),
+        ("dir_only", "directory"),
+        ("dir_list", "directory"),
     ],
 )
 def test_composite_and_bounded_element_types(param_name, expected_type):

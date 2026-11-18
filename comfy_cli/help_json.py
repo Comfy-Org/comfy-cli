@@ -13,6 +13,7 @@ docstrings. Phase 2 will hoist this alongside ``comfy discover`` and add a
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, get_args
 
 import typer
@@ -140,8 +141,8 @@ def _type_from_descriptor(td: Any) -> dict[str, Any]:
     """Build the ``{type, choices?}`` contract from a typer >= 0.29 TypeDescriptor.
 
     Maps the descriptor back to the same ``type`` strings the ``click.ParamType``
-    path emits — ``"choice"``, ``"int range"`` / ``"float range"``, ``"path"``,
-    ``"boolean"``, ``"int"``, ``"float"``, ``"str"`` — so the contract does not
+    path emits — ``"choice"``, ``"int range"`` / ``"float range"``, ``"path"`` /
+    ``"file"`` / ``"directory"``, ``"filename"``, ``"boolean"``, ``"int"``, ``"float"``, ``"str"`` — so the contract does not
     drift when the installed typer crosses 0.29.
     """
     if _descriptor_flag(td, "is_choice"):
@@ -174,12 +175,33 @@ def _element_type_name(td: Any, annotation: Any) -> str:
     elem = replace(td, annotation=annotation)
     if _descriptor_flag(elem, "is_choice"):
         return "choice"
+    if isinstance(annotation, type):
+        # typer's file markers built a ``click.File``, named ``"filename"``.
+        if issubclass(annotation, _FILE_MARKERS):
+            return "filename"
+        # ``click.Path`` named itself from ``file_okay`` / ``dir_okay``.
+        if issubclass(annotation, PurePath):
+            return _path_type_name(td.parameter_info)
     base = {bool: "boolean", int: "int", float: "float", str: "str"}.get(
         annotation, getattr(annotation, "__name__", str(annotation)).lower()
     )
     if _descriptor_flag(elem, "is_ranged"):
         return f"{base} range"
     return base
+
+
+_FILE_MARKERS = (typer.FileText, typer.FileTextWrite, typer.FileBinaryRead, typer.FileBinaryWrite)
+
+
+def _path_type_name(parameter_info: Any) -> str:
+    """Name a path the way ``click.Path`` does: ``"file"``, ``"directory"`` or ``"path"``."""
+    file_okay = getattr(parameter_info, "file_okay", True)
+    dir_okay = getattr(parameter_info, "dir_okay", True)
+    if file_okay and not dir_okay:
+        return "file"
+    if dir_okay and not file_okay:
+        return "directory"
+    return "path"
 
 
 def _type_to_dict(t: click.ParamType) -> dict[str, Any]:
