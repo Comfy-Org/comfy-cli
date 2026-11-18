@@ -263,10 +263,15 @@ comfy provides a convenient way to manage custom nodes for extending ComfyUI's f
 - Show custom nodes' information:
 
 ```
-comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]
+comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list|agent-created]
                              ?[--channel <channel name>]
                              ?[--mode [remote|local|cache]]
 ```
+
+  `agent-created` lists the packs that carry the local Comfy agent's install record
+  (`.comfy-agent-install`), including ones switched off with a `.disabled` suffix or moved to
+  `custom_nodes/.disabled`. It reads the workspace directly. comfy-cli cannot verify the record's
+  signature, so a listed pack says the agent made it; ask the agent to confirm.
 
 - `comfy node show all --channel recent`
 
