@@ -222,3 +222,45 @@ def test_rejects_a_symlinked_record_even_without_o_nofollow(tmp_path, monkeypatc
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
 
     assert find_agent_packs(custom_nodes) == []
+
+
+def _swap_record_before_open(monkeypatch, swap):
+    """Run `swap(path)` after the reader's lstat and before its open, without O_NOFOLLOW."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    real_open = os.open
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if str(path).endswith(".comfy-agent-install"):
+            swap(path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+
+
+def test_rejects_a_record_replaced_between_check_and_open(tmp_path, monkeypatch):
+    # A regular file swapped in under the same name: a different file than the
+    # one checked. Runs on every platform, Windows included.
+    custom_nodes = tmp_path / "custom_nodes"
+    _make_pack(custom_nodes, "raced", _record("raced"))
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps(_record("raced")))
+    _swap_record_before_open(monkeypatch, lambda path: os.replace(other, path))
+
+    assert find_agent_packs(custom_nodes) == []
+
+
+def test_rejects_a_record_swapped_for_a_symlink_between_check_and_open(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("creating a symlink needs privileges on Windows; the test above covers the swap there")
+    custom_nodes = tmp_path / "custom_nodes"
+    _make_pack(custom_nodes, "raced", _record("raced"))
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps(_record("raced")))
+
+    def to_symlink(path):
+        os.remove(path)
+        os.symlink(target, path)
+
+    _swap_record_before_open(monkeypatch, to_symlink)
+
+    assert find_agent_packs(custom_nodes) == []

@@ -45,14 +45,19 @@ def _read_record(pack_path: Path) -> dict | None:
     record_path = pack_path / INSTALL_RECORD_NAME
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        if not stat.S_ISREG(os.lstat(record_path).st_mode):
+        checked = os.lstat(record_path)
+        if not stat.S_ISREG(checked.st_mode):
             return None
         fd = os.open(record_path, flags)
     except OSError:
         return None
     try:
         with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            opened = os.fstat(f.fileno())
+            # Without O_NOFOLLOW (Windows) the name can be swapped for a link
+            # or another file between lstat and open. Read only the file that
+            # was checked.
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
                 return None
             raw = f.read(MAX_RECORD_BYTES + 1)
     except OSError:
