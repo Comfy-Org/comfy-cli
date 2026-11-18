@@ -2450,6 +2450,69 @@ def test_cloud_watch_prints_the_targets_warning(monkeypatch, capsys):
     assert warning["code"] == "partial_execution_targets_ignored"
 
 
+@pytest.mark.parametrize(
+    "record",
+    [None, {"status": {"completed": True, "status_str": "success"}}],
+    ids=["no-history-yet", "status-only-record"],
+)
+def test_cloud_status_snapshot_does_not_judge_targets_before_outputs_exist(monkeypatch, record):
+    """History can lag `completed` and come back empty or status-only. Judging
+    then would call every target missing; leaving `warnings` out would read as
+    an untargeted job. Say the check could not run yet instead."""
+
+    class _LaggingHistory(_CompletedCloudClient):
+        def get_history(self, prompt_id):
+            return record
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _LaggingHistory())
+    _targeted_cloud_job("pid-lag", targets=["9"], run_graph=["9"])
+
+    [warning] = jobs_mod._cloud_status_snapshot("pid-lag")["warnings"]
+    assert warning["code"] == "output_node_ids_unchecked"
+    assert "comfy jobs status pid-lag --where cloud" in warning["message"]
+
+
+@pytest.mark.parametrize(
+    ("targets", "run_graph"),
+    [(9, ["9"]), ([["9"]], ["9"]), ("9", ["9"]), (["9"], 4), (["9"], [["4"]])],
+)
+def test_cloud_status_snapshot_ignores_malformed_recorded_targets(monkeypatch, targets, run_graph):
+    """A hand-edited or corrupted state file must not crash `jobs status`,
+    nor have a bare string split into one target per character."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-bad", targets=targets, run_graph=run_graph)
+
+    snap = jobs_mod._cloud_status_snapshot("pid-bad")
+    assert snap["status"] == "completed"
+    assert "warnings" not in snap
+
+
+def test_cloud_status_snapshot_reads_numeric_recorded_ids_as_strings(monkeypatch):
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-int", targets=[9], run_graph=[9])
+
+    [warning] = jobs_mod._cloud_status_snapshot("pid-int")["warnings"]
+    assert warning["untargeted_output_node_ids"] == ["12"]
+
+
+def test_jobs_wait_row_carries_the_targets_warning(monkeypatch, capsys):
+    """`jobs wait` copies only some snapshot fields onto each row; the targets
+    verdict is one of them, since the row is the whole result of the wait."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    warning = {"code": "partial_execution_targets_ignored", "message": "m", "untargeted_output_node_ids": ["12"]}
+    snap = {"prompt_id": "pid-wait-targets", "status": "completed", "outputs": ["u"], "warnings": [warning]}
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda *a, **k: True)
+    monkeypatch.setattr(jobs_mod, "_resolve_host_port", lambda h, p: ("h", 8188))
+    monkeypatch.setattr(jobs_mod, "_wait_fetch_snapshot", lambda pid, **kw: snap)
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs wait"))
+    jobs_mod.wait_cmd(["pid-wait-targets"], poll_interval=0.01, timeout=5)
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["data"]["jobs"][0]["warnings"] == [warning]
+
+
 def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
     """In-flight jobs have no record to group — keys present, empty dicts."""
 

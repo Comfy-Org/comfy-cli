@@ -42,7 +42,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Cloud `jobs status`/`jobs watch` of a completed `comfy run --output-node-ids` job only (absent otherwise): the same non-fatal entries `comfy run --wait` puts in `data.warnings` (`partial_execution` with `missing_output_node_ids`, `partial_execution_targets_ignored` with `untargeted_output_node_ids`), judged against the targets recorded on the job state file. Empty when the server ran exactly the targets.",
+      "description": "Cloud `jobs status`/`jobs watch` of a completed `comfy run --output-node-ids` job only (absent otherwise): the same non-fatal entries `comfy run --wait` puts in `data.warnings` (`partial_execution` with `missing_output_node_ids`, `partial_execution_targets_ignored` with `untargeted_output_node_ids`), judged against the targets recorded on the job state file. Empty when the server ran exactly the targets. `output_node_ids_unchecked` when the cloud had not returned the outputs yet; ask again. `jobs wait` copies the same list onto each job row.",
       "items": {
         "type": "object",
         "required": ["code", "message"],

@@ -293,7 +293,10 @@ submit time. Its `queued` envelope carries a `data.note` naming the
 records the targets (`output_node_ids`, `run_graph_node_ids`,
 `output_node_ids_checked`). Once the job completes, `comfy jobs watch --where
 cloud` and `comfy jobs status --where cloud` run the same check and carry the
-same entries in `data.warnings`. That key is present only for a targeted job.
+same entries in `data.warnings`; `comfy jobs wait` copies them onto the job's
+row. That key is present only for a targeted job. If the cloud has not
+returned the job's outputs yet, the one entry is `output_node_ids_unchecked`:
+run `comfy jobs status <prompt_id> --where cloud` again.
 
 ## Event reference
 

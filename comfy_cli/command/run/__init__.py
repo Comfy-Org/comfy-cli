@@ -1529,10 +1529,12 @@ def execute_cloud(
             locator_fields={"base_url": target.base_url},
             # Nothing judges the returned outputs at submit time, so say
             # where the --output-node-ids check happens instead.
+            # Only when the targets reached the state file: without it the
+            # watch has nothing to judge against.
             note=(
                 f"--output-node-ids is checked when the job finishes: run `{watch_command}` "
                 "to see whether the server ran only the targets"
-                if output_node_ids
+                if output_node_ids and state_file is not None
                 else None
             ),
         )

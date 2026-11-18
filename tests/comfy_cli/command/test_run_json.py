@@ -3120,6 +3120,21 @@ class TestOutputNodeIdsCloud:
         assert data["status"] == "queued"
         assert "comfy jobs watch cloud-pid --where cloud" in data["note"]
 
+    def test_async_run_without_a_state_file_promises_no_watch_check(
+        self, monkeypatch, two_output_workflow_file, capsys
+    ):
+        """When the state file could not be written the targets were never
+        stored, so pointing at `jobs watch` for the check would be false."""
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: None)
+        lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert "note" not in _envelope(lines)["data"]
+
     def test_async_untargeted_run_records_no_targets(self, monkeypatch, two_output_workflow_file, capsys):
         import comfy_cli.jobs_state as jobs_state_mod
 
