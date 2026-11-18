@@ -50,6 +50,19 @@ history.
   now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
   the timeout.
 
+- The two dynamic-combo mismatch reports in UI→API conversion are logged at
+  ERROR, so the CLI's default `LOG_LEVEL` no longer drops them. A saved
+  `COMFY_DYNAMICCOMBO_V3` selector that names no option in the current schema
+  (a partner model renamed or removed server-side) leaves its sub-input slots
+  unconsumed and shifts every later widget — on a Seedance text-to-video graph
+  the prompt string lands in `seed` and a resolution string in `watermark`.
+  The converter cannot recover that alignment and reported it so the corruption
+  would not be silent, but the report was a WARNING and `setup_logging`
+  defaults the level to ERROR, so nothing was printed. The same applied to a
+  nesting chain past the expansion depth limit. Both tests asserted the record
+  was created under a forced `caplog` floor rather than that it survived the
+  level the CLI runs at; a third test now pins that.
+
 ## [1.29.0] - 2026-11-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.
