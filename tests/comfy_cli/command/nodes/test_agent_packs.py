@@ -197,3 +197,28 @@ def test_show_agent_created_json_errors_when_custom_nodes_is_missing(tmp_path, _
     envelope = json.loads(result.stdout.strip().splitlines()[-1])
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == "not_in_workspace"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_a_symlinked_custom_nodes_root_still_lists_enabled_packs(tmp_path):
+    real = tmp_path / "real_custom_nodes"
+    _make_pack(real, "restyler", _record("restyler"))
+    _make_pack(real / ".disabled", "moved", _record("moved"))
+    (tmp_path / "custom_nodes").symlink_to(real)
+
+    packs = find_agent_packs(tmp_path / "custom_nodes")
+
+    assert [(p.pack, p.state) for p in packs] == [("moved", "disabled-by-manager"), ("restyler", "enabled")]
+
+
+def test_rejects_a_symlinked_record_even_without_o_nofollow(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("symlinks need privileges on Windows")
+    custom_nodes = tmp_path / "custom_nodes"
+    pack = _make_pack(custom_nodes, "linked")
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps(_record("linked")))
+    (pack / ".comfy-agent-install").symlink_to(target)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+    assert find_agent_packs(custom_nodes) == []

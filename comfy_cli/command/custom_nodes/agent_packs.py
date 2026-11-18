@@ -45,6 +45,8 @@ def _read_record(pack_path: Path) -> dict | None:
     record_path = pack_path / INSTALL_RECORD_NAME
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
+        if not stat.S_ISREG(os.lstat(record_path).st_mode):
+            return None
         fd = os.open(record_path, flags)
     except OSError:
         return None
@@ -88,7 +90,7 @@ def _names_pack(recorded: str, entry: str, under_manager_folder: bool) -> bool:
 def _scan(folder: Path, under_manager_folder: bool, prefix: str) -> list[AgentPack]:
     packs: list[AgentPack] = []
     try:
-        if not stat.S_ISDIR(os.lstat(folder).st_mode):
+        if under_manager_folder and not stat.S_ISDIR(os.lstat(folder).st_mode):
             return packs
         entries = sorted(folder.iterdir(), key=lambda p: p.name)
     except OSError:
