@@ -78,6 +78,14 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
         "is_flag": bool(getattr(param, "is_flag", False)),
         "multiple": bool(getattr(param, "multiple", False)),
     }
+    # typer >= 0.29 builds parameters with no click ``type``. pyproject.toml caps
+    # typer below 0.29; this names the fix when an install bypasses that cap
+    # (``pip install --no-deps``, a resolver override) instead of an AttributeError.
+    if not hasattr(param, "type"):
+        raise RuntimeError(
+            f"comfy --help --json cannot read option {param.name!r}: the installed typer "
+            "has no click parameter types. comfy-cli needs typer<0.29: pip install 'typer<0.29'"
+        )
     type_info = _type_to_dict(param.type)
     info["type"] = type_info["type"]
     if "choices" in type_info:
