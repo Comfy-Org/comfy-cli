@@ -2420,9 +2420,17 @@ def download(
         typer.Argument(help="Prompt ID to download outputs for. Omit to read from piped stdin.", show_default=False),
     ] = None,
     out_dir: Annotated[
-        str,
-        typer.Option("--out-dir", "-o", help="Directory to save outputs to."),
-    ] = "./outputs",
+        str | None,
+        typer.Option(
+            "--out-dir",
+            "-o",
+            show_default=False,
+            help=(
+                "Directory to save outputs to. Omit to use the governing project/1 root's "
+                "`outputs/`, else the `default_project_dir` config key's `outputs/`, else `./outputs`."
+            ),
+        ),
+    ] = None,
     where: Annotated[
         str | None,
         typer.Option("--where", show_default=False, help="Routing target: 'local' or 'cloud'."),
