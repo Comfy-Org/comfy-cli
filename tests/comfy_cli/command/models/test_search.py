@@ -1029,6 +1029,17 @@ class TestShow:
         assert env["data"]["row"]["base_model"] == "Flux.1 D"
         assert env["data"]["row"]["trained_words"] == ["redux", "blend"]
 
+    def test_asks_for_public_models(self, cloud_target, monkeypatch, capsys):
+        # `show` looks a name up in the whole catalog, public models included.
+        # It says so, rather than depending on the server's default, which is
+        # planned to change to own assets only.
+        calls = _patch_urlopen(monkeypatch, {"/api/assets": _ASSETS_RESPONSE})
+        _run(["show", "flux1-redux-dev.safetensors", "--where", "cloud"], capsys)
+        assert calls
+        for call in calls:
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(call["url"]).query)
+            assert query["include_public"] == ["true"]
+
     def test_no_exact_match_returns_close_matches(self, cloud_target, monkeypatch, capsys):
         # Substring hits but no exact name match.
         _patch_urlopen(monkeypatch, {"/api/assets": _ASSETS_RESPONSE})

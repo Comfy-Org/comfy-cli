@@ -980,7 +980,16 @@ def show_cmd(
     max_pages = 50  # safety cap (10k results) so a misbehaving server can't loop forever
     for _ in range(max_pages):
         qs = urllib.parse.urlencode(
-            {"include_tags": "models", "name_contains": name, "limit": page_size, "offset": offset}
+            {
+                "include_tags": "models",
+                # `show` looks the name up in the whole catalog. Said explicitly:
+                # Comfy Cloud's default for an omitted include_public is planned
+                # to change to own assets only.
+                "include_public": "true",
+                "name_contains": name,
+                "limit": page_size,
+                "offset": offset,
+            }
         )
         url = target.url("assets") + "?" + qs
         try:
