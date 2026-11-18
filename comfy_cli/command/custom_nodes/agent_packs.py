@@ -1,8 +1,8 @@
 """Find custom node packs the local Comfy agent says it created.
 
 The local agent writes a `.comfy-agent-install` JSON record inside each folder
-pack it creates (cloud repo, docs/adr/0005-agent-pack-install-record.md). The
-record is signed with a key only the local agent holds, so comfy-cli can read
+pack it creates (the cloud repo's install-record decision, Comfy-Org/cloud#16202).
+The record is signed with a key only the local agent holds, so comfy-cli can read
 it but cannot verify it: a listed pack "says it was made by the agent".
 
 The record is untrusted input: a cloned or shared pack can carry one. This
