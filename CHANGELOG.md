@@ -20,7 +20,9 @@ history.
 - `comfy extension list`, `comfy extension disable <folder>` and
   `comfy extension enable <folder>` turn a custom node pack's frontend code off
   or on through the running local ComfyUI's `Comfy.Extension.DisabledPacks`
-  setting. No restart: the change applies on the next page reload. Other
+  setting, which needs ComfyUI_frontend 1.59 or later (the frontend checks it
+  before importing a folder's scripts; the command warns when ComfyUI pins an
+  older frontend). No restart: the change applies on the next page reload. Other
   switched-off folders are kept (the setting is re-read just before the
   write), an unknown folder is refused, and a malformed setting is reported
   instead of overwritten. `--user` picks the user under `--multi-user`.
