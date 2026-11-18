@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy extension list`, `comfy extension disable <folder>` and
+  `comfy extension enable <folder>` turn a custom node pack's frontend code off
+  or on through the running local ComfyUI's `Comfy.Extension.DisabledPacks`
+  setting. No restart: the change applies on the next page reload. Other
+  switched-off folders are kept, an unknown folder is refused, and a malformed
+  setting is reported instead of overwritten.
 - `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
   finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
   `data.warnings` reports `partial_execution` for a target that returned

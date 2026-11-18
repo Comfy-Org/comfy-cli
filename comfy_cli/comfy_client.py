@@ -274,7 +274,7 @@ class Client:
         method: str,
         path_parts: tuple[str, ...],
         *,
-        body: dict | None = None,
+        body: Any = None,
         body_factory: Callable[[], dict] | None = None,
         timeout: float | None = None,
         _retried: bool = False,
@@ -525,6 +525,20 @@ class Client:
             body={"unload_models": unload_models, "free_memory": free_memory},
             timeout=timeout,
         )
+
+    # ----- frontend extensions and settings -----
+
+    def get_extensions(self, *, timeout: float | None = None) -> Any:
+        """GET {prefix}/extensions: the frontend script URLs ComfyUI serves, core ones included."""
+        return self._request("GET", ("extensions",), timeout=timeout)
+
+    def get_setting(self, setting_id: str, *, timeout: float | None = None) -> Any:
+        """GET {prefix}/settings/{id}: one frontend setting value, or None when it was never set."""
+        return self._request("GET", ("settings", setting_id), timeout=timeout)
+
+    def post_setting(self, setting_id: str, value: Any, *, timeout: float | None = None) -> None:
+        """POST {prefix}/settings/{id}: replace one frontend setting value."""
+        self._request("POST", ("settings", setting_id), body=value, timeout=timeout)
 
     # ----- polling helpers -----
 

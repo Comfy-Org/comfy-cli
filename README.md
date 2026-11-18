@@ -299,6 +299,17 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
 
+- Turn a pack's frontend code off or on, without a restart:
+
+  `comfy extension list`
+
+  `comfy extension disable <folder>` / `comfy extension enable <folder>`
+
+  These write the frontend's `Comfy.Extension.DisabledPacks` setting through the running local
+  ComfyUI (frontend 1.59 or later), so the pack's scripts are not loaded after the next page
+  reload. The pack's Python nodes stay installed. To turn off the whole pack, use
+  `comfy node disable`, which needs a ComfyUI restart.
+
 #### `install` vs `registry-install`
 
 comfy-cli offers two ways to install a custom node, backed by different

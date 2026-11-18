@@ -3165,6 +3165,10 @@ _RootGroup.lazy_subcommands = {
     "nodes": LazySubcommand(
         "comfy_cli.command.nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories)."
     ),
+    "extension": LazySubcommand(
+        "comfy_cli.command.extensions",
+        help="Turn a custom node pack's frontend code off or on (no restart; reload the page).",
+    ),
     "templates": LazySubcommand("comfy_cli.command.templates", help="Browse the Comfy workflow-template gallery."),
     "knowledge": LazySubcommand(
         "comfy_cli.command.knowledge",
