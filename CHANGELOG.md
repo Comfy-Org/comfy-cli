@@ -99,6 +99,10 @@ history.
 
 ### Fixed
 
+- A failed `comfy run` or `comfy jobs watch` no longer prints the failing
+  node's inputs, which can hold an API key: `comfy run` drops them from its
+  error dump and `execution_error` stream event, and `jobs watch` from its
+  envelope when ComfyUI's live error event has no traceback.
 - `comfy knowledge resolve` no longer suggests, in `candidate_ids`, a model id
   that differs from another id only by letter case. Such an id resolves to the
   other model, so retrying it would pick the wrong one.

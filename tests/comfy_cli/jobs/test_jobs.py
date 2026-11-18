@@ -5442,3 +5442,44 @@ def test_poll_cloud_once_clears_a_recorded_rate_limit_on_the_next_good_poll():
     assert job_watcher._poll_cloud_once(state, client=_Ok()) is False
     assert state.error is None
     assert state.status not in jobs_state.TERMINAL_STATUSES
+
+
+class TestALiveFailureWithoutATracebackIsRedacted:
+    """A live `execution_error` event lands in the payload twice: promoted to
+    `execution_error` (trimmed and redacted) and copied to `details` raw.
+
+    `details` was only rebuilt when it carried a `traceback`, so an event
+    without one reached the envelope with the failing node's `current_inputs`
+    (which can hold an API key) intact.
+    """
+
+    EVENT = {
+        "prompt_id": "p",
+        "node_id": "5",
+        "node_type": "ApiNode",
+        "exception_message": "boom",
+        "exception_type": "RuntimeError",
+        "current_inputs": {"api_key": ["sk-redact-me"]},
+    }
+
+    def _envelope(self, capsys, payload):
+        import typer
+
+        from comfy_cli.command import jobs
+        from comfy_cli.output.renderer import OutputMode, Renderer
+
+        with pytest.raises(typer.Exit):
+            jobs._emit_terminal(Renderer(mode=OutputMode.JSON), payload, command="jobs watch")
+        return capsys.readouterr().out.strip().splitlines()[-1]
+
+    @pytest.mark.parametrize("status", ["error", "cancelled"])
+    def test_raw_details_do_not_carry_current_inputs(self, capsys, status):
+        payload = {"prompt_id": "p", "status": status, "details": dict(self.EVENT)}
+        payload["execution_error"] = dict(self.EVENT)
+        out = self._envelope(capsys, payload)
+        assert "sk-redact-me" not in out
+        assert json.loads(out)["error"]["details"]["details"]["exception_message"] == "boom"
+
+    def test_an_error_dict_does_not_carry_current_inputs(self, capsys):
+        payload = {"prompt_id": "p", "status": "error", "error": {**self.EVENT, "message": "boom"}}
+        assert "sk-redact-me" not in self._envelope(capsys, payload)

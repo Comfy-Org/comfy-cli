@@ -225,6 +225,15 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
     if isinstance(structured, dict):
         structured = execution_errors.trim_record(structured)
         payload["execution_error"] = structured
+    # A live watch also copies the raw event to `details`, and some callers
+    # carry the record as `error`. Both reach the envelope; redact them here,
+    # whatever the status, because the traceback rewrite below only replaces
+    # `details` when the event has a traceback.
+    if isinstance(payload.get("details"), dict):
+        payload["details"] = execution_errors.redact_record(payload["details"])
+    if isinstance(err, dict):
+        err = execution_errors.redact_record(err)
+        payload["error"] = err
     if status == "error":
         # Classify the structured record itself when the cloud snapshot
         # carries one: re-parsing the flattened one-liner would JSON-sniff an
