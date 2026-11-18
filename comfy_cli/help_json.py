@@ -12,7 +12,7 @@ docstrings. Phase 2 will hoist this alongside ``comfy discover`` and add a
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 import typer
 
@@ -78,7 +78,7 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
         "is_flag": bool(getattr(param, "is_flag", False)),
         "multiple": bool(getattr(param, "multiple", False)),
     }
-    type_info = _type_to_dict(param.type)
+    type_info = _param_type_info(param)
     info["type"] = type_info["type"]
     if "choices" in type_info:
         info["choices"] = type_info["choices"]
@@ -91,6 +91,74 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
         info["flags"] = list(param.opts) + list(param.secondary_opts)
         info["envvar"] = param.envvar
     return info
+
+
+def _param_type_info(param: click.Parameter) -> dict[str, Any]:
+    """Resolve a parameter's ``{type, choices?}`` across typer versions.
+
+    click (and typer < 0.29) expose the resolved ``click.ParamType`` as
+    ``param.type``. typer >= 0.29 rebuilt its parameter model: ``TyperOption`` /
+    ``TyperArgument`` no longer carry a ``type`` attribute (the click param is
+    built lazily at parse time), and the resolved annotation now lives on
+    ``param.type_descriptor``. Read whichever one is present and produce the same
+    contract either way, so the help JSON is identical on both.
+    """
+    t = getattr(param, "type", None)
+    if t is not None:
+        return _type_to_dict(t)
+    td = getattr(param, "type_descriptor", None)
+    if td is not None:
+        return _type_from_descriptor(td)
+    # Unknown typer internals (a future refactor): keep the required ``type``
+    # string present rather than crashing the whole document. The newest-typer
+    # CI lane (see .github/workflows/pytest.yml) is what surfaces this early.
+    return {"type": "str"}
+
+
+def _descriptor_flag(td: Any, name: str) -> bool:
+    """Read a boolean ``TypeDescriptor`` property, defaulting to False.
+
+    typer >= 0.29 computes several of these lazily and some (e.g. ``is_ranged``)
+    raise on non-class annotations like ``list[str]`` — a bare ``getattr`` default
+    only absorbs ``AttributeError``, so swallow any error and treat the flag as
+    unset. Every flag we read is "is the type this shape?", so False-on-error is
+    the correct, contract-preserving answer for the annotations that trip it.
+    """
+    try:
+        return bool(getattr(td, name))
+    except Exception:
+        return False
+
+
+def _type_from_descriptor(td: Any) -> dict[str, Any]:
+    """Build the ``{type, choices?}`` contract from a typer >= 0.29 TypeDescriptor.
+
+    Maps the descriptor back to the same ``type`` strings the ``click.ParamType``
+    path emits — ``"choice"``, ``"int range"`` / ``"float range"``, ``"path"``,
+    ``"boolean"``, ``"int"``, ``"float"``, ``"str"`` — so the contract does not
+    drift when the installed typer crosses 0.29.
+    """
+    if _descriptor_flag(td, "is_choice"):
+        # ``choices`` are enum members on typer >= 0.29; emit their values, as the
+        # ``click.Choice`` path did (``schemas/help.json`` requires strings).
+        choices = getattr(td, "choices", None) or ()
+        return {
+            "type": "choice",
+            "choices": [str(getattr(c, "value", c)) for c in choices],
+        }
+    annotation = td.annotation
+    # ``multiple`` options carry a ``list[...]`` / ``tuple[...]`` annotation; the
+    # click path reported the element type, so unwrap to it.
+    if _descriptor_flag(td, "is_list") or _descriptor_flag(td, "is_tuple"):
+        args = get_args(annotation)
+        if args:
+            annotation = args[0]
+    base = {bool: "boolean", int: "int", float: "float", str: "str"}.get(
+        annotation, getattr(annotation, "__name__", str(annotation)).lower()
+    )
+    if _descriptor_flag(td, "is_ranged"):
+        return {"type": f"{base} range"}
+    return {"type": base}
 
 
 def _type_to_dict(t: click.ParamType) -> dict[str, Any]:
