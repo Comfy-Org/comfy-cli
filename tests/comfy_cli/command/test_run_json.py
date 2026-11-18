@@ -3097,6 +3097,40 @@ class TestOutputNodeIdsCloud:
         assert ignored["code"] == "partial_execution_targets_ignored"
         assert ignored["untargeted_output_node_ids"] == ["2"]
 
+    def test_async_run_records_targets_for_a_later_watch(self, monkeypatch, two_output_workflow_file, capsys):
+        """Without --wait nothing checks the returned outputs at submit time,
+        so the job record keeps the targets and their subgraph for
+        `comfy jobs watch` / `jobs status` to judge, and the queued envelope
+        says the check happens there (BE-24608)."""
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        written = []
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: written.append(state) or "/tmp/state.json")
+        lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        state = written[-1]
+        assert state.output_node_ids == ["3"]
+        # Target 3 and the latent it reads; node 2 is outside the run graph.
+        assert sorted(state.run_graph_node_ids) == ["1", "3"]
+        assert state.output_node_ids_checked is True
+        data = _envelope(lines)["data"]
+        assert data["status"] == "queued"
+        assert "comfy jobs watch cloud-pid --where cloud" in data["note"]
+
+    def test_async_untargeted_run_records_no_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        written = []
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: written.append(state) or "/tmp/state.json")
+        lines, _exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=False, timeout=5)
+        assert written[-1].output_node_ids is None
+        assert written[-1].run_graph_node_ids is None
+        assert "note" not in _envelope(lines)["data"]
+
     def test_empty_output_lists_count_as_missing(self, monkeypatch, two_output_workflow_file, capsys):
         record = {"status": {"status_str": "success"}, "outputs": {"3": {"images": [], "animated": [False]}}}
         _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=_TARGET_OBJECT_INFO)

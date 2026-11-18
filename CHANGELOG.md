@@ -17,6 +17,13 @@ history.
 
 ### Added
 
+- `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
+  finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
+  `data.warnings` reports `partial_execution` for a target that returned
+  nothing and `partial_execution_targets_ignored` when the server also ran
+  nodes outside the targets. An async targeted run records its targets on the
+  job state file, and its `queued` envelope carries a `data.note` naming the
+  watch command.
 - `comfy templates ls --local-only` drops partner-API templates from the
   index (a name starting with `api_`, or an API tag) with no network
   beyond the index. `--runnable` implies `--local-only`, then checks

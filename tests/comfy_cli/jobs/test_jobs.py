@@ -2386,6 +2386,70 @@ def test_cloud_status_snapshot_without_item_map_emits_empty_by_item(monkeypatch)
     assert snap["outputs_by_item"] == {}
 
 
+def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True):
+    from comfy_cli import jobs_state
+
+    state = jobs_state.new(prompt_id=prompt_id, client_id="c", workflow="w", where="cloud")
+    state.output_node_ids = targets
+    state.run_graph_node_ids = run_graph
+    state.output_node_ids_checked = checked
+    jobs_state.write(state)
+
+
+def test_cloud_status_snapshot_warns_when_a_targeted_job_ran_untargeted_nodes(monkeypatch):
+    """BE-24608: an async `comfy run --output-node-ids` is judged when it is
+    watched. Node 12 is outside target 9's run graph and still produced an
+    output, so the server ignored the targets."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-ignored", targets=["9"], run_graph=["9", "4"])
+
+    snap = jobs_mod._cloud_status_snapshot("pid-ignored")
+    [warning] = snap["warnings"]
+    assert warning["code"] == "partial_execution_targets_ignored"
+    assert warning["untargeted_output_node_ids"] == ["12"]
+
+
+def test_cloud_status_snapshot_warns_when_a_target_returned_nothing(monkeypatch):
+    record = {"status": {"status_str": "success"}, "outputs": {"9": {"images": [{"filename": "a.png"}]}}}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
+    _targeted_cloud_job("pid-missing", targets=["9", "12"], run_graph=["9", "12"])
+
+    [warning] = jobs_mod._cloud_status_snapshot("pid-missing")["warnings"]
+    assert warning["code"] == "partial_execution"
+    assert warning["missing_output_node_ids"] == ["12"]
+
+
+def test_cloud_status_snapshot_targeted_job_that_ran_as_asked_has_no_warnings(monkeypatch):
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-clean", targets=["9", "12"], run_graph=["9", "12"])
+
+    assert jobs_mod._cloud_status_snapshot("pid-clean")["warnings"] == []
+
+
+def test_cloud_status_snapshot_untargeted_job_carries_no_warnings_key(monkeypatch):
+    """Only a targeted job is judged; the snapshot shape of every other job
+    is unchanged."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+
+    assert "warnings" not in jobs_mod._cloud_status_snapshot("pid-untargeted")
+
+
+def test_cloud_watch_prints_the_targets_warning(monkeypatch, capsys):
+    """`comfy jobs watch --where cloud` ends on the same snapshot, so its
+    terminal envelope carries the warning too."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    _targeted_cloud_job("pid-watch", targets=["9"], run_graph=["9"])
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    jobs_mod._cloud_watch("pid-watch", poll_interval=0.0, max_wait=1.0)
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    [warning] = lines[-1]["data"]["warnings"]
+    assert warning["code"] == "partial_execution_targets_ignored"
+
+
 def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
     """In-flight jobs have no record to group — keys present, empty dicts."""
 

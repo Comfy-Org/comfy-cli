@@ -287,6 +287,14 @@ more than was asked for, most likely because it does not support
 A local run has no `data.warnings`; compare `data.executed_node_ids` with the
 targets to check the same thing.
 
+A cloud `--output-node-ids` run without `--wait` cannot check anything at
+submit time. Its `queued` envelope carries a `data.note` naming the
+`comfy jobs watch <prompt_id> --where cloud` command, and the job's state file
+records the targets (`output_node_ids`, `run_graph_node_ids`,
+`output_node_ids_checked`). Once the job completes, `comfy jobs watch --where
+cloud` and `comfy jobs status --where cloud` run the same check and carry the
+same entries in `data.warnings`. That key is present only for a targeted job.
+
 ## Event reference
 
 | `type`             | When                                                 |

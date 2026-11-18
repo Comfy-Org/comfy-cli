@@ -941,7 +941,7 @@ def _load_workflow_or_exit(renderer, workflow, preloaded):
         raise typer.Exit(code=1) from e
 
 
-def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, **where_fields):
+def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, targets=None, **where_fields):
     """Create + persist the initial ``queued`` job state. Shared by the local
     async path and the cloud non-wait path — the ``--wait`` paths (local and
     cloud) build the state inline instead, since they also stamp their own
@@ -950,6 +950,10 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     ``where_fields`` carries the target-specific locators (``host``/``port`` for
     local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair,
     whose second element is None when the write could not land.
+
+    ``targets`` is the ``(output_node_ids, run_graph, ids_checked)`` triple of
+    a cloud ``--output-node-ids`` run, recorded so ``comfy jobs watch`` can
+    judge the finished job; see :func:`_record_targets`.
 
     The write goes through ``_write_state``, not ``jobs_state.write`` directly,
     and that is load-bearing: both callers run *after* the server accepted the
@@ -970,8 +974,20 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
         **where_fields,
     )
     state.item_map = (compose_meta or {}).get("items")
+    if targets is not None:
+        _record_targets(state, *targets)
     state_file = _write_state(state)
     return state, state_file
+
+
+def _record_targets(state, output_node_ids, run_graph: dict, ids_checked: bool) -> None:
+    """Stamp a ``--output-node-ids`` run's targets on its job record. A no-op
+    for an untargeted run, so its record keeps the null defaults."""
+    if not output_node_ids:
+        return
+    state.output_node_ids = list(output_node_ids)
+    state.run_graph_node_ids = [str(nid) for nid in run_graph]
+    state.output_node_ids_checked = bool(ids_checked)
 
 
 def _announce_async_queued(
@@ -984,6 +1000,7 @@ def _announce_async_queued(
     state_file,
     watcher_spawned,
     locator_fields,
+    note=None,
 ):
     """Async-submit ``queued`` tail shared by the local async path and the
     cloud non-wait path: the pretty status panel (+ watcher-failure warning),
@@ -1019,6 +1036,8 @@ def _announce_async_queued(
         )
         if not watcher_spawned:
             pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
+        if note:
+            pprint(f"  [dim]{sanitize_markup(note)}[/dim]")
     renderer.emit(
         {
             "workflow": workflow_name,
@@ -1032,6 +1051,7 @@ def _announce_async_queued(
             # Lets a consumer know whether something is keeping the state file
             # fresh, or whether it must poll `comfy jobs status` itself.
             "watcher_spawned": watcher_spawned,
+            **({"note": note} if note else {}),
         },
         command="run",
         where=where,
@@ -1486,6 +1506,7 @@ def execute_cloud(
             workflow_name,
             where="cloud",
             compose_meta=compose_meta,
+            targets=(output_node_ids, run_graph, bool(cloud_object_info)),
             base_url=target.base_url,
         )
         _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1496,15 +1517,24 @@ def execute_cloud(
         watcher_spawned = state_file is not None and _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
+        watch_command = f"comfy jobs watch {submit.prompt_id} --where cloud"
         _announce_async_queued(
             submit.prompt_id,
             client_id,
             workflow_name,
             where="cloud",
-            watch_command=f"comfy jobs watch {submit.prompt_id} --where cloud",
+            watch_command=watch_command,
             state_file=state_file,
             watcher_spawned=watcher_spawned,
             locator_fields={"base_url": target.base_url},
+            # Nothing judges the returned outputs at submit time, so say
+            # where the --output-node-ids check happens instead.
+            note=(
+                f"--output-node-ids is checked when the job finishes: run `{watch_command}` "
+                "to see whether the server ran only the targets"
+                if output_node_ids
+                else None
+            ),
         )
         return
 
@@ -1524,6 +1554,7 @@ def execute_cloud(
         base_url=target.base_url,
     )
     state.item_map = (compose_meta or {}).get("items")
+    _record_targets(state, output_node_ids, run_graph, bool(cloud_object_info))
     jobs_state.stamp_watcher_identity(state)
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")

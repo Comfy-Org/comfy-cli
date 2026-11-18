@@ -963,7 +963,9 @@ subgraph contains a partner node. If no partner credential is sent, it may fail
 mid-run with `execution_error`. On a
 `--where cloud --wait` run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
 when a targeted node returned nothing, and `partial_execution_targets_ignored`
-when the server ran untargeted nodes anyway.
+when the server ran untargeted nodes anyway. Without `--wait`, the same check
+runs when the job is followed with `comfy jobs watch <prompt_id> --where cloud`
+(or `comfy jobs status`): read `data.warnings` there.
 
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)

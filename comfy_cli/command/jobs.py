@@ -3239,6 +3239,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     outputs_by_item: dict[str, list[str]] = {}
     text_outputs: dict[str, list[str]] = {}
     record_outputs: Any = None
+    targeted_warnings: list[dict] | None = None
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
@@ -3261,6 +3262,18 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
             job = jobs_state.read(prompt_id)
             item_map = job.item_map if job is not None else None
             outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
+            # A `comfy run --output-node-ids` job is judged on its targets
+            # here, the same check `comfy run --wait` runs, so an async run
+            # or `jobs watch` also warns when the server ignored the targets.
+            if job is not None and job.output_node_ids:
+                from comfy_cli.command.run import _targeted_run_warnings
+
+                targeted_warnings = _targeted_run_warnings(
+                    record,
+                    job.output_node_ids,
+                    dict.fromkeys(job.run_graph_node_ids or job.output_node_ids),
+                    job.output_node_ids_checked,
+                )
 
     # `/api/jobs/<id>` (JobDetailResponse) serves the failure cause as a
     # structured `execution_error` object and the timestamps as Unix-ms ints —
@@ -3321,6 +3334,10 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
+    if targeted_warnings is not None:
+        # Present only for a targeted job, so every other snapshot keeps its
+        # shape. Same entries as `comfy run --wait`'s `data.warnings`.
+        snap["warnings"] = targeted_warnings
     if note := _nothing_to_show_note(state, record_outputs, where="cloud"):
         snap["note"] = note
     return snap
