@@ -129,7 +129,10 @@ def _normalize_content_hash(value: str) -> str:
     return f"blake3:{m.group(1).lower()}" if m else value
 
 
-@app.command("ls", help="List your assets on Comfy Cloud.")
+@app.command(
+    "ls",
+    help="List assets on Comfy Cloud: your own plus public ones. --mine-only lists only your own.",
+)
 @tracking.track_command("assets")
 def ls_cmd(
     name: Annotated[
