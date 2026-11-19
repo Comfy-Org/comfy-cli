@@ -1195,12 +1195,58 @@ def validate_node_for_publishing():
     return config
 
 
+MAX_HYGIENE_FINDINGS_SHOWN = 50
+
+
+def _report_agent_pack_hygiene(force: bool) -> None:
+    """Advisory: what Settings > Extensions cannot turn off in an agent pack. Never fails."""
+    from comfy_cli.command.custom_nodes import agent_pack_hygiene
+    from comfy_cli.output.sanitize import sanitize_markup
+
+    pack = pathlib.Path.cwd()
+    notes: list[str] = []
+    try:
+        if not (force or agent_pack_hygiene.is_agent_pack(pack)):
+            return
+        findings = agent_pack_hygiene.check_pack(pack, notes)
+    except Exception as e:  # noqa: BLE001 - advisory only: never block the publishing checks
+        print(f"[yellow]Agent pack hygiene check could not run: {sanitize_markup(str(e))}[/yellow]")
+        return
+    if not findings and not notes:
+        print("[green]Agent pack hygiene: no findings.[/green]")
+        return
+    if findings:
+        print(
+            f"[yellow]Agent pack hygiene: {len(findings)} advisory finding(s) "
+            "(validation does not fail on these):[/yellow]"
+        )
+    for finding in findings[:MAX_HYGIENE_FINDINGS_SHOWN]:
+        print(
+            f"[yellow]  {sanitize_markup(finding.file)}:{finding.line} {finding.kind}: "
+            f"{sanitize_markup(finding.message)}[/yellow]"
+        )
+    if len(findings) > MAX_HYGIENE_FINDINGS_SHOWN:
+        print(f"[yellow]  ... and {len(findings) - MAX_HYGIENE_FINDINGS_SHOWN} more[/yellow]")
+    for note in notes:
+        print(f"[yellow]Agent pack hygiene: not checked: {sanitize_markup(note)}[/yellow]")
+
+
 @app.command("validate", help="Validate this custom node for registry publishing")
 @tracking.track_command("publish")
-def validate():
+def validate(
+    agent_pack: Annotated[
+        bool,
+        typer.Option(
+            "--agent-pack",
+            help="Also run the advisory agent-pack hygiene check. It runs on its own when the pack "
+            "carries the local agent's install record or an `agent.` extension name.",
+        ),
+    ] = False,
+):
     """
     Run validation checks that would be performed during publishing.
     """
+    _report_agent_pack_hygiene(agent_pack)
     validate_node_for_publishing()
 
 
