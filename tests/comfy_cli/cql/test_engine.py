@@ -5460,3 +5460,568 @@ class TestSubgraphDefNodesShapeChecks:
             "definitions": {"subgraphs": [{"id": "bad", "nodes": 5}, {"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
         }
         assert _count_instances(wf, "u1") == 2
+
+
+class TestAutogrowSlotPorts:
+    """Autogrow slot keys (``images.image0``, ``model.images.image_1``, …) are
+    type-, shape- and catalog-checked exactly as ordinary inputs are.
+
+    ``/object_info`` declares the GROUP and never its grown slots, so a slot key
+    never entered ``port_by_name``: a link-valued one got ``dangling_edge`` /
+    ``output_index_out_of_range`` but skipped the ``edge_type_mismatch``
+    comparison, and a plain-valued one fell out at ``if port is None: continue``
+    before any shape or catalog check. An ``INT`` wired into an ``IMAGE`` slot
+    validated clean here and was then hard-rejected by the server as
+    ``return_type_mismatch`` (``execution.validate_inputs`` →
+    ``validate_node_input`` on the expanded ``template_input``). Validation now
+    synthesizes one :class:`Port` per present, template-declared slot key from
+    the group's own template input.
+
+    ``Grow`` mirrors the live ``BatchImagesNode.images``
+    (``prefix: image``, ``min: 1``, ``max: 50``, inner ``IMAGE``).
+    """
+
+    INFO = {
+        "IntSrc": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["INT"],
+            "output_name": ["value"],
+            "display_name": "IntSrc",
+            "python_module": "nodes",
+        },
+        "ImgSrc": {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["IMAGE"],
+            "output_name": ["image"],
+            "display_name": "ImgSrc",
+            "python_module": "nodes",
+        },
+        "Grow": {
+            "input": {
+                "required": {
+                    "images": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"image": ["IMAGE", {}]}},
+                                "prefix": "image",
+                                "min": 1,
+                                "max": 50,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["images"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "Grow",
+            "python_module": "nodes",
+        },
+        # Template inner type COMBO: the slot value is a catalog choice, so the
+        # synthesized port must inherit `enum_values`/`enum_declared`.
+        "GrowCombo": {
+            "input": {
+                "required": {
+                    "opts": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"choice": ["COMBO", {"options": ["a", "b"]}]}},
+                                "prefix": "opt",
+                                "min": 0,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["opts"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowCombo",
+            "python_module": "nodes",
+        },
+        # Template inner type INT with a declared range: the synthesized port
+        # must inherit `options` so the range check applies to the slot.
+        "GrowInt": {
+            "input": {
+                "required": {
+                    "counts": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"count": ["INT", {"min": 1, "max": 10}]}},
+                                "prefix": "n",
+                                "min": 0,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["counts"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowInt",
+            "python_module": "nodes",
+        },
+        # A template carrying no inner input at all: nothing declares the slot's
+        # type, so no port is synthesized and the historical "no port, no
+        # diagnostic" behaviour stands.
+        "GrowEmpty": {
+            "input": {
+                "required": {
+                    "blanks": [
+                        "COMFY_AUTOGROW_V3",
+                        {"template": {"input": {}, "prefix": "blank", "min": 0}},
+                    ]
+                }
+            },
+            "input_order": {"required": ["blanks"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowEmpty",
+            "python_module": "nodes",
+        },
+        "Sink": {
+            "input": {"required": {"image": ["IMAGE", {}]}},
+            "input_order": {"required": ["image"]},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "display_name": "Sink",
+            "python_module": "nodes",
+        },
+        # Inner IMAGE type but no names/prefix: declared_slot_keys is None, so
+        # slots must not be typed by a prefix match (a typo like images.bogus
+        # used to pick up an IMAGE port and hard-error).
+        "GrowNoNames": {
+            "input": {
+                "required": {
+                    "images": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"image": ["IMAGE", {}]}},
+                                "min": 1,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["images"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowNoNames",
+            "python_module": "nodes",
+        },
+        # Classic list-form COMBO as the template's first (and only) input —
+        # autogrow_template_input_spec must not skip it for lacking a string
+        # type_id.
+        "GrowListCombo": {
+            "input": {
+                "required": {
+                    "opts": [
+                        "COMFY_AUTOGROW_V3",
+                        {
+                            "template": {
+                                "input": {"required": {"choice": [["a", "b"], {}]}},
+                                "prefix": "opt",
+                                "min": 0,
+                            }
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["opts"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "GrowListCombo",
+            "python_module": "nodes",
+        },
+        # A group nested under a dynamic combo's selected option, with an
+        # inner type but no names/prefix: the nested twin of GrowNoNames.
+        "NestedNoNames": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "m1",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": ["IMAGE", {}]}},
+                                                        "min": 0,
+                                                    }
+                                                },
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "NestedNoNames",
+            "python_module": "nodes",
+        },
+        # Same shape, list-form COMBO inner input: the slot type must read as
+        # the string "COMBO", never the choice list itself.
+        "NestedNoNamesListCombo": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "m1",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": [["a", "b"], {}]}},
+                                                        "min": 0,
+                                                    }
+                                                },
+                                            ]
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "display_name": "NestedNoNamesListCombo",
+            "python_module": "nodes",
+        },
+    }
+
+    def _graph(self) -> Graph:
+        return Graph.from_object_info(self.INFO)
+
+    def _wf(self, class_type: str, inputs: dict) -> dict:
+        """`class_type` fed by an INT producer (`"0"`) and an IMAGE producer
+        (`"1"`), consumed by an output node so the node is output-reachable (the
+        server prunes anything else, and the range checks are gated on that).
+        Producers `inputs` doesn't reference are dropped, so an unused one
+        doesn't add `node_not_reachable_from_output` noise to the assertions."""
+        used = {str(v[0]) for v in inputs.values() if isinstance(v, list) and len(v) == 2}
+        producers = {
+            "0": {"class_type": "IntSrc", "inputs": {}},
+            "1": {"class_type": "ImgSrc", "inputs": {}},
+        }
+        return {
+            **{k: v for k, v in producers.items() if k in used},
+            "2": {"class_type": class_type, "inputs": inputs},
+            "3": {"class_type": "Sink", "inputs": {"image": ["2", 0]}},
+        }
+
+    # -- edges ------------------------------------------------------------
+
+    def test_int_source_into_an_image_slot_is_a_type_mismatch(self):
+        """The reported defect, top level: an INT output wired into
+        ``Grow.images.image0`` (template inner type ``IMAGE``) used to validate
+        clean and be hard-rejected by the server."""
+        result = self._graph().validate_workflow(self._wf("Grow", {"images.image0": ["0", 0]}))
+        errs = [e for e in result["errors"] if e["code"] == "edge_type_mismatch"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "2"
+        assert errs[0]["field"] == "images.image0"
+        assert "expects IMAGE but IntSrc[0] produces INT" in errs[0]["message"]
+        # Reachable type mismatches are hard errors (the server would reject
+        # the prompt); slot keys inherit that severity.
+        assert result["valid"] is False
+
+    def test_correctly_wired_slot_stays_clean(self):
+        result = self._graph().validate_workflow(self._wf("Grow", {"images.image0": ["1", 0]}))
+        assert result["valid"] is True, result["errors"]
+        assert result["warnings"] == []
+
+    def test_undeclared_slot_key_gets_no_synthesized_diagnostic(self):
+        """``images.bogus`` is not a name the template grows, so the server
+        never places it in the node's schema — no port is synthesized for it and
+        it draws no edge diagnostic (nor a crash). The top level has no
+        unknown-input check, so it stays silent there; the nested path keeps
+        reporting ``unknown_input`` (see ``test_nested_autogrow.py``)."""
+        result = self._graph().validate_workflow(
+            self._wf("Grow", {"images.image0": ["1", 0], "images.bogus": ["0", 0]})
+        )
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    def test_dangling_slot_edge_keeps_its_existing_error(self):
+        """Regression pin: the checks a slot key ALREADY got must not change."""
+        result = self._graph().validate_workflow(self._wf("Grow", {"images.image0": ["99", 0]}))
+        err = next(e for e in result["errors"] if e["code"] == "dangling_edge")
+        assert err["field"] == "images.image0"
+
+    # -- shape / catalog --------------------------------------------------
+
+    def test_combo_template_slot_value_is_membership_checked(self):
+        """A COMBO template makes each slot a catalog choice; the synthesized
+        port inherits the option list, so an unknown value is the same
+        ``unknown_enum_value`` error any declared COMBO input gets."""
+        result = self._graph().validate_workflow(self._wf("GrowCombo", {"opts.opt0": "zzz"}))
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "2"
+        assert errs[0]["field"] == "opts.opt0"
+
+    def test_combo_template_slot_value_in_the_enum_is_clean(self):
+        result = self._graph().validate_workflow(self._wf("GrowCombo", {"opts.opt0": "a"}))
+        assert result["valid"] is True, result["errors"]
+        assert result["warnings"] == []
+
+    def test_ranged_int_template_slot_value_is_range_checked(self):
+        """A ranged INT template makes each slot range-checked: ``min: 1`` with
+        a slot value of ``0`` is the same ``below_min`` error a declared INT
+        input gets."""
+        result = self._graph().validate_workflow(self._wf("GrowInt", {"counts.n0": 0}))
+        errs = [e for e in result["errors"] if e["code"] == "below_min"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "counts.n0"
+
+    def test_int_template_slot_shape_is_checked(self):
+        result = self._graph().validate_workflow(self._wf("GrowInt", {"counts.n0": "five"}))
+        errs = [e for e in result["errors"] if e["code"] == "shape_mismatch"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "counts.n0"
+
+    def test_template_with_no_inner_input_synthesizes_nothing(self):
+        """Nothing declares the slot's type, so there is nothing to check it
+        against — no port, no diagnostic, no crash."""
+        result = self._graph().validate_workflow(
+            self._wf("GrowEmpty", {"blanks.blank0": ["0", 0], "blanks.blank1": "anything"})
+        )
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    # -- the synthesized ports themselves ---------------------------------
+
+    def test_autogrow_slot_port_reads_the_template_input(self):
+        graph = self._graph()
+        grow = graph.node("Grow")
+        assert grow is not None
+        port = next(p for p in grow.inputs if p.name == "images")
+        slot = port.autogrow_slot_port("images.image0", required=True)
+        assert slot is not None
+        assert (slot.name, slot.type, slot.required) == ("images.image0", "IMAGE", True)
+
+    def test_autogrow_slot_port_is_none_without_a_template_input(self):
+        graph = self._graph()
+        empty = graph.node("GrowEmpty")
+        sink = graph.node("Sink")
+        assert empty is not None and sink is not None
+        blanks = next(p for p in empty.inputs if p.name == "blanks")
+        assert blanks.autogrow_slot_port("blanks.blank0", required=False) is None
+        # A non-autogrow port has no template to read at all.
+        image = next(p for p in sink.inputs if p.name == "image")
+        assert image.autogrow_slot_port("image.x", required=False) is None
+
+    def test_slot_ports_mark_the_servers_required_slot_names_required(self):
+        """``required`` per slot is the server's own answer — the names it
+        places in the expanded schema's ``required`` section (``names[:min]``),
+        not merely the first ``min`` keys the prompt happens to wire."""
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        grow = graph.node("Grow")
+        assert grow is not None
+        port = next(p for p in grow.inputs if p.name == "images")
+        ports = _autogrow_slot_ports("images", port, ["images.image0", "images.image1"])
+        # `min: 1` with the inner input in the template's own `required`
+        # section, so only slot 0 is required.
+        assert ports["images.image0"].required is True
+        assert ports["images.image1"].required is False
+
+    def test_slot_ports_inherit_the_template_enum_and_options(self):
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        combo, ranged = graph.node("GrowCombo"), graph.node("GrowInt")
+        assert combo is not None and ranged is not None
+        opts = next(p for p in combo.inputs if p.name == "opts")
+        slot = _autogrow_slot_ports("opts", opts, ["opts.opt0"])["opts.opt0"]
+        assert slot.type == "COMBO"
+        assert slot.enum_values == ["a", "b"]
+        assert slot.enum_declared is True
+        counts = next(p for p in ranged.inputs if p.name == "counts")
+        int_slot = _autogrow_slot_ports("counts", counts, ["counts.n0"])["counts.n0"]
+        assert (int_slot.options.min, int_slot.options.max) == (1, 10)
+
+    def test_slot_ports_skip_keys_the_template_never_declares(self):
+        """The filter is the caller's (``autogrow_declared_slot_keys``), but the
+        helper must not invent a port for a key it is handed either — it types
+        exactly the keys it is given, and the driver only ever hands it declared
+        ones."""
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        grow = graph.node("Grow")
+        assert grow is not None
+        port = next(p for p in grow.inputs if p.name == "images")
+        assert port.autogrow_declared_slot_keys(["images.image0", "images.bogus"]) == {"images.image0"}
+        assert set(_autogrow_slot_ports("images", port, ["images.image0"])) == {"images.image0"}
+
+    def test_no_naming_template_does_not_synthesize_ports_for_typo_keys(self):
+        """When the catalog names no slots, a prefix match must not invent a
+        type for `images.bogus` (or a deeper key). That's the reject-what-you-
+        cannot-read inversion: a typo used to hard-error as `edge_type_mismatch`
+        instead of staying silent at the top level."""
+        result = self._graph().validate_workflow(
+            self._wf("GrowNoNames", {"images.image0": ["1", 0], "images.bogus": ["0", 0]})
+        )
+        assert result["errors"] == []
+        assert result["warnings"] == []
+
+    def test_list_form_combo_template_is_membership_checked(self):
+        """A classic list-form COMBO (`[["a", "b"], {}]`) is a usable template
+        input; skipping it for lacking a string type_id used to leave the slot
+        untyped (and could pick up a later input's spec)."""
+        result = self._graph().validate_workflow(self._wf("GrowListCombo", {"opts.opt0": "zzz"}))
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert len(errs) == 1
+        assert errs[0]["field"] == "opts.opt0"
+        clean = self._graph().validate_workflow(self._wf("GrowListCombo", {"opts.opt0": "a"}))
+        assert clean["valid"] is True, clean["errors"]
+
+    def test_nested_no_naming_template_does_not_infer_a_slot_type(self):
+        """The nested twin of the no-naming case: `model.images.bogus` under a
+        group with no names/prefix gets no inferred IMAGE type, so an INT link
+        into it is not an `edge_type_mismatch`, and a literal on it is not a
+        `literal_on_link_input`."""
+        wf = self._wf("NestedNoNames", {"model": "m1", "model.images.bogus": ["0", 0]})
+        result = self._graph().validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+        assert [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == []
+        assert result["valid"] is True, result["errors"]
+        literal = self._graph().validate_workflow(self._wf("NestedNoNames", {"model": "m1", "model.images.bogus": "x"}))
+        codes = {f["code"] for f in literal["errors"] + literal["warnings"]}
+        assert "literal_on_link_input" not in codes
+
+    def test_nested_list_form_combo_slot_link_does_not_crash(self):
+        """A linked nested slot under a no-naming list-form COMBO template used
+        to reach `Port.type = ["a", "b"]` and raise `TypeError: unhashable
+        type: 'list'` in the edge check."""
+        wf = self._wf("NestedNoNamesListCombo", {"model": "m1", "model.images.image0": ["1", 0]})
+        result = self._graph().validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+
+    def test_list_form_combo_element_type_is_the_combo_type_string(self):
+        graph = self._graph()
+        grow = graph.node("GrowListCombo")
+        assert grow is not None
+        opts = next(p for p in grow.inputs if p.name == "opts")
+        assert opts.autogrow_element_type == "COMBO"
+
+    def test_slot_ports_are_empty_when_there_are_no_slots(self):
+        """A prefix template with a huge min and no max must not expand a
+        billion-element required-names list just to type zero slots."""
+        from comfy_cli.cql.engine import _MAX_AUTOGROW_NAMES, _autogrow_slot_ports, _port_from_spec
+
+        port = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"required": {"image": ["IMAGE", {}]}},
+                        "prefix": "image",
+                        "min": 10**9,
+                    }
+                },
+            ],
+            True,
+        )
+        assert _autogrow_slot_ports("images", port, []) == {}
+        names = port.autogrow_required_slot_names(port.autogrow_effective_min)
+        assert names is not None
+        assert len(names) == _MAX_AUTOGROW_NAMES
+        assert names[0] == "image0"
+        assert names[-1] == f"image{_MAX_AUTOGROW_NAMES - 1}"
+
+    def test_template_input_spec_skips_nested_autogrow_and_dynamic_combo(self):
+        from comfy_cli.cql.engine import _port_from_spec
+
+        nested = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"required": {"inner": ["COMFY_AUTOGROW_V3", {"template": {}}]}},
+                        "prefix": "image",
+                    }
+                },
+            ],
+            True,
+        )
+        assert nested.autogrow_template_input_spec is None
+        assert nested.autogrow_slot_port("images.image0", required=False) is None
+        combo = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {
+                            "required": {"sel": ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "a", "inputs": {}}]}]}
+                        },
+                        "prefix": "image",
+                    }
+                },
+            ],
+            True,
+        )
+        assert combo.autogrow_template_input_spec is None
+
+    def test_template_input_spec_normalizes_a_tuple_wrapper(self):
+        """`_parse_input_spec` only understands str/list; a tuple wrapper must
+        not yield a Port typed UNKNOWN (and a false edge_type_mismatch)."""
+        from comfy_cli.cql.engine import _port_from_spec
+
+        port = _port_from_spec(
+            "images",
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ("IMAGE", {})}}, "prefix": "image"}},
+            ],
+            True,
+        )
+        spec = port.autogrow_template_input_spec
+        assert isinstance(spec, list)
+        assert spec[0] == "IMAGE"
+        slot = port.autogrow_slot_port("images.image0", required=False)
+        assert slot is not None
+        assert slot.type == "IMAGE"
+
+    def test_slot_ports_share_one_parsed_template_port(self):
+        from comfy_cli.cql.engine import _autogrow_slot_ports
+
+        graph = self._graph()
+        combo = graph.node("GrowCombo")
+        assert combo is not None
+        opts = next(p for p in combo.inputs if p.name == "opts")
+        ports = _autogrow_slot_ports("opts", opts, ["opts.opt0", "opts.opt1"])
+        assert ports["opts.opt0"].enum_values is ports["opts.opt1"].enum_values
+        assert ports["opts.opt0"].options is ports["opts.opt1"].options
+        assert ports["opts.opt0"].name == "opts.opt0"
+        assert ports["opts.opt1"].name == "opts.opt1"

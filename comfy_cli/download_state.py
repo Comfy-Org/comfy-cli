@@ -185,10 +185,15 @@ def request_cancel(path: Path) -> bool:
         return False
 
 
-# Destination claims live in their own subdirectory of the (owner-only) state
-# dir rather than next to the user's model files: a claim is our bookkeeping,
-# not something a user should find in `models/loras`, and `list_all` globs
-# `*.json` at the top level so the subdirectory stays invisible to every verb.
+# Destination claims live in one owner-only directory per user and host (see
+# :func:`global_state_dir`), not in a workspace and not next to the user's model
+# files. Not in a workspace, because the claim key is a destination, and two
+# workspaces can aim at one destination: Comfy Desktop points every install at
+# one shared model library, and `--relative-path` accepts paths outside the
+# workspace. A per-workspace claims directory let those two invocations consult
+# disjoint directories, both win, and both write (comfy-cli#1095). Not next to
+# the model file, because a claim is our bookkeeping, not something a user
+# should find in `models/loras`, and a models folder may not be writable.
 #
 # **Ownership of a destination is HELD, not derived.** The process performing a
 # transfer holds an exclusive OS lock (`flock` on POSIX, `msvcrt.locking` on
@@ -287,9 +292,50 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 
 
-def claims_dir(workspace: Path) -> Path:
-    """Return ``<workspace>/.comfy-downloads/claims`` and ensure it exists, owner-only."""
-    base = state_dir(workspace) / CLAIMS_DIRNAME
+# Moves the host-global claims directory into this (absolute) directory. Tests
+# point it at a per-test directory (see tests/conftest.py) so no case shares
+# locks with the developer's machine; a user can point it elsewhere when the
+# default location cannot lock. It names a parent, not the claims directory
+# itself: comfy-cli owns, chmods and sweeps only its own subdirectory, never a
+# directory the user named.
+CLAIMS_DIR_ENV = "COMFY_DOWNLOAD_CLAIMS_DIR"
+
+# The claims directory's name inside comfy-cli's config directory, or inside
+# the directory :data:`CLAIMS_DIR_ENV` names.
+GLOBAL_CLAIMS_DIRNAME = "download-claims"
+
+
+def _default_config_dir() -> str:
+    """comfy-cli's per-user config directory, the same one ``ConfigManager`` uses."""
+    from comfy_cli import constants
+
+    if sys.platform == "win32":
+        return constants.DEFAULT_CONFIG[constants.OS.WINDOWS]
+    if sys.platform == "darwin":
+        return constants.DEFAULT_CONFIG[constants.OS.MACOS]
+    return constants.DEFAULT_CONFIG[constants.OS.LINUX]
+
+
+def global_state_dir() -> Path:
+    """The host-global claims directory, created owner-only on first use.
+
+    One per user and host, so every workspace that user runs a download from
+    consults the same claims: ``download-claims/`` in comfy-cli's config
+    directory, or in the directory :data:`CLAIMS_DIR_ENV` names.
+
+    Raises ``OSError`` when the parent is not an absolute path (an override
+    given as a relative path, or no home directory, which leaves ``~`` in
+    place), or the directory cannot be made. A relative one would resolve
+    against each process's working directory, which is a per-cwd claim: two
+    shells in different directories would both win, the race this directory
+    exists to close. Callers fall back to the workspace's own claims directory
+    (see :func:`claims_dir`), so a download never fails over it.
+    """
+    explicit = os.environ.get(CLAIMS_DIR_ENV, "").strip()
+    parent = os.path.expanduser(explicit) if explicit else _default_config_dir()
+    if not os.path.isabs(parent):
+        raise OSError(errno.ENOENT, "the download claims directory is not an absolute path", parent)
+    base = Path(parent) / GLOBAL_CLAIMS_DIRNAME
     base.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
     if sys.platform != "win32":
         # Same reason as `state_dir`: mkdir's mode is masked by the umask and
@@ -297,6 +343,39 @@ def claims_dir(workspace: Path) -> Path:
         with contextlib.suppress(OSError):
             base.chmod(STATE_DIR_MODE)
     return base
+
+
+def claims_dir(fallback_state_dir: Path | None = None) -> Path:
+    """The directory destination claims live in.
+
+    The host-global one (:func:`global_state_dir`). When that is unavailable and
+    ``fallback_state_dir`` is given, ``<fallback_state_dir>/claims`` instead:
+    the workspace's own directory, where claims lived before #1095. That keeps
+    two downloads in one workspace refusing each other on a host with no usable
+    config directory (no home, a read-only one); only the cross-workspace case
+    is lost there. The submitter and its worker pass the same state directory
+    and inherit the same environment, so they make the same choice.
+    """
+    try:
+        return global_state_dir()
+    except OSError:
+        if fallback_state_dir is None:
+            raise
+    base = Path(fallback_state_dir) / CLAIMS_DIRNAME
+    base.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
+    if sys.platform != "win32":
+        with contextlib.suppress(OSError):
+            base.chmod(STATE_DIR_MODE)
+    return base
+
+
+def workspace_claims_dir(workspace: Path) -> Path:
+    """``<workspace>/.comfy-downloads/claims``: claims from before #1095, and the fallback.
+
+    :func:`prune` sweeps it so a workspace upgraded from that version does not
+    keep its old claim files forever.
+    """
+    return Path(workspace) / STATE_DIRNAME / CLAIMS_DIRNAME
 
 
 def claim_filename(dest_key: str) -> str:
@@ -311,19 +390,44 @@ def claim_filename(dest_key: str) -> str:
     return f"{hashlib.sha256(dest_key.encode('utf-8')).hexdigest()}.claim"
 
 
-def claim_path(workspace: Path, dest_key: str) -> Path:
-    """The claim path for ``dest_key`` under ``workspace``, creating ``claims/``."""
-    return claims_dir(workspace) / claim_filename(dest_key)
+def claim_path(dest_key: str, fallback_state_dir: Path | None = None) -> Path:
+    """The claim path for ``dest_key``, creating the claims directory.
 
-
-def claim_marker_for(state_file: Path, dest_key: str) -> Path:
-    """The claim that pairs with a state file addressed by path.
-
-    The worker is handed ``--state <file>`` and never re-resolves a workspace
-    (same reason as :func:`cancel_marker_for`), so it derives the claim from the
-    state file's own directory. Creates nothing - the worker locks what is there.
+    The one resolver both sides use: the submitter, and the worker it hands
+    ``--state <file>`` to. The worker inherits the submitter's environment, so
+    :data:`CLAIMS_DIR_ENV` reaches it too, and both pass the same state
+    directory as ``fallback_state_dir`` (see :func:`claims_dir`), so they cannot
+    disagree about where a destination's claim is.
     """
-    return Path(state_file).parent / CLAIMS_DIRNAME / claim_filename(dest_key)
+    return claims_dir(fallback_state_dir) / claim_filename(dest_key)
+
+
+def claim_holder_state_file(payload: dict[str, Any], default_dir: Path) -> Path | None:
+    """The state file a claim payload's ``download_id`` lives in, or None.
+
+    A payload written since #1095 names its record's state file (``state``),
+    because the record can sit in any workspace's state directory. One with no
+    ``state`` was written by a per-workspace claim, so its record is in the
+    reader's own state directory, ``default_dir``.
+
+    None when ``state`` is there but cannot be the record ``download_id`` names:
+    not absolute, not ``<download_id>.json``, or not in a ``.comfy-downloads``
+    directory. The pointer is read back off disk, so it is checked before it is
+    opened, and a reader must not resolve the id anywhere else instead.
+    """
+    download_id = payload["download_id"]
+    pointer = payload.get("state")
+    if pointer is None:
+        return Path(default_dir) / f"{download_id}.json"
+    if not isinstance(pointer, str):
+        return None
+    if "\x00" in pointer:
+        # No filesystem call accepts it; `open` would raise ValueError, not OSError.
+        return None
+    path = Path(pointer)
+    if not path.is_absolute() or path.name != f"{download_id}.json" or path.parent.name != STATE_DIRNAME:
+        return None
+    return path
 
 
 def _parse_claim_payload(raw: bytes | str) -> dict[str, Any] | None:
@@ -349,6 +453,15 @@ def _parse_claim_payload(raw: bytes | str) -> dict[str, Any] | None:
     return payload
 
 
+def read_claim_payload(path: Path) -> dict[str, Any] | None:
+    """The whole claim payload at ``path``, read *unlocked*. Same caveats as :func:`read_claim`."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    return _parse_claim_payload(raw)
+
+
 def read_claim(path: Path) -> str | None:
     """The ``download_id`` recorded in the claim at ``path``, read *unlocked*.
 
@@ -362,11 +475,7 @@ def read_claim(path: Path) -> str | None:
     Ownership questions go through :func:`lock_claim` and
     :meth:`ClaimLock.read_payload`, which read the same bytes under the lock.
     """
-    try:
-        raw = Path(path).read_bytes()
-    except OSError:
-        return None
-    payload = _parse_claim_payload(raw)
+    payload = read_claim_payload(path)
     return payload["download_id"] if payload is not None else None
 
 
@@ -424,17 +533,19 @@ class ClaimLock:
             return None
         return _parse_claim_payload(b"".join(chunks))
 
-    def write_payload(self, download_id: str, dest: str) -> None:
+    def write_payload(self, download_id: str, dest: str, state_file: Path | None = None) -> None:
         """Rewrite the payload in place. Raises ``OSError`` if it could not be.
 
-        Same shape the claim has always carried, and still no url: a resolved
-        download url can be presigned, and a claim needs an id and a path.
+        Still no url: a resolved download url can be presigned, and a claim needs
+        an id and a path. ``state_file`` is the record ``download_id`` names.
+        Claims are shared across workspaces, so a reader in another workspace
+        needs it to find that record (see :func:`claim_holder_state_file`).
         """
         fd = self._descriptor()
-        body = json.dumps(
-            {"download_id": download_id, "dest": str(dest), "created_at": _now_iso()},
-            indent=2,
-        ).encode("utf-8")
+        payload: dict[str, Any] = {"download_id": download_id, "dest": str(dest), "created_at": _now_iso()}
+        if state_file is not None:
+            payload["state"] = str(state_file)
+        body = json.dumps(payload, indent=2).encode("utf-8")
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
         view = memoryview(body)
@@ -749,8 +860,23 @@ _TOLERANT_FALLBACKS: dict[str, Any] = {"kind": "foreground"}
 
 def read_path(path: Path) -> DownloadState | None:
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return read_path_strict(path)
+    except OSError:
+        return None
+
+
+def read_path_strict(path: Path) -> DownloadState | None:
+    """Like :func:`read_path`, but a file that cannot be read raises ``OSError``.
+
+    None still means "not a record": bytes that are not UTF-8 JSON of the right
+    shape. Callers that judge a claim holder need the difference, because a
+    record that is gone proves its claim stale and one that could not be read
+    proves nothing (``FileNotFoundError`` is the "gone" case).
+    """
+    raw = Path(path).read_bytes()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
@@ -851,12 +977,17 @@ def _remove_record(path: Path) -> bool:
     return True
 
 
-def _sweep_claims(workspace: Path) -> None:
-    """Drop claim files nothing owns any more, and legacy temp leftovers.
+def _sweep_claims(base: Path, default_dir: Path, *, sweep_tmp: bool = False) -> None:
+    """Drop claim files in ``base`` nothing owns any more, and legacy temp leftovers.
+
+    ``default_dir`` is the state directory a payload naming no state file is
+    resolved in (see :func:`claim_holder_state_file`). ``sweep_tmp`` removes the
+    previous implementation's temp files; only a workspace's own claims
+    directory can hold them, so the shared one is never swept for them.
 
     A claim file is never unlinked on release (see :class:`ClaimLock`), so this
-    is the only thing that bounds ``claims/`` below "every destination this
-    workspace ever downloaded to". It is a nicety, not a correctness step: a
+    is the only thing that bounds the claims directory below "every destination
+    ever downloaded to". It is a nicety, not a correctness step: a
     left-behind claim costs ~100 bytes and refuses nobody, because ownership is
     the *lock*, which no longer exists once its holder is gone.
 
@@ -882,7 +1013,7 @@ def _sweep_claims(workspace: Path) -> None:
     only so a workspace upgraded from it does not carry them forever. Best
     effort throughout, like the rest of :func:`prune`.
     """
-    base = Path(workspace) / STATE_DIRNAME / CLAIMS_DIRNAME
+    base = Path(base)
     try:
         if not base.is_dir():
             return
@@ -892,23 +1023,34 @@ def _sweep_claims(workspace: Path) -> None:
     tmp_cutoff = time.time() - CLAIM_TMP_MAX_AGE_S
     for path in entries:
         if path.name.endswith(CLAIM_TMP_SUFFIX):
+            if not sweep_tmp:
+                continue
             with contextlib.suppress(OSError):
                 if path.stat().st_mtime < tmp_cutoff:
                     path.unlink()
             continue
         if not path.name.endswith(".claim") or sys.platform == "win32":
             continue
-        download_id = _sweep_payload_id(path)
-        if download_id is _SWEEP_SKIP:
+        payload = _sweep_payload(path)
+        if payload is _SWEEP_SKIP:
             continue
-        if download_id is not None:
+        download_id = payload["download_id"] if payload is not None else None
+        if payload is not None:
             # Judged *unlocked*: a record read, a stat of the destination and a
             # psutil query are all slow next to the payload read, and the claim
             # lock is what a submitter is waiting on. Holding it across them
             # would let a sweep refuse an unrelated submit to this destination.
+            record_file = claim_holder_state_file(payload, default_dir)
+            if record_file is None:
+                # A pointer we will not follow is not one we can prove dead.
+                continue
             try:
-                record = read(workspace, download_id)
+                record = read_path_strict(record_file)
+            except FileNotFoundError:
+                record = None
             except (OSError, ValueError):
+                # Unreadable is not gone: the holder may be a submit in its
+                # spawn gap, and unlinking would hand its worker an empty claim.
                 continue
             if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
                 continue
@@ -932,8 +1074,8 @@ def _sweep_claims(workspace: Path) -> None:
 _SWEEP_SKIP: Any = object()
 
 
-def _sweep_payload_id(path: Path) -> Any:
-    """The id stamped in ``path``'s claim, read under a brief lock.
+def _sweep_payload(path: Path) -> Any:
+    """The payload stamped in ``path``'s claim, read under a brief lock.
 
     :data:`_SWEEP_SKIP` when the claim is held or cannot be locked at all — a
     held one is owned, and an unlockable one is not ours to judge.
@@ -945,8 +1087,7 @@ def _sweep_payload_id(path: Path) -> Any:
     if lock is None:
         return _SWEEP_SKIP
     try:
-        payload = lock.read_payload()
-        return payload["download_id"] if payload is not None else None
+        return lock.read_payload()
     finally:
         lock.release()
 
@@ -973,12 +1114,12 @@ def prune(workspace: Path) -> int:
     An in-flight record (``starting``/``downloading``) is never touched at any
     age, and never counts toward — or is evicted by — the cap.
 
-    Also sweeps ``claims/`` (see :func:`_sweep_claims`): a claim file is never
-    unlinked on release — the lock lives on its inode — so without this the
-    directory would grow to one small file per destination the workspace has
-    ever downloaded to, the same unbounded growth the record rules above exist
-    to prevent. Swept claims do not count toward the returned total, which stays
-    "records removed".
+    Also sweeps the claims directory (see :func:`_sweep_claims`), and the
+    workspace's own pre-#1095 one: a claim file is never unlinked on release —
+    the lock lives on its inode — so without this the directory would grow to one
+    small file per destination ever downloaded to, the same unbounded growth the
+    record rules above exist to prevent. Swept claims do not count toward the
+    returned total, which stays "records removed".
 
     Every step is best effort, exactly like :func:`write_path`'s OSError
     handling: a read-only state directory, a permissions problem, or a file a
@@ -986,12 +1127,15 @@ def prune(workspace: Path) -> int:
     the number of records actually removed.
     """
     # Suppressed here rather than inside the sweep: `_sweep_claims` guards its
-    # own directory walk, but it then calls `read`, which resolves the state
-    # directory (an `mkdir`) and only catches `ValueError`. That `OSError` would
-    # escape `prune` and land in a download, which is exactly what the contract
-    # above promises never happens.
+    # own directory walk, but resolving the shared claims directory is an
+    # `mkdir`, and the sweep's record and lock calls can raise too. That `OSError`
+    # would escape `prune` and land in a download, which is exactly what the
+    # contract above promises never happens.
+    default_dir = Path(workspace) / STATE_DIRNAME
     with contextlib.suppress(OSError):
-        _sweep_claims(workspace)
+        _sweep_claims(workspace_claims_dir(workspace), default_dir, sweep_tmp=True)
+    with contextlib.suppress(OSError):
+        _sweep_claims(global_state_dir(), default_dir)
     base = Path(workspace) / STATE_DIRNAME
     try:
         if not base.is_dir():
@@ -1043,6 +1187,15 @@ def _parse_iso(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def claim_payload_age_s(payload: dict[str, Any]) -> float | None:
+    """Seconds since a claim payload was stamped, or None when it carries no usable time."""
+    created_at = payload.get("created_at")
+    stamped = _parse_iso(created_at) if isinstance(created_at, str) else None
+    if stamped is None:
+        return None
+    return (datetime.now(timezone.utc) - stamped).total_seconds()
 
 
 def elapsed_seconds(state: DownloadState) -> float:

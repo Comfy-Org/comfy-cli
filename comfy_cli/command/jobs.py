@@ -225,6 +225,15 @@ def _emit_terminal(renderer, payload: dict, *, command: str, where: str | None =
     if isinstance(structured, dict):
         structured = execution_errors.trim_record(structured)
         payload["execution_error"] = structured
+    # A live watch also copies the raw event to `details`, and some callers
+    # carry the record as `error`. Both reach the envelope; redact them here,
+    # whatever the status, because the traceback rewrite below only replaces
+    # `details` when the event has a traceback.
+    if isinstance(payload.get("details"), dict):
+        payload["details"] = execution_errors.redact_record(payload["details"])
+    if isinstance(err, dict):
+        err = execution_errors.redact_record(err)
+        payload["error"] = err
     if status == "error":
         # Classify the structured record itself when the cloud snapshot
         # carries one: re-parsing the flattened one-liner would JSON-sniff an
@@ -1930,6 +1939,10 @@ def wait_cmd(
             # just waited for an answer to. The row is the whole result of a
             # wait, so the one thing that explains an empty one belongs on it.
             row["note"] = snap["note"]
+        if "warnings" in snap:
+            # The --output-node-ids verdict of a targeted cloud job: the row
+            # is the whole result of the wait, so it carries the verdict too.
+            row["warnings"] = snap["warnings"]
         jobs_list.append(row)
 
     completed = sum(1 for r in jobs_list if r["status"] == "completed")
@@ -3049,9 +3062,23 @@ def _is_cloud(where: str | None) -> bool:
     try:
         decision = where_module.resolve_default(flag=where)
     except ValueError:
-        # Invalid value — fall back to local; the validating command
-        # (cmdline.py top-level option) will surface ``where_invalid``.
-        return False
+        # An invalid persisted ``where_default`` shouldn't be fatal; fall back to
+        # the flag (if valid) or auto-detect with the bad config value dropped.
+        try:
+            decision = where_module.resolve(flag=where, config_value=None)
+        except ValueError as exc:
+            # The flag/env/project value itself is bad, so dropping the config
+            # changed nothing and no further fallback can make it valid. Emit the
+            # shared ``where_invalid`` envelope and exit, exactly as ``nodes``
+            # does — this used to `return False`, on the assumption that
+            # ``cmdline.py``'s top-level ``--where`` had already validated the
+            # value, but that only covers ``comfy --where X jobs ls``. A
+            # per-command ``comfy jobs ls --where bogus`` (or an exported
+            # ``COMFY_WHERE=bogus``) reaches no such validator, so it silently
+            # routed to local and exited 0 with ``ok: true``: a machine consumer
+            # got a successful *local* answer to a question about a target it
+            # never named.
+            raise where_module.where_invalid_exit(exc) from exc
     return decision.target is where_module.WhereTarget.CLOUD
 
 
@@ -3184,6 +3211,60 @@ def _ms_to_iso(value: Any) -> str | None:
         return None
 
 
+def _recorded_id_list(value: Any) -> list[str] | None:
+    """A node-id list read back from a job state file, or None when it is not
+    one. ``jobs_state.read`` checks keys, not types, so a hand-edited file can
+    carry a bare string (which iterates as one id per character) or nested
+    lists; neither may reach the targets check."""
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(v, (str, int)) and not isinstance(v, bool) for v in value):
+        return None
+    return [str(v) for v in value]
+
+
+def _recorded_targets_warnings(prompt_id: str, record: Any) -> list[dict] | None:
+    """The ``--output-node-ids`` verdict for a completed cloud job, judged
+    against the targets ``comfy run`` recorded on its state file. None for a
+    job with no (usable) recorded targets, so its snapshot keeps its shape.
+
+    The history record can lag ``completed`` (absent, or status-only with no
+    ``outputs``). Judging then would report every target missing, so the
+    verdict says the check could not run yet instead."""
+    from comfy_cli import jobs_state
+
+    job = jobs_state.read(prompt_id)
+    if job is None:
+        return None
+    targets = _recorded_id_list(job.output_node_ids)
+    if targets is None:
+        return None
+    run_graph = _recorded_id_list(job.run_graph_node_ids) if job.run_graph_node_ids is not None else targets
+    if run_graph is None:
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("outputs"), dict):
+        unchecked_warnings: list[dict] = []
+        unchecked_warnings.append(
+            {
+                "code": "output_node_ids_unchecked",
+                "message": (
+                    "the cloud has not returned this job's outputs yet, so --output-node-ids could not be "
+                    f"checked; run `comfy jobs status {prompt_id} --where cloud` again"
+                ),
+            }
+        )
+        return unchecked_warnings
+    from comfy_cli.command.run import _targeted_run_warnings
+
+    return _targeted_run_warnings(record, targets, dict.fromkeys(run_graph), bool(job.output_node_ids_checked))
+
+
+def _print_snapshot_warnings(renderer, snap: dict) -> None:
+    for w in snap.get("warnings") or []:
+        if isinstance(w, dict) and w.get("message"):
+            renderer.console().print(f"[yellow]⚠ {sanitize_markup(str(w['message']))}[/yellow]")
+
+
 def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     """Compose a cloud snapshot from /api/jobs/<id> + /api/history_v2/<id>."""
     from comfy_cli import jobs_state
@@ -3216,6 +3297,8 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     outputs_by_item: dict[str, list[str]] = {}
     text_outputs: dict[str, list[str]] = {}
     record_outputs: Any = None
+    targeted_warnings: list[dict] | None = None
+    record: Any = None
     if state == "completed":
         record = client.get_history(prompt_id)
         if record:
@@ -3238,6 +3321,10 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
             job = jobs_state.read(prompt_id)
             item_map = job.item_map if job is not None else None
             outputs_by_node, outputs_by_item = _group_outputs(node_outputs, item_map)
+        # A `comfy run --output-node-ids` job is judged on its targets here,
+        # the same check `comfy run --wait` runs, so an async run, `jobs watch`
+        # and `jobs wait` also warn when the server ignored the targets.
+        targeted_warnings = _recorded_targets_warnings(prompt_id, record)
 
     # `/api/jobs/<id>` (JobDetailResponse) serves the failure cause as a
     # structured `execution_error` object and the timestamps as Unix-ms ints —
@@ -3298,6 +3385,10 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
         "updated_at": status.get("updated_at") or _ms_to_iso(status.get("update_time")),
         "base_url": client.target.base_url,
     }
+    if targeted_warnings is not None:
+        # Present only for a targeted job, so every other snapshot keeps its
+        # shape. Same entries as `comfy run --wait`'s `data.warnings`.
+        snap["warnings"] = targeted_warnings
     if note := _nothing_to_show_note(state, record_outputs, where="cloud"):
         snap["note"] = note
     return snap
@@ -3353,6 +3444,9 @@ def _cloud_status(prompt_id: str) -> None:
             tbl.add_row("text", Text("\n").join(preview_lines))
         if snap.get("note"):
             tbl.add_row("note", sanitize_markup(str(snap["note"])))
+        for w in snap.get("warnings") or []:
+            if isinstance(w, dict) and w.get("message"):
+                tbl.add_row("warning", f"[yellow]{sanitize_markup(str(w['message']))}[/yellow]")
         renderer.console().print(tbl)
     renderer.emit(snap, command="jobs status", where="cloud")
 
@@ -3405,6 +3499,8 @@ def _cloud_watch(prompt_id: str, *, poll_interval: float, max_wait: float) -> No
                 renderer.event("output", url=u, prompt_id=prompt_id)
                 if renderer.is_pretty():
                     renderer.console().print(f"[bold green]✓[/bold green] output: [cyan]{sanitize_markup(u)}[/cyan]")
+            if renderer.is_pretty():
+                _print_snapshot_warnings(renderer, snap)
             final_snap = snap
             break
 

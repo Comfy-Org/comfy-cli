@@ -129,7 +129,10 @@ def _normalize_content_hash(value: str) -> str:
     return f"blake3:{m.group(1).lower()}" if m else value
 
 
-@app.command("ls", help="List your assets on Comfy Cloud.")
+@app.command(
+    "ls",
+    help="List assets on Comfy Cloud: your own plus public ones. --mine-only lists only your own.",
+)
 @tracking.track_command("assets")
 def ls_cmd(
     name: Annotated[
@@ -143,6 +146,13 @@ def ls_cmd(
         ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", help="Cap rows returned (max 500).")] = 20,
+    include_public: Annotated[
+        bool,
+        typer.Option(
+            "--include-public/--mine-only",
+            help="Include public/shared assets (default true). --mine-only lists only your own.",
+        ),
+    ] = True,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import http.client
@@ -155,6 +165,9 @@ def ls_cmd(
     # `capped_total=false` asks Comfy Cloud for the exact `total` this command
     # forwards; without it the server may answer with a capped count.
     params: list[tuple[str, Any]] = [("limit", min(max(limit, 1), 500)), ("capped_total", "false")]
+    # Always said: Comfy Cloud returns public assets when this is left out, and
+    # that default is planned to change to own assets only.
+    params.append(("include_public", "true" if include_public else "false"))
     if name:
         params.append(("name_contains", name))
     for t in tags.split(",") if tags else []:

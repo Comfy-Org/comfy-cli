@@ -17,6 +17,52 @@ history.
 
 ### Added
 
+- `comfy extension list`, `comfy extension disable <folder>` and
+  `comfy extension enable <folder>` turn a custom node pack's frontend code off
+  or on through the running local ComfyUI's `Comfy.Extension.DisabledPacks`
+  setting, which needs ComfyUI_frontend 1.59 or later (the frontend checks it
+  before importing a folder's scripts; the command warns when ComfyUI pins an
+  older frontend). No restart: the change applies on the next page reload. Other
+  switched-off folders are kept (the setting is re-read just before the
+  write), an unknown folder is refused, and a malformed setting is reported
+  instead of overwritten. `--user` picks the user under `--multi-user`.
+- `comfy node show agent-created` (and `simple-show agent-created`) lists the
+  custom node packs the local Comfy agent says it created, read from the
+  `.comfy-agent-install` record in each pack: enabled, switched off with a
+  `.disabled` suffix, or moved to `custom_nodes/.disabled` by ComfyUI-Manager.
+  The record's signature cannot be checked by comfy-cli, so the output (and
+  `data.verified` in `--json`) says the packs are unverified.
+- `comfy node validate` runs an advisory hygiene check on packs the local
+  Comfy agent writes (an install record or an `agent.` extension name), or on
+  any pack with `--agent-pack`. It reports what Settings > Extensions cannot
+  turn off: code at module top level and CSS aimed at the whole page, plus an
+  extension name with no `agent.` prefix or provenance. Findings never fail
+  validation.
+- `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
+  finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
+  `data.warnings` reports `partial_execution` for a target that returned
+  nothing and `partial_execution_targets_ignored` when the server also ran
+  nodes outside the targets. An async targeted run records its targets on the
+  job state file, and its `queued` envelope carries a `data.note` naming the
+  watch command.
+- `comfy templates ls --local-only` drops partner-API templates from the
+  index (a name starting with `api_`, or an API tag) with no network
+  beyond the index. `--runnable` implies `--local-only`, then checks
+  each remaining template against the local install and annotates every
+  row with a verdict and `missing_count`. A single template's fetch or
+  parse failure becomes `verdict: "unknown"` with a warning and does not
+  abort the list. A workflow body with no `nodes` list is `unknown`, not
+  `runnable`. A model folder whose listing fails with an HTTP error other
+  than 404 is reported missing with a warning. When the local server's
+  object_info is unavailable, a run-level warning says verdicts rely on
+  the index heuristic alone. The JSON payload adds `local_only_dropped`.
+  An oversized folder listing is `model_listing_too_large`.
+- `comfy models search`, `list-folders`, `list-folder` and `show` take
+  `--host`/`--port` the same way `comfy upload` does, so they can point
+  at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
+  rejected against an effective cloud target with `host_flag_cloud`, and
+  a bad host or port yields `host_port_invalid` instead of a traceback.
+  With no flags, behavior is unchanged.
 - `comfy workflow slots` rows for a subgraph's promoted widgets carry
   `source_address`, the interior node and widget the row stands for
   (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
@@ -54,6 +100,26 @@ history.
 
 ### Changed
 
+- The Run on Cloud skill asks before submitting one paid test job, including
+  validation and preflight runs. Declining still saves the prepared workflow
+  and returns its Cloud link with execution marked unverified. Upload, build,
+  and deployment approvals remain separate from job consent.
+- **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
+  `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
+  `where_invalid` envelope and a non-zero exit. Before, `comfy --json
+  nodes show --where bogus` printed a traceback with nothing on stdout,
+  and `comfy --json jobs ls --where bogus` printed a successful local
+  listing for a target the caller never named.
+- **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
+  following poll) now emits `cloud_unauthorized` instead of
+  `cloud_http_error`. The message says the login predates a permission
+  change and `comfy cloud login` fixes it, and the envelope carries
+  `details.reason` and `details.required_scope`. `comfy cloud login` now
+  also requests the `comfy-cloud:secrets:write` and
+  `comfy-cloud:agent:write` default OAuth scopes, so a new login can
+  call the Cloud secrets and agent APIs. A refresh does not widen an
+  existing grant; a session minted before this change needs a re-login
+  for those scopes.
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
   install (Path A of `comfy-build`), not from the workflow alone
   (`--from-workflow`). Its custom build step is short and uploads nothing
@@ -65,6 +131,21 @@ history.
 
 ### Fixed
 
+- Two `comfy model download` runs from different workspaces aimed at the same
+  file now refuse each other. Before, each workspace kept its own download
+  claims, so both runs wrote the file. This is the default case on Comfy
+  Desktop, where every install saves into one shared model library. Claims
+  now live in `download-claims/` in comfy-cli's config directory, or inside
+  the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
+  downloads before upgrading, since an older version keeps its claims per
+  workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- A failed `comfy run` or `comfy jobs watch` no longer prints the failing
+  node's inputs, which can hold an API key: `comfy run` drops them from its
+  error dump and `execution_error` stream event, and `jobs watch` from its
+  envelope when ComfyUI's live error event has no traceback.
+- `comfy knowledge resolve` no longer suggests, in `candidate_ids`, a model id
+  that differs from another id only by letter case. Such an id resolves to the
+  other model, so retrying it would pick the wrong one.
 - The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and
   `comfy-build-failures` skills say an ordinary version pin in
   `pipDependencies` adds no package, where they said any line never does. They

@@ -372,6 +372,10 @@ def model_candidates(bundle: Bundle, query: str) -> list[str]:
     for alias, model_id in bundle.candidate_aliases.items():
         if model_id not in bundle.models:
             continue
+        # A case-only twin of another id loses the shared lowercase key, so
+        # `resolve <id>` would land on the other model; never suggest it.
+        if resolve_id(bundle, model_id) != model_id:
+            continue
         words = _candidate_tokens(alias)
         if not words or words[0] != parts[0] or [word for word in words if word.isdigit()] != numbers:
             continue

@@ -219,6 +219,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # resource management (ComfyUI /system_stats + /free passthrough)
     "comfy system-stats": "system_stats",
     "comfy free": "free",
+    # frontend code of custom node folders (Comfy.Extension.DisabledPacks)
+    "comfy extension list": "extension_list",
+    "comfy extension disable": "extension_toggle",
+    "comfy extension enable": "extension_toggle",
 }
 
 

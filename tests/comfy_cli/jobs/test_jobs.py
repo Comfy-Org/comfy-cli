@@ -2386,6 +2386,133 @@ def test_cloud_status_snapshot_without_item_map_emits_empty_by_item(monkeypatch)
     assert snap["outputs_by_item"] == {}
 
 
+def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True):
+    from comfy_cli import jobs_state
+
+    state = jobs_state.new(prompt_id=prompt_id, client_id="c", workflow="w", where="cloud")
+    state.output_node_ids = targets
+    state.run_graph_node_ids = run_graph
+    state.output_node_ids_checked = checked
+    jobs_state.write(state)
+
+
+def test_cloud_status_snapshot_warns_when_a_targeted_job_ran_untargeted_nodes(monkeypatch):
+    """An async `comfy run --output-node-ids` is judged when it is
+    watched. Node 12 is outside target 9's run graph and still produced an
+    output, so the server ignored the targets."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-ignored", targets=["9"], run_graph=["9", "4"])
+
+    snap = jobs_mod._cloud_status_snapshot("pid-ignored")
+    [warning] = snap["warnings"]
+    assert warning["code"] == "partial_execution_targets_ignored"
+    assert warning["untargeted_output_node_ids"] == ["12"]
+
+
+def test_cloud_status_snapshot_warns_when_a_target_returned_nothing(monkeypatch):
+    record = {"status": {"status_str": "success"}, "outputs": {"9": {"images": [{"filename": "a.png"}]}}}
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient(record))
+    _targeted_cloud_job("pid-missing", targets=["9", "12"], run_graph=["9", "12"])
+
+    [warning] = jobs_mod._cloud_status_snapshot("pid-missing")["warnings"]
+    assert warning["code"] == "partial_execution"
+    assert warning["missing_output_node_ids"] == ["12"]
+
+
+def test_cloud_status_snapshot_targeted_job_that_ran_as_asked_has_no_warnings(monkeypatch):
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-clean", targets=["9", "12"], run_graph=["9", "12"])
+
+    assert jobs_mod._cloud_status_snapshot("pid-clean")["warnings"] == []
+
+
+def test_cloud_status_snapshot_untargeted_job_carries_no_warnings_key(monkeypatch):
+    """Only a targeted job is judged; the snapshot shape of every other job
+    is unchanged."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+
+    assert "warnings" not in jobs_mod._cloud_status_snapshot("pid-untargeted")
+
+
+def test_cloud_watch_prints_the_targets_warning(monkeypatch, capsys):
+    """`comfy jobs watch --where cloud` ends on the same snapshot, so its
+    terminal envelope carries the warning too."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    monkeypatch.setattr(jobs_mod, "cloud_preflight_or_exit", lambda: None)
+    _targeted_cloud_job("pid-watch", targets=["9"], run_graph=["9"])
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs watch"))
+    jobs_mod._cloud_watch("pid-watch", poll_interval=0.0, max_wait=1.0)
+    lines = [json.loads(ln) for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    [warning] = lines[-1]["data"]["warnings"]
+    assert warning["code"] == "partial_execution_targets_ignored"
+
+
+@pytest.mark.parametrize(
+    "record",
+    [None, {"status": {"completed": True, "status_str": "success"}}],
+    ids=["no-history-yet", "status-only-record"],
+)
+def test_cloud_status_snapshot_does_not_judge_targets_before_outputs_exist(monkeypatch, record):
+    """History can lag `completed` and come back empty or status-only. Judging
+    then would call every target missing; leaving `warnings` out would read as
+    an untargeted job. Say the check could not run yet instead."""
+
+    class _LaggingHistory(_CompletedCloudClient):
+        def get_history(self, prompt_id):
+            return record
+
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _LaggingHistory())
+    _targeted_cloud_job("pid-lag", targets=["9"], run_graph=["9"])
+
+    [warning] = jobs_mod._cloud_status_snapshot("pid-lag")["warnings"]
+    assert warning["code"] == "output_node_ids_unchecked"
+    assert "comfy jobs status pid-lag --where cloud" in warning["message"]
+
+
+@pytest.mark.parametrize(
+    ("targets", "run_graph"),
+    [(9, ["9"]), ([["9"]], ["9"]), ("9", ["9"]), (["9"], 4), (["9"], [["4"]])],
+)
+def test_cloud_status_snapshot_ignores_malformed_recorded_targets(monkeypatch, targets, run_graph):
+    """A hand-edited or corrupted state file must not crash `jobs status`,
+    nor have a bare string split into one target per character."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-bad", targets=targets, run_graph=run_graph)
+
+    snap = jobs_mod._cloud_status_snapshot("pid-bad")
+    assert snap["status"] == "completed"
+    assert "warnings" not in snap
+
+
+def test_cloud_status_snapshot_reads_numeric_recorded_ids_as_strings(monkeypatch):
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-int", targets=[9], run_graph=[9])
+
+    [warning] = jobs_mod._cloud_status_snapshot("pid-int")["warnings"]
+    assert warning["untargeted_output_node_ids"] == ["12"]
+
+
+def test_jobs_wait_row_carries_the_targets_warning(monkeypatch, capsys):
+    """`jobs wait` copies only some snapshot fields onto each row; the targets
+    verdict is one of them, since the row is the whole result of the wait."""
+    from comfy_cli.output import Renderer, set_renderer
+    from comfy_cli.output.renderer import OutputMode
+
+    warning = {"code": "partial_execution_targets_ignored", "message": "m", "untargeted_output_node_ids": ["12"]}
+    snap = {"prompt_id": "pid-wait-targets", "status": "completed", "outputs": ["u"], "warnings": [warning]}
+    monkeypatch.setattr(jobs_mod, "_server_or_error", lambda *a, **k: True)
+    monkeypatch.setattr(jobs_mod, "_resolve_host_port", lambda h, p: ("h", 8188))
+    monkeypatch.setattr(jobs_mod, "_wait_fetch_snapshot", lambda pid, **kw: snap)
+
+    set_renderer(Renderer(mode=OutputMode.NDJSON, command="jobs wait"))
+    jobs_mod.wait_cmd(["pid-wait-targets"], poll_interval=0.01, timeout=5)
+    env = json.loads([ln for ln in capsys.readouterr().out.splitlines() if ln.strip()][-1])
+    assert env["data"]["jobs"][0]["warnings"] == [warning]
+
+
 def test_cloud_status_snapshot_non_terminal_keeps_empty_groupings(monkeypatch):
     """In-flight jobs have no record to group — keys present, empty dicts."""
 
@@ -5442,3 +5569,44 @@ def test_poll_cloud_once_clears_a_recorded_rate_limit_on_the_next_good_poll():
     assert job_watcher._poll_cloud_once(state, client=_Ok()) is False
     assert state.error is None
     assert state.status not in jobs_state.TERMINAL_STATUSES
+
+
+class TestALiveFailureWithoutATracebackIsRedacted:
+    """A live `execution_error` event lands in the payload twice: promoted to
+    `execution_error` (trimmed and redacted) and copied to `details` raw.
+
+    `details` was only rebuilt when it carried a `traceback`, so an event
+    without one reached the envelope with the failing node's `current_inputs`
+    (which can hold an API key) intact.
+    """
+
+    EVENT = {
+        "prompt_id": "p",
+        "node_id": "5",
+        "node_type": "ApiNode",
+        "exception_message": "boom",
+        "exception_type": "RuntimeError",
+        "current_inputs": {"api_key": ["sk-redact-me"]},
+    }
+
+    def _envelope(self, capsys, payload):
+        import typer
+
+        from comfy_cli.command import jobs
+        from comfy_cli.output.renderer import OutputMode, Renderer
+
+        with pytest.raises(typer.Exit):
+            jobs._emit_terminal(Renderer(mode=OutputMode.JSON), payload, command="jobs watch")
+        return capsys.readouterr().out.strip().splitlines()[-1]
+
+    @pytest.mark.parametrize("status", ["error", "cancelled"])
+    def test_raw_details_do_not_carry_current_inputs(self, capsys, status):
+        payload = {"prompt_id": "p", "status": status, "details": dict(self.EVENT)}
+        payload["execution_error"] = dict(self.EVENT)
+        out = self._envelope(capsys, payload)
+        assert "sk-redact-me" not in out
+        assert json.loads(out)["error"]["details"]["details"]["exception_message"] == "boom"
+
+    def test_an_error_dict_does_not_carry_current_inputs(self, capsys):
+        payload = {"prompt_id": "p", "status": "error", "error": {**self.EVENT, "message": "boom"}}
+        assert "sk-redact-me" not in self._envelope(capsys, payload)

@@ -22,10 +22,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -595,7 +597,37 @@ def ls_cmd(
     ] = None,
     refresh: Annotated[
         bool,
-        typer.Option("--refresh", help="Re-fetch index.json from GitHub before listing."),
+        typer.Option(
+            "--refresh", help="Re-fetch index.json (and, with --runnable, the template workflows) before listing."
+        ),
+    ] = False,
+    local_only: Annotated[
+        bool,
+        typer.Option(
+            "--local-only",
+            help=(
+                "Index-only pre-filter: drop templates that need partner-API access "
+                "(name starts with `api_`, or an `API` tag). Zero network beyond the "
+                "index. NOTE: a known tail of community templates with unmarked API "
+                "nodes still leaks through until the workflow_templates tag backfill "
+                "lands — use --runnable to catch those via object_info."
+            ),
+        ),
+    ] = False,
+    runnable: Annotated[
+        bool,
+        typer.Option(
+            "--runnable",
+            help=(
+                "Assess runnability on THIS install: applies the --local-only "
+                "pre-filter, then fetches each surviving template's workflow (cached "
+                "under gallery/templates/) and annotates every row with a `verdict` "
+                "(runnable / missing-models / api-required / unknown) and "
+                "`missing_count`. Needs a local ComfyUI server to list installed "
+                "models; the first run downloads ~300 small JSON files, later runs "
+                "hit the cache."
+            ),
+        ),
     ] = False,
     select: Annotated[
         str | None,
@@ -639,8 +671,54 @@ def ls_cmd(
         )
     ]
     matched = len(rows)
+
+    # `--runnable` implies the `--local-only` index pre-filter (drop templates
+    # that need partner-API access before spending any network on workflows).
+    local_only_dropped = 0
+    if local_only or runnable:
+        pre_filter_count = len(rows)
+        rows = [r for r in rows if not _template_is_api_by_index(r["name"], r.get("tags") or [])]
+        local_only_dropped = pre_filter_count - len(rows)
+
+    # `--runnable`: fetch + check every surviving row (batched), annotating each
+    # with a verdict. Runs on the full post-pre-filter set so the cache warms and
+    # the counts are stable; `--limit` is applied to the result below.
+    checked: dict[str, dict[str, Any]] = {}
+    run_warnings: list[str] = []
+    if runnable:
+        checked, run_warnings = _batch_check_rows(renderer, rows, refresh=refresh)
+
+    # `--limit` applies AFTER all filtering (flag filters + the local-only
+    # pre-filter) so a small limit never truncates ahead of the pre-filter and
+    # under-fills the result.
     if limit is not None:
         rows = rows[: max(0, limit)]
+
+    def _row_out(r: dict[str, Any]) -> dict[str, Any]:
+        out = {
+            "name": r["name"],
+            "title": r["title"],
+            "output_type": r["output_type"],
+            "category_title": r["category_title"],
+            "tags": r["tags"],
+            "models": r["models"],
+            "providers": r["providers"],
+            "description": r["description"][:120],
+        }
+        if runnable:
+            res = checked.get(r["name"])
+            out["verdict"] = res["verdict"] if res else "unknown"
+            out["missing_count"] = len(res["models"]["missing"]) if res else 0
+        return out
+
+    ls_warnings: list[str] = list(run_warnings)
+    if runnable:
+        for r in rows:
+            res = checked.get(r["name"])
+            if res:
+                ls_warnings.extend(res.get("warnings") or [])
+        # A folder shared by many templates warns once per template; report it once.
+        ls_warnings = list(dict.fromkeys(ls_warnings))
 
     payload = {
         "total_in_gallery": total,
@@ -654,20 +732,14 @@ def ls_cmd(
             "provider": provider,
             "name": name_sub,
         },
-        "rows": [
-            {
-                "name": r["name"],
-                "title": r["title"],
-                "output_type": r["output_type"],
-                "category_title": r["category_title"],
-                "tags": r["tags"],
-                "models": r["models"],
-                "providers": r["providers"],
-                "description": r["description"][:120],
-            }
-            for r in rows
-        ],
+        "rows": [_row_out(r) for r in rows],
     }
+    if local_only or runnable:
+        payload["local_only"] = True
+        payload["local_only_dropped"] = local_only_dropped
+    if runnable:
+        payload["runnable"] = True
+        payload["warnings"] = ls_warnings
 
     if select is not None:
         from comfy_cli.selector import emit_selected
@@ -677,6 +749,8 @@ def ls_cmd(
     if renderer.is_pretty():
         from rich.table import Table
 
+        from comfy_cli.output.sanitize import sanitize_markup
+
         if not rows:
             rprint("[dim]0 templates matched.[/dim]")
         else:
@@ -685,23 +759,44 @@ def ls_cmd(
             tbl.add_column("type", style="dim")
             tbl.add_column("title")
             tbl.add_column("tags", style="dim")
+            if runnable:
+                tbl.add_column("verdict")
+                tbl.add_column("missing", style="dim")
+            _verdict_color = {
+                "runnable": "green",
+                "missing-models": "yellow",
+                "api-required": "red",
+                "unknown": "dim",
+            }
             for r in rows:
-                tbl.add_row(
-                    r["name"],
-                    r["output_type"],
-                    r["title"] or "(untitled)",
-                    ", ".join(r["tags"]),
-                )
+                # Gallery text is untrusted: a stray `[/bold]` would raise MarkupError.
+                cells = [
+                    sanitize_markup(r["name"]),
+                    sanitize_markup(r["output_type"]),
+                    sanitize_markup(r["title"] or "(untitled)"),
+                    sanitize_markup(", ".join(r["tags"])),
+                ]
+                if runnable:
+                    res = checked.get(r["name"])
+                    verdict = res["verdict"] if res else "unknown"
+                    mc = len(res["models"]["missing"]) if res else 0
+                    color = _verdict_color.get(verdict, "")
+                    cells.append(f"[{color}]{verdict}[/{color}]" if color else verdict)
+                    cells.append(str(mc))
+                tbl.add_row(*cells)
             renderer.console().print(tbl)
             tail = f" (of {matched} matched, {total} in gallery)" if (matched != len(rows) or matched != total) else ""
             rprint(f"[dim]{len(rows)} template(s){tail}[/dim]")
+            if runnable and ls_warnings:
+                for w in ls_warnings:
+                    rprint(f"  [yellow]⚠[/yellow] {sanitize_markup(w)}")
     knowledge.attach(
         payload,
         command="templates ls",
         queries=[x for x in (tag, name_sub, model) if x],
         templates=[r["name"] for r in rows],
         catalog_templates=all_names,
-        thin=(matched == 0),
+        thin=(matched - local_only_dropped == 0),
         qualified=any(payload["filters"].values()),
     )
     renderer.emit(payload, command="templates ls")
@@ -1590,6 +1685,347 @@ def _match_local_models(
         else:
             missing.append(dict(req))
     return present, missing, warnings
+
+
+def _persist_template_workflow(cache_path: Path, body: bytes) -> None:
+    """Atomically write a fetched per-template workflow JSON into its cache slot.
+
+    Best-effort: a non-writable cache dir (read-only image, full disk) must never
+    fail the caller once we already hold valid data. The temp filename carries
+    both the pid *and* the thread id so the ``ls --runnable`` ThreadPool can't
+    collide two concurrent writers, and a partial temp file is unlinked on error
+    so the read path never trusts a truncated body on the next run.
+    """
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            tmp_path.write_bytes(body)
+            os.replace(tmp_path, cache_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    except OSError:
+        pass
+
+
+def _parse_workflow_body(body: bytes) -> tuple[dict[str, Any] | None, str | None]:
+    """Decode a per-template workflow body into ``(workflow, error)``.
+
+    ``error`` is a human string when the body is not a UI-format workflow
+    (malformed, non-UTF-8, too deeply nested, a JSON non-object, or an object with
+    no ``nodes`` list — an error payload like ``{"error": "rate limited"}`` would
+    otherwise check as a zero-node ``runnable`` template). The batch
+    ``ls --runnable`` path turns that into a per-template ``unknown`` verdict
+    rather than aborting the listing.
+    """
+    try:
+        wf = json.loads(body)
+    except (ValueError, RecursionError) as e:  # JSONDecodeError/UnicodeDecodeError are ValueErrors
+        return None, f"workflow is not valid JSON: {e}"
+    if not isinstance(wf, dict):
+        return None, "workflow is not a JSON object"
+    if not isinstance(wf.get("nodes"), list):
+        return None, "workflow has no `nodes` list (not a ComfyUI workflow)"
+    return wf, None
+
+
+def _fetch_and_cache_workflow(name: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch one template's workflow, cache it, and parse it — for the batch path.
+
+    Returns ``(workflow, error)``; every failure (network, non-200, over-cap
+    body, bad JSON) is caught and returned as an ``error`` string so a single
+    template's failure degrades to ``unknown`` and never aborts the whole
+    ``ls --runnable`` run (or, in the ThreadPool, propagates out of a worker).
+    """
+    try:
+        body = _fetch_template_workflow(name)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
+        return None, f"failed to fetch workflow: {e}"
+    wf, err = _parse_workflow_body(body)
+    # Only a parseable body earns a cache slot, so a bad upstream response is
+    # re-fetched next run instead of being served from cache forever.
+    if wf is not None:
+        _persist_template_workflow(_template_workflow_cache_path(name), body)
+    return wf, err
+
+
+def _batch_load_workflows(names: list[str], *, refresh: bool) -> dict[str, tuple[dict[str, Any] | None, str | None]]:
+    """Resolve each template's workflow, reusing the phase-1 per-template cache and
+    fetching misses concurrently.
+
+    Returns ``{name: (workflow, error)}``. A cache hit (unless ``refresh``) is a
+    plain synchronous read; misses are fetched through a bounded
+    ``ThreadPoolExecutor`` (``max_workers=8``) so a cold first run over ~300 small
+    JSON files is tolerable while a warmed cache is all local reads. ``refresh``
+    bypasses the cache read so ``--refresh`` re-fetches workflows as well as the
+    index.
+    """
+    results: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
+    to_fetch: list[str] = []
+    for name in names:
+        cache_path = _template_workflow_cache_path(name)
+        body: bytes | None = None
+        if not refresh and cache_path.exists():
+            try:
+                body = cache_path.read_bytes()
+            except OSError:
+                body = None
+        if body is not None:
+            wf, err = _parse_workflow_body(body)
+            if wf is not None:
+                results[name] = (wf, err)
+                continue
+        # Miss, --refresh, or an unparseable (corrupt/truncated) cache entry → fetch.
+        to_fetch.append(name)
+
+    if to_fetch:
+        pool = ThreadPoolExecutor(max_workers=8)
+        try:
+            futures = {pool.submit(_fetch_and_cache_workflow, name): name for name in to_fetch}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    results[name] = fut.result()
+                except Exception as e:
+                    # A worker crash is one template's `unknown`, never a run abort.
+                    results[name] = (None, f"failed to fetch workflow: {e}")
+        finally:
+            # Ctrl-C mid-run drops the queued fetches instead of draining them all.
+            pool.shutdown(wait=True, cancel_futures=True)
+    return results
+
+
+def _list_model_folders(
+    target, directories: list[str], warnings: list[str] | None = None
+) -> dict[str, list[str] | None]:
+    """List each distinct model directory ONCE on the local server.
+
+    ``directories`` is deduped by the caller; unaddressable names (any that
+    ``_is_walkable_folder_name`` rejects) are skipped here and left out of the
+    returned mapping — :func:`_check_template` re-derives the "isn't a valid model
+    folder" warning for them from the directory string, so listing them would only
+    waste a request. A folder that 404s maps to ``None`` (custom-node folder). Any
+    other HTTP error degrades just that folder to ``None`` too, with a warning
+    naming the status appended to ``warnings``. Server-unreachable errors
+    propagate to the caller.
+    """
+    from comfy_cli.command.models.search import _is_walkable_folder_name
+
+    listings: dict[str, list[str] | None] = {}
+    for directory in directories:
+        if not _is_walkable_folder_name(directory):
+            continue
+        try:
+            listings[directory] = _list_local_folder(target, directory)
+        except urllib.error.HTTPError as e:
+            # The server answered, so it is reachable: one folder's error is not a run abort.
+            listings[directory] = None
+            if warnings is not None:
+                warnings.append(
+                    f"listing model folder {directory!r} failed with HTTP {e.code} — its files are reported missing"
+                )
+    return listings
+
+
+def _check_template(
+    row: dict[str, Any],
+    wf: dict[str, Any],
+    listings: dict[str, list[str] | None],
+    *,
+    graph: Any = None,
+) -> dict[str, Any]:
+    """Phase-1 runnable verdict for ONE template — the core shared by ``check``
+    and ``ls --runnable``.
+
+    * ``row`` is the flattened gallery row (for ``name``/``title``/``tags``/
+      ``requires_custom_nodes``).
+    * ``wf`` is the parsed workflow JSON object.
+    * ``listings`` maps a model directory name to the local server's file listing
+      for it (``None`` = the folder 404s / wasn't listable), pre-fetched ONCE per
+      distinct directory by the caller so a batch run lists each folder a single
+      time rather than once per template.
+    * ``graph`` is an optional pre-loaded object_info ``Graph`` for the
+      object_info API-node tier; ``None`` restricts the API signal to the index
+      heuristic (name / ``API`` tag).
+
+    Returns the verdict dict the payload/table are built from. It never raises for
+    a well-formed workflow: an unlistable directory surfaces as ``missing`` plus a
+    warning, exactly as the single-template ``check`` does.
+    """
+    name = row.get("name") or ""
+    required = _collect_model_requirements(wf)
+    node_types = _collect_node_class_types(wf)
+
+    # API dependence: index heuristic, upgraded by object_info when a graph is
+    # available. Mirrors `check`'s two-tier logic verbatim.
+    api_dependent = _template_is_api_by_index(name, row.get("tags") or [])
+    api_source = "index"
+    api_nodes: list[str] = []
+    if graph is not None:
+        try:
+            api_nodes = [cls for cls in node_types if (m := graph.node(cls)) is not None and m.is_api_node]
+        except Exception:
+            # A partial/failed object_info scan must leave `source` reflecting the
+            # index heuristic, not claim object_info for a verdict it didn't make.
+            api_nodes = []
+        if api_nodes:
+            api_source = "object_info"
+            api_dependent = True
+
+    # Installed intersection against the pre-fetched listings. Warnings are
+    # per-directory (deduped) and re-derived from the directory string so this is
+    # a pure function of (row, wf, listings) — no second network call.
+    warnings: list[str] = []
+    present: list[str] = []
+    missing: list[dict[str, str]] = []
+    from comfy_cli.command.models.search import _is_walkable_folder_name
+
+    warned_dirs: set[str] = set()
+    for req in required:
+        directory = req["directory"]
+        if not _is_walkable_folder_name(directory):
+            if directory not in warned_dirs:
+                warnings.append(
+                    f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
+                )
+                warned_dirs.add(directory)
+            missing.append(dict(req))
+            continue
+        listing = listings.get(directory)
+        if listing is None:
+            if directory not in warned_dirs:
+                warnings.append(
+                    f"model folder {directory!r} not found on the local server "
+                    f"(custom-node folder?) — its files are reported missing"
+                )
+                warned_dirs.add(directory)
+            missing.append(dict(req))
+            continue
+        # Normalize BOTH sides: a model ref may itself carry a subfolder.
+        req_base = _basename(req["name"])
+        if any(_basename(entry) == req_base for entry in listing):
+            present.append(req["name"])
+        else:
+            missing.append(dict(req))
+
+    custom_nodes_required = list(row.get("requires_custom_nodes") or [])
+    verdict = _compute_verdict(
+        api_dependent=api_dependent,
+        missing=missing,
+        required_count=len(required),
+        node_types=node_types,
+    )
+    return {
+        "name": name,
+        "title": row.get("title") or "",
+        "verdict": verdict,
+        "models": {"required": len(required), "present": present, "missing": missing},
+        "api": {"dependent": api_dependent, "source": api_source, "api_nodes": api_nodes},
+        "custom_nodes_required": custom_nodes_required,
+        "warnings": warnings,
+    }
+
+
+def _unknown_verdict(row: dict[str, Any], reason: str) -> dict[str, Any]:
+    """A synthetic ``unknown`` verdict for a template whose workflow could not be
+    fetched or parsed — so a single template's failure degrades to a warning row
+    in ``ls --runnable`` instead of aborting the whole listing."""
+    name = row.get("name") or ""
+    return {
+        "name": name,
+        "title": row.get("title") or "",
+        "verdict": "unknown",
+        "models": {"required": 0, "present": [], "missing": []},
+        "api": {
+            "dependent": _template_is_api_by_index(name, row.get("tags") or []),
+            "source": "index",
+            "api_nodes": [],
+        },
+        "custom_nodes_required": list(row.get("requires_custom_nodes") or []),
+        "warnings": [f"could not determine runnability for {name!r}: {reason}"],
+    }
+
+
+def _batch_check_rows(
+    renderer, rows: list[dict[str, Any]], *, refresh: bool
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Run the phase-1 check over every row, batching the two network fan-outs.
+
+    Returns ``({name: verdict_dict}, run_warnings)``. Two batching wins the per-template ``check``
+    can't get: workflows are fetched through one bounded ThreadPool with the
+    phase-1 cache reused, and every distinct model directory across the whole run
+    is listed on the local server exactly ONCE.
+
+    A single template's fetch/parse failure degrades to a synthetic ``unknown``
+    verdict (a warning row), never aborting the listing. An unreachable local
+    server, by contrast, IS fatal when any surviving template declares model
+    requirements: ``--runnable`` means "runnable on THIS install", which can't be
+    answered without the install (``--local-only`` is the index-only escape hatch).
+    """
+    from comfy_cli.target import resolve_target
+
+    row_by_name = {r["name"]: r for r in rows}
+    names = list(row_by_name)  # de-dupes any repeated name, preserves order
+    loaded = _batch_load_workflows(names, refresh=refresh)
+
+    # Distinct model directories across every successfully-parsed workflow.
+    distinct_dirs: list[str] = []
+    seen_dirs: set[str] = set()
+    for name in names:
+        wf, _err = loaded.get(name, (None, "not fetched"))
+        if wf is None:
+            continue
+        for req in _collect_model_requirements(wf):
+            directory = req["directory"]
+            if directory not in seen_dirs:
+                seen_dirs.add(directory)
+                distinct_dirs.append(directory)
+
+    run_warnings: list[str] = []
+    listings: dict[str, list[str] | None] = {}
+    if distinct_dirs:
+        target = resolve_target(where="local")
+        try:
+            listings = _list_model_folders(target, distinct_dirs, run_warnings)
+        except ResponseTooLarge as e:
+            renderer.error(
+                code="model_listing_too_large",
+                message=f"a local model folder listing is over the response size cap: {e}",
+                hint="check that the server on this host:port is ComfyUI",
+            )
+            raise typer.Exit(code=1) from e
+        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
+            renderer.error(
+                code="server_not_running",
+                message=f"local ComfyUI server is unreachable, cannot check installed models: {e}",
+                hint="run `comfy launch` to start a local server, or use --local-only for an index-only filter",
+            )
+            raise typer.Exit(code=1) from e
+
+    # object_info graph once (best-effort) for the API-node tier.
+    graph = None
+    try:
+        from comfy_cli.cql.engine import Graph
+
+        graph = Graph.load(mode="local")
+    except Exception:
+        graph = None
+    if names and graph is None:
+        run_warnings.append(
+            "object_info unavailable from the local server — partner-API nodes and uninstalled custom nodes "
+            "were not detected; verdicts rely on the index `api_`/`API` heuristic alone"
+        )
+
+    results: dict[str, dict[str, Any]] = {}
+    for name in names:
+        wf, err = loaded.get(name, (None, "not fetched"))
+        row = row_by_name[name]
+        if wf is None:
+            results[name] = _unknown_verdict(row, err or "unknown error")
+        else:
+            results[name] = _check_template(row, wf, listings, graph=graph)
+    return results, run_warnings
 
 
 @app.command(
