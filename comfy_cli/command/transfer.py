@@ -154,6 +154,13 @@ def _auth_for_url(url: str, auth_hdrs: dict[str, str], base_url: str) -> dict[st
     so it degrades instead of rejecting: a foreign origin gets the fetch,
     never the credentials. Signed-URL outputs (the common case) work
     credential-free anyway.
+
+    The origin comparison is exact (scheme, host, port): a subdomain of
+    the target does not match, so it gets no credentials. That is the
+    safe direction, and deliberate — if a future cloud deployment serves
+    outputs from a sibling host, that host silently stops
+    authenticating rather than failing loudly; it should be added as an
+    explicit exception, not matched by prefix.
     """
     if not auth_hdrs:
         return auth_hdrs
