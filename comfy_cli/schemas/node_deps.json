@@ -7,7 +7,7 @@
     "workspace": { "type": "string", "description": "Resolved ComfyUI workspace path." },
     "python": {
       "type": "string",
-      "description": "Interpreter whose site-packages were probed (`pip list --format=json`, run once for the whole report; an `importlib.metadata` listing in the same interpreter when it has no pip)."
+      "description": "Interpreter whose raw Name/Version metadata was read with one guarded importlib.metadata probe for the whole report, whether or not pip is installed."
     },
     "compiled_lock": {
       "type": "object",
@@ -80,12 +80,12 @@
                 "source": { "type": "string", "enum": ["requirements.txt", "pyproject.toml", "registry"] },
                 "installed": {
                   "type": ["string", "null"],
-                  "description": "Version found in the workspace venv, or null when missing/unparseable/unknown."
+                  "description": "Raw metadata version found in the workspace venv, or null when missing/unparseable/unavailable."
                 },
                 "status": {
                   "type": "string",
                   "enum": ["satisfied", "mismatch", "missing", "unparseable", "unknown"],
-                  "description": "`unparseable` covers pip options (-r, --extra-index-url) and bare VCS/URL lines; `unknown` means the comparison could not be made (the pip probe failed, or the installed dist records a non-PEP-440 version)."
+                  "description": "`unparseable` covers pip options (-r, --extra-index-url) and bare VCS/URL lines; `unknown` means the comparison could not be made (the metadata probe failed, or the installed dist records a non-PEP-440 version and the requirement includes an operator other than ===). Each === clause compares raw strings case-insensitively; any other operator requires a PEP-440-valid installed version."
                 }
               },
               "required": ["raw", "name", "specifier", "source", "installed", "status"]
@@ -109,7 +109,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Non-fatal problems. `installed_versions_unavailable` means the installed-packages probe (pip, then importlib.metadata) failed, so every requirement is `unknown`. `registry_unavailable` (transient — retry) / `registry_node_not_found` (permanent 404 — do NOT retry) / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; `registry_partial_dependency_metadata` means its `declared` list lost malformed entries and is incomplete; `registry_invalid_node_id` means a `--registry` value was blank or outside `[A-Za-z0-9._-]` and was rejected without a request. Every other row is unaffected.",
+      "description": "Non-fatal problems. `installed_versions_unavailable` means the installed-packages metadata probe failed, so every requirement is `unknown`. `registry_unavailable` (transient — retry) / `registry_node_not_found` (permanent 404 — do NOT retry) / `registry_no_dependency_metadata` mean a `--registry` candidate could not be diffed; `registry_partial_dependency_metadata` means its `declared` list lost malformed entries and is incomplete; `registry_invalid_node_id` means a `--registry` value was blank or outside `[A-Za-z0-9._-]` and was rejected without a request. Every other row is unaffected.",
       "items": {
         "type": "object",
         "properties": {

@@ -4,6 +4,7 @@ import importlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -799,6 +800,34 @@ def test_a_watch_the_deploy_api_never_answers_ends_with_the_watch_lost_exit_code
     assert error["code"] == "deploy_watch_lost"
     assert "comfy deploy status --deployment dep-status --watch" in error["hint"]
     assert len(client.get_calls) == 7
+
+
+def test_a_watch_refused_with_the_sign_in_still_stored_ends_as_watch_auth_lost(tmp_path, monkeypatch) -> None:
+    # Given a watch whose read is refused after the client's refresh and retry
+    class Refused(RecordingDeploy):
+        sign_in_base_url = "https://cloud.comfy.org"
+
+        def get_deployment(self, deployment_id: str) -> JsonObject:
+            self.get_calls.append(deployment_id)
+            raise DeployAPIError("deploy_not_signed_in", "invalid auth token", status=401)
+
+    client = Refused([_status_deployment(status="provisioning")])
+    sleeps: list[float] = []
+    _install_clients(monkeypatch, FakeBuilder(), client, sleeps)
+    stored = SimpleNamespace(access_token="token", refresh_token="rt", base_url="https://cloud.comfy.org")
+    monkeypatch.setattr("comfy_cli.credentials.get_session", lambda **_: stored)
+
+    # When
+    result = _invoke_json(write_spec(tmp_path), "--watch")
+
+    # Then
+    assert result.exit_code == 75, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "watch_auth_lost"
+    assert "comfy deploy status --deployment dep-status --watch" in error["hint"]
+    assert "comfy cloud login" not in error["hint"]
+    assert client.get_calls == ["dep-status"]
+    assert sleeps == []
 
 
 def test_a_watch_that_gives_up_takes_the_live_line_down_before_the_error_prints(tmp_path, monkeypatch) -> None:

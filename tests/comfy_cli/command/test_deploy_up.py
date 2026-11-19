@@ -10,7 +10,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import jsonschema
 import pytest
@@ -812,6 +812,93 @@ def test_a_4xx_on_the_follow_read_still_fails_at_once(tmp_path, monkeypatch) -> 
     assert "not answering" not in result.stderr
     assert sleeps == []
     assert client.get_calls == 2
+
+
+_CLOUD = "https://cloud.comfy.org"
+
+
+def _refused() -> DeployAPIError:
+    # What the client raises once a 401 outlives its forced refresh and its one retry.
+    return DeployAPIError(
+        "deploy_not_signed_in",
+        "invalid auth token",
+        status=401,
+        details={"operation": "get", "status": 401, "server_code": "UNAUTHORIZED"},
+    )
+
+
+def _stored_sign_in(monkeypatch, base_url: str | None) -> None:
+    session = (
+        SimpleNamespace(access_token="token", refresh_token="rt", base_url=base_url) if base_url is not None else None
+    )
+    monkeypatch.setattr("comfy_cli.credentials.get_session", lambda **_: session)
+
+
+def test_a_401_on_the_follow_read_with_the_sign_in_still_stored_ends_the_watch_not_the_deployment(
+    tmp_path, monkeypatch
+) -> None:
+    """Parallel watches can each be refused after the shared refresh. The deployment
+    was accepted with that same sign-in and keeps coming up, so the envelope must
+    not send an agent to sign in, nor report a failure that did not happen."""
+    # Given a deployment the service accepted, then a follow read it refuses
+    client = FlakyFollow([_refused()], get_statuses=["queued", "ready"])
+    client.sign_in_base_url = _CLOUD  # type: ignore[attr-defined]
+    _stored_sign_in(monkeypatch, _CLOUD)
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then
+    assert result.exit_code == 75, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "watch_auth_lost"
+    assert "may still be coming up" in error["message"]
+    assert error["hint"].startswith("run `comfy deploy status --deployment dep-1 --watch` to watch it again")
+    assert "comfy cloud login" not in error["hint"]
+    assert error["details"] == {"deployment_id": "dep-1"}
+    assert sleeps == []
+    assert len(client.create_keys) == 1
+
+
+@pytest.mark.parametrize(
+    ("client_sign_in", "stored_sign_in"),
+    [(_CLOUD, None), (_CLOUD, "https://staging.comfy.test"), (None, _CLOUD)],
+    ids=["refresh_signed_the_user_out", "signed_in_to_another_environment", "workspace_key"],
+)
+def test_a_401_on_the_follow_read_with_no_sign_in_to_keep_still_says_to_sign_in(
+    tmp_path, monkeypatch, client_sign_in, stored_sign_in
+) -> None:
+    # Given a follow read refused, and no sign-in this watch's client could keep using
+    client = FlakyFollow([_refused()], get_statuses=["queued", "ready"])
+    client.sign_in_base_url = client_sign_in  # type: ignore[attr-defined]
+    _stored_sign_in(monkeypatch, stored_sign_in)
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, [])
+
+    # Then
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "deploy_not_signed_in"
+
+
+class _RefusesTheCreate(FakeDeploy):
+    def create_deployment(self, release_id: str, compute_config: JsonObject, **kwargs) -> JsonObject:
+        raise _refused()
+
+
+def test_a_401_on_the_create_keeps_the_sign_in_code(tmp_path, monkeypatch) -> None:
+    # Given a sign-in still stored, and a service that refuses the create itself
+    client = _RefusesTheCreate()
+    client.sign_in_base_url = _CLOUD  # type: ignore[attr-defined]
+    _stored_sign_in(monkeypatch, _CLOUD)
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, [])
+
+    # Then nothing was accepted, so nothing runs on, and the refusal is the sign-in's
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "deploy_not_signed_in"
 
 
 def test_a_second_outage_in_one_watch_is_announced_and_backed_off_afresh(tmp_path, monkeypatch) -> None:
@@ -1674,3 +1761,254 @@ def test_an_editor_edit_a_watch_read_confirms_is_a_change(tmp_path, monkeypatch)
     envelope = _json_envelope(result)
     assert envelope["ok"] is True
     assert envelope["changed"] is True
+
+
+_AT_ACTIVE_CAP = "workspace has reached its active deployment limit (2)"
+_OVER_WORKER_CAP = "computeConfig.max 30 is over this workspace's per-deployment worker limit of 20"
+
+
+class _RefusedDeploy(FakeDeploy):
+    """A comfy-deploy at a 429 CONCURRENCY_LIMIT, as both of its caps answer: every
+    create, start and move is refused with ``message``."""
+
+    def __init__(self, rows: list[JsonObject], message: str) -> None:
+        super().__init__(rows)
+        self.message = message
+        self.limit_reads = 0
+
+    def _refuse(self) -> DeployAPIError:
+        return DeployAPIError(
+            "deploy_quota_exceeded",
+            self.message,
+            status=429,
+            details={"operation": "create", "status": 429, "server_code": "CONCURRENCY_LIMIT"},
+        )
+
+    def create_deployment(self, release_id: str, compute_config: JsonObject, **_: object) -> JsonObject:
+        raise self._refuse()
+
+    def start_deployment(self, deployment_id: str) -> JsonObject:
+        self.start_calls.append(deployment_id)
+        raise self._refuse()
+
+    def move_deployment(
+        self, deployment_id: str, base_revision: int, release_id: str, *, editor: bool | None = None
+    ) -> JsonObject:
+        self.move_calls.append((deployment_id, base_revision, release_id))
+        raise self._refuse()
+
+    def get_limits(self) -> JsonObject:
+        self.limit_reads += 1
+        return {"maxActiveDeployments": 5, "maxModelStorageGb": 100}
+
+
+class _LabellingBuilder(FakeBuilder):
+    def release_labels(self, release_ids: list[str]) -> list[JsonObject]:
+        labels = {"release-4": "build-1", "release-5": "build-1", "release-9": "build-2"}
+        return [{"releaseId": rid, "buildId": labels[rid], "buildName": "b", "version": 1} for rid in release_ids]
+
+
+def _slot_rows() -> list[JsonObject]:
+    return [
+        deployment("dep-1", status="ready"),
+        deployment("dep-2", release_id="release-9", status="provisioning"),
+        deployment("dep-3", status="stopped"),
+        deployment("dep-4", release_id="release-9", status="failed"),
+        deployment("dep-6", status="stop_failed"),
+        deployment("dep-7", status="ready", deleted_at="2026-08-23T13:00:00Z"),
+    ]
+
+
+def _refused_create(builder: FakeBuilder, client: FakeDeploy) -> DeployAPIError:
+    module = _deploy()
+    with pytest.raises(DeployAPIError) as caught:
+        module.reconcile_up(builder, client, _request(module, create=True))
+    return caught.value
+
+
+def test_a_create_refused_at_the_active_cap_names_each_deployment_holding_a_slot() -> None:
+    # Given two deployments holding slots, at a limit of two, beside four that hold none
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP)
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then the slot holders are listed with their Builds, and the stopped, failed and deleted are not
+    assert error.code == "deploy_quota_exceeded"
+    assert [(row["id"], row["status"], row["buildId"]) for row in error.details["activeDeployments"]] == [
+        ("dep-1", "ready", "build-1"),
+        ("dep-2", "provisioning", "build-2"),
+    ]
+    assert all("createdAt" in row for row in error.details["activeDeployments"])
+    assert error.details["server_code"] == "CONCURRENCY_LIMIT"
+    assert "comfy deploy stop" in error.hint
+
+
+def test_a_create_over_the_worker_cap_names_no_deployment() -> None:
+    """comfy-deploy answers the per-deployment worker cap with the same 429, worded
+    apart from every active-cap refusal, so the wording alone decides."""
+    # Given two active deployments and a refusal worded as the worker cap
+    client = _RefusedDeploy(_slot_rows(), _OVER_WORKER_CAP)
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then no list, and no limits read to decide it
+    assert "activeDeployments" not in error.details
+    assert error.hint is None
+    assert client.limit_reads == 0
+
+
+def test_an_active_cap_refusal_reads_no_limits() -> None:
+    # Given
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP)
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then
+    assert "activeDeployments" in error.details
+    assert client.limit_reads == 0
+
+
+def _holders_beside(row: JsonObject) -> list[JsonObject]:
+    """``row``, on build-1, beside two deployments of another Build holding slots."""
+    return [
+        deployment("dep-1", release_id="release-9", status="ready"),
+        deployment("dep-2", release_id="release-9", status="provisioning"),
+        row,
+    ]
+
+
+def test_a_restart_refused_at_the_active_cap_names_each_deployment_holding_a_slot() -> None:
+    # Given the Build's only deployment is stopped, so `up` starts it
+    module = _deploy()
+    client = _RefusedDeploy(_holders_beside(deployment("dep-3", status="stopped")), _AT_ACTIVE_CAP)
+
+    # When
+    with pytest.raises(DeployAPIError) as caught:
+        module.reconcile_up(_LabellingBuilder(), client, _request(module))
+
+    # Then the stopped one is not a holder; the two running ones are
+    error = caught.value
+    assert client.start_calls == ["dep-3"]
+    assert error.code == "deploy_quota_exceeded"
+    assert [(row["id"], row["buildId"]) for row in error.details["activeDeployments"]] == [
+        ("dep-1", "build-2"),
+        ("dep-2", "build-2"),
+    ]
+    assert "comfy deploy stop" in error.hint
+
+
+def test_a_move_refused_at_the_active_cap_names_each_deployment_holding_a_slot() -> None:
+    # Given the Build's deployment serves release-4, so `up` moves it onto release-5
+    module = _deploy()
+    moving = {**deployment("dep-3", release_id="release-4"), "revision": 3}
+    client = _RefusedDeploy(_holders_beside(moving), _AT_ACTIVE_CAP)
+    releases = [
+        {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+    ]
+
+    # When
+    with pytest.raises(DeployAPIError) as caught:
+        module.reconcile_up(_LabellingBuilder(releases), client, _request(module))
+
+    # Then
+    error = caught.value
+    assert client.move_calls == [("dep-3", 3, "release-5")]
+    assert [(row["id"], row["buildId"]) for row in error.details["activeDeployments"]] == [
+        ("dep-1", "build-2"),
+        ("dep-2", "build-2"),
+        ("dep-3", "build-1"),
+    ]
+    assert "comfy deploy stop" in error.hint
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(deployment("dep-3", status="stopped"), id="restart"),
+        pytest.param({**deployment("dep-3", release_id="release-4"), "revision": 3}, id="move"),
+    ],
+)
+def test_a_restart_or_move_over_the_worker_cap_names_no_deployment(row: JsonObject) -> None:
+    # Given
+    module = _deploy()
+    client = _RefusedDeploy(_holders_beside(row), _OVER_WORKER_CAP)
+    releases = [
+        {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+    ]
+
+    # When
+    with pytest.raises(DeployAPIError) as caught:
+        module.reconcile_up(_LabellingBuilder(releases), client, _request(module))
+
+    # Then
+    assert "activeDeployments" not in caught.value.details
+    assert caught.value.hint is None
+
+
+def test_a_failed_follow_up_read_leaves_the_quota_envelope_as_it_was(tmp_path, monkeypatch) -> None:
+    # Given a refusal at the active cap whose Build lookup blows up
+    module = _deploy()
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP)
+
+    def broken(builder, active):
+        raise RuntimeError("labels broke")
+
+    monkeypatch.setattr("comfy_cli.command.build_quota.label_builds", broken)
+    monkeypatch.setattr(module, "_command_clients", lambda: (_LabellingBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--create", "--gpu", "l4", "--region", "US-MO-2"],
+    )
+
+    # Then the envelope is today's: its code, its details and the registered hint
+    from comfy_cli import error_codes
+
+    error = _json_envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_quota_exceeded"
+    assert error["details"] == {"operation": "create", "status": 429, "server_code": "CONCURRENCY_LIMIT"}
+    assert error["hint"] == error_codes.get("deploy_quota_exceeded").hint
+
+
+def test_the_active_cap_envelope_carries_the_list_and_names_deploy_stop(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP)
+    monkeypatch.setattr(module, "_command_clients", lambda: (_LabellingBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--create", "--gpu", "l4", "--region", "US-MO-2"],
+    )
+
+    # Then
+    error = _json_envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_quota_exceeded"
+    assert [row["id"] for row in error["details"]["activeDeployments"]] == ["dep-1", "dep-2"]
+    assert "comfy deploy stop" in error["hint"]
+
+
+def test_an_active_cap_refusal_lists_the_holders_even_when_the_list_counts_fewer_than_the_limit() -> None:
+    """The deploy list shows each deployment's serving copy; the limit counts every
+    undeleted copy, so a stopped deployment whose replacement is queued holds a slot
+    the list reads as free. The refusal is the answer, so the count never hides the list."""
+    # Given a refusal at the active cap, with two listed slot holders under a limit of three
+    client = _RefusedDeploy(_slot_rows(), _AT_ACTIVE_CAP)
+
+    # When
+    error = _refused_create(_LabellingBuilder(), client)
+
+    # Then
+    assert error.code == "deploy_quota_exceeded"
+    assert [row["id"] for row in error.details["activeDeployments"]] == ["dep-1", "dep-2"]
+    assert error.details["server_code"] == "CONCURRENCY_LIMIT"
+    assert "comfy deploy stop" in error.hint

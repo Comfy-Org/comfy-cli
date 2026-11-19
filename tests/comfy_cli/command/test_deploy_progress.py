@@ -683,7 +683,14 @@ class _TerminalRenderer:
     def __init__(self, width: int) -> None:
         from rich.console import Console
 
-        self._console = Console(file=io.StringIO(), width=width, force_terminal=True, color_system=None)
+        # Emulate the promised terminal even when the caller exports TERM=dumb.
+        self._console = Console(
+            file=io.StringIO(),
+            width=width,
+            force_terminal=True,
+            color_system=None,
+            _environ={"TERM": "xterm-256color"},
+        )
 
     def is_pretty(self) -> bool:
         return True

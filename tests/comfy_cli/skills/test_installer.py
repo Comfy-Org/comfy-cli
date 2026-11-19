@@ -56,6 +56,7 @@ def test_bundles_expected_skills():
     assert "comfy-director" in names
     assert "comfy-build" in names
     assert "comfy-deploy" in names
+    assert "comfy-run-on-cloud" in names
 
 
 def test_bundled_skills_have_required_frontmatter():
@@ -464,6 +465,21 @@ def test_comfy_deploy_skill_covers_the_deploy_group():
         assert needle in text, f"comfy-deploy skill should mention {needle}"
 
 
+def test_deploy_skills_describe_approved_uploads():
+    """`deploy run --allow-upload` is in the usage block an agent copies from,
+    and the failure table names the other cause of `deploy_asset_upload_failed`:
+    the private temporary copy of an approved file could not be made."""
+    usage = skill_content("comfy-deploy").split("## `comfy deploy run`", 1)[1].split("```", 2)[1]
+    assert "[--allow-upload <hash> ...]" in usage
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_asset_upload_failed` |")
+    )
+    assert "temporary copy" in row
+    assert "details.temp_dir" in row
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 
@@ -474,6 +490,372 @@ def test_build_and_deploy_skills_hand_off_to_each_other():
     """
     assert "comfy-deploy" in skill_content("comfy-build"), "comfy-build should hand off to comfy-deploy"
     assert "comfy-build" in skill_content("comfy-deploy"), "comfy-deploy should point back at comfy-build"
+
+
+def test_run_on_cloud_skill_follows_the_check_route():
+    """The route starts at `workflow check --where cloud`, reads the workflow
+    from the running server, gates model uploads through `model upload`, and
+    ends at the `workflow save` link. `test_no_mentions_of_nonexistent_commands`
+    resolves each command against the live Typer tree."""
+    text = skill_content("comfy-run-on-cloud")
+    for needle in (
+        "comfy --json workflow check",
+        "--where cloud",
+        "--apply-remaps --out",
+        "--models-dir",
+        "comfy --json which",
+        "local_paths",
+        "comfy --json model upload",
+        "--expected-sha256",
+        "comfy --json workflow save",
+        "data.url",
+        "/api/userdata/workflows%2F",
+        "comfy-user",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should mention {needle}"
+    for verdict in ("covered", "covered_with_remaps", "covered_needs_check", "needs_build"):
+        assert f"`{verdict}`" in text, f"comfy-run-on-cloud skill should handle the {verdict} verdict"
+
+
+def test_run_on_cloud_skill_runs_unproven_models_on_clouds_copy_and_names_them():
+    """Cloud's library models carry no content hash, so `covered_needs_check` is
+    the usual verdict for stock models: no model-choice question, and name each
+    unproven model in the report. A model proven different blocks instead."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "Use Cloud's copy; step 6 asks before a paid test run" in text
+    assert "ran on Cloud's copy unproven" in text
+    assert "`different_file`" in text
+    assert "Ask: use Cloud's copy" not in text
+
+
+def test_run_on_cloud_skill_requires_separate_consent_for_one_paid_job():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "The Run on Cloud prompt does not authorize a paid job" in text
+    assert "including validation or preflight jobs" in text
+    assert "Approval for uploads, swaps, builds or deployments is not approval to run a job" in text
+    assert "A yes covers one job" in text
+    assert "Ask again before submitting another paid job" in text
+    assert "running it on Comfy Cloud (each run costs credits)" not in text
+
+
+def test_run_on_cloud_skill_saves_without_running_when_consent_is_declined_or_pending():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "If they decline or have not answered, skip every job-submitting command in this step" in text
+    assert "including `deploy run --no-upload`" in text
+    assert "continue to step 7 to save the prepared workflow and return its link" in text
+    assert "Save the prepared editor-format file whether or not a test job ran" in text
+    assert '"Your custom build is ready."' in text
+    assert '"Your workflow is ready on Comfy Cloud."' in text
+    assert '"It hasn\'t been run yet."' in text
+    assert '"prepared, not run' not in text
+
+
+def test_run_on_cloud_skill_builds_from_the_whole_install():
+    """A custom build for a local workflow takes the whole install: the pack
+    versions installed and the models it holds, each with its folder and hash.
+    Building from the workflow alone (`--from-workflow`) picks the newest
+    version of each pack and starts with no models."""
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "--from-workflow" not in run
+    assert "Build from the whole install that serves `<server>`, by comfy-build's Path A" in run
+    build = " ".join(skill_content("comfy-build").split())
+    assert "carries only what that workflow loads" not in build
+    assert "a build it needs is made from the whole install (Path A)" in build
+
+
+def test_run_on_cloud_skill_gates_a_custom_build_on_one_plan_yes():
+    """Step 4's custom build is a short pointer to comfy-build Path A with one
+    yes to the plan before anything uploads, and the upload rule says that yes
+    covers the build's uploads."""
+    text = skill_content("comfy-run-on-cloud")
+    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
+    assert len(step.splitlines()) <= 10
+    step = " ".join(step.split())
+    assert "by comfy-build's Path A" in step
+    assert "show the plan and get one yes" in step
+    assert "`--min 0 --max 1` workers" in step
+    assert "Nothing uploads before that yes" in step
+    assert "A custom build's plan yes (step 4) covers its uploads" in " ".join(text.split())
+
+
+def test_run_on_cloud_skill_passes_the_server_to_init():
+    """`init` reads the ComfyUI version from a running server when the install
+    has no version marker (split and Desktop layouts), and defaults to port
+    8188. A server on another port must be passed, or the spec has no base
+    version and the release is refused after the yes."""
+    text = skill_content("comfy-run-on-cloud")
+    step = text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")]
+    assert "pass `<server>` to `init` as `--comfy-url`" in " ".join(step.split())
+
+
+def test_run_on_cloud_skill_plan_is_comfy_builds_before_you_cut():
+    """The one yes covers comfy-build's whole "Before you cut" plan (every file
+    in a local pack uploads, Git packs with uncommitted edits, its own
+    questions), plus the GPU, region, cost and workers."""
+    text = skill_content("comfy-run-on-cloud")
+    step = " ".join(text[text.index("4. **A custom build.**") : text.index("| kind | what counts |")].split())
+    assert 'comfy-build\'s "Before you cut" plan' in step
+    assert "(count and total size)" not in step
+
+
+def test_build_skill_says_uncommitted_edits_in_a_git_pack_stay_behind():
+    """`init` records a Git-sourced pack's repository and HEAD commit and `push`
+    does not upload it, so the disclosure names each pack with uncommitted
+    changes and says those edits are not in the build."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "git -C '<install>/custom_nodes/<folder>' status --porcelain" in build
+    assert "Cloud builds the recorded commit, so name each Git pack with uncommitted changes" in build
+    assert "and say those edits will not be in the build" in build
+
+
+def test_build_skill_says_a_local_pack_uploads_its_whole_folder():
+    """`push` packages every ordinary file in a local pack's folder, so the
+    disclosure says config files and keys such as `.env` upload too."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "Every file in each local pack's folder uploads, config files and keys such as `.env` included" in build
+
+
+def test_build_skills_name_the_pins_the_builder_installs():
+    """An exact, unmarked `nvidia-vfx` pin and an HTTPS wheel line are installed
+    even when no node asks for them, so no skill says a pin never adds one."""
+    for name in ("comfy-build", "comfy-build-pins", "comfy-build-authoring", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        for phrase in (
+            "A version pin forces a version, it never adds a package",
+            "a pin never adds a package",
+            "the builder applies every version pin as a pip **override**",
+            "The builder applies every version pin as a pip **override**",
+            "only forces the version of a package something else installs",
+        ):
+            assert phrase not in text, f"{name} should not say {phrase!r}"
+    for name in ("comfy-build-pins", "comfy-build-failures"):
+        text = " ".join(skill_content(name).split())
+        assert "nvidia-vfx==" in text, f"{name} should name the nvidia-vfx exception"
+        assert ".whl" in text, f"{name} should name the wheel exception"
+
+
+def test_build_pins_skill_keeps_a_needed_nvidia_vfx_pin():
+    """The builder installs an exact `nvidia-vfx` pin, so the delete rule for
+    `nvidia-*` exempts one a pack needs, as the keep rule says."""
+    text = " ".join(skill_content("comfy-build-pins").split())
+    assert "every `nvidia-*`, `comfyui-frontend-package`" not in text
+    assert "every `nvidia-*` except an `nvidia-vfx` pin a pack needs" in text
+
+
+def test_build_skill_searches_every_py_file_before_calling_a_folder_node_less():
+    """`init` lists every `custom_nodes/` folder as a pack, and the builder fails
+    the release on a side-loaded library that declares no nodes. A pack may build
+    `NODE_CLASS_MAPPINGS` or a V3 `comfy_entrypoint` in a submodule and re-export
+    it with a wildcard import, so `__init__.py` alone cannot tell: Path A
+    searches every `.py` file in the folder, and asks before dropping a folder
+    where neither name appears."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "`__init__.py` defines or imports" not in build
+    assert (
+        "A folder declares nodes when `NODE_CLASS_MAPPINGS` (the V1 node API) or `comfy_entrypoint` "
+        "(the V3 node API) appears in any `.py` file in it, subfolders included" in build
+    )
+    assert (
+        "grep -rlE --include='*.py' 'NODE_CLASS_MAPPINGS|comfy_entrypoint' '<install>/custom_nodes/<folder>'" in build
+    )
+    assert 'name it in the disclosure as "declares no nodes" and ask before dropping its `customNodes` entry' in build
+    assert "declared custom nodes failed to import" in build
+    # A kept pack may import a dropped library, which the build does not carry.
+    assert "with each kept pack that imports its library (grep the kept packs for the import)" in build
+    assert "the build does not carry that library" in build
+
+
+def test_build_skill_drops_disabled_pack_folders():
+    """ComfyUI skips a `custom_nodes/` folder whose name ends in `.disabled`, but
+    `init` lists it, so Path A drops that entry and names it."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "a folder whose name ends in `.disabled`**, which ComfyUI does not load" in build
+    assert "Drop that entry too, and name it in the disclosure" in build
+
+
+def test_build_skill_stops_on_a_disabled_pack_link_before_init():
+    """`init` follows a `custom_nodes/<name>.disabled` symlink, and packaging
+    refuses a symlinked local pack, so the scan stops before any spec exists.
+    The scanner owns that case: until it skips such a link, the agent names the
+    link and stops before `init`. It never moves or deletes the link, so no link
+    is left in a folder the person does not know about."""
+    build = " ".join(skill_content("comfy-build").split())
+    find = "find '<install>/custom_nodes' -maxdepth 1 -name '*.disabled' -type l"
+    assert f"Before `init`, list such links: `{find}`" in build
+    assert "`build_spec_invalid`, `node root must not be a symlink`" in build
+    assert "name each link to the person, say `init` fails on it, and stop" in build
+    assert "Never move or delete the link yourself: the person may move or delete it and ask again" in build
+    run = " ".join(skill_content("comfy-run-on-cloud").split())
+    for text in (run, build):
+        assert "mktemp" not in text
+        assert "<park>" not in text
+        assert not re.findall(r"\bmv ", text)
+
+
+def test_build_skills_name_single_file_nodes_the_scan_skips():
+    """ComfyUI loads a single `.py` file under `custom_nodes/` as a pack, but
+    `init` scans folders only, so such a file never reaches the spec: the
+    disclosure names it as not carried."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "It skips a single `.py` file under `custom_nodes/`**, which ComfyUI loads as a pack" in build
+    assert "`init` scans folders only, so no such file reaches the spec" in build
+    assert "List the single `.py` files directly under `<install>/custom_nodes/`" in build
+
+
+def test_build_skill_stops_when_the_missing_node_comes_from_a_single_file():
+    """A single-file node cannot be carried, so a build for a workflow missing
+    that node on Cloud would fail on it: Path A stops before the plan."""
+    build = " ".join(skill_content("comfy-build").split())
+    assert "When the node the workflow is missing on Cloud comes from such a file, stop before the plan" in build
+
+
+def test_run_on_cloud_skill_keeps_the_prompts_server_for_local_commands():
+    """A server on another port than 8188 must be the one `--where local` reads."""
+    text = skill_content("comfy-run-on-cloud")
+    assert "COMFY_LOCAL_URL=<server> comfy --json run" in text
+    assert "--where local" in text
+
+
+def test_run_on_cloud_skill_judges_a_deployment_by_its_served_release():
+    """A Build's definition can change after its release was cut, so packs and
+    models both come from the served release's manifest."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "comfy --json build release manifest <release id>" in text
+    assert "`customNodes` and `models`" in text
+    assert "comfy --json build show --id" not in text
+
+
+def test_run_on_cloud_skill_holds_deployment_uploads_until_asked():
+    """`deploy run` uploads scanner-found files on its own, and with two asset
+    folders holding a `portrait.png` each it picks one by its own order. So the
+    skill asks about the scanner's own plan (`details.missing[]` from a
+    `--no-upload` run, by full path), and the retry may upload only the approved
+    hashes. A list the skill builds itself from the tracked workspace could name
+    one `portrait.png` while the run sends the other."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "--no-upload" in text
+    assert "deploy_asset_missing" in text
+    assert "`details.missing[]` is the exact upload plan" in text
+    assert "`local_path` (the full path it picked)" in text
+    assert "--allow-upload <hash>" in text
+    assert "never pass a hash nobody approved" in text
+    assert "It hashes a private copy of each file it uploads and sends that copy" in text
+    assert "data.assets.files[]" in text
+    # The old self-built list, from the tracked workspace only, is gone.
+    assert "jq -r '[.[].inputs" not in text
+    assert "Run without `--no-upload` only after" not in text
+
+
+def test_run_on_cloud_skill_asks_again_only_when_there_is_a_local_plan():
+    """`deploy_asset_missing` also covers a remote asset the account cannot
+    reach (`details.server_code` `missing_asset`, with no `details.missing[]`).
+    Asking again about local files is only for a refusal that lists them."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "`details.missing[]` is there: a file differs from the approved plan" in text
+    assert "`details.server_code` is `missing_asset`" in text
+    assert "Report that asset as unreachable" in text
+
+
+def test_run_on_cloud_skill_reads_the_save_warning_for_a_missing_link():
+    """An API-format file saved with sidebar saving on gets no link either; its
+    warning says so, so the skill does not blame the workspace setting."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "data.warnings[]" in text
+    assert "`api_format_saved_as_record`: sidebar saving is on" in text
+    assert "no warning: the workspace saves workflows as records only" in text
+
+
+def test_run_on_cloud_skill_handles_every_model_upload_outcome():
+    text = skill_content("comfy-run-on-cloud")
+    for needle in (
+        "already_present",
+        "model_upload_needs_confirm",
+        "asset_upload_wrong_workspace",
+        "asset_upload_unverified",
+        "asset_upload_invalid",
+        "file_changed",
+        "name_in_use",
+        "name_unverified",
+        "bad_expected_sha256",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should handle {needle}"
+
+
+def test_run_on_cloud_skill_says_a_record_only_save_has_no_link():
+    """A record-only save adds nothing to the Workflows sidebar."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "records only" in text
+    assert "there is no link" in text
+    assert "then Workflows, then" not in text
+
+
+def test_run_on_cloud_skill_drops_the_later_milestone_links():
+    """Saved-file ids, `workflow ui` and `deploy ui` links are not part of this
+    route, and `build inventory --cloud` gave way to `workflow check`."""
+    text = skill_content("comfy-run-on-cloud")
+    for gone in ("saved_file_id", "workflow ui", "deploy ui", "build inventory"):
+        assert gone not in text, f"comfy-run-on-cloud skill should not mention {gone}"
+
+
+def test_run_on_cloud_skill_explains_workflow_and_folder_links():
+    """The save's link opens the one workflow or its folder; the skill hands
+    back `data.url` as it is and reads why a folder link was given."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    for needle in (
+        "Hand back `data.url` as returned",
+        "`data.url_opens`",
+        "workflowId=<data.workflow_id>",
+        "workflows=<folder>",
+        "`data.folder_link_reason`",
+        "`workflow_links_off`",
+        "`record_not_found`",
+        "`record_ambiguous`",
+        "`record_lookup_failed`",
+        "`workflow_record_unknown`",
+        "Cloud checks the link against the saved file when it opens",
+        "not listed here as `folder`",
+        "`data.filename`",
+    ):
+        assert needle in text, f"comfy-run-on-cloud skill should mention {needle}"
+    # The Cloud page is not part of this repository; the skill does not quote it.
+    assert "Couldn't open this workflow" not in text
+
+
+def test_comfy_skill_reads_an_unknown_link_value_as_folder():
+    text = " ".join(skill_content("comfy").split())
+    assert "`data.url_opens`" in text
+    assert "treat a value not listed here as `folder`" in text
+
+
+def test_run_on_cloud_skill_asks_before_every_upload_and_lossy_swap():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "uploading any file from this machine" in text
+    assert "Ask by file name" in text
+    assert "A lossy swap**, asked first" in text
+
+
+def test_run_on_cloud_prompt_template_loads_the_skill():
+    """The prompt "Copy prompt" puts on the clipboard has to name a skill `show`
+    resolves, and carry the lines the skill reads."""
+    import comfy_cli.skills as skills_pkg
+
+    template = (Path(skills_pkg.__file__).parent / "comfy-run-on-cloud" / "PROMPT-TEMPLATE.md").read_text(
+        encoding="utf-8"
+    )
+    for line in (
+        "Run my ComfyUI workflow on Comfy Cloud.",
+        "If comfy is missing: uv tool install comfy-cli",
+        "Read the skill first: comfy skills show comfy-run-on-cloud",
+        "Workflow: workflows/<name>.json",
+        "ComfyUI: http://127.0.0.1:8188",
+        "ComfyUI user: <user>",
+    ):
+        assert line in template, f"prompt template should carry {line!r}"
+    assert "comfy-run-on-cloud" in readable_skill_names()
+
+
+def test_build_skill_points_a_single_workflow_at_run_on_cloud():
+    assert "comfy skills show comfy-run-on-cloud" in skill_content("comfy-build")
 
 
 def test_skill_content_rejects_unknown_name():
@@ -1238,3 +1620,49 @@ def test_agent_permissions_skill_names_every_permanently_refused_host():
     assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
     for host in _REFUSED_HOSTS:
         assert host in rows[0], f"the row should name the refused host {host}"
+
+
+def test_run_on_cloud_skill_fetches_files_with_any_name():
+    """A workflow or input whose name has a space, `#` or `&` still downloads
+    into a folder that exists: the query is URL-encoded, the working folder
+    name is made safe and created with its `inputs` folder, and paths are quoted."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert 'mkdir -p "<work>/inputs"' in text
+    assert "--data-urlencode 'filename=<file>'" in text
+    assert "--data-urlencode 'subfolder=<subfolder>'" in text
+    assert "inside double quotes the shell still runs `$(...)`" in text
+    assert '"filename=<file>"' not in text
+    assert '--name "<name>"' not in text
+    assert "a space as `%20`" in text
+    assert "run-on-cloud/<name>" not in text
+
+
+def test_run_on_cloud_skill_confirms_the_server_and_keeps_files_in_its_folder():
+    """Another program on the prompt's port answers every path with 200, so the
+    skill confirms ComfyUI before fetching; a model with no local copy is asked
+    about only when the server has it; a swap wires slots by name; and every
+    file it writes stays under `<work>`."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert '"<server>/api/system_stats"' in text
+    assert "`system.comfyui_version`" in text
+    assert '"<server>/api/models/<folder>"' in text
+    assert "Name slots in `connect`, never their numbers" in text
+    assert "lists a node's inputs and outputs by name" in text
+    assert "the server's answer proves nothing" in text
+    assert '> "<work>/preview.json"' in text
+    assert '--workflow "<work>/api.json"' in text
+    assert "> preview.json" not in text
+    assert "--workflow api.json" not in text
+
+
+def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
+    """The input is fetched and hashed before the ask, so the yes covers the
+    bytes that are uploaded; partner-API nodes spend credits beyond the run, so
+    `spend_consent_required` is asked about before `--allow-spend`."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "fetch it from the local server before you ask" in text
+    assert "shasum -a 256 '<work>/inputs/<subfolder>/<file>'" in text
+    assert "--create-dirs -o '<work>/inputs/<subfolder>/<file>'" in text
+    assert "Do not fetch it again" in text
+    assert "`spend_consent_required`" in text
+    assert "`--allow-spend`" in text

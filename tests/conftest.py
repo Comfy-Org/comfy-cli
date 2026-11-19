@@ -49,3 +49,16 @@ def _neutralize_agent_attribution(monkeypatch):
     """
     for var in _AGENT_ATTRIBUTION_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_download_claims(tmp_path, monkeypatch):
+    """Point the host-global download claims directory at this test's tmp_path.
+
+    Claims are shared by every workspace on a host (comfy-cli#1095), so without
+    this every case would lock files in the developer's real config directory,
+    and two cases aimed at one destination would share a claim. Set through the
+    environment, not a monkeypatched function, so a helper process or a spawned
+    worker the test starts resolves the same directory.
+    """
+    monkeypatch.setenv("COMFY_DOWNLOAD_CLAIMS_DIR", str(tmp_path / "download-claims"))

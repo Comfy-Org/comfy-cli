@@ -18,6 +18,71 @@
       "description": "list: the `--offset` for the next page; present only when `has_more` is true and the source paged by the offset requested."
     },
     "slots": { "type": "array" },
+    "nodes": {
+      "description": "Shared key, command-specific shapes. compose/decompose: an INTEGER node count. ls-nodes: an ARRAY with one row per TOP-LEVEL node (a subgraph instance is one opaque row; `count` is that array's length). print --format json: an ARRAY of print records (a subgraph interior appears once per instance address, e.g. \"57/3\"). A last-key-wins reader used to keep only the print contract when this key was declared twice; there is now a single declaration that admits every command's output.",
+      "type": ["integer", "array"],
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "description": "ls-nodes: node id as serialized in the workflow. print: the address the edit commands take, e.g. \"3\" or \"57/3\"" },
+          "type": { "description": "class_type as serialized (ls-nodes copies verbatim so a corrupt file is reported as it actually is; print is a string)" },
+          "title": { "description": "ls-nodes: display title, else the `Node name for S&R` property (verbatim). print: the node's own title; empty when it has none or it equals the class" },
+          "mode": {
+            "type": "string",
+            "description": "ls-nodes: present ONLY when the node is disabled (`mute` or `bypass`, litegraph mode 2/4); absent for a normally-executing node. print: normal, muted or bypassed (another litegraph mode as its number)"
+          },
+          "name": { "type": "string", "description": "print: the binding name in `source`" },
+          "collapsed": { "type": "boolean" },
+          "pinned": { "type": "boolean" },
+          "outputs": { "type": "array", "items": { "type": ["string", "null"] }, "description": "print: output names in slot order" },
+          "widgets": { "type": "object", "description": "print: widget name -> value, as printed" },
+          "links": {
+            "type": "object",
+            "description": "print: input name -> {node, output, slot}, or null for an empty socket (including an auto-grow group's open slot)",
+            "additionalProperties": {
+              "type": ["object", "null"],
+              "properties": { "node": { "type": "string" }, "output": { "type": "string" }, "slot": {} }
+            }
+          },
+          "promoted": { "type": "object", "description": "print: interior widget -> {instance, widget}: the subgraph input (IN.<name>) that sets it; the value is the instance's" },
+          "subgraph": { "type": "string", "description": "print: the definition id, on a subgraph instance" },
+          "definition": { "type": "string", "description": "print: the definition id, on an interior node" },
+          "definition_missing": { "type": "boolean" },
+          "class_unknown": { "type": "boolean" },
+          "widgets_positional": { "type": "array", "description": "print: raw widgets_values when they cannot be named" }
+        }
+      }
+    },
+    "subgraph_nodes": {
+      "type": "array",
+      "description": "ls-nodes: one row per node INSIDE a live subgraph instance (definitions.subgraphs[].nodes, recursively) — nodes that never appear in `nodes`. Empty when the workflow has no subgraph instances. This listing INCLUDES disabled nodes: a row's own `mode` says whether it is muted/bypassed, and because a nested instance gets a row of its own, a caller deciding what actually EXECUTES must also check the `mode` of every ancestor along the row's `path` prefixes (a live `10/3/7` under a muted `10/3` is dropped by workflow_to_api, as is any interior under a disabled top-level instance — whose mode is on its `nodes[]` row).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "`<instance>/<interior>` address, nesting with `/` (e.g. \"10/3/7\") — the same addressing `comfy workflow slots` uses, so it composes into a slot address"
+          },
+          "instance": { "type": "string", "description": "id of the TOP-LEVEL subgraph instance this row is reached through" },
+          "id": { "description": "interior node id as serialized in the subgraph definition" },
+          "type": { "description": "class_type as serialized in the definition; same verbatim-copy caveat as the `nodes[]` `type`" },
+          "title": { "description": "display title, else the `Node name for S&R` property; same verbatim-copy caveat as `type`" },
+          "mode": {
+            "type": "string",
+            "enum": ["mute", "bypass"],
+            "description": "present ONLY when the interior node is disabled; workflow_to_api drops such a node after expansion, so nothing else reveals it"
+          }
+        }
+      }
+    },
+    "subgraph_count": {
+      "type": "integer",
+      "description": "ls-nodes: length of `subgraph_nodes` (kept separate from `count`, which stays top-level-only)."
+    },
+    "subgraph_truncated": {
+      "type": "boolean",
+      "description": "ls-nodes: present and true ONLY when the interior walk hit its row ceiling, so `subgraph_nodes` is INCOMPLETE and `subgraph_count` is a floor rather than a total. Any listing whose reachable interior rows exceed the ceiling sets it — usually a branching definition graph, which can expand a few-KB file into billions of rows, but a legitimately huge workflow reaches it the same way. Ordinary workflows are far below the ceiling and never carry this key."
+    },
     "notes": {
       "type": "array",
       "description": "notes: the Note/MarkdownNote documentation nodes the workflow carries, in graph order (top-level nodes first, then each subgraph definition).",
@@ -41,7 +106,7 @@
         }
       }
     },
-    "format": { "type": "string", "enum": ["py"], "description": "print: output form. Only `py` today." },
+    "format": { "type": "string", "enum": ["py", "json"], "description": "print: output form. `json` adds `nodes`." },
     "source": { "type": "string", "description": "print: the rendered Python-like source, one line per node." },
     "bindings": {
       "type": "object",

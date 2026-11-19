@@ -7,9 +7,10 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
 import typer
@@ -17,6 +18,7 @@ from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.command.models import search as models_search_command
+from comfy_cli.command.models import upload as models_upload_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
@@ -30,7 +32,7 @@ from comfy_cli.file_utils import (
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.output.sanitize import sanitize_markup
-from comfy_cli.workspace_manager import WorkspaceManager
+from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,14 @@ app = typer.Typer()
 
 workspace_manager = WorkspaceManager()
 config_manager = ConfigManager()
+
+_MAX_FOLDER_PATHS_BYTES = 1 << 20
+
+# Per-socket inactivity timeout and the wall-clock ceiling on the whole
+# model-folder lookup. The second is not redundant: see
+# :func:`_folder_paths_within_deadline`.
+_FOLDER_PATHS_SOCKET_TIMEOUT_S = 2.0
+_FOLDER_PATHS_DEADLINE_S = 3.0
 
 _CIVITAI_SUBDOMAIN_SUFFIXES = tuple(f".{h}" for h in constants.CIVITAI_ALLOWED_HOSTS)
 
@@ -53,6 +63,178 @@ model_path_map = {
 
 def get_workspace() -> pathlib.Path:
     return pathlib.Path(workspace_manager.workspace_path)
+
+
+def _usable_model_folder(folder: object) -> str | None:
+    """``folder`` as a directory we are willing to save a model into, or None.
+
+    The value is whatever process is listening on the loopback port chose to
+    return, so it is checked rather than trusted, and every check fails closed
+    onto the workspace path:
+
+    * **It must be a non-empty absolute path.** A relative folder would be a
+      guess at the server's working directory, and `os.path.join` would resolve
+      it against *ours* instead.
+    * **A UNC or device path is refused before any filesystem call.** On Windows
+      ``\\\\host\\share\\loras`` satisfies ``isabs``, and merely stat-ing it opens an
+      outbound SMB connection that can hand the user's NTLM credentials to
+      whoever named the host; ``\\\\?\\`` / ``\\\\.\\`` device paths are refused
+      alongside it. The check is on the raw string, since the filesystem call is
+      itself the thing being avoided.
+    * **It must already exist as a directory.** This is the load-bearing one,
+      for two separate reasons. A loopback reply is not proof of a shared
+      filesystem: ComfyUI in Docker (``-p 8188:8188``), behind ``ssh -L``, or in
+      WSL answers on 127.0.0.1 and reports *its* paths
+      (``/root/ComfyUI/models/loras``) — which on this machine are absent, so the
+      download would fail on ``mkdir`` or, running as root, land in a host
+      directory the server never scans while the CLI claimed otherwise. And
+      requiring the directory to exist means a responder that is not ComfyUI at
+      all cannot make the CLI *create* a tree at a path of its choosing.
+
+    The final ``os.path.isdir`` is a filesystem call on a path the server chose,
+    so it can block uninterruptibly on an unresponsive hard-mounted network
+    filesystem. That is why this runs inside
+    :func:`_server_model_folder_within_deadline`'s worker rather than on the
+    caller — see that docstring.
+
+    Residual, stated rather than closed: an existing directory is still accepted
+    when it is a symlink, and a process that controls the loopback port can name
+    any existing directory the user can write to. Narrowing further would need a
+    notion of "a known model root", which Desktop's user-chosen shared library
+    does not have. Both require something already listening on the port the CLI
+    was pointed at.
+    """
+    if not isinstance(folder, str) or not folder or not os.path.isabs(folder):
+        return None
+    if folder[:2] in ("\\\\", "//", "\\/", "/\\"):
+        return None
+    normalized = os.path.normpath(folder)
+    return normalized if os.path.isdir(normalized) else None
+
+
+def _folder_paths_body() -> dict | list | None:
+    """``/internal/folder_paths`` from the ComfyUI on this machine, or None.
+
+    The Target is built with :func:`target.local_target` rather than resolved
+    through ``where``: this is a filesystem question about the local server, and
+    ``resolve_target(where=None, ...)`` answers it with the *cloud* target
+    whenever a session, ``COMFY_WHERE`` or ``where_default`` says cloud — which
+    both skips the server we meant to ask and spends a credential refresh (and,
+    on a fatal refresh, the stored session) on a Target that is then discarded.
+    """
+    from comfy_cli.cql._net import is_loopback_host
+    from comfy_cli.env_checker import _unbracket_host
+    from comfy_cli.host_port import resolve_host_port
+    from comfy_cli.http import request_json
+    from comfy_cli.target import local_target
+
+    # `resolve_host_port` brackets IPv6 literals for URL use; `local_target`
+    # re-brackets idempotently and `Target.host` is documented as the raw
+    # literal, so the bare form is what goes in.
+    host, port = resolve_host_port(None, None)
+    bare_host = _unbracket_host(host)
+    if not is_loopback_host(bare_host):
+        return None
+    target = local_target(bare_host, port)
+    _, body = request_json(
+        target.url("internal", "folder_paths"),
+        target,
+        timeout=_FOLDER_PATHS_SOCKET_TIMEOUT_S,
+        max_bytes=_MAX_FOLDER_PATHS_BYTES,
+    )
+    return body
+
+
+def _probe_server_model_folder(kind: str) -> str | None:
+    """Ask the local ComfyUI for its ``kind`` folder and check it. Blocking.
+
+    The server lists its default folder for a kind first, so only the first entry
+    is considered: a later one is another configured root, and preferring it on
+    the strength of existing locally is how a container path with a familiar name
+    gets picked over the workspace.
+    """
+    body = _folder_paths_body()
+    folders = body.get(kind) if isinstance(body, dict) else None
+    first = folders[0] if isinstance(folders, list) and folders else None
+    return _usable_model_folder(first)
+
+
+def _server_model_folder_within_deadline(kind: str) -> str | None:
+    """:func:`_probe_server_model_folder` under a wall-clock cap, or None.
+
+    ``request_json``'s ``timeout`` is urllib's *per-socket-operation* inactivity
+    timeout, not a deadline: a listener that dribbles a byte inside every window
+    resets it indefinitely, so an optional lookup — and every typed download
+    waiting on it — could stall for far longer than the budget suggests. The
+    request therefore runs on a daemon thread and the caller stops waiting at
+    :data:`_FOLDER_PATHS_DEADLINE_S` no matter what the socket is doing.
+
+    The *whole* probe goes on that thread, the folder check included, and that is
+    not tidiness. :func:`_usable_model_folder` ends in ``os.path.isdir`` on a path
+    the server chose, which on an unresponsive hard-mounted network filesystem
+    blocks uninterruptibly — so leaving it on the caller would reintroduce the
+    unbounded stall one call after bounding it.
+
+    Abandoning the thread is safe: it writes nothing, owns nothing but its own
+    socket, is still bounded by the per-socket timeout, and being a daemon never
+    delays interpreter exit.
+    """
+    answered: list[str | None] = []
+    failed: list[Exception] = []
+
+    def run() -> None:
+        try:
+            answered.append(_probe_server_model_folder(kind))
+        except Exception as e:  # noqa: BLE001 - optional lookup; the workspace path still works
+            failed.append(e)
+
+    worker = threading.Thread(target=run, name="comfy-folder-paths", daemon=True)
+    worker.start()
+    worker.join(_FOLDER_PATHS_DEADLINE_S)
+    if failed:
+        logger.debug("could not ask the local ComfyUI for its model folders: %s", failed[0])
+        return None
+    if not answered:
+        logger.debug("the local ComfyUI did not answer with its model folders within %ss", _FOLDER_PATHS_DEADLINE_S)
+        return None
+    return answered[0]
+
+
+def _server_model_folder(kind: str) -> str | None:
+    """The folder the local ComfyUI saves ``kind`` to by default, or None if it won't say.
+
+    Comfy Desktop keeps models in a shared library set by `--extra-model-paths-config`,
+    so `<workspace>/models/<kind>` can be a folder the server never scans.
+    The server lists its default folder first. A download never fails over this: any
+    failure, including no server or one too old for the route, keeps the workspace path.
+
+    An explicit `--workspace` wins outright and the server is not asked at all.
+    Nothing ties the probed server to the selected workspace — it comes from
+    `--host`/`--port`, `COMFY_LOCAL_URL`, the recorded background server or the
+    default `127.0.0.1:8188` — so with another install serving (Desktop, a second
+    workspace's server), honoring its folder would silently override the one
+    place the user said where to put the file.
+    """
+    if not kind:
+        return None
+    if workspace_manager.workspace_type is WorkspaceType.SPECIFIED:
+        logger.debug("--workspace was given explicitly; not asking a local server where to save")
+        return None
+    return _server_model_folder_within_deadline(kind)
+
+
+def _default_destination(model_path: str, basemodel: str) -> str:
+    """Where a typed download goes when the caller gave no `--relative-path`."""
+    folder = _server_model_folder(model_path)
+    if folder is None:
+        return os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+    destination = os.path.join(folder, basemodel)
+    # `sanitize_markup`, not `escape`: the folder is server-supplied text, so it
+    # needs the control-character strip as well as the markup escape — `escape`
+    # alone leaves an ANSI/OSC sequence intact to repaint the terminal and spoof
+    # the very line that is reporting where the file went.
+    print(f"Saving to {sanitize_markup(destination)}, the folder the running ComfyUI scans for {escape(model_path)}")
+    return destination
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -396,6 +578,16 @@ def download(
         ),
     ] = False,
 ):
+    """Download a model file, resolving where to put it before any bytes move.
+
+    `--relative-path` is honored verbatim (only `expanduser`-ed) and is the one
+    way to name the destination exactly. Without it, a typed CivitAI or Hugging
+    Face download asks :func:`_default_destination` — which prefers the folder
+    the running local ComfyUI scans for that model type and otherwise keeps
+    `<workspace>/models/<kind>/<basemodel>`. Everything after that (the
+    in-flight scan, the destination claim, foreground vs `--background`) is
+    keyed on the resolved destination, so it is settled first.
+    """
     if relative_path is not None:
         relative_path = os.path.expanduser(relative_path)
 
@@ -433,7 +625,7 @@ def download(
             if model_path is None:
                 model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = _default_destination(model_path, basemodel)
     elif is_civitai_api_url:
         local_filename, url, model_type, basemodel = _resolve_civitai_source(
             lambda: request_civitai_model_version_api(version_id, headers), url
@@ -446,7 +638,7 @@ def download(
             if model_path is None:
                 model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
 
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = _default_destination(model_path, basemodel)
     elif is_huggingface_url:
         model_id = "/".join(url.split("/")[-2:])
 
@@ -455,7 +647,7 @@ def download(
         if relative_path is None:
             model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
             basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
-            relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
+            relative_path = _default_destination(model_path, basemodel)
     else:
         # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
         # source: the download proceeds via download_file() below. This is a note,
@@ -679,9 +871,13 @@ def download(
                         details={"url": _scrub_url(url), "path": str(local_filepath)},
                     ) from None
 
-            print(f"Model downloaded successfully to: {escape(str(output_path))}")
+            # `sanitize_markup`, not `escape`: with no `--relative-path` the
+            # destination can be a folder the local server named, so the path is
+            # partly server-supplied text and needs the control-character strip
+            # too. `escape` alone leaves an ANSI/OSC sequence intact.
+            print(f"Model downloaded successfully to: {sanitize_markup(output_path)}")
         else:
-            print(f"Start downloading URL: {escape(_scrub_url(url))} into {escape(str(local_filepath))}")
+            print(f"Start downloading URL: {escape(_scrub_url(url))} into {sanitize_markup(local_filepath)}")
             try:
                 download_file(
                     url,
@@ -693,6 +889,11 @@ def download(
                     # finished run from a killed-mid-flight one. See
                     # `_foreground_progress`.
                     progress_callback=_foreground_progress(claim) if claim is not None else None,
+                    # Tag the `.part` with the claim record's id, the same way a
+                    # background worker tags its own, so `download-cancel` of some
+                    # other (dead) record for this destination can't sweep the temp
+                    # this run is streaming into.
+                    part_tag=claim.id if claim is not None else None,
                 )
             except DownloadException as e:
                 # `message` is rendered through `Text` (see `_download_failure`), which
@@ -925,9 +1126,10 @@ def _submit_background_download(
     # it pointing at a record of ours that does not exist yet — it would read as
     # stale and be stolen out from under us.
     #
-    # Unchanged non-goal: the claim lives under `get_workspace()`, so two
-    # invocations run from different workspaces at one destination still consult
-    # different claim directories (the documented cross-workspace residual).
+    # The claim lives in one host-global directory, not under `get_workspace()`
+    # (comfy-cli#1095), so two invocations run from different workspaces at one
+    # destination contend for the same lock. The advisory re-scan below is still
+    # per-workspace; it only matters when the claim degraded.
     #
     # Which is why the advisory re-scan survives, and runs *first*, before the
     # claim. It is the only thing that sees a competitor holding no claim lock —
@@ -1026,14 +1228,16 @@ def _download_worker(
     # and losing the destination to that would be a spurious refusal.
     #
     # Derived defensively, never carried in the record — the claim is addressed
-    # by destination, not by download. `state.dest` is read back off disk, so
+    # by destination, not by download, through the same resolver the submitter
+    # used (`download_state.claim_path`), so the two cannot disagree.
+    # `state.dest` is read back off disk, so
     # `_dest_key` (`realpath`) is being handed untrusted text and can raise on a
     # shape the submitter's own `dest` never had. Bookkeeping must never be what
     # stops a transfer from recording its result, so a claim we cannot address is
     # a claim we proceed without.
     claim_file: pathlib.Path | None
     try:
-        claim_file = download_state.claim_marker_for(path, _dest_key(state.dest))
+        claim_file = download_state.claim_path(_dest_key(state.dest), path.parent)
     except (OSError, ValueError):
         claim_file = None
 
@@ -1067,12 +1271,15 @@ def _download_worker(
             # competitor. Anything else is adopted.
             payload = claim_lock.read_payload() if claim_lock is not None else None
             owner = payload.get("download_id") if payload is not None else None
-            if owner is not None and owner != state.id and not _claim_owner_live(path, owner):
-                owner = None
+            if owner is not None and owner != state.id and not _claim_owner_live(path, payload):
+                # Adopting another download's finished claim. If that download
+                # already produced the file, we started too late: writing now
+                # would replace a file someone else just finished.
+                owner = None if not _dest_exists(state.dest) else owner
             claim_lost = claim_lock is None or (owner is not None and owner != state.id)
             if claim_lock is not None and owner is None:
                 with contextlib.suppress(OSError):
-                    claim_lock.write_payload(state.id, state.dest)
+                    claim_lock.write_payload(state.id, state.dest, path.absolute())
 
     def release() -> None:
         nonlocal claim_lock
@@ -1144,6 +1351,12 @@ def _download_worker(
                 _worker_headers(state),
                 downloader=state.downloader,
                 progress_callback=on_progress,
+                # Tag the `.part` temp with this download's id so a cancel of a
+                # sibling download targeting the same destination can't unlink the
+                # temp this worker is streaming into. `download_file` refuses an
+                # id outside the download-id grammar (a tampered record) rather
+                # than let it steer the temp's path.
+                part_tag=state.id,
             )
         except DownloadCancelled:
             state.status = "cancelled"
@@ -1318,17 +1531,12 @@ def _active_download_for(
     ``exclude_id`` skips one record: :func:`_submit_background_download` re-runs
     this scan *after* writing its own claim and must not find itself.
 
-    The scan is scoped to ``get_workspace()``'s state directory, and that is the
-    residual neither this nor the claim lock closes — the claim lives in
-    the same per-workspace state directory. A destination can sit outside the
-    workspace (``--relative-path`` is only ``expanduser``-ed, so it accepts
-    ``..`` and absolute paths), so two invocations run against *different*
-    workspaces but aimed at the same file consult disjoint
-    ``<workspace>/.comfy-downloads`` directories and are invisible to each other
-    — both claim, both win, both write. Closing it needs a claim that lives next
-    to the destination rather than next to the workspace, or a refusal of
-    workspace-escaping ``--relative-path``; both are design calls with their own
-    tradeoffs and neither is made here.
+    The scan is scoped to ``get_workspace()``'s state directory. Two invocations
+    run against *different* workspaces but aimed at one file (a shared Comfy
+    Desktop model library, or a ``--relative-path`` outside the workspace) do not
+    see each other's records here. The claim lock is what refuses them: it lives
+    in one host-global directory (comfy-cli#1095). This scan only stands alone
+    when the claim degraded, and then the cross-workspace case is open again.
     """
     wanted = _dest_key(dest)
     winner: download_state.DownloadState | None = None
@@ -1355,7 +1563,11 @@ def _active_download_for(
     return winner
 
 
-def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.Path) -> typer.Exit:
+def _in_flight_failure(
+    competitor: download_state.DownloadState,
+    dest: pathlib.Path,
+    workspace: pathlib.Path | None = None,
+) -> typer.Exit:
     """The ``model_download_in_flight`` refusal, worded for the claim we hit.
 
     Both halves vary by ``kind``. A background download really can be cancelled
@@ -1363,62 +1575,167 @@ def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.P
     refuses it, because the recorded pid is a user CLI process sharing the
     terminal's foreground process group — so pointing at it would be advice that
     fails. Ctrl-C in the owning terminal is the honest instruction.
+
+    ``workspace`` is the competitor's workspace when it is not ours
+    (comfy-cli#1095). `download-status` and `download-cancel` look an id up in
+    the selected workspace, so the hint has to select the competitor's.
     """
     kind = "foreground" if competitor.is_foreground else "background"
+    comfy = f'comfy --workspace "{workspace}"' if workspace is not None else "comfy"
     stop = (
         "interrupt it with Ctrl-C in the terminal running it"
         if competitor.is_foreground
-        else f"cancel it with `comfy model download-cancel {competitor.id}`"
+        else f"cancel it with `{comfy} model download-cancel {competitor.id}`"
     )
+    details = {
+        "path": str(dest),
+        "download_id": competitor.id,
+        "status": competitor.status,
+        "kind": competitor.kind,
+    }
+    if workspace is not None:
+        details["workspace"] = str(workspace)
     return _download_failure(
         code="model_download_in_flight",
         message=f"A {kind} download ({competitor.id}) is already writing to {dest}.",
-        hint=f"track it with `comfy model download-status {competitor.id}`, or {stop}",
-        details={
-            "path": str(dest),
-            "download_id": competitor.id,
-            "status": competitor.status,
-            "kind": competitor.kind,
-        },
+        hint=f"track it with `{comfy} model download-status {competitor.id}`, or {stop}",
+        details=details,
     )
+
+
+def _holder_workspace(payload: dict | None) -> pathlib.Path | None:
+    """The workspace a claim payload's record lives in, when it is not the selected one."""
+    if payload is None:
+        return None
+    try:
+        own = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        record_file = download_state.claim_holder_state_file(payload, own)
+    except (OSError, ValueError, KeyError):
+        return None
+    if record_file is None or record_file.parent == own:
+        return None
+    return record_file.parent.parent
 
 
 def _dest_claim_path(dest: pathlib.Path) -> pathlib.Path | None:
     """Where ``dest``'s claim file lives, or None when claims are unavailable.
 
-    Inside the state directory rather than next to the model file: the state dir
-    is already owner-only, and a sidecar in `models/loras` would be something
-    users (and `comfy model downloads`) trip over. Keyed by :func:`_dest_key`,
-    the same canonical spelling `_active_download_for` compares on, so a symlink
-    and its target hash to one claim.
+    In the host-global claims directory (:func:`download_state.claims_dir`),
+    which every workspace shares, rather than next to the model file: it is
+    owner-only, and a sidecar in `models/loras` would be something users (and
+    `comfy model downloads`) trip over. Keyed by :func:`_dest_key`, the same
+    canonical spelling `_active_download_for` compares on, so a symlink and its
+    target hash to one claim.
 
     None rather than a raise when the directory cannot be made: claims are
     bookkeeping, and the caller degrades to the advisory guard.
     """
     try:
-        return download_state.claim_path(get_workspace(), _dest_key(dest))
+        state_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        key = _dest_key(dest)
     except (OSError, ValueError):
-        return None
-
-
-def _record_or_none(download_id: str | None) -> download_state.DownloadState | None:
-    """``download_id``'s record, or None for every way the lookup can fail.
-
-    :func:`download_state.read` resolves (and creates) the state directory, so it
-    can raise ``OSError`` as well as ``ValueError`` on a malformed id. Both are
-    tolerated here because every caller is on a *refusal* path, where the record
-    is only wanted to word a message: a lookup that fails must not turn a clean
-    refusal into a traceback.
-    """
-    if not download_id:
         return None
     try:
-        return download_state.read(get_workspace(), download_id)
+        return download_state.claim_path(key)
+    except OSError as e:
+        _report_shared_claims_unavailable(e)
+    try:
+        return download_state.claim_path(key, state_dir)
     except (OSError, ValueError):
         return None
 
 
-def _spawn_gap_holder(holder_id: str) -> download_state.DownloadState | None:
+_shared_claims_unavailable_reported = False
+
+
+def _report_shared_claims_unavailable(exc: OSError) -> None:
+    """Warn once per process that claims fell back to this workspace's directory.
+
+    Downloads in this workspace still refuse each other; a download from another
+    workspace into the same file is not seen (comfy-cli#1095).
+    """
+    global _shared_claims_unavailable_reported
+    if _shared_claims_unavailable_reported:
+        return
+    _shared_claims_unavailable_reported = True
+    logger.warning(
+        "the shared download claims directory is unavailable (%s); using this workspace's own, "
+        "which does not see downloads started from other workspaces. Set %s to an absolute, "
+        "writable directory to share claims.",
+        exc,
+        download_state.CLAIMS_DIR_ENV,
+    )
+
+
+def _own_state_file(state: download_state.DownloadState) -> pathlib.Path | None:
+    """The state file ``state`` was written to, for a claim payload to point at.
+
+    None when it cannot be named. The payload is then written without a pointer,
+    and a reader in this workspace still finds the record by id.
+    """
+    try:
+        return download_state.state_path(get_workspace(), state.id).absolute()
+    except (OSError, ValueError):
+        return None
+
+
+# What a claim holder lookup returns when the payload names a record it cannot
+# resolve: a pointer that fails validation, or a state directory it cannot stat.
+# Not "no record" (which reads as stale), because a download in another
+# workspace may sit behind it. See :func:`_spawn_gap_holder`.
+_UNRESOLVED_HOLDER: Any = object()
+
+
+def _claim_holder(payload: dict | None, default_dir: pathlib.Path) -> tuple[Any, pathlib.Path | None]:
+    """The record a claim payload names, unreconciled, and the file it came from.
+
+    The record is a ``DownloadState``, None, or ``_UNRESOLVED_HOLDER``. None for
+    no payload, a record that is not there, or one that will not parse; every
+    reader has always treated those as stale. Never raises.
+    """
+    if payload is None:
+        return None, None
+    record_file = download_state.claim_holder_state_file(payload, default_dir)
+    if record_file is None:
+        return _UNRESOLVED_HOLDER, None
+    try:
+        return download_state.read_path_strict(record_file), record_file
+    except FileNotFoundError:
+        return None, record_file
+    except (OSError, ValueError):
+        # Unreadable is not gone (EACCES, EIO): it proves nothing about the holder.
+        return _UNRESOLVED_HOLDER, record_file
+
+
+def _payload_in_spawn_gap(payload: dict) -> bool:
+    """Whether an unresolvable holder's payload was stamped within the startup grace.
+
+    The payload's own ``created_at`` stands in for the record we could not read.
+    Bounded by the same grace as :func:`_in_spawn_gap`, so an unresolvable claim
+    can refuse a destination for a minute at most, never forever.
+    """
+    age = download_state.claim_payload_age_s(payload)
+    return age is not None and 0.0 <= age < download_state.STARTUP_GRACE_S
+
+
+def _holder_record_or_none(payload: dict | None) -> download_state.DownloadState | None:
+    """The record a claim payload names, wherever it lives, or None. Never raises.
+
+    Every caller is on a *refusal* path, where the record is only wanted to word
+    a message, so a lookup that fails must not turn a clean refusal into a
+    traceback. The payload may name a download in another workspace
+    (comfy-cli#1095), and the refusal should still say what kind it is and how
+    to stop it. Not reconciled, as before: wording a refusal rewrites nothing.
+    """
+    try:
+        default_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+        holder, _ = _claim_holder(payload, default_dir)
+    except (OSError, ValueError):
+        return None
+    return None if holder is _UNRESOLVED_HOLDER else holder
+
+
+def _spawn_gap_holder(holder_id: str, payload: dict | None = None) -> Any:
     """The record ``holder_id`` names, when it is a submit still inside its spawn gap.
 
     The one case a held lock cannot arbitrate on its own. Between a submitter's
@@ -1439,30 +1756,58 @@ def _spawn_gap_holder(holder_id: str) -> download_state.DownloadState | None:
     replaced. The residual is the same one the grace has always had: a submitter
     that dies between writing its record and spawning its worker wedges its
     destination for up to a minute.
+
+    The record is found through the payload's state-file pointer, because the
+    holder can be a submit in another workspace (comfy-cli#1095). A payload
+    whose record cannot be resolved at all is judged on its own ``created_at``:
+    inside the grace it returns ``_UNRESOLVED_HOLDER`` (refuse), after it None
+    (stale). Reading it as stale outright would steal a destination from another
+    workspace's submit whose worker has not come up yet.
     """
-    record = _record_or_none(holder_id)
+    if payload is None:
+        payload = {"download_id": holder_id}
+    try:
+        default_dir = pathlib.Path(get_workspace()) / download_state.STATE_DIRNAME
+    except (OSError, ValueError):
+        return None
+    record, record_file = _claim_holder(payload, default_dir)
+    if record is _UNRESOLVED_HOLDER:
+        return _UNRESOLVED_HOLDER if _payload_in_spawn_gap(payload) else None
     if record is None:
         return None
-    fresh, _ = _reconciled(record)
+    if record_file is not None and record_file.parent == default_dir:
+        fresh, _ = _reconciled(record)
+    else:
+        # Another workspace's record is that workspace's to rewrite.
+        fresh = download_state.reconcile(record)
     return fresh if _in_spawn_gap(fresh) else None
 
 
-def _claim_owner_live(state_file: pathlib.Path, owner_id: str) -> bool:
-    """Whether ``owner_id``, found in a claim a worker just locked, is a live competitor.
+def _claim_owner_live(state_file: pathlib.Path, payload: dict) -> bool:
+    """Whether the payload's owner, found in a claim a worker just locked, is a live competitor.
 
-    The worker-side twin of :func:`_spawn_gap_holder`. Resolved next to the
-    worker's own state file rather than through :func:`get_workspace`, for the
-    same reason the claim itself is (see :func:`download_state.claim_marker_for`),
-    and reconciled without persisting: the worker writes only its own record.
-    An unreadable record is not live.
+    The worker-side twin of :func:`_spawn_gap_holder`, with the same rules. A
+    payload naming no state file is resolved next to the worker's own state
+    file, because the worker is handed ``--state <file>`` and never re-resolves a
+    workspace. The record is reconciled without persisting: the worker writes
+    only its own record. A record that is not there, or will not parse, is not
+    live; one that cannot be resolved at all is live while its payload is
+    inside the startup grace.
     """
-    try:
-        record = download_state.read_path(pathlib.Path(state_file).parent / f"{owner_id}.json")
-    except (OSError, ValueError):
-        return False
+    record, _ = _claim_holder(payload, pathlib.Path(state_file).parent)
+    if record is _UNRESOLVED_HOLDER:
+        return _payload_in_spawn_gap(payload)
     if record is None:
         return False
     return _in_spawn_gap(download_state.reconcile(record))
+
+
+def _dest_exists(dest: str) -> bool:
+    """Whether a file is already at ``dest``. An unreadable path reads as absent."""
+    try:
+        return pathlib.Path(dest).exists()
+    except (OSError, ValueError):
+        return False
 
 
 def _in_spawn_gap(fresh: download_state.DownloadState) -> bool:
@@ -1504,11 +1849,12 @@ def _refuse_held_claim(
     when it failed to stop the worker, and a held lock is that worker still
     writing.
     """
-    holder_id = download_state.read_claim(claim_file)
-    holder = _record_or_none(holder_id)
+    payload = download_state.read_claim_payload(claim_file)
+    holder_id = payload["download_id"] if payload is not None else None
+    holder = _holder_record_or_none(payload)
     _withdraw_record(state, dest, holder_id)
     if holder is not None and holder.status not in _HOLDER_FINISHED_STATUSES:
-        return _in_flight_failure(holder, dest)
+        return _in_flight_failure(holder, dest, _holder_workspace(payload))
     named = f" ({holder_id})" if holder_id else ""
     return _download_failure(
         code="model_download_claim_contested",
@@ -1693,7 +2039,7 @@ def _acquire_dest_claim(
             holder_id = payload.get("download_id") if payload is not None else None
             if holder_id is None or holder_id == state.id or holder_id == judged_stale:
                 try:
-                    lock.write_payload(state.id, str(dest))
+                    lock.write_payload(state.id, str(dest), _own_state_file(state))
                 except OSError as e:
                     write_error = e
                 else:
@@ -1708,10 +2054,14 @@ def _acquire_dest_claim(
         # and psutil query behind `_spawn_gap_holder` are slow next to a payload
         # read, and a worker that legitimately owns this destination may be
         # waiting on the lock to start its transfer.
-        holder = _spawn_gap_holder(holder_id)
+        holder = _spawn_gap_holder(holder_id, payload)
+        if holder is _UNRESOLVED_HOLDER:
+            # Stamped moments ago by a download whose record we cannot read. Not
+            # ours to take, and not one we can describe beyond its id.
+            raise _refuse_held_claim(state, dest, claim_file)
         if holder is not None:
             _withdraw_record(state, dest, holder.id)
-            raise _in_flight_failure(holder, dest)
+            raise _in_flight_failure(holder, dest, _holder_workspace(payload))
         judged_stale = holder_id
     else:
         # The payload changed under us on every round: somebody keeps stamping
@@ -2024,7 +2374,10 @@ def download_cancel(
         # find the temp it is streaming into deleted underneath it.
         reclaimed = 0
         if state.status != "completed" and not download_state.worker_alive(state):
-            reclaimed = cleanup_partials(pathlib.Path(state.dest))
+            # Scope the sweep to this download's tagged temps (plus the legacy
+            # untagged shape a pre-change binary left) so it can't reclaim a
+            # sibling download's live temp.
+            reclaimed = cleanup_partials(pathlib.Path(state.dest), tag=state.id)
             if reclaimed:
                 state.completed_bytes = 0
                 with contextlib.suppress(OSError, ValueError):
@@ -2119,8 +2472,10 @@ def download_cancel(
             # onto the destination once the transfer completes, so a worker killed
             # mid-flight leaves its gigabytes *there*, not at `dest`. Without this
             # sweep the cancel would report success and reclaim nothing — the exact
-            # hand-cleanup this command exists to spare the user.
-            if cleanup_partials(partial):
+            # hand-cleanup this command exists to spare the user. Scope it to this
+            # download's id so a sibling download to the same destination keeps its
+            # own live temp.
+            if cleanup_partials(partial, tag=state.id):
                 removed = True
         state.status = "cancelled"
         state.error = None if stopped else "worker may still be running; partial file left in place"
@@ -2264,3 +2619,7 @@ def list_command(
 # setup on the whole noun would leak it onto those.
 app.registered_commands.extend(models_search_command.app.registered_commands)
 app.registered_groups.extend(models_search_command.app.registered_groups)
+# `comfy model upload` (the Comfy Cloud model library) lives in its own module
+# and is carried over the same way. It is not on the `comfy models` alias,
+# which covers the discovery leaves only.
+app.registered_commands.extend(models_upload_command.app.registered_commands)

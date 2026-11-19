@@ -49,6 +49,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build", "comfy-build"),
     ("comfy-deploy", "comfy-deploy"),
     ("comfy-custom-nodes", "comfy-custom-nodes"),
+    ("comfy-run-on-cloud", "comfy-run-on-cloud"),
 )
 
 

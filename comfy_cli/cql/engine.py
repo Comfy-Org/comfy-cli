@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -124,8 +124,8 @@ LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOT
 # An enum finding used to carry the WHOLE option list, twice (``suggestions``
 # and ``valid_options``). On a model loader that is every installed file, so a
 # few bad filenames over a large folder made a huge payload. The closest few
-# options and the count are what a
-# caller acts on; the full list stays one explicit request away.
+# options and the count are what a caller acts on; the full list stays one
+# explicit request away.
 
 #: An option list this short is cheap and is carried whole as ``valid_options``.
 ENUM_INLINE_MAX = 12
@@ -235,6 +235,34 @@ _PREVIEW_3D_CLASSES = frozenset({"SaveGLB", "Preview3D"})
 # thousands of nodes, so an unreachable target must fail fast rather than walk
 # the whole type lattice.
 _MAX_PATH_SEARCH_STATES = 20_000
+
+# Digits an autogrow slot index may carry before it cannot be one the server
+# generated. `Autogrow._MaxNames` caps a group at 100 slots; the bound exists so
+# a prompt-supplied key like `image<5000 digits>` is rejected by length rather
+# than by `int()`, which raises above 4300 digits.
+_MAX_AUTOGROW_INDEX_DIGITS = 6
+
+# The server's `Autogrow._MaxNames` cap: a group never grows more than this many
+# slots. Required-name expansion (`[f"{prefix}{i}" for i in range(min)]`) must
+# honour it, or a prompt-influenced / catalog `min` of 1e9 with no `max` would
+# allocate a billion-element list inside validation.
+_MAX_AUTOGROW_NAMES = 100
+
+
+def _finite_int(value: Any) -> int | None:
+    """``int(value)`` for a real, finite JSON number, else ``None``.
+
+    ``/object_info`` is parsed with plain ``json.loads``, which accepts the bare
+    ``NaN`` / ``Infinity`` literals a Python-serialized payload emits — and
+    ``int()`` raises ``ValueError`` / ``OverflowError`` on those, a crash inside
+    ``validate_workflow`` where the validator owes a diagnostic. ``bool`` is
+    excluded because ``True`` is an ``int`` but never a numeric bound.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return int(value)
 
 
 @dataclass
@@ -353,6 +381,51 @@ class Port:
         return ", ".join(first) + ", …"
 
     @property
+    def autogrow_template_input_spec(self) -> Any | None:
+        """The single inner ``INPUT_TYPES`` spec this autogrow group's schema
+        ``template`` declares — the spec the server copies into every grown
+        slot (``["IMAGE", {}]`` for ``model.images``).
+
+        ``None`` when there is nothing to read: a non-autogrow port, a template
+        with no ``input`` block (an older/partial catalog capture), or one whose
+        sections declare no input carrying a usable socket type.
+        """
+        t = self.options.template
+        if not self.is_autogrow or not isinstance(t, dict):
+            return None
+        inputs = t.get("input")
+        if not isinstance(inputs, dict):
+            return None
+        # Declaration order, not a hardcoded ("required", "optional"): the
+        # server's `_expand_schema_for_dynamic` iterates `input.items()` and
+        # takes the first value of the first non-empty section, so a template
+        # that lists `optional` first is read from `optional`. Scanning later
+        # inputs for a string `type_id` would skip a classic list-form COMBO
+        # (`[["a", "b"], {}]`) and could return a *later* input's spec.
+        for section_def in inputs.values():
+            if not isinstance(section_def, dict) or not section_def:
+                continue
+            spec = next(iter(section_def.values()))
+            # `_parse_input_spec` only understands str / list; a tuple wrapper
+            # would otherwise yield a Port typed UNKNOWN and a false
+            # `edge_type_mismatch`.
+            if isinstance(spec, tuple):
+                spec = list(spec)
+            type_id = spec[0] if isinstance(spec, list) and spec else spec
+            # A classic list-form COMBO is a usable spec. A nested autogrow or
+            # dynamic-combo type is not: there is no socket type to check a
+            # slot against, and inventing one would be the reject-what-you-
+            # cannot-read mistake the sibling autogrow accessors all avoid.
+            if isinstance(type_id, list):
+                return spec
+            if not isinstance(type_id, str) or not type_id:
+                return None
+            if type_id.startswith("COMFY_AUTOGROW") or _is_dynamic_combo_type(type_id):
+                return None
+            return spec
+        return None
+
+    @property
     def autogrow_element_type(self) -> str | None:
         """The socket type every grown slot of this autogrow input carries —
         the single input the schema ``template`` declares (``IMAGE`` for
@@ -361,21 +434,38 @@ class Port:
         a template with none (or a non-autogrow port) reads as ``None``, which
         callers treat as "accept the source type".
         """
-        t = self.options.template
-        if not self.is_autogrow or not isinstance(t, dict):
+        spec = self.autogrow_template_input_spec
+        if spec is None:
             return None
-        inputs = t.get("input")
-        if not isinstance(inputs, dict):
+        # Through `_parse_input_spec`, not `spec[0]`: a classic list-form COMBO
+        # (`[["a", "b"], {}]`) has its choice LIST in position 0, and handing
+        # that to `Port.type` crashes every hashing type check downstream.
+        return _parse_input_spec(spec)[0]
+
+    def autogrow_slot_port(self, slot_key: str, *, required: bool) -> Port | None:
+        """A :class:`Port` for one grown slot of this group, parsed from the
+        template's inner input — the same input the server copies into the
+        node's expanded schema under this ``slot_key``
+        (``Autogrow._expand_schema_for_dynamic``).
+
+        Slot keys never appear in ``/object_info``'s own input list, so nothing
+        in ``Morphism.inputs`` types them; validation synthesizes one of these
+        per present, template-declared key so a slot gets the *same* edge,
+        shape and catalog checks as an ordinary input. Everything the inner
+        spec declares comes along — ``enum_values``/``enum_declared`` so a COMBO
+        template is membership-checked, ``options`` so a ranged ``INT`` template
+        is range-checked.
+
+        ``None`` when :attr:`autogrow_template_input_spec` reads nothing (a
+        non-autogrow port, or a template with no inner input): with no declared
+        inner type there is nothing to check a slot against, and inventing one
+        would be the reject-what-you-cannot-read mistake the sibling autogrow
+        accessors all avoid.
+        """
+        spec = self.autogrow_template_input_spec
+        if spec is None:
             return None
-        for section in ("required", "optional"):
-            section_def = inputs.get(section)
-            if not isinstance(section_def, dict):
-                continue
-            for spec in section_def.values():
-                type_id = spec[0] if isinstance(spec, (list, tuple)) and spec else spec
-                if isinstance(type_id, str) and type_id:
-                    return type_id
-        return None
+        return _port_from_spec(slot_key, spec, required)
 
     @property
     def autogrow_limits(self) -> tuple[int, int | None]:
@@ -384,15 +474,190 @@ class Port:
         length of ``names`` when the template enumerates them, else the
         template's ``max`` (``None`` when the schema leaves it open — the
         frontend's own default there is 100, but that is a UI choice, not a
-        server limit, so it is not asserted here)."""
+        server limit, so it is not asserted here).
+
+        Bounds that are not finite JSON numbers read as undeclared rather than
+        crashing the conversion (see :func:`_finite_int`); the ``min`` default
+        of 1 is the frontend's, so callers that need the *server's* gate must
+        use :attr:`autogrow_declared_min` / :attr:`autogrow_effective_min`,
+        which never synthesize one."""
         t = self.options.template if isinstance(self.options.template, dict) else {}
-        lo = t.get("min")
-        lo = int(lo) if isinstance(lo, (int, float)) and not isinstance(lo, bool) else 1
+        lo = _finite_int(t.get("min"))
+        lo = 1 if lo is None else lo
         names = t.get("names")
         if isinstance(names, list) and names:
             return lo, len(names)
-        hi = t.get("max")
-        return lo, (int(hi) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else None)
+        return lo, _finite_int(t.get("max"))
+
+    @property
+    def autogrow_template_required(self) -> bool | None:
+        """The server's ``template_required`` gate for this autogrow input:
+        whether the template's single inner input sits in the template's OWN
+        ``required`` section.
+
+        ``comfy_api/latest/_io.py``, ``Autogrow._expand_schema_for_dynamic``
+        walks the template's sections *in declaration order* (``input.items()``,
+        JSON insertion order — not a fixed required-then-optional sweep), takes
+        the first non-empty one, and sets ``template_required = _input_type ==
+        "required"`` — *"for now, get just the first value from dict_input; if
+        not required, min can be ignored"*. This walks it the same way, so a
+        template that lists a non-empty ``optional`` ahead of ``required``
+        reads ``False`` here exactly as it does on the server.
+
+        ``None`` when there is nothing to read — a non-autogrow port, or a
+        template carrying no ``input`` block (an older/partial catalog capture
+        whose ``min``/``names`` sit beside ``template`` rather than inside it).
+        Callers must distinguish that "cannot judge" from a definite ``False``.
+        """
+        if not self.is_autogrow:
+            return None
+        t = self.options.template
+        if not isinstance(t, dict):
+            return None
+        inputs = t.get("input")
+        if not isinstance(inputs, dict):
+            return None
+        for section, section_def in inputs.items():
+            if not isinstance(section_def, dict) or not section_def:
+                continue
+            return section == "required"
+        return None
+
+    @property
+    def autogrow_declared_min(self) -> int | None:
+        """The template's OWN ``min``, or ``None`` when the catalog declares
+        none (or declares one that isn't a finite number).
+
+        Distinct from ``autogrow_limits[0]``, which substitutes the frontend's
+        default of 1: ``applyAutogrow`` picking 1 is a UI choice, while the
+        server reads ``value[1]["template"]["min"]`` with no default at all.
+        A hard reject must not be built on a number nothing declared, so the
+        validation path gates on this and treats ``None`` as "cannot judge".
+        """
+        t = self.options.template
+        if not self.is_autogrow or not isinstance(t, dict):
+            return None
+        return _finite_int(t.get("min"))
+
+    @property
+    def autogrow_effective_min(self) -> int:
+        """Slots the server actually places in its ``required`` section — the
+        count a prompt must wire before the server will accept the node.
+
+        Slot ``i`` lands in ``required`` only ``if i < min and
+        template_required`` (see :attr:`autogrow_template_required`), so a
+        Seedream-style group declaring ``min: 0`` inside ``required`` keeps
+        validating clean with zero slots, and so does a ``min: 1`` group whose
+        inner input sits in the template's ``optional`` section.
+
+        The section the autogrow input ITSELF sits in is deliberately not
+        consulted, because the server does not consult it either
+        (``_expand_schema_for_dynamic`` ignores its ``input_type`` argument):
+        an ``optional``-section group with ``min: 2`` still owes two slots.
+
+        ``0`` whenever the gate is not positively ``True`` — including the two
+        "cannot judge" cases (an unreadable ``template_required``, or a
+        template declaring no ``min`` of its own), the same "don't reject what
+        you can't read" leniency :attr:`autogrow_element_type` applies. A
+        caller that wants to keep checking an unreadable template must consult
+        :attr:`autogrow_template_required` and :attr:`autogrow_declared_min`
+        for the ``None`` itself.
+
+        Clamped to the group's declared capacity, as the server's own
+        ``for i, name in enumerate(names)`` loop is: a template naming one slot
+        while declaring ``min: 3`` owes one slot, not an unsatisfiable three.
+        """
+        if not self.autogrow_template_required:
+            return 0
+        lo = self.autogrow_declared_min
+        if lo is None:
+            return 0
+        lo = max(lo, 0)
+        hi = self.autogrow_limits[1]
+        return min(lo, hi) if hi is not None else lo
+
+    def autogrow_required_slot_names(self, count: int) -> list[str] | None:
+        """The first ``count`` slot names the server places in its ``required``
+        section — the *specific* keys a prompt owes, not merely how many.
+
+        ``_expand_schema_for_dynamic`` expands a fixed name list
+        (``names`` verbatim, or ``[f"{prefix}{i}" for i in range(max)]``) and
+        promotes ``names[:min]`` to ``required``, so a count alone is not the
+        server's test: ``images.image1`` + ``images.image2`` satisfies ``min:
+        2`` by count while the required ``images.image0`` is still missing, and
+        the server rejects it. Gaps like that are not hypothetical — see
+        ``workflow_ops._first_free_autogrow_index`` on legacy workflows.
+
+        ``None`` when the catalog declares no naming template at all
+        (:attr:`autogrow_template`), so callers fall back to counting rather
+        than hard-erroring on the pluralization *guess*
+        :attr:`autogrow_element_template` would supply. Clamped to the
+        declared maximum, as the server's own ``enumerate(names)`` is.
+        """
+        t = self.autogrow_template
+        if t is None:
+            return None
+        count = max(count, 0)
+        names = t.get("names")
+        if names:
+            return [str(n) for n in names[:count]]
+        hi = self.autogrow_limits[1]
+        if hi is not None:
+            count = min(count, hi)
+        # `Autogrow._MaxNames` is 100: a prefix template with no `max` and a
+        # huge `min` (or a caller-supplied count) must not allocate a
+        # billion-element list inside validation.
+        count = min(count, _MAX_AUTOGROW_NAMES)
+        # `autogrow_template` yields `names` or `prefix` and nothing else.
+        return [f"{t['prefix']}{i}" for i in range(count)]
+
+    def autogrow_declared_slot_keys(self, keys: Iterable[str]) -> set[str] | None:
+        """Those of ``keys`` that are slot keys this group actually grows —
+        ``{self.name}.{name}`` for a name the schema's template declares.
+
+        ``_expand_schema_for_dynamic`` expands a fixed name list and puts only
+        those ids in the node's schema, so ``images.bogus`` (a typo, or a stale
+        key from another node) is not an input of the node at all: the server
+        ignores it. Callers use this to keep such a key out of the "known keys"
+        set, so it surfaces as ``unknown_input`` rather than being waved
+        through by a bare ``startswith`` on the prefix.
+
+        ``None`` when the catalog declares no naming template
+        (:attr:`autogrow_template`), so callers fall back to the historical
+        prefix match rather than filtering against the pluralization *guess*
+        :attr:`autogrow_element_template` would supply.
+        """
+        t = self.autogrow_template
+        if t is None:
+            return None
+        prefix = f"{self.name}."
+        suffixes = {k: k[len(prefix) :] for k in keys if k.startswith(prefix)}
+        names = t.get("names")
+        if names:
+            declared = {str(n) for n in names}
+            return {k for k, suffix in suffixes.items() if suffix in declared}
+        stem = t["prefix"]
+        hi = self.autogrow_limits[1]
+        out: set[str] = set()
+        for key, suffix in suffixes.items():
+            index = suffix[len(stem) :]
+            # `isascii()` as well as `isdigit()`: the latter is True for
+            # superscripts and other numeric characters that `int()` rejects
+            # outright. The length bound is the other half of that — `int()`
+            # raises above 4300 digits — and both matter because this runs over
+            # prompt-supplied key names. `Autogrow._MaxNames` is 100, so no id
+            # the server generates comes anywhere near the bound.
+            if not suffix.startswith(stem) or not (index.isascii() and index.isdigit()):
+                continue
+            if len(index) > _MAX_AUTOGROW_INDEX_DIGITS:
+                continue
+            # Round-trip the index so only the server's own spelling matches:
+            # `image01` is not an id `f"{prefix}{i}"` ever emits.
+            if f"{stem}{int(index)}" != suffix:
+                continue
+            if hi is None or int(index) < hi:
+                out.add(key)
+        return out
 
     @property
     def autogrow_template(self) -> dict | None:
@@ -790,6 +1055,10 @@ class Port:
         for w in warnings:
             w.setdefault("severity", finding_severity(w.get("code", "")))
             w.setdefault("value", value)
+            if w.get("code") == "below_min":
+                w.setdefault("bound", self.options.min)
+            elif w.get("code") == "above_max":
+                w.setdefault("bound", self.options.max)
         return warnings
 
 
@@ -1253,13 +1522,11 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
             # before), but flagged as declared so validate can say "0 options
             # installed" instead of silently skipping the check.
             return first, bool(options), list(options), port_opts, True, []
-        # Dynamic combo declared WITHOUT the V3 type name: options are
-        # {key, inputs} dicts. It IS a widget (the frontend renders a selector
-        # plus key-dependent sub-widgets) and the selector's choices are the
-        # keys. Detected structurally rather than by type string so a node that
-        # ships the option tree under a plain COMBO still expands its
-        # sub-widgets; without this the sub-inputs vanish from widget_order and
-        # `set-widget <id>.<sub>` reports the widget as unknown.
+        # An option tree under a plain COMBO: {key, inputs} dicts. The frontend
+        # picks its dynamic-combo widget by type name alone, so this renders one
+        # selector and serializes one widgets_values slot, with no sub-widgets.
+        # The selector's choices are the keys; `dynamic_options` keeps the tree
+        # for inspection, and every expansion stays gated on the type name.
         # `enum_declared=True`: the choice list shipped, it just isn't scalar.
         if isinstance(options, list) and options and all(isinstance(v, dict) and "key" in v for v in options):
             return first, True, [v["key"] for v in options], port_opts, True, options
@@ -1420,14 +1687,95 @@ def parse_disable_config(data: bytes) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _apply_annotation(
+    m: Morphism,
+    node_pack: dict[str, str],
+    node_labels: dict[str, list[str]],
+    disable_labels: set[str],
+) -> None:
+    if m.id in node_pack:
+        m.pack = node_pack[m.id]
+    if m.id in node_labels:
+        m.labels = node_labels[m.id]
+    m.cloud_disabled = any(label in disable_labels for label in m.labels)
+
+
+class _LazyNodes(Mapping[str, Morphism]):
+    """Class name -> ``Morphism`` over a raw ``/object_info`` payload, parsing
+    each class on first access.
+
+    A catalog holds thousands of classes and a command that reads a workflow
+    touches a handful, so parsing them all up front dominated those commands.
+    Iteration order, membership and length match the eager dict this replaces:
+    insertion order of ``object_info``, entries whose value is not a JSON
+    object skipped. Annotations are recorded and replayed in order on every
+    class parsed later, so a lazily parsed class ends up exactly as it would
+    have had it been parsed before ``annotate`` ran.
+
+    ``values()`` and ``items()`` parse every class, so ``nodes widget-catalog``
+    (via ``build_types``) still fails on a malformed class as the eager parse
+    did. Callers rely on that to refuse a bad catalog at startup: a catalog
+    builder must not stop iterating early or read only some keys.
+    """
+
+    __slots__ = ("_raw", "_parsed", "_annotations")
+
+    def __init__(self, object_info: dict[str, Any]) -> None:
+        self._raw: dict[str, dict] = {k: v for k, v in object_info.items() if isinstance(v, dict)}
+        self._parsed: dict[str, Morphism] = {}
+        self._annotations: list[tuple[dict[str, str], dict[str, list[str]], set[str]]] = []
+
+    def _parse(self, name: str, raw: dict) -> Morphism:
+        m = _parse_morphism(name, raw)
+        _unconstrain_frontend_combos(m)
+        for node_pack, node_labels, disable_labels in self._annotations:
+            _apply_annotation(m, node_pack, node_labels, disable_labels)
+        self._parsed[name] = m
+        return m
+
+    def __getitem__(self, name: str) -> Morphism:
+        m = self._parsed.get(name)
+        if m is not None:
+            return m
+        return self._parse(name, self._raw[name])
+
+    def get(self, name: str, default: Any = None) -> Any:
+        m = self._parsed.get(name)
+        if m is not None:
+            return m
+        raw = self._raw.get(name)
+        if raw is None:
+            return default
+        return self._parse(name, raw)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._raw
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._raw)
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def add_annotation(
+        self,
+        node_pack: dict[str, str],
+        node_labels: dict[str, list[str]],
+        disable_labels: set[str],
+    ) -> None:
+        self._annotations.append((node_pack, node_labels, disable_labels))
+        for m in self._parsed.values():
+            _apply_annotation(m, node_pack, node_labels, disable_labels)
+
+
 class Graph:
     """Indexed compatibility graph over ComfyUI node classes."""
 
     def __init__(self) -> None:
-        self._nodes: dict[str, Morphism] = {}
-        self._producers: dict[str, list[Morphism]] = defaultdict(list)
-        self._consumers: dict[str, list[Morphism]] = defaultdict(list)
-        self._types: set[str] = set()
+        # Classes are parsed on first lookup (see ``_LazyNodes``); the type
+        # indexes below are built on first access, which parses every class.
+        self._nodes: _LazyNodes = _LazyNodes({})
+        self._type_index: tuple[dict[str, list[Morphism]], dict[str, list[Morphism]], set[str]] | None = None
         self._annotated = False
         # Lazily-computed closure of types obtainable without wiring anything in
         # (see ``free_types``). Invalidated implicitly: graphs are built once.
@@ -1457,30 +1805,46 @@ class Graph:
             )
         g = cls()
         g._raw = object_info
-        for node_id, raw in object_info.items():
-            if not isinstance(raw, dict):
-                continue
-            m = _parse_morphism(node_id, raw)
-            _unconstrain_frontend_combos(m)
-            g._nodes[m.id] = m
-            # A deprecated class stays addressable by name (show, validate,
-            # edits on a graph that already holds it) but is never a
-            # discovery answer: upstream/downstream/path/free-producer all
-            # read these indexes.
-            for t in m.output_types():
-                if not m.deprecated:
-                    g._producers[t].append(m)
-                g._types.add(t)
-            for t in m.input_link_types():
-                if not m.deprecated:
-                    g._consumers[t].append(m)
-                g._types.add(t)
-        # Sort indexes for deterministic output
-        for t in g._producers:
-            g._producers[t].sort(key=lambda m: m.id)
-        for t in g._consumers:
-            g._consumers[t].sort(key=lambda m: m.id)
+        g._nodes = _LazyNodes(object_info)
         return g
+
+    def _build_type_index(self) -> tuple[dict[str, list[Morphism]], dict[str, list[Morphism]], set[str]]:
+        if self._type_index is None:
+            producers: dict[str, list[Morphism]] = defaultdict(list)
+            consumers: dict[str, list[Morphism]] = defaultdict(list)
+            types: set[str] = set()
+            for m in self._nodes.values():
+                # A deprecated class stays addressable by name (show, validate,
+                # edits on a graph that already holds it) but is never a
+                # discovery answer: upstream/downstream/path/free-producer all
+                # read these indexes.
+                for t in m.output_types():
+                    if not m.deprecated:
+                        producers[t].append(m)
+                    types.add(t)
+                for t in m.input_link_types():
+                    if not m.deprecated:
+                        consumers[t].append(m)
+                    types.add(t)
+            # Sort indexes for deterministic output
+            for t in producers:
+                producers[t].sort(key=lambda m: m.id)
+            for t in consumers:
+                consumers[t].sort(key=lambda m: m.id)
+            self._type_index = (producers, consumers, types)
+        return self._type_index
+
+    @property
+    def _producers(self) -> dict[str, list[Morphism]]:
+        return self._build_type_index()[0]
+
+    @property
+    def _consumers(self) -> dict[str, list[Morphism]]:
+        return self._build_type_index()[1]
+
+    @property
+    def _types(self) -> set[str]:
+        return self._build_type_index()[2]
 
     # -- Annotation --
 
@@ -1495,12 +1859,7 @@ class Graph:
             supported_nodes_yaml, cloud_disable_yaml
         )
 
-        for nid, m in self._nodes.items():
-            if nid in node_pack:
-                m.pack = node_pack[nid]
-            if nid in node_labels:
-                m.labels = node_labels[nid]
-            m.cloud_disabled = any(label in disable_labels for label in m.labels)
+        self._nodes.add_annotation(node_pack, node_labels, disable_labels)
         self._annotated = True
 
     # -- Lookup --
@@ -1843,7 +2202,12 @@ class Graph:
             return []
         return [e.name for e in _expand_widget_entries(m, [], first_key=True)]
 
-    def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:
+    def widget_order_for_node(
+        self,
+        class_name: str,
+        widgets_values: list[Any] | None,
+        saved_widget_names: list[str] | None = None,
+    ) -> list[str]:
         """Value-aware widget order: like ``widget_order`` but at each dynamic
         combo the current selector (read from its positional slot) picks an
         option whose widget-like sub-inputs are expanded in place as
@@ -1853,16 +2217,28 @@ class Graph:
         if m is None:
             return []
         defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
-        return [e.name for e in _expand_widget_entries(m, widgets_values or [], first_key=defaults)]
+        return [
+            e.name
+            for e in _expand_widget_entries(
+                m, widgets_values or [], first_key=defaults, saved_widget_names=saved_widget_names
+            )
+        ]
 
-    def editable_widget_names(self, class_name: str, widgets_values: list[Any] | None = None) -> list[str]:
+    def editable_widget_names(
+        self,
+        class_name: str,
+        widgets_values: list[Any] | None = None,
+        saved_widget_names: list[str] | None = None,
+    ) -> list[str]:
         """The subset of :meth:`widget_order_for_node` a write may target —
         schema-backed slots only, i.e. what ``comfy workflow slots`` advertises."""
         m = self._nodes.get(class_name)
         if m is None:
             return []
         defaults = widgets_values is None and any(p.is_dynamic_group for p in m.inputs)
-        return _editable_widget_names(_expand_widget_entries(m, widgets_values or [], first_key=defaults))
+        return _editable_widget_names(
+            _expand_widget_entries(m, widgets_values or [], first_key=defaults, saved_widget_names=saved_widget_names)
+        )
 
     def frontend_injected_widget_names(self, class_name: str) -> list[str]:
         """Names in the widget order that the frontend injects with no schema
@@ -2124,11 +2500,10 @@ class Graph:
 
             port_by_name = {p.name: p for p in m.inputs}
             # V3 autogrow inputs are declared once (e.g. `images`) but wired as
-            # slot keys (`images.image0`, `images.image1`, …). Track which
-            # autogrow ports actually received a slot so the required-but-empty
-            # case surfaces here instead of as a cryptic server reject.
+            # slot keys (`images.image0`, `images.image1`, …), so their
+            # slot-count check (`_check_autogrow_required`) counts those keys
+            # rather than looking for the base name.
             autogrow_ports = {p.name: p for p in m.inputs if p.is_autogrow}
-            autogrow_seen: set[str] = set()
             node_inputs = node_data.get("inputs")
             # A truthy non-dict `inputs` (e.g. a string/list from malformed JSON)
             # sails through `or {}` and crashes `.items()`; treat it as empty so
@@ -2142,7 +2517,7 @@ class Graph:
             # _check_dynamic_combos already covers it. Sub-keys under an
             # unresolved selection keep the old generic checks.
             dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
-            dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combos(
+            dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved, dyn_slot_ports = _check_dynamic_combos(
                 node_id, class_type, m, node_inputs, range_is_error=node_id in reachable
             )
             group_errors: list[dict] = []
@@ -2153,6 +2528,34 @@ class Graph:
                 )
                 group_errors.extend(e)
                 group_warnings.extend(w)
+            # Autogrow slot keys (`images.image0`, `model.images.image_1`, …)
+            # are absent from `port_by_name` — object_info declares the GROUP,
+            # never its grown slots — so the per-input loop below had no type to
+            # check them against: a link-valued slot skipped the
+            # `edge_type_mismatch` comparison and a plain value fell out at
+            # `if port is None: continue`, before any shape or catalog check.
+            # An INT wired into an IMAGE slot validated clean here and was then
+            # hard-rejected by the server as `return_type_mismatch`. Synthesize
+            # one Port per present, template-declared slot key from the group's
+            # own template input so those keys route through exactly the same
+            # branches as any other input.
+            slot_ports: dict[str, Port] = {}
+            for base, agp in autogrow_ports.items():
+                matched = {k for k in node_inputs if k.startswith(f"{base}.")}
+                # Only the keys the group actually grows: `images.bogus` is not
+                # an input of the node, so it gets no synthesized diagnostic.
+                # Where the catalog names no slots there is nothing to filter
+                # against and the historical prefix match stands.
+                declared = agp.autogrow_declared_slot_keys(matched)
+                # Only synthesize ports for keys the catalog actually names.
+                # When there is no naming template (`declared is None`), a
+                # prefix match would invent a type for typos (`images.bogus`)
+                # and invert "don't reject what you cannot read".
+                if declared is not None:
+                    slot_ports.update(_autogrow_slot_ports(base, agp, declared))
+            # Nested groups are typed by the dynamic-combo walk, which is the
+            # only pass that knows which option expanded them.
+            slot_ports.update(dyn_slot_ports)
             for input_name, value in node_inputs.items():
                 if input_name in port_by_name and port_by_name[input_name].is_dynamic_group:
                     continue
@@ -2163,10 +2566,6 @@ class Graph:
                     and not any(input_name.startswith(prefix) for prefix in dyn_unresolved)
                 ):
                     continue
-                if autogrow_ports and "." in input_name:
-                    base = input_name.split(".", 1)[0]
-                    if base in autogrow_ports:
-                        autogrow_seen.add(base)
                 if input_name in autogrow_ports and isinstance(value, list) and len(value) == 2:
                     port = autogrow_ports[input_name]
                     errors.append(
@@ -2195,7 +2594,7 @@ class Graph:
                 # made `images.extra` on a plain IMAGE input look declared, and
                 # a malformed link under that decoy hard-failed a prompt the
                 # server runs — it ignores every key a node does not declare.
-                declared_input = _node_declares_input(port_by_name, input_name)
+                declared_input = _node_declares_input(port_by_name, input_name, node_inputs)
 
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
@@ -2344,7 +2743,14 @@ class Graph:
                     # known-type/empty-intersection mismatch is ever promoted —
                     # a wildcard, a union overlap, or a blank/unknown type on
                     # either end still yields no finding at all.
-                    port = port_by_name.get(input_name) or _dotted_slot_port(port_by_name, input_name, node_inputs)
+                    port = port_by_name.get(input_name) or slot_ports.get(input_name)
+                    if port is None:
+                        # Autogrow suffixes — top-level or nested under a
+                        # dynamic combo — are typed only via slot_ports, so a
+                        # key the template never declared (`images.bogus`,
+                        # `model.images.bogus`) gets no synthesized type. Other
+                        # dotted keys (combo sub-inputs) still resolve here.
+                        port = _dotted_slot_port(port_by_name, input_name, node_inputs, autogrow_slots=False)
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
@@ -2389,11 +2795,17 @@ class Graph:
                                 warnings.append(finding)
                     continue
 
-                port = port_by_name.get(input_name)
+                port = port_by_name.get(input_name) or slot_ports.get(input_name)
                 # A dotted key (`videos.video1`, `model.mask`) has no port of its
                 # own; it is checked for a literal against the slot or sub-input
                 # it resolves to, and every other check below is its group's.
-                link_port = port if port is not None else _dotted_slot_port(port_by_name, input_name, node_inputs)
+                # Do not promote _dotted_slot_port into `port`: combo sub-inputs
+                # are already shape/catalog-checked in the combo walk, and
+                # undeclared autogrow suffixes must not gain a synthesized type.
+                if port is not None:
+                    link_port = port
+                else:
+                    link_port = _dotted_slot_port(port_by_name, input_name, node_inputs, autogrow_slots=False)
                 # A literal on a socket that only carries a node's output. The
                 # server does not type-check custom types (only INT/FLOAT/
                 # STRING/BOOLEAN/COMBO), so it hands the string to the node,
@@ -2473,7 +2885,7 @@ class Graph:
             # of required-presence-type hard errors (missing/unknown
             # dynamic-combo selection), so it's gated alongside them.
             if node_id in reachable:
-                errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
+                errors.extend(_check_autogrow_required(node_id, autogrow_ports, node_data))
                 errors.extend(_check_required_present(node_id, m, node_data))
                 errors.extend(dyn_errors)
                 errors.extend(group_errors)
@@ -2563,8 +2975,18 @@ class Graph:
     # -- Workflow slot editing --
 
     def get_template_schema(self, template_id: str, workflow: dict) -> dict:
-        """Extract the slot manifest from a frontend-format workflow."""
-        return {"id": template_id, "slots": _extract_frontend_slots(workflow, self)}
+        """Extract the slot manifest from a frontend-format workflow.
+
+        ``warnings`` is present only when a node contributed no slots for a
+        reason a caller should surface — today, a saved widget layout the
+        current catalog cannot reconcile.
+        """
+        warnings: list[dict] = []
+        slots = _extract_frontend_slots(workflow, self, warnings)
+        schema = {"id": template_id, "slots": slots}
+        if warnings:
+            schema["warnings"] = warnings
+        return schema
 
     def apply_slots(self, workflow: dict, overrides: dict[str, Any]) -> tuple[dict, list[dict]]:
         """Apply slot overrides. Returns (modified_workflow, warnings)."""
@@ -2827,8 +3249,8 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
     output nodes (``OUTPUT_NODE``) and everything reachable by walking their
     input links backward — any node not reachable from an output is pruned and
     never validated. We reproduce that reachable set so the promoted hard checks
-    (required_input_missing, autogrow_no_slots, below_min/above_max,
-    edge_type_mismatch) don't reject a disconnected node the server would
+    (required_input_missing, autogrow_no_slots, autogrow_below_min,
+    below_min/above_max, edge_type_mismatch) don't reject a disconnected node the server would
     silently drop.
 
     An input value shaped ``[source_node_id, output_index]`` is a link edge (the
@@ -2949,6 +3371,8 @@ def _validate_catalog_value(
                 "code": w["code"],
                 "message": w["message"],
                 "hint": f"use a value {op} {bound}",
+                "value": w["value"],
+                "bound": bound,
             }
             # Only a hard reject on a node the server will run; on a pruned node
             # it stays advisory (matching pre-promotion behavior for that node).
@@ -3161,7 +3585,7 @@ def _dynamic_combo_options(spec: Any) -> list[dict]:
 
 def _check_dynamic_combos(
     node_id: str, class_type: str, m: Morphism, node_inputs: dict, *, range_is_error: bool = True
-) -> tuple[list[dict], list[dict], set[str], set[str]]:
+) -> tuple[list[dict], list[dict], set[str], set[str], dict[str, Port]]:
     """Validate every dynamic-combo input against the option its selector names.
 
     Mirrors the server: ``DynamicCombo._expand_schema_for_dynamic``
@@ -3180,21 +3604,26 @@ def _check_dynamic_combos(
 
     Also flags present dotted keys that match no sub-input of the resolved
     selection — a warning, not an error, because the server ignores extra
-    keys; that pass lives in ``_unknown_dotted_key_warnings``. Returns ``(errors, warnings, valid_keys, unresolved)`` — the caller
+    keys; that pass lives in ``_unknown_dotted_key_warnings``. Returns
+    ``(errors, warnings, valid_keys, unresolved, slot_ports)`` — the caller
     uses ``valid_keys``/``unresolved`` to exempt stale (server-ignored)
     dynamic sub-keys from the generic edge checks, which would otherwise
-    hard-error on e.g. a dangling link left over from a previous selection.
+    hard-error on e.g. a dangling link left over from a previous selection,
+    and ``slot_ports`` to type the autogrow slot keys a resolved option
+    expanded — this walk is the only pass that knows which option expanded
+    them, so the driver loop cannot derive them for itself.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
     present = node_inputs
     dynamic_ports = [p for p in m.inputs if p.is_dynamic_combo]
     if not dynamic_ports:
-        return errors, warnings, set(), set()
+        return errors, warnings, set(), set(), {}
 
     valid_keys: set[str] = set()
     unresolved: set[str] = set()
     resolved: dict[str, Any] = {}
+    slot_ports: dict[str, Port] = {}
     for port in dynamic_ports:
         e, w, v, u = _check_dynamic_combo_input(
             node_id,
@@ -3205,6 +3634,7 @@ def _check_dynamic_combos(
             present,
             resolved,
             range_is_error=range_is_error,
+            slot_ports=slot_ports,
         )
         errors.extend(e)
         warnings.extend(w)
@@ -3212,7 +3642,7 @@ def _check_dynamic_combos(
         unresolved |= u
 
     warnings.extend(_unknown_dotted_key_warnings(node_id, present, dynamic_ports, valid_keys, unresolved, resolved))
-    return errors, warnings, valid_keys, unresolved
+    return errors, warnings, valid_keys, unresolved, slot_ports
 
 
 def _unknown_dotted_key_warnings(
@@ -3303,6 +3733,7 @@ def _check_dynamic_combo_input(
     depth: int = 0,
     *,
     range_is_error: bool = True,
+    slot_ports: dict[str, Port] | None = None,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """One dynamic-combo input: resolve its selected option, check its sub-inputs.
 
@@ -3313,6 +3744,13 @@ def _check_dynamic_combo_input(
     (mutated) records ``name -> selected key`` for every combo level that DID
     resolve, so the caller can attribute a stray key to the deepest resolved
     prefix.
+
+    ``slot_ports`` is the second mutated accumulator, filled the same way and
+    for the same reason: an autogrow group nested in a resolved option grows
+    slot keys the top-level driver has no way to type on its own, so this walk
+    records a synthesized :class:`Port` per present slot key
+    (:func:`_autogrow_slot_ports`) for the driver's edge/shape/catalog checks.
+    Optional so the direct callers in the tests need not supply one.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -3453,6 +3891,7 @@ def _check_dynamic_combo_input(
                 resolved,
                 depth,
                 range_is_error=range_is_error,
+                slot_ports=slot_ports,
             )
             errors.extend(e)
             warnings.extend(w)
@@ -3472,12 +3911,17 @@ def _check_dynamic_combo_sub(
     depth: int,
     *,
     range_is_error: bool = True,
+    slot_ports: dict[str, Port] | None = None,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Presence + shape + catalog checks for one expanded sub-input.
 
     The sub-input spec is a plain ``INPUT_TYPES`` entry, so it goes through the
     same ``_parse_input_spec`` / :class:`Port` machinery as a top-level input and
     inherits identical shape and enum/range semantics.
+
+    ``slot_ports`` is the mutated accumulator described on
+    :func:`_check_dynamic_combo_input`: an autogrow sub-input records one
+    synthesized :class:`Port` per slot key it grows into it.
     """
     port = _port_from_spec(dotted, sub_spec, sub_required)
 
@@ -3493,6 +3937,7 @@ def _check_dynamic_combo_sub(
             resolved,
             depth + 1,
             range_is_error=range_is_error,
+            slot_ports=slot_ports,
         )
 
     if port.is_dynamic_group:
@@ -3500,14 +3945,21 @@ def _check_dynamic_combo_sub(
         return errors, warnings, keys, set()
 
     if port.is_autogrow:
-        # An autogrow sub-input wires as `<dotted>.<slot>` keys and routinely
-        # declares `min: 0` even inside the `required` section (Seedream's
-        # `model.images`), so absence is NOT a server reject — the converter
-        # emits no key at all for a zero-slot autogrow. Nothing to presence- or
+        # An autogrow sub-input wires as `<dotted>.<slot>` keys, so absence of
+        # the dotted base itself is never a server reject — the converter emits
+        # no key at all for a zero-slot autogrow. Nothing to presence- or
         # shape-check here. Any slot keys actually present are accepted
-        # wholesale (not counted, not edge-checked here) so they don't
-        # surface as unknown_input noise; the generic driver loop still
-        # edge-checks whichever slot keys ARE present.
+        # wholesale (not edge-checked here) so they don't surface as
+        # unknown_input noise; the generic driver loop still edge-checks
+        # whichever slot keys ARE present.
+        #
+        # What IS enforced is the server's own autogrow minimum, through the
+        # same `_autogrow_slot_errors` the top-level driver uses, so the same
+        # mistake reports the same code at either depth. A group declaring
+        # `min: 0` inside `required` (Seedream's `model.images`) reads as an
+        # effective min of 0 and stays lenient; one declaring `min >= 1`
+        # (GrokVideoReferenceNode's `model.reference_images`) is a hard reject
+        # the server would issue.
         #
         # A bare `dotted: [src, idx]` link, though, is the exact same mistake
         # the top-level autogrow_bare_input check catches — the server expects
@@ -3535,23 +3987,39 @@ def _check_dynamic_combo_sub(
                 set(),
             )
         slot_prefix = f"{dotted}."
-        # `min: 0` (Seedream) yields no required slots; `min: 1` (Grok image
-        # edit's `model.images`) makes `model.images.image_1` a server-side
-        # required input. A graph with no image wired there gets
-        # required_input_missing here, instead of passing validation and
-        # failing on submit.
-        missing = [s for s in port.autogrow_required_slots if s not in present] if sub_required else []
-        errors = [
-            {
-                "node_id": node_id,
-                "field": slot,
-                "code": "required_input_missing",
-                "message": f"required autogrow slot {slot!r} is not connected — the server will reject this node",
-                "hint": f"wire {slot!r} first; slots fill in order ({port.autogrow_slot_example()})",
-            }
-            for slot in missing
-        ]
-        return errors, [], {k for k in present if k.startswith(slot_prefix)}, set()
+        matched = {k for k in present if k.startswith(slot_prefix)}
+        # `required=False` deliberately, unlike the top-level caller: the
+        # historical "at least one slot" fallback for an unreadable template is
+        # a TOP-LEVEL behaviour that predates this check, while a nested group
+        # has always been lenient there — a dynamic-combo option routinely
+        # declares an autogrow group in `required` with an effective `min: 0`
+        # (Seedream's `model.images`), and the converter legitimately emits no
+        # slot keys for it. Extending the fallback down here to make the two
+        # depths symmetric would reject those real workflows, so the asymmetry
+        # stays: nested enforces only a minimum the catalog actually declares.
+        errors = _autogrow_slot_errors(node_id, dotted, port, matched, required=False)
+        # Only the keys the group actually grows count as known. A key under
+        # the prefix that the template never declares (`model.images.bogus`) is
+        # not an input of the node at all, so waving it through here would
+        # suppress its `unknown_input` warning as well as its slot check.
+        # Where the catalog declares no names there is nothing to filter
+        # against, so the historical prefix match stands.
+        declared = port.autogrow_declared_slot_keys(matched)
+        valid = matched if declared is None else declared
+        # Type each of those keys off the group's template input, so the driver
+        # loop edge/shape/catalog-checks a nested slot exactly as it does a
+        # top-level one. Only the valid keys: an undeclared `model.images.bogus`
+        # stays an `unknown_input` warning and gets no synthesized diagnostic.
+        # And only when the catalog names slots — a `declared is None`
+        # prefix match would invent a type for typo keys the same way the
+        # top-level path used to.
+        if slot_ports is not None and declared is not None:
+            slot_ports.update(_autogrow_slot_ports(dotted, port, valid))
+        # The valid keys stay valid even when the count is short, so the slots
+        # that ARE wired don't regress into `unknown_input` noise on top of the
+        # count error. These errors flow into `dyn_errors`, which the driver
+        # loop already gates on output-reachability.
+        return errors, [], valid, set()
 
     if dotted not in present:
         if not sub_required:
@@ -3588,35 +4056,150 @@ def _check_dynamic_combo_sub(
     return errs, warns, set(), set()
 
 
-def _autogrow_first_slot(port: Port) -> str:
-    """The slot name this group's FIRST connection must use.
+def _autogrow_below_min_error(node_id: str, field: str, port: Port, slots: set[str], lo: int) -> dict | None:
+    """One ``autogrow_below_min`` error when ``slots`` — the ``{field}.`` keys
+    the prompt wires — don't cover the ones the server places in its
+    ``required`` section, else ``None``.
 
-    A modern group names its slots outright (``names: [image_1, …]``, the
-    convention ClaudeNode and most partner nodes ship) and there is no
-    ``image0`` in that scheme at all; guessing one rejected 51 of the 517
-    shipped templates, every one of them correctly wired. Only a group with no
-    names list is numbered from ``{prefix}0``.
+    Where the catalog names the slots, this checks the NAMES the server
+    expands (``Port.autogrow_required_slot_names``) rather than the count:
+    ``images.image1`` + ``images.image2`` is two slots against ``min: 2`` and
+    the server still rejects it for a missing ``images.image0``. Where it names
+    none, there is nothing to be precise about and the count is the best test
+    available.
     """
-    template = port.autogrow_element_template or {}
-    names = template.get("names")
-    if isinstance(names, list) and names and isinstance(names[0], str) and names[0]:
-        return names[0]
-    prefix = template.get("prefix")
-    if not (isinstance(prefix, str) and prefix):
-        last = port.name.rsplit(".", 1)[-1]
-        prefix = last[:-1] if last.endswith("s") else last
-    return f"{prefix}0"
+    if lo < 1:
+        return None
+    names = port.autogrow_required_slot_names(lo)
+    if names is None:
+        n = len(slots)
+        if n >= lo:
+            return None
+        message = (
+            f"autogrow input {field!r} has {n} connected slot(s) but declares a minimum of {lo} — "
+            f"the server will reject this node"
+        )
+        hint = f"wire at least {lo} keys, one per connection: {port.autogrow_slot_example()}"
+    else:
+        missing = [key for name in names if (key := f"{field}.{name}") not in slots]
+        if not missing:
+            return None
+        # Same truncation as the sibling hints — a group's slot list is
+        # schema-driven and can run long, so don't dump it all into one line.
+        shown = ", ".join(repr(m) for m in missing[:8]) + (
+            f" (and {len(missing) - 8} more)" if len(missing) > 8 else ""
+        )
+        message = (
+            f"autogrow input {field!r} is missing {len(missing)} of the {len(names)} slot(s) the server "
+            f"places in `required`: {shown} — the server will reject this node"
+        )
+        hint = f"wire the missing slot key(s), one connection each: {shown}"
+    return {
+        "node_id": node_id,
+        "field": field,
+        "code": "autogrow_below_min",
+        "message": message,
+        "hint": hint,
+    }
 
 
-def _check_autogrow_required(
-    node_id: str, autogrow_ports: dict[str, Port], autogrow_seen: set[str], node_data: dict
-) -> list[dict]:
-    """Required autogrow inputs that received no connected slots.
+def _autogrow_slot_errors(node_id: str, field: str, port: Port, slots: set[str], required: bool) -> list[dict]:
+    """Every slot-count error one autogrow group owes — shared by the top-level
+    driver (:func:`_check_autogrow_required`) and the dynamic-combo-nested path
+    (:func:`_check_dynamic_combo_sub`) so the same authoring mistake reports the
+    same code at every nesting depth.
 
-    The server would reject such a node, so surface it here instead of as a
-    cryptic downstream reject.
+    The gate is :attr:`Port.autogrow_effective_min`, not ``required``: the
+    server places autogrow slots ``i < min`` in ``required`` whenever the
+    template's inner input is itself required, regardless of which section the
+    autogrow input sits in — and conversely ignores ``min`` entirely when it is
+    not (``comfy_api/latest/_io.py``, ``Autogrow._expand_schema_for_dynamic``).
+
+    One carve-out keeps this strictly additive: a template we cannot read gives
+    no ``template_required`` signal, and one whose gate WOULD bind but which
+    carries no ``min`` of its own declares no minimum for it to bind to
+    (``autogrow_limits`` substitutes the *frontend's* default of 1 there, which
+    is no basis for a hard reject). For exactly those two cases this falls back
+    to the historical ``required`` gate — and to its historical semantics too,
+    "at least one slot", since the ``1`` it stands in for is synthesized here
+    rather than declared by the catalog. A gate that reads a definite ``False``
+    is not one of them: that is the server telling us it ignores ``min``.
     """
-    inputs = node_data.get("inputs") or {}
+    lo = port.autogrow_effective_min
+    # "Cannot judge" is narrower than "no minimum binds": a template whose gate
+    # reads a definite `False` tells us the server ignores `min` outright, which
+    # is an answer, not a gap. Only an unreadable gate — or a readable one that
+    # WOULD bind but declares no `min` for it to bind to — leaves us guessing.
+    gate = port.autogrow_template_required
+    cannot_judge = gate is None or (gate is True and port.autogrow_declared_min is None)
+    if lo < 1:
+        if not cannot_judge or not required:
+            return []
+    if not slots:
+        owed = f" but the server places {lo} of them in `required`" if lo >= 1 else ""
+        return [
+            {
+                "node_id": node_id,
+                "field": field,
+                "code": "autogrow_no_slots",
+                "message": (
+                    f"autogrow input {field!r} has no connected slots{owed} — the server will reject this node"
+                ),
+                "hint": (f"wire {lo if lo >= 1 else 1} key(s), one per connection: {port.autogrow_slot_example()}"),
+            }
+        ]
+    if cannot_judge:
+        return []
+    shortfall = _autogrow_below_min_error(node_id, field, port, slots, lo)
+    return [shortfall] if shortfall else []
+
+
+def _autogrow_slot_ports(field: str, port: Port, slots: Iterable[str]) -> dict[str, Port]:
+    """One synthesized :class:`Port` per present slot key of one autogrow group
+    — shared by the top-level driver loop and the dynamic-combo-nested path so a
+    slot is typed the same way at every nesting depth.
+
+    ``slots`` must already be the keys the group actually grows
+    (:meth:`Port.autogrow_declared_slot_keys`, or the historical prefix match
+    where the catalog names none): a key the template never declares is not an
+    input of the node at all, so synthesizing a Port for it would invent a
+    diagnostic about something the server ignores.
+
+    ``required`` per slot is the server's own answer — the specific names it
+    places in the expanded schema's ``required`` section
+    (:meth:`Port.autogrow_required_slot_names` over
+    :attr:`Port.autogrow_effective_min`), not merely the first ``min`` keys the
+    prompt happens to wire. It stays ``False`` where the catalog names no slots
+    for the same reason the count check falls back there: nothing declared them.
+
+    Empty for a group whose template declares no inner input — there is no type
+    to check a slot against, so it keeps the pre-existing "no port, no
+    diagnostic" behaviour rather than guessing one. Empty immediately when
+    there are no slots to type, so a huge ``min`` is never expanded just to
+    build a required-names set that nothing would use.
+
+    Slot Ports share one parsed template Port (``enum_values`` / ``options``
+    by reference) and differ only in ``name`` / ``required`` — one parse, not
+    one copy of the enum per slot.
+    """
+    slots = list(slots)
+    if not slots:
+        return {}
+    names = port.autogrow_required_slot_names(port.autogrow_effective_min)
+    required_keys = set() if names is None else {f"{field}.{name}" for name in names}
+    prototype = port.autogrow_slot_port(slots[0], required=False)
+    if prototype is None:
+        return {}
+    return {key: replace(prototype, name=key, required=key in required_keys) for key in slots}
+
+
+def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node_data: dict) -> list[dict]:
+    """Autogrow inputs wired with fewer slots than the server requires.
+
+    Every gate and carve-out lives in :func:`_autogrow_slot_errors`, which the
+    nested dynamic-combo path shares so both depths report the same code.
+    """
+    inputs = node_data.get("inputs")
     # A truthy non-dict `inputs` (a scalar from a hand-edited or generated file)
     # survives `or {}` and then raises on the membership tests below —
     # TypeError: argument of type 'int' is not iterable — which escaped as a
@@ -3626,57 +4209,19 @@ def _check_autogrow_required(
         inputs = {}
     errors: list[dict] = []
     for base, port in autogrow_ports.items():
-        if port.required and base in autogrow_seen:
-            # The group grows from index 0: the server asks for `image0` by name
-            # and answers `required_input_missing` when a group is wired from
-            # image1 up, even though later slots are present. A gap ABOVE the
-            # anchor is fine (image0 + image2 submits), so only index 0 is
-            # checked here.
-            slots = {k.split(".", 1)[1] for k in inputs if isinstance(k, str) and k.startswith(f"{base}.")}
-            first = _autogrow_first_slot(port)
-            if slots and first not in slots:
-                errors.append(
-                    {
-                        "node_id": node_id,
-                        "field": base,
-                        "code": "autogrow_missing_first_slot",
-                        "message": (
-                            f"autogrow input {base!r} is wired from {sorted(slots)[0]!r} but has no "
-                            f"{first} slot — the server requires the first slot"
-                        ),
-                        "hint": f"wire the first slot: {port.autogrow_slot_example()}",
-                    }
-                )
-        # `required` names where the group LIVES in the schema, not how many
-        # connections it needs: GLSLShader.floats and friends sit under
-        # required with min 0, and a shader using no float uniforms runs.
-        minimum, _ = port.autogrow_limits
-        if port.required and minimum >= 1 and base not in autogrow_seen and base not in inputs:
-            errors.append(
-                {
-                    "node_id": node_id,
-                    "field": base,
-                    "code": "autogrow_no_slots",
-                    "message": (
-                        f"required autogrow input {base!r} has no connected slots — the server will reject this node"
-                    ),
-                    "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
-                }
-            )
+        # The base name wired directly as a single connection is a different
+        # mistake, already reported as `autogrow_bare_input` by the driver loop
+        # — don't double-error it. Only that exact shape, though: the driver
+        # loop tests `isinstance(value, list) and len(value) == 2` too, so
+        # `{base: None}` / `{base: ""}` / `{base: [[..], [..], [..]]}` raise no
+        # error anywhere (`validate_shape` no-ops for COMFY_AUTOGROW_V3 and
+        # `_check_required_present` exempts autogrow ports) and skipping on
+        # mere presence of the key would silence the slot check for free.
+        value = inputs.get(base)
+        if isinstance(value, list) and len(value) == 2:
             continue
-        if not port.required:
-            continue
-        for slot in port.autogrow_required_slots:
-            if slot not in inputs:
-                errors.append(
-                    {
-                        "node_id": node_id,
-                        "field": slot,
-                        "code": "required_input_missing",
-                        "message": f"required autogrow slot {slot!r} is not connected — the server will reject this node",
-                        "hint": f"wire {slot!r} first; slots fill in order ({port.autogrow_slot_example()})",
-                    }
-                )
+        slots = {k for k in inputs if k.startswith(f"{base}.")}
+        errors.extend(_autogrow_slot_errors(node_id, base, port, slots, port.required))
     return errors
 
 
@@ -4302,21 +4847,37 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
-def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+def _node_declares_input(port_by_name: dict[str, Port], key: Any, node_inputs: dict) -> bool:
     """Whether a node whose ports are ``port_by_name`` declares ``key``.
 
     The server reads the inputs a class DECLARES (``validate_inputs`` walks
     ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
-    decides whether a key can fail a prompt or be followed as an edge. Only an
-    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
-    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    decides whether a key can fail a prompt or be followed as an edge. Autogrow
+    groups and DynamicGroup controllers take generated dotted slots; a dynamic
+    combo takes only the dotted inputs exposed by its current selection. A
+    stale key from another selection and a dotted suffix on an ordinary port
+    are not declared.
     """
     if not isinstance(key, str):
         return False
     if key in port_by_name:
         return not port_by_name[key].is_dynamic_group
     base = port_by_name.get(key.split(".", 1)[0])
-    return base is not None and (base.is_autogrow or base.is_dynamic_combo or base.is_dynamic_group)
+    if base is None:
+        return False
+    if base.is_autogrow or base.is_dynamic_group:
+        return True
+    if not base.is_dynamic_combo:
+        return False
+    # Only a selection that RESOLVED can call a dotted key stale. When the
+    # selection is unknowable — link-valued, absent-but-required, an options
+    # container this parser can't read, or the depth cap — the server's
+    # expansion is unknown, so reading the key as undeclared would demote its
+    # real dangling_edge/bad_link_shape error to a warning and stop
+    # _declared_link_targets following the edge, which can drop a feeder node
+    # out of `reachable` and hide a cycle. Stay conservative there.
+    port, unresolved = _resolve_dotted_slot(port_by_name, key, node_inputs)
+    return unresolved or port is not None
 
 
 def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
@@ -4340,14 +4901,43 @@ def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
     port_by_name = {p.name: p for p in m.inputs} if m is not None else None
     targets: list[str] = []
     for key, value in node_inputs.items():
-        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+        if port_by_name is not None and not _node_declares_input(port_by_name, key, node_inputs):
             continue
         if isinstance(value, list) and len(value) == 2:
             targets.append(str(value[0]))
     return targets
 
 
-def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:
+def _resolve_dotted_slot(
+    port_by_name: dict[str, Port], dotted: str, node_inputs: dict, *, autogrow_slots: bool = True
+) -> tuple[Port | None, bool]:
+    """``(port, unresolved)`` for a dotted wire key.
+
+    ``unresolved`` is True only when a dynamic combo on the path gave no basis
+    to judge the key at all — the same four cases
+    :func:`_check_dynamic_combo_input` reports as unresolved prefixes (a
+    link-valued selector, an unreadable or newer ``options`` shape, a resolved
+    option with no ``inputs`` dict, and the depth cap), plus a required
+    selector that is absent. It is False for a key the current schema and
+    selections genuinely do NOT declare, which is the case a caller may treat
+    as stale.
+
+    ``autogrow_slots=False`` returns ``(None, False)`` for a key that lands in
+    an autogrow group at any depth, for a caller that types those slots from
+    the template instead (:func:`_autogrow_slot_ports`).
+    """
+    base, _, leaf = dotted.partition(".")
+    if not leaf:
+        return None, False
+    port = port_by_name.get(base)
+    if port is None:
+        return None, False
+    return _resolve_dotted_under(port, dotted, node_inputs, 0, autogrow_slots=autogrow_slots)
+
+
+def _dotted_slot_port(
+    port_by_name: dict[str, Port], dotted: str, node_inputs: dict, *, autogrow_slots: bool = True
+) -> Port | None:
     """The port a dotted wire key targets: an autogrow slot or a combo sub-input.
 
     The server type-checks every entry in a node's ``inputs`` by name, dotted
@@ -4356,22 +4946,28 @@ def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: d
     group is nested under a dynamic combo's selected option
     (``model.images.image0``, ``model.mode.budget``).
 
-    Returns ``None`` when the key resolves to nothing the CURRENT schema and
-    selections declare: an unknown group, a sub-key left over from another
-    selection, a dotted suffix on an ordinary port, or a template with no
-    element type. The server ignores all of those, so none may hard-fail.
+    Returns ``None`` when the key resolves to no port to type-check: an unknown
+    group, a sub-key left over from another selection, a dotted suffix on an
+    ordinary port, or a dynamic-combo selection that could not be resolved at
+    all. The server ignores the first three, so none may hard-fail; a caller
+    that must tell the resolvable cases apart from the unresolvable one uses
+    :func:`_resolve_dotted_slot`.
+
+    An autogrow slot whose group declares no element type is NOT one of those
+    cases: it comes back as a ``"*"``-typed port, so the slot keeps its
+    structural link checks and accepts any source type — unless
+    ``autogrow_slots=False``, which yields ``None`` for every autogrow slot
+    (see :func:`_resolve_dotted_slot`).
     """
-    base, _, leaf = dotted.partition(".")
-    if not leaf:
-        return None
-    port = port_by_name.get(base)
-    if port is None:
-        return None
-    return _resolve_dotted_under(port, dotted, node_inputs, 0)
+    return _resolve_dotted_slot(port_by_name, dotted, node_inputs, autogrow_slots=autogrow_slots)[0]
 
 
-def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> Port | None:
+def _resolve_dotted_under(
+    port: Port, dotted: str, node_inputs: dict, depth: int, *, autogrow_slots: bool = True
+) -> tuple[Port | None, bool]:
     """Walk ``dotted`` down from ``port``, whose name is a prefix of it.
+
+    Returns ``(port, unresolved)`` as :func:`_resolve_dotted_slot` defines them.
 
     The FULL dotted path is carried the whole way: a nested selector is read
     from ``inputs`` under its own full name (``model.mode``), and a nested
@@ -4386,27 +4982,59 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
             try:
                 fields = _dynamic_group_fields(port, f"{port.name}.{index}")
             except DynamicGroupBindingError:
-                return None
-            return next((p for p in fields if p.name == dotted), None)
-        return None
+                return None, False
+            return next((p for p in fields if p.name == dotted), None), False
+        return None, False
     if port.is_autogrow:
+        if not autogrow_slots:
+            return None, False
         element = port.autogrow_element_type
         if not element:
-            return None
+            # Older/partial catalogs can omit the element schema while still
+            # declaring the generated slot. Preserve structural link checks
+            # and accept any source type, matching the validator's historical
+            # behavior for these otherwise-untyped slots.
+            element = "*"
         # A slot carries the group's element type; the slot NAME is checked
         # elsewhere (autogrow_unknown_slot), so an odd name still gets the
         # type comparison the server will make.
-        return replace(port, name=dotted, type=element)
+        return replace(port, name=dotted, type=element), False
     if port.is_dynamic_combo:
+        # Each early return below mirrors one `unresolved` exit of
+        # _check_dynamic_combo_input, so the two agree about when a selection
+        # is merely UNMATCHED (stale sub-keys, judgeable) and when it is
+        # UNKNOWABLE (nothing can be concluded about the sub-keys at all).
         if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
-            return None
-        selector = node_inputs.get(port.name)
-        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, port.name):
+            return None, True
+        if port.name not in node_inputs:
+            # A required selector that is absent fails at execution and the
+            # expansion is a no-op whose shape we cannot name; an OPTIONAL one
+            # definitely did not expand, so its dotted keys really are
+            # undeclared. Same split _check_dynamic_combo_input makes.
+            return None, port.required
+        selector = node_inputs[port.name]
+        if isinstance(selector, list) and len(selector) == 2:
+            # Wired as a link: which option expands is known only at execution.
+            return None, True
+        if not port.dynamic_options:
+            return None, True
+        option = next(
+            (o for o in port.dynamic_options if _dynamic_combo_key_matches(o.get("key"), selector)),
+            None,
+        )
+        if option is None or not isinstance(option.get("inputs"), dict):
+            # No option matched the selection, or the matched one carries no
+            # readable sub-input schema — either way there is no sub-input set
+            # to check this key against.
+            return None, True
+        for sub in _dynamic_combo_option_ports(option, port.name):
             if sub.name == dotted:
-                return sub
+                return sub, False
             if dotted.startswith(f"{sub.name}."):
-                return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1)
-    return None
+                return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1, autogrow_slots=autogrow_slots)
+        # The selection resolved and does not declare this key: genuinely stale.
+        return None, False
+    return None, False
 
 
 def _dynamic_combo_key_matches(left: Any, right: Any) -> bool:
@@ -4577,7 +5205,12 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
                 raise DynamicGroupBindingError("widgets_values_form has duplicated or missing named values")
         else:
             raise DynamicGroupBindingError("widgets_values_form requires array or object widgets_values")
-    entries = _expand_widget_entries(m, source if isinstance(source, (list, dict)) else [])
+    saved_names = saved_widget_order(node)
+    entries = _expand_widget_entries(
+        m,
+        source if isinstance(source, (list, dict)) else [],
+        saved_widget_names=saved_names,
+    )
     saved_length = len(values) if isinstance(values, list) else len(form["order"]) if form is not None else None
     if saved_length is not None:
         while len(entries) > saved_length and entries[-1].frontend_injected:
@@ -4597,12 +5230,140 @@ def _validate_dynamic_group_layout(node: dict, m: Morphism) -> list[_WidgetEntry
     return entries
 
 
+class SavedWidgetLayoutError(ValueError):
+    """A recorded positional widget layout cannot be reconciled safely."""
+
+
+def saved_sub_order(saved_widget_names: list[str] | None, parent: str, sub_names: list[str]) -> list[str] | None:
+    """Reorder a dynamic combo's selected sub-input names to the SAVED layout.
+
+    A ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option contributes its
+    sub-inputs as contiguous ``widgets_values`` slots right after the selector
+    (``dynamicComboWidget.updateWidgets`` -> ``addNodeInput``), and the saved
+    graph names them on its ``inputs[]`` entries, dotted and in that order. The
+    option's sub-input list in today's catalog is only today's layout, so an
+    option that has since gained a sub-input shifts every later slot.
+
+    ``saved_widget_names`` is the node's recorded widget order (the ``widget``
+    markers on ``inputs[]``). Returns the dotted children of ``parent`` in that
+    order, or ``None`` to mean "no usable saved layout, use the catalog order":
+
+    * nothing recorded for this parent;
+    * a recorded child the current option no longer declares, so the two
+      layouts disagree beyond repair from here;
+    * the recorded order already equals the catalog order.
+
+    Returns ONLY the saved names, in saved order. A sub the save did not name
+    owns no ``widgets_values`` slot, because the node the file describes did not
+    have that widget: emitting it anyway is what shifted every later slot. The
+    caller re-adds the subs that own no slot regardless (connection-only ones),
+    since dropping those would change the emitted input set.
+
+    A descendant of a NESTED selector (``model.variant.width`` under
+    ``model.variant``) is skipped rather than treated as a disagreement: it is
+    not this level's slot, and the recursive walk orders it with the nested
+    selector as its own parent. A repeated name is taken once, at its first
+    position.
+
+    Shared by the converter (``workflow_to_api._saved_sub_order``) and the
+    value-aware widget order an edit indexes by (``_expand_widget_entries``).
+    They resolved this independently and disagreed: on a pre-``auto_upscale``
+    Seedance save, ``set-widget seed`` wrote the slot holding ``seed``'s
+    ``control_after_generate`` marker and left the seed untouched.
+    """
+    if not saved_widget_names or not sub_names:
+        return None
+    declared: dict[str, int] = {}
+    for name in sub_names:
+        declared[name] = declared.get(name, 0) + 1
+    prefix = f"{parent}."
+    ordered: list[str] = []
+    seen: dict[str, int] = {}
+    for name in saved_widget_names:
+        if not isinstance(name, str) or not name.startswith(prefix):
+            continue
+        if name not in declared:
+            head = name[len(prefix) :].split(".", 1)[0]
+            direct_parent = f"{prefix}{head}"
+            if direct_parent in declared:
+                occurrence = seen.get(direct_parent, 0)
+                if occurrence < declared[direct_parent]:
+                    seen[direct_parent] = occurrence + 1
+                    ordered.append(direct_parent)
+                continue
+            raise SavedWidgetLayoutError(
+                f"saved widget {name!r} under {parent!r} is absent from the current catalog layout"
+            )
+        occurrence = seen.get(name, 0)
+        if occurrence >= declared[name]:
+            # A duplicated marker cannot create another positional occurrence.
+            continue
+        seen[name] = occurrence + 1
+        ordered.append(name)
+    if not ordered:
+        return None
+    return None if ordered == sub_names else ordered
+
+
+def saved_widget_order(
+    node: dict | None,
+    graph: Graph | None = None,
+    class_type: str | None = None,
+) -> list[str] | None:
+    """The widget names a SAVED node records on its ``inputs[]`` entries, in order.
+
+    ``widgets_values_form.order`` is the explicit A24 layout and wins when it
+    exactly describes a positional array. A name-keyed value object needs no
+    positional recovery, so input markers are ignored for it.
+
+    Legacy arrays may instead record their layout through ``inputs[].widget``.
+    When a graph is supplied, trust those markers only if expanding with them
+    accounts for the complete positional array. CLI-built nodes can acquire a
+    single marker when one widget is promoted or connected; treating that
+    partial marker set as a complete save layout drops unrelated combo slots.
+    """
+    if not isinstance(node, dict):
+        return None
+    values = node.get("widgets_values")
+    form = node.get("widgets_values_form")
+    if isinstance(values, list) and isinstance(form, dict):
+        order = form.get("order")
+        if (
+            set(form) == {"order"}
+            and isinstance(order, list)
+            and len(order) == len(values)
+            and all(isinstance(name, str) and name for name in order)
+            and len(order) == len(set(order))
+        ):
+            return list(order)
+        return None
+    if isinstance(values, dict):
+        return None
+    raw = node.get("inputs")
+    if not isinstance(raw, list):
+        return None
+    names = [
+        inp["name"] for inp in raw if isinstance(inp, dict) and inp.get("widget") and isinstance(inp.get("name"), str)
+    ]
+    if not names:
+        return None
+    if graph is not None and isinstance(values, list):
+        morphism = graph.node(class_type or str(node.get("type", "")))
+        if morphism is None:
+            return None
+        entries = _expand_widget_entries(morphism, values, saved_widget_names=names)
+        if len(entries) != len(values):
+            return None
+    return names
+
+
 def _expand_widget_entries(
     m: Morphism,
     widgets_values: list[Any] | dict[str, Any],
     *,
     first_key: bool = False,
     sub_links: list[Port] | None = None,
+    saved_widget_names: list[str] | None = None,
 ) -> list[_WidgetEntry]:
     """Flatten a node's widget ports into one entry per ``widgets_values`` slot.
 
@@ -4672,7 +5433,26 @@ def _expand_widget_entries(
             else:
                 default = _widget_default(port) if port.options.default is not None else None
                 selector = saved_value(name, idx, default)
-            for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):
+            subs = _dynamic_combo_sub_ports(port.dynamic_options, selector, name)
+            order = saved_sub_order(saved_widget_names, name, [s.name for s in subs])
+            if order is not None:
+                remaining = list(subs)
+                kept: list[Port] = []
+                for saved_name in order:
+                    index = next((i for i, sub in enumerate(remaining) if sub.name == saved_name), None)
+                    if index is not None:
+                        sub = remaining.pop(index)
+                        if sub.is_link:
+                            raise SavedWidgetLayoutError(
+                                f"saved widget {saved_name!r} is connection-only in the current catalog layout"
+                            )
+                        kept.append(sub)
+                # A sub the save never named owns no slot. Connection-only subs
+                # own none either way, so carrying them keeps `sub_links`
+                # complete without moving any positional index.
+                kept += [sub for sub in remaining if sub.is_link]
+                subs = kept
+            for sub in subs:
                 if sub.is_link:
                     if sub_links is not None:
                         sub_links.append(sub)
@@ -4694,7 +5474,7 @@ def _expand_widget_entries(
     return entries
 
 
-def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
+def _node_widget_slots(node: dict, prefix: str, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Surface a regular node's widget inputs as slots under ``prefix``.
 
     ``prefix`` is the addressable node path (``"3"`` at top level, ``"10/9"``
@@ -4702,6 +5482,15 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     about — including a dynamic combo's selector (enum = its option keys) and
     the selected option's ``<name>.<sub>`` sub-inputs. Returns ``[]`` for
     nodes whose type isn't in object_info.
+
+    A save whose recorded layout the current catalog cannot reconcile
+    (:class:`SavedWidgetLayoutError`) also yields ``[]``, with the reason
+    appended to ``warnings``. It owns no RESOLVABLE positions, and re-deriving
+    them from today's order is the misalignment reading the saved layout exists
+    to prevent — so this node advertises nothing rather than a guess. It is
+    reported per node instead of raised because a read must not lose the whole
+    graph to one stale node: every other node still lists, which is what lets a
+    caller see the offending node at all.
     """
     node_type = node.get("type", "")
     m = graph.node(node_type)
@@ -4710,7 +5499,21 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     _validate_dynamic_group_layout(node, m)
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
-    for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
+    try:
+        saved_names = saved_widget_order(node, graph, node_type)
+        entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
+    except SavedWidgetLayoutError as exc:
+        if warnings is not None:
+            warnings.append(
+                {
+                    "code": "saved_widget_layout_unreadable",
+                    "message": f"node {prefix}: {exc}; its slots are not listed",
+                    "instance_id": prefix,
+                    "node_type": node_type,
+                }
+            )
+        return []
+    for idx, entry in enumerate(entries):
         if entry.port is None:  # control_after_generate / injected marker — not a slot
             continue
         current = widgets[idx] if idx < len(widgets) else None
@@ -4745,7 +5548,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     return slots
 
 
-def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
+def _extract_frontend_slots(workflow: dict, graph: Graph, warnings: list[dict] | None = None) -> list[dict]:
     """Walk workflow nodes and extract tweakable slots.
 
     For every node we surface its widget inputs at ``<nodePath>.<input>``. When
@@ -4760,6 +5563,10 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
     at ``<instanceId>.<name>`` for backward compatibility, but the recursion
     means an agent is never stranded when those proxies are missing or dangle
     (fetched templates routinely point proxyWidgets at deleted interior ids).
+
+    ``warnings``, when given, collects the per-node reasons a node advertised no
+    slots at all (an unreconcilable saved layout). The walk continues past such
+    a node, so one stale save costs its own slots and nothing else.
     """
     defs_by_id = _subgraph_defs_by_id(workflow)
     slots: list[dict] = []
@@ -4785,7 +5592,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             node_type = node.get("type", "")
             sg = defs_by_id.get(node_type)
             if sg is None:
-                for slot in _node_widget_slots(node, node_path, graph):
+                for slot in _node_widget_slots(node, node_path, graph, warnings):
                     if (node_id, slot["name"]) not in exclude:
                         add(slot)
                 continue
@@ -4895,6 +5702,12 @@ def _declared_subgraph_slots(
         }
         if linked_from is not None:
             slot["linked_from"] = linked_from
+        if pi is not None and pi.is_widget:
+            source_address = _promoted_source_address(
+                instance_id, sg, pi, defs, graph, instance, scope if scope is not None else workflow
+            )
+            if source_address is not None:
+                slot["source_address"] = source_address
         declared.append(slot)
     if workflow is not None:
         # Legacy ``proxyWidgets`` promotions the definition does not back
@@ -4912,17 +5725,128 @@ def _declared_subgraph_slots(
             if current is _promoted.UNSET:
                 all_resolved = False
                 continue
-            declared.append(
-                {
-                    "address": f"{instance_id}.{entry.name}",
-                    "name": entry.name,
-                    "type": str(entry.type),
-                    "current_value": current,
-                    "instance_id": instance_id,
-                    "node_type": instance.get("type", ""),
-                }
-            )
+            slot = {
+                "address": f"{instance_id}.{entry.name}",
+                "name": entry.name,
+                "type": str(entry.type),
+                "current_value": current,
+                "instance_id": instance_id,
+                "node_type": instance.get("type", ""),
+            }
+            # A primitive bypass's value lives on an interior PrimitiveNode
+            # that may feed several widgets; source_address names one concrete
+            # widget, so these rows omit it (documented in SKILL.md).
+            if entry.plan == _promoted.PLAN_CREATE:
+                source_address = _promoted_source_address(
+                    instance_id,
+                    sg,
+                    entry.as_promoted_input(sg),
+                    defs,
+                    graph,
+                    instance,
+                    scope if scope is not None else workflow,
+                )
+                if source_address is not None:
+                    slot["source_address"] = source_address
+            declared.append(slot)
     return declared, (any_declared and all_resolved)
+
+
+def _promoted_source_address(
+    instance_id: str,
+    sg: dict,
+    pi: Any,
+    defs: dict[str, dict],
+    graph: Graph,
+    instance: dict | None = None,
+    scope: dict | None = None,
+) -> str | None:
+    """``<instance>/<interior>[/<deeper>…].<widget>`` — the concrete interior
+    widget a promoted row stands for, through any nested promotion chain.
+    Informational only: the row is still edited at ``<instance>.<name>``.
+    ``None`` when the chain does not resolve to a live interior widget: a
+    missing interior node, or a widget the catalog says that class lacks (a
+    class the catalog does not know is trusted as saved). A dynamic-combo
+    sub-widget is checked against the option execution selects — a promoted
+    selector's host value (``instance`` in ``scope``) over the interior one."""
+    from comfy_cli.cql import promoted as _promoted
+
+    target = _promoted.deepest_source(sg, pi, defs)
+    if target is None:
+        return None
+    path, widget = target
+    class_type, port = promoted_source_port(sg, pi, defs, graph)
+    if port is None:
+        if not class_type:
+            return None
+        m = graph.node(class_type)
+        if m is not None:
+            # A dynamic-combo sub-widget (``model.size_preset``) is not a
+            # top-level port; its selector is.
+            head = widget.split(".", 1)[0]
+            if head == widget or not any(p.name == head and p.is_dynamic_combo for p in m.inputs):
+                return None
+            # …and only the SELECTED option's sub-widgets exist on the node.
+            node = _promoted_source_node(sg, path, defs)
+            values = _widgets_as_positional(node.get("widgets_values") if node else None, graph, class_type)
+            selected = _promoted_selector_value(instance, scope, sg, path, head, defs)
+            order = graph.widget_order_for_node(class_type, values)
+            if selected is not _promoted.UNSET and head in order and order.index(head) < len(values):
+                values = list(values)
+                values[order.index(head)] = selected
+                order = graph.widget_order_for_node(class_type, values)
+            if widget not in order:
+                return None
+    return f"{_SUBGRAPH_PATH_SEP.join([instance_id, *path])}.{widget}"
+
+
+def _promoted_selector_value(
+    instance: dict | None, scope: dict | None, sg: dict, path: list[str], selector: str, defs: dict[str, dict]
+) -> Any:
+    """The host value execution writes over the interior dynamic-combo
+    ``selector`` at the end of ``path`` when that selector is itself promoted
+    — outermost host first, as the converter's overlay lets an outer host win.
+    :data:`promoted.UNSET` when no host materializes it, or when a live link
+    feeds it (its value is only known at run time), so the caller keeps the
+    interior's saved selection."""
+    from comfy_cli.cql import promoted as _promoted
+
+    current_instance, current_scope, current_sg = instance, scope, sg
+    for depth in range(len(path)):
+        if current_instance is None or current_scope is None:
+            break
+        remaining = path[depth:]
+        for spi in _promoted.promoted_inputs(current_sg, defs):
+            if not spi.is_widget or _promoted.deepest_source(current_sg, spi, defs) != (remaining, selector):
+                continue
+            if _promoted.live_external_link(current_scope, current_instance, spi.name, current_sg) is not None:
+                return _promoted.UNSET
+            value = _promoted.host_value(current_instance, spi)
+            if value is not _promoted.UNSET:
+                return value
+        inner = _promoted._inner_node(current_sg, remaining[0])
+        inner_def = defs.get(str(inner.get("type", ""))) if inner is not None else None
+        if inner_def is None:
+            break
+        current_instance, current_scope, current_sg = inner, current_sg, inner_def
+    return _promoted.UNSET
+
+
+def _promoted_source_node(sg: dict, path: list[str], defs: dict[str, dict]) -> dict | None:
+    """The terminal interior node at the end of a promoted source ``path``,
+    descending into nested subgraph definitions; ``None`` if any hop is missing."""
+    from comfy_cli.cql import promoted as _promoted
+
+    current_sg = sg
+    node: dict | None = None
+    for seg in path:
+        node = _promoted._inner_node(current_sg, seg)
+        if node is None:
+            return None
+        nxt = defs.get(str(node.get("type", "")))
+        if nxt is not None:
+            current_sg = nxt
+    return node
 
 
 def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph) -> tuple[str, Port | None]:
@@ -4934,16 +5858,10 @@ def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph)
     if target is None:
         return "", None
     path, widget = target
-    current_sg = sg
-    node: dict | None = None
-    for seg in path:
-        node = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == seg), None)
-        if node is None:
-            return "", None
-        nxt = defs.get(str(node.get("type", "")))
-        if nxt is not None:
-            current_sg = nxt
-    class_type = str(node.get("type", "")) if node else ""
+    node = _promoted_source_node(sg, path, defs)
+    if node is None:
+        return "", None
+    class_type = str(node.get("type", ""))
     m = graph.node(class_type)
     if m is None:
         return class_type, None
@@ -4956,9 +5874,11 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     Returns the widget's current value (which may be ``None`` for a
     legitimately-null widget) or the module-level ``_UNRESOLVED`` sentinel when
     the proxy entry points at a missing/dangling interior node, when the widget
-    name is absent from the node's widget order, or when the index is past the
-    end of ``widgets_values``.  Callers must use ``is _UNRESOLVED`` to test for
-    the unresolvable case so that a real ``None`` value is preserved.
+    name is absent from the node's widget order, when the interior node's saved
+    widget layout cannot be reconciled with the current catalog, or when the
+    index is past the end of ``widgets_values``.  Callers must use
+    ``is _UNRESOLVED`` to test for the unresolvable case so that a real ``None``
+    value is preserved.
     """
     proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
     for entry in proxy:
@@ -4973,7 +5893,15 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
                 continue
             interior_class = inode.get("type", "")
             widgets = _widgets_as_positional(inode.get("widgets_values"), graph, interior_class)
-            order = graph.widget_order_for_node(interior_class, widgets)
+            try:
+                saved_names = saved_widget_order(inode, graph, interior_class)
+                order = graph.widget_order_for_node(interior_class, widgets, saved_names)
+            except SavedWidgetLayoutError:
+                # The save records a layout today's catalog cannot reconcile, so
+                # this proxy's slot position is unknown — which is exactly what
+                # the sentinel means. Reading it off the catalog order instead
+                # would hand back a neighbour's value.
+                return _UNRESOLVED
             try:
                 idx = order.index(name)
             except ValueError:
@@ -5010,7 +5938,9 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     # node before the target exists and its value has validated.
     widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     # The canvas would load a legacy button run into viewport/width/height, so
-    # an edit writes the node back in the frontend's four-widget shape.
+    # an edit writes the node back in the frontend's four-widget shape. This runs
+    # before the saved-layout read below because it can refuse the edit outright,
+    # and because everything downstream expands against this `widgets` list.
     legacy_widgets = widgets
     widgets = strip_legacy_load_3d_buttons(m, widgets)
     if widgets is not legacy_widgets:
@@ -5019,6 +5949,11 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         legacy_entries = _expand_widget_entries(m, legacy_widgets)
         if any(e.frontend_injected and e.name == input_name for e in legacy_entries):
             raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(legacy_entries))
+    # `widgets_values` is positional against the layout the node was SAVED with,
+    # which its `inputs[].widget` markers record. Expanding a dynamic combo's
+    # option from today's catalog instead put every slot after an added
+    # sub-input one place out, so the write landed on a neighbour.
+    saved_names = saved_widget_order(node, graph, node_type)
     if extend:
         button_defaults = dict(load_3d_button_slots(m, widgets))
 
@@ -5042,7 +5977,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # reinterprets it.
         materialized_selectors: set[str] = set()
         while True:
-            entries_now = _expand_widget_entries(m, widgets)
+            entries_now = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
             target_idx = next((idx for idx, entry in enumerate(entries_now) if entry.name == input_name), None)
             missing = next(
                 (
@@ -5074,10 +6009,18 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
                 selector.name,
             )
             widgets.extend(default_values)
-    order = graph.widget_order_for_node(node_type, widgets)
+    order = graph.widget_order_for_node(node_type, widgets, saved_names)
+    # Dynamic-group rows are the only place a REQUESTED name can occupy two
+    # positions, so the ambiguity refusal stays scoped to them. Outside a group
+    # the sole repeated name is the frontend's ``control_after_generate`` marker
+    # — a node with both ``seed`` and ``noise_seed`` carries two — and that name
+    # was editable (first occurrence) long before this saved-layout read, with
+    # no per-widget address to disambiguate it. Threading ``saved_names`` in
+    # cannot add a duplicate either: ``saved_sub_order`` caps every name at the
+    # number of occurrences the catalog declares.
     if has_group and order.count(input_name) > 1:
         raise ValueError(f"ambiguous widget {input_name!r} on {node_type}: multiple occurrences")
-    entries = _expand_widget_entries(m, widgets)
+    entries = _expand_widget_entries(m, widgets, saved_widget_names=saved_names)
     if any(e.frontend_injected and e.name == input_name for e in entries):
         raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
     if group_entries is not None:
@@ -5085,6 +6028,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     try:
         widget_idx = order.index(input_name)
     except ValueError:
+        if saved_names is not None:
+            current_entries = _expand_widget_entries(m, widgets)
+            current = next((entry for entry in current_entries if entry.name == input_name), None)
+            if current is not None and current.port is not None and not current.port.is_link:
+                raise ValueError(
+                    f"widget {input_name!r} exists in the current catalog but not in this saved workflow's layout; "
+                    "the save predates that widget, so no positional slot was guessed or written"
+                )
         warning = _unknown_dynamic_sub_warning(
             m,
             input_name,
@@ -5161,9 +6112,6 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             fatal = next((finding for finding in warnings if finding.get("severity") == SEVERITY_ERROR), None)
             if fatal:
                 raise ValueError(fatal["message"])
-
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
     # A node that declares its own ``widgets_values_form`` (schema A24) is laid
@@ -5319,7 +6267,9 @@ def _write_dynamic_combo_selector(
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
     raw_values = node.get("widgets_values")
-    preserve_named = isinstance(raw_values, dict) and any(e.port and e.port.is_dynamic_group for e in entries)
+    preserve_named = isinstance(raw_values, dict) and (
+        "widgets_values_form" in node or any(e.port and e.port.is_dynamic_group for e in entries)
+    )
     if not any(_dynamic_combo_key_matches(value, key) for key in port.enum_values):
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
@@ -5358,6 +6308,7 @@ def _write_dynamic_combo_selector(
         }
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
+    _clear_dynamic_combo_widget_markers(node, input_name)
     if any(entry.port and entry.port.is_dynamic_group for entry in entries):
         if "widgets_values_form" in node:
             node["widgets_values_form"]["order"] = (
@@ -5383,6 +6334,28 @@ def _write_dynamic_combo_selector(
             ),
         }
     ]
+
+
+def _clear_dynamic_combo_widget_markers(node: dict, parent: str) -> None:
+    """Invalidate legacy markers after rebuilding a combo's positional roster.
+
+    The positional values have just been replaced with today's selected-option
+    layout. Keeping the previous option's dotted markers would make the next
+    read interpret those new values using the old layout. Clear only markers in
+    this selector's subtree and preserve the input objects themselves, including
+    any link/socket metadata. Do not fabricate replacement input objects: CLI-
+    built nodes intentionally keep value widgets out of ``inputs`` and adding
+    them changes their connectable socket surface. With no saved subtree marker,
+    subsequent reads use the same pinned catalog order that built the new array.
+    """
+    inputs = node.get("inputs")
+    if not isinstance(inputs, list) or any(not isinstance(item, dict) for item in inputs):
+        return
+    prefix = f"{parent}."
+    for item in inputs:
+        name = item.get("name")
+        if isinstance(name, str) and name.startswith(prefix):
+            item.pop("widget", None)
 
 
 def _dynamic_combo_default_values(

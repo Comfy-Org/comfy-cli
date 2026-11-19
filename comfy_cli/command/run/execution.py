@@ -684,7 +684,9 @@ class WorkflowExecution:
 
     def on_error(self, data):
         self._stop_progress()
-        data = data if isinstance(data, dict) else {}
+        # `current_inputs` (the failing node's widget values) can carry an API
+        # key; drop it before the payload reaches the terminal or the stream.
+        data = execution_errors.redact_record(data) if isinstance(data, dict) else {}
         node_id = str(data.get("node_id", ""))
         if self.renderer.is_pretty():
             pprint(f"[bold red]Error running workflow\n{sanitize_markup(json.dumps(data, indent=2))}[/bold red]")

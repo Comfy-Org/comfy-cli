@@ -224,6 +224,7 @@ def which_panel(
     server_running: bool = False,
     server_url: str | None = None,
     version: str = "0.0.0",
+    desktop: Mapping[str, Any] | None = None,
 ) -> Panel:
     type_badge = Text(workspace_type or "—", style="bold green") if workspace_type else Text("—", style="dim")
     python_value = Text("—", style="dim")
@@ -247,11 +248,23 @@ def which_panel(
         )
 
     rows: list[tuple[str, Any]] = [
-        ("Path", Text(workspace_path, style="bold white")),
+        ("Path", Text(sanitize_value(workspace_path), style="bold white")),
         ("Type", type_badge),
         ("Python", python_value),
         ("Server", server_value),
     ]
+    # A registry with no usable install leaves the Desktop fields null; show
+    # the rows only for a selected install, as ``fill_print_table`` does.
+    if desktop and desktop.get("code_dir"):
+        rows.extend(
+            [
+                ("Desktop code", Text(sanitize_value(desktop["code_dir"]))),
+                ("Desktop data", Text(sanitize_value(desktop["data_dir"]))),
+                ("Desktop Python", Text(sanitize_value(desktop["python"] or "—"))),
+                ("Model roots", Text("\n".join(sanitize_value(root["path"]) for root in desktop["model_roots"]))),
+                ("Selected because", Text(sanitize_value(desktop["selected_reason"] or "—"))),
+            ]
+        )
     tbl = Table.grid(padding=(0, 2), expand=False)
     tbl.add_column(justify="right", style="bold cyan", no_wrap=True)
     tbl.add_column(overflow="fold")
