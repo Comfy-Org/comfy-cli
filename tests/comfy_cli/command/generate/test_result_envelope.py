@@ -85,9 +85,8 @@ def pinned_renderer():
 def test_success_emits_envelope_in_json_mode(pinned_renderer):
     _, machine, _ = pinned_renderer(OutputMode.JSON)
     generate_app._emit_result(
-                _succeeded(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=None, as_json=True)
+        _succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True
+    )
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     assert envelope["schema"] == "envelope/1"
     assert envelope["type"] == "envelope"
@@ -105,9 +104,8 @@ def test_download_variant_lists_saved_paths_in_data(pinned_renderer, tmp_path):
     gen_output.save_urls = lambda urls, d, rid: [saved]
     try:
         generate_app._emit_result(
-                _succeeded(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=str(tmp_path), as_json=True)
+            _succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=str(tmp_path), as_json=True
+        )
     finally:
         gen_output.save_urls = original
     data = json.loads(machine.getvalue().splitlines()[-1])["data"]
@@ -120,9 +118,8 @@ def test_payload_validates_against_registered_schema(pinned_renderer):
     )
     _, machine, _ = pinned_renderer(OutputMode.JSON)
     generate_app._emit_result(
-                _succeeded(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=None, as_json=True)
+        _succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True
+    )
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     _validator_for("generate_result.json").validate(envelope["data"])
     _validator_for("envelope.json").validate(envelope)
@@ -131,9 +128,8 @@ def test_payload_validates_against_registered_schema(pinned_renderer):
 def test_ndjson_final_line_is_the_envelope(pinned_renderer):
     _, machine, _ = pinned_renderer(OutputMode.NDJSON)
     generate_app._emit_result(
-                _succeeded(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=None, as_json=True)
+        _succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True
+    )
     lines = [json.loads(x) for x in machine.getvalue().splitlines()]
     assert lines[-1]["schema"] == "envelope/1"
     assert all(line.get("type") != "envelope" for line in lines[:-1])
@@ -149,9 +145,8 @@ def test_pretty_mode_tail_json_keeps_legacy_raw_blob(pinned_renderer, capsys):
     # capture via capsys rather than the renderer's stream overrides.
     pinned_renderer(OutputMode.PRETTY)
     generate_app._emit_result(
-                _succeeded(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=None, as_json=True)
+        _succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True
+    )
     doc = json.loads(capsys.readouterr().out)
     assert doc["status"] == "succeeded"
 
@@ -181,9 +176,8 @@ def test_failed_job_is_an_ok_false_envelope_and_exit_1_in_json_mode(pinned_rende
     _, machine, _ = pinned_renderer(OutputMode.JSON)
     with pytest.raises(typer.Exit) as e:
         generate_app._emit_result(
-                _failed(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=None, as_json=True)
+            _failed(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=True
+        )
     assert e.value.exit_code == 1
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     assert envelope["ok"] is False
@@ -196,10 +190,82 @@ def test_output_json_alone_gets_the_envelope_not_colored_text(pinned_renderer, c
     envelope on the machine stream, never ANSI-colored URLs on stdout."""
     _, machine, _ = pinned_renderer(OutputMode.JSON)
     generate_app._emit_result(
-                _succeeded(),
-                track_error=lambda kind, exc: None,
-                request_id="req1", download=None, as_json=False)
+        _succeeded(), track_error=lambda kind, exc: None, request_id="req1", download=None, as_json=False
+    )
     envelope = json.loads(machine.getvalue().splitlines()[-1])
     assert envelope["schema"] == "envelope/1" and envelope["ok"] is True
     assert envelope["data"]["result"] == {"status": "succeeded", "urls": ["https://cdn.example/img.png"]}
     assert "\x1b[" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# Pretty mode must never go silent: an inline-blob answer without --download
+# prints the --download hint, and an empty response still prints main's
+# "No image URLs found" line (a blank screen read as success).
+# --------------------------------------------------------------------------- #
+
+
+def test_pretty_inline_blobs_without_download_print_the_hint(pinned_renderer, capsys):
+    pinned_renderer(OutputMode.PRETTY)
+    result = _succeeded(
+        image_urls=[],
+        blobs=[("image/png", b"\x89PNG\r\n\x1a\nfake")],
+        raw={"status": "succeeded"},
+    )
+
+    generate_app._emit_result(
+        result,
+        track_error=lambda kind, exc: None,
+        request_id="req1",
+        download=None,
+        as_json=False,
+    )
+
+    out = capsys.readouterr().out
+    assert "1 inline image(s) in the response" in out
+    assert "--download" in out
+    assert "No image URLs found" not in out
+
+
+def test_pretty_empty_response_still_prints_the_no_urls_line(pinned_renderer, capsys):
+    pinned_renderer(OutputMode.PRETTY)
+    result = _succeeded(image_urls=[], raw={"status": "succeeded"})
+
+    generate_app._emit_result(
+        result,
+        track_error=lambda kind, exc: None,
+        request_id="req1",
+        download=None,
+        as_json=False,
+    )
+
+    out = capsys.readouterr().out
+    assert "No image URLs found" in out
+
+
+def test_pretty_inline_blobs_with_download_print_saved_not_hint(pinned_renderer, capsys, tmp_path):
+    pinned_renderer(OutputMode.PRETTY)
+    result = _succeeded(
+        image_urls=[],
+        blobs=[("image/png", b"\x89PNG\r\n\x1a\nfake")],
+        raw={"status": "succeeded"},
+    )
+    saved = tmp_path / "out.png"
+    from comfy_cli.command.generate import output as gen_output
+
+    original = gen_output.save_inline_blobs
+    gen_output.save_inline_blobs = lambda blobs, d, rid: [saved]
+    try:
+        generate_app._emit_result(
+            result,
+            track_error=lambda kind, exc: None,
+            request_id="req1",
+            download=str(tmp_path),
+            as_json=False,
+        )
+    finally:
+        gen_output.save_inline_blobs = original
+
+    out = capsys.readouterr().out
+    assert "Saved:" in out
+    assert "inline image(s) in the response" not in out

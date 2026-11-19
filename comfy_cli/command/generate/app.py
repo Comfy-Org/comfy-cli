@@ -434,8 +434,16 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         if result.image_urls:
             output.print_urls(result.image_urls, request_id=request_id)
         output.print_saved(saved)
-    elif download:
-        rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
+        if result.blobs and not download:
+            rprint(
+                f"[bold green]Request:[/bold green] {request_id}\n"
+                f"[yellow]{len(result.blobs)} inline image(s) in the response. "
+                "Pass --download <path> to save them.[/yellow]"
+            )
+    else:
+        output.print_urls(result.image_urls, request_id=request_id)
+        if download:
+            rprint("[yellow]--download requested but no image URLs found in response.[/yellow]")
 
 
 class SpendNotConfirmed(RuntimeError):
@@ -1306,8 +1314,7 @@ def _resume(extra_args: list[str]) -> None:
         # inside the `with` would interleave the envelope with the live spinner.
         _fail(code=_transport_code(poll_error), message=f"Job {job_id} failed while polling: {poll_error}")
         raise typer.Exit(code=1) from poll_error
-    _emit_result(result, request_id=job_id, download=download, as_json=as_json,
-                    track_error=lambda kind, exc: None)
+    _emit_result(result, request_id=job_id, download=download, as_json=as_json, track_error=lambda kind, exc: None)
 
 
 def _print_top_help() -> None:

@@ -349,9 +349,8 @@ def test_pretty_failed_job_reason_with_rich_tags_survives(capsys):
         )
         with pytest.raises(typer.Exit):
             gen_app._emit_result(
-                result,
-                track_error=lambda kind, exc: None,
-                request_id="job-1", download=None, as_json=False)
+                result, track_error=lambda kind, exc: None, request_id="job-1", download=None, as_json=False
+            )
     finally:
         reset_renderer_for_testing()
     assert "[/path]" in capsys.readouterr().out
@@ -417,9 +416,8 @@ def test_pretty_failed_job_reason_strips_ansi(capsys):
         result = gen_app.poll.PollResult(status="failed", raw={"status": "x"}, image_urls=[], error=_ANSI_ATTACK)
         with pytest.raises(typer.Exit):
             gen_app._emit_result(
-                result,
-                track_error=lambda kind, exc: None,
-                request_id="job-1", download=None, as_json=False)
+                result, track_error=lambda kind, exc: None, request_id="job-1", download=None, as_json=False
+            )
     finally:
         reset_renderer_for_testing()
     _assert_ansi_neutralized(capsys.readouterr().out)
