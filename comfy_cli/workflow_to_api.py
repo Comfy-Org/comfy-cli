@@ -2513,7 +2513,7 @@ def _collect_widget_inputs(
     if not isinstance(widget_values, list):
         return {}
 
-    if any(isinstance(v, dict) for v in widget_values):
+    if any(_is_absorbable_dict(v) for v in widget_values):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
@@ -2560,6 +2560,11 @@ def _collect_widget_inputs(
             continue
         out[name] = emit(name, value)
     return out
+
+
+def _is_absorbable_dict(value: Any) -> bool:
+    """True only for the self-naming dict entries ``_absorb_dict_widget_values`` understands."""
+    return isinstance(value, dict) and bool(value) and ("type" in value or "lora" in value)
 
 
 def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], link_inputs: dict[str, list]) -> None:
