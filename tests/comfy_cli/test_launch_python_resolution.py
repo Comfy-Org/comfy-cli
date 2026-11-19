@@ -84,8 +84,16 @@ class TestBackgroundLaunchReexec:
         assert captured["cmd"][0] == str(invoked)
 
     def test_module_invocation_falls_back_to_path(self, tmp_path, monkeypatch):
-        """`python -m comfy_cli` has a .py in argv[0]; PATH resolution stays the fallback."""
-        monkeypatch.setattr(sys, "argv", [str(tmp_path / "comfy_cli" / "__main__.py")])
+        """`python -m comfy_cli` has a .py in argv[0]; PATH resolution stays the fallback.
+
+        The __main__.py must exist so the isfile() branch of
+        _resolve_comfy_exec is actually taken and the `.py` suffix guard is
+        load-bearing: without the guard, an existing __main__.py would be
+        re-exec'd as a bare program instead of falling back to PATH."""
+        main_py = tmp_path / "comfy_cli" / "__main__.py"
+        main_py.parent.mkdir(parents=True)
+        main_py.write_text("")
+        monkeypatch.setattr(sys, "argv", [str(main_py)])
         monkeypatch.setattr(launch.ConfigManager, "background", property(lambda self: None), raising=False)
         monkeypatch.setattr(launch.utils, "is_running", lambda *a, **k: False)
         monkeypatch.setattr(launch, "check_comfy_server_running", lambda port: False)
@@ -114,5 +122,10 @@ class TestResolveComfyExec:
 
     def test_module_and_missing_paths_fall_back_to_path(self, tmp_path, monkeypatch):
         monkeypatch.setattr(launch.shutil, "which", lambda name: "/found/on/path/comfy")
-        assert launch._resolve_comfy_exec(str(tmp_path / "comfy_cli" / "__main__.py")) == "/found/on/path/comfy"
+        # an existing __main__.py exercises the `.py` suffix guard: isfile() is
+        # true, but a module entry point must never be re-exec'd as a program
+        main_py = tmp_path / "comfy_cli" / "__main__.py"
+        main_py.parent.mkdir(parents=True)
+        main_py.write_text("")
+        assert launch._resolve_comfy_exec(str(main_py)) == "/found/on/path/comfy"
         assert launch._resolve_comfy_exec(str(tmp_path / "nope")) == "/found/on/path/comfy"
