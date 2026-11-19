@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import uuid
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,25 @@ def test_define_subgraph_can_assign_an_explicit_new_id():
 
     assert op["subgraph_id"] == SUBGRAPH_ID
     assert op["subgraph_definition"]["id"] == SUBGRAPH_ID
+
+
+def test_define_subgraph_mints_a_uuid_when_neither_id_is_given():
+    """§1.9's third id source -- "a new UUID" -- was the one branch no test
+    reached, and it is the one that calls `uuid.uuid4()`. A merge that drops
+    `import uuid` passes every other test in this file and raises NameError
+    here, which is what happened on 2026-11-19."""
+    definition = _definition()
+    definition.pop("id")
+
+    _, op = workflow_ops.define_subgraph({"nodes": [], "links": []}, definition)
+
+    minted = op["subgraph_id"]
+    assert op["subgraph_definition"]["id"] == minted
+    assert uuid.UUID(minted).version == 4
+    assert workflow_ops._SUBGRAPH_UUID_RE.fullmatch(minted)
+
+    _, second = workflow_ops.define_subgraph({"nodes": [], "links": []}, definition)
+    assert second["subgraph_id"] != minted, "each call mints its own id"
 
 
 @pytest.mark.parametrize(
