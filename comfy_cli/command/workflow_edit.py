@@ -1400,9 +1400,23 @@ def _load_param_sets(raw: str, renderer) -> list[dict]:
 
 
 def _reject_deferred_specs(specs: list) -> None:
-    """Refuse to persist a batch locally when any spec is a deferred op kind."""
+    """Refuse to persist a batch locally when any spec is a deferred op kind.
+
+    Only the kinds that are deferred AND batchable (``define_subgraph``) are
+    stopped here: ``apply_specs`` would dispatch them, so without this check a
+    local ``foreach`` would persist an op whose replay belongs to cmp. A
+    standalone-only deferred kind (``insert_workflow``) is left to fall through
+    so ``apply_specs`` raises :class:`workflow_ops.NotBatchableError` and the
+    caller gets the registered ``workflow_insert_workflow_not_batchable`` code
+    and the standalone command, not a generic ``workflow_edit_invalid``. This
+    mirrors ``apply_cmd``, which already intersects the two sets.
+    """
     deferred = [
-        spec.get("op") for spec in specs if isinstance(spec, dict) and spec.get("op") in workflow_ops.DEFERRED_OPS
+        spec.get("op")
+        for spec in specs
+        if isinstance(spec, dict)
+        and spec.get("op") in workflow_ops.DEFERRED_OPS
+        and spec.get("op") in workflow_ops.BATCHABLE_OPS
     ]
     if deferred:
         raise ValueError(f"local foreach cannot persist deferred operation(s): {', '.join(deferred)}")

@@ -1913,6 +1913,29 @@ class TestForeach:
         assert "deferred operation" in env["error"]["message"]
         assert not list(out.glob("*.json"))
 
+    def test_foreach_gives_insert_workflow_its_registered_not_batchable_code(self, patched_graph, tmp_path, capsys):
+        """`insert_workflow` is deferred AND standalone-only. The deferred guard
+        must not swallow it into the generic `workflow_edit_invalid`: §1.7 of
+        `docs/op-vocabulary-v1.md` promises the registered
+        `workflow_insert_workflow_not_batchable` code and a hint naming the
+        standalone command, which is what `apply` already returns."""
+        rp = tmp_path / "insert.json"
+        rp.write_text(
+            json.dumps({"ops": [{"op": "insert_workflow", "template": str(tmp_path / "t.json")}]}),
+            encoding="utf-8",
+        )
+        params = tmp_path / "sets.json"
+        params.write_text("[{}]", encoding="utf-8")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert "comfy workflow insert-workflow" in env["error"]["hint"]
+        assert "deferred operation" not in env["error"]["message"]
+        assert not list(out.glob("*.json"))
+
     def test_foreach_rejects_deferred_op_kind_that_only_appears_after_substitution(
         self, patched_graph, tmp_path, capsys
     ):
