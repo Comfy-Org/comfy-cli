@@ -1688,3 +1688,49 @@ selector or count, because the rebuild resets the value but not the stamp
 
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 24. Amendment v1.15 — 2026-11-19 (`define_subgraph`: the tenth kind, and what "Batchable" means for a deferred kind)
+
+**Why this section exists.** §9 requires a versioned amendment for any
+post-freeze change, and adding an op kind is the case it names explicitly
+("Adding, removing, or re-scoping an op kind requires updating `FROZEN_OPS` /
+`DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables, and this document in one
+commit"). `tests/comfy_cli/test_op_vocabulary_contract.py` pins the frozen table
+against the code but does not check for the amendment, so nothing automated
+would have caught its absence.
+
+**`define_subgraph` is added** as the tenth frozen kind: §1.9 has the envelope
+and the ownership boundary, the §1 table has its row, and
+`comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]` is its
+standalone command. It is in `FROZEN_OPS`, in `BATCHABLE_OPS`, and in
+`DEFERRED_OPS`. §1.7's "Only `define_subgraph` and `insert_workflow` may carry
+`definitions`" sentence predates this amendment and had no kind to refer to
+until now.
+
+**What `Batchable = yes` does and does not promise for it.** §1's definition of
+Batchable is acceptance by `apply_specs`, and that is what the column states:
+`apply_specs` dispatches `define_subgraph`, so a server-side batch replay
+carries it like any other batchable kind. The two **local** batch commands are a
+separate matter and both refuse it:
+
+| surface | `define_subgraph` in a batch | `insert_workflow` in a batch |
+|---|---|---|
+| `apply_specs` (library) | dispatched | `NotBatchableError` |
+| `comfy workflow apply` | refused, `workflow_edit_invalid`, "local apply cannot persist deferred operation(s)" | `workflow_insert_workflow_not_batchable` (§1.7) |
+| `comfy workflow foreach` | refused, `workflow_edit_invalid`, "local foreach cannot persist deferred operation(s)" | `workflow_insert_workflow_not_batchable` (§1.7) |
+
+The refusal is the `DEFERRED_OPS` boundary, not a batch rule: both local
+commands **persist** their result, and this kind's validation, replay and
+conflict resolution are cmp's (§1.9). A deferred-and-batchable kind is therefore
+the one combination where the Batchable column and the CLI's behaviour differ,
+and the difference is deliberate. Any future kind in both sets inherits it.
+
+**Both local commands now intersect the two sets**, so a deferred kind that is
+*not* batchable keeps its own registered code instead of being swallowed by the
+deferred guard: `insert_workflow` inside a `foreach` recipe returned
+`workflow_edit_invalid` and now returns `workflow_insert_workflow_not_batchable`
+with the hint naming `comfy workflow insert-workflow`, matching `apply` and
+matching what §1.7 promises.
+
+**No other section changes.** §§2-8 and amendments v1.1-v1.14 are untouched, and
+no existing kind is removed or re-scoped.
