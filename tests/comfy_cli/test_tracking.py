@@ -475,7 +475,20 @@ class TestTrackCommandRedaction:
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
         @tracking_module.track_command()
-        def some_cmd(path=None, deps=None, output=None, workflow=None, from_snapshot=None):
+        def some_cmd(
+            path=None,
+            deps=None,
+            output=None,
+            workflow=None,
+            from_snapshot=None,
+            out_dir=None,
+            custom_nodes_dir=None,
+            project_dir=None,
+            input_path=None,
+            lib=None,
+            ops_file=None,
+            recipe_file=None,
+        ):
             return None
 
         some_cmd(
@@ -484,11 +497,31 @@ class TestTrackCommandRedaction:
             output=r"D:\private\out.json",
             workflow=r"/home/me/wf.json",
             from_snapshot=r"/home/me/from.json",
+            out_dir=r"/home/me/private/outs",
+            custom_nodes_dir=r"/home/me/private/custom_nodes",
+            project_dir=r"/home/me/private/proj",
+            input_path=r"/home/me/private/object_info.json",
+            lib=r"/home/me/private/fragments",
+            ops_file=r"/home/me/private/ops.json",
+            recipe_file=r"/home/me/private/recipe.json",
         )
 
         _command_tracked_once(tracking_module.provider)
         _, _, properties = _first_track_call(tracking_module.provider)
-        for name in ("path", "deps", "output", "workflow", "from_snapshot"):
+        for name in (
+            "path",
+            "deps",
+            "output",
+            "workflow",
+            "from_snapshot",
+            "out_dir",
+            "custom_nodes_dir",
+            "project_dir",
+            "input_path",
+            "lib",
+            "ops_file",
+            "recipe_file",
+        ):
             assert properties[name] == "<redacted>"
         assert "private" not in str(properties)
         assert "Users" not in str(properties)
