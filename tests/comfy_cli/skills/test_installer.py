@@ -519,13 +519,35 @@ def test_run_on_cloud_skill_follows_the_check_route():
 
 def test_run_on_cloud_skill_runs_unproven_models_on_clouds_copy_and_names_them():
     """Cloud's library models carry no content hash, so `covered_needs_check` is
-    the usual verdict for stock models: run without asking, and name each
+    the usual verdict for stock models: no model-choice question, and name each
     unproven model in the report. A model proven different blocks instead."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "Run on Cloud's copy without asking" in text
+    assert "Use Cloud's copy; step 6 asks before a paid test run" in text
     assert "ran on Cloud's copy unproven" in text
     assert "`different_file`" in text
     assert "Ask: use Cloud's copy" not in text
+
+
+def test_run_on_cloud_skill_requires_separate_consent_for_one_paid_job():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "The Run on Cloud prompt does not authorize a paid job" in text
+    assert "including validation or preflight jobs" in text
+    assert "Approval for uploads, swaps, builds or deployments is not approval to run a job" in text
+    assert "A yes covers one job" in text
+    assert "Ask again before submitting another paid job" in text
+    assert "running it on Comfy Cloud (each run costs credits)" not in text
+
+
+def test_run_on_cloud_skill_saves_without_running_when_consent_is_declined_or_pending():
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "If they decline or have not answered, skip every job-submitting command in this step" in text
+    assert "including `deploy run --no-upload`" in text
+    assert "continue to step 7 to save the prepared workflow and return its link" in text
+    assert "Save the prepared editor-format file whether or not a test job ran" in text
+    assert '"Your custom build is ready."' in text
+    assert '"Your workflow is ready on Comfy Cloud."' in text
+    assert '"It hasn\'t been run yet."' in text
+    assert '"prepared, not run' not in text
 
 
 def test_run_on_cloud_skill_builds_from_the_whole_install():
