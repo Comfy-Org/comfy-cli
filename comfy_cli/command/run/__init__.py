@@ -1221,20 +1221,22 @@ def _targeted_run_warnings(record: dict, output_node_ids: list[str], run_graph: 
     return warnings
 
 
-def _cloud_ended_record(job_status: dict, history: dict | None) -> dict | None:
-    """Final record for a cloud job its /jobs/<id> status shows has ended, else None.
+def _cloud_ended_record(job_status: dict) -> dict | None:
+    """Final record for a cloud job its /jobs/<id> status shows failed or cancelled, else None.
 
     A job that fails before it executes (a missing input image, say) may never
     get a done history record, so the history poll alone waits it out to the
     silence timeout. Failed and cancelled jobs get a record built from the
     jobs-endpoint body, carrying its error, in the shape the terminal-status
-    code in ``execute_cloud`` reads. A completed job returns its history record
-    once one exists, since that is where the outputs are.
+    code in ``execute_cloud`` reads.
+
+    A completed job deliberately returns None: its outputs are in the history
+    record, and the jobs endpoint can report ``completed`` while the history
+    fetched in the same poll is still a running one, so success is left to the
+    history poll's own done check.
     """
     raw = str(job_status.get("status") or "").lower()
     state = jobs_state.CLOUD_STATUS_ALIASES.get(raw)
-    if state == "completed":
-        return history or None
     if state in ("error", "cancelled"):
         return {
             "status": {"status_str": state},
@@ -1608,7 +1610,10 @@ def execute_cloud(
     try:
         try:
             # The latest /jobs/<id> body, kept so `_ended` can read the status
-            # `_probe` fetched without a second request per poll.
+            # `_probe` fetched without a second request per poll. A probe that
+            # raises (swallowed by the wait loop) leaves the previous body in
+            # place for one poll; that body is a non-terminal status or the same
+            # terminal one, so acting on it is harmless.
             last_job: dict = {}
 
             def _probe():
@@ -1619,8 +1624,8 @@ def execute_cloud(
                 last_job.update(st)
                 return (st.get("status"), st.get("progress"), st.get("queue_position"))
 
-            def _ended(history):
-                return _cloud_ended_record(last_job, history)
+            def _ended(_history):
+                return _cloud_ended_record(last_job)
 
             record = client.wait_for_completion(
                 submit.prompt_id, timeout=float(timeout), progress_probe=_probe, ended_probe=_ended

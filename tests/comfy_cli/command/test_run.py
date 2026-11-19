@@ -2954,12 +2954,13 @@ class TestExecuteCloudWait:
         # The poll budget was actually spent before giving up.
         assert client.get_history.call_count == comfy_client._MAX_POLL_FAILURES
 
-    def _run_wait_on_job_statuses(self, workflow_file, fake_target, statuses):
-        """Run --wait with a real wait loop over a faked /jobs/<id> sequence.
+    def _run_wait_on_job_statuses(self, workflow_file, fake_target, statuses, histories=(None,)):
+        """Run --wait with a real wait loop over faked /jobs/<id> and history sequences.
 
-        History never reports done, which is what cloud does for a job that
-        fails before it executes. The last status repeats for any later poll.
-        Returns (exit code, client).
+        By default history never reports done, which is what cloud does for a
+        job that fails before it executes. The last status and the last history
+        record repeat for any later poll. Returns (exit code, client); a run
+        that returns normally exits 0.
         """
         import itertools
 
@@ -2973,7 +2974,7 @@ class TestExecuteCloudWait:
 
         client = comfy_client.Client(fake_target)
         client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-ended", number=1, node_errors={}))
-        client.get_history = MagicMock(return_value=None)
+        client.get_history = MagicMock(side_effect=itertools.chain(histories, itertools.repeat(histories[-1])))
         client.get_job_status = MagicMock(side_effect=itertools.chain(statuses, itertools.repeat(statuses[-1])))
 
         # Each poll's sleep advances a fake clock, so a wait that misses the
@@ -2991,9 +2992,11 @@ class TestExecuteCloudWait:
             patch("comfy_cli.comfy_client.time.sleep", side_effect=_sleep),
             patch("comfy_cli.comfy_client.time.time", side_effect=lambda: clock[0]),
         ):
-            with pytest.raises(typer.Exit) as excinfo:
+            try:
                 execute_cloud(workflow_file, wait=True, timeout=600)
-        return excinfo.value.exit_code, client
+            except typer.Exit as e:
+                return e.exit_code, client
+        return 0, client
 
     def test_wait_ends_on_failed_job_status_with_its_error(self, api_workflow_file, fake_target, capsys):
         """A job the jobs endpoint reports failed ends the wait at once with
@@ -3032,6 +3035,31 @@ class TestExecuteCloudWait:
         state = jobs_state.read("prompt-ended")
         assert state.status == "error"
         assert state.error["code"] == "execution_error"
+
+    def test_wait_on_completed_job_status_waits_for_the_done_history(self, api_workflow_file, fake_target, capsys):
+        """`/jobs/<id>` can say completed while the history fetched in the same
+        poll is still a running record. The wait must not end on that record:
+        it would report success without the outputs."""
+        from comfy_cli import jobs_state
+
+        running = {"status": {"status_str": "running", "completed": False}, "outputs": {}}
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file,
+            fake_target,
+            [{"id": "prompt-ended", "status": "completed"}],
+            histories=[running, running, self.RECORD],
+        )
+
+        assert exit_code == 0
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is True
+        assert envelope["data"]["outputs_by_node"] == {
+            "9": ["https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output"],
+            "12": ["https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"],
+        }
+        assert client.get_history.call_count == 3
+        assert jobs_state.read("prompt-ended").record == self.RECORD
 
     def test_wait_ends_on_cancelled_job_status(self, api_workflow_file, fake_target, capsys):
         from comfy_cli import jobs_state
