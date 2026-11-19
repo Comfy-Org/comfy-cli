@@ -73,6 +73,10 @@ comfy deploy up
 comfy discover
 comfy download
 comfy env
+comfy extension
+comfy extension disable
+comfy extension enable
+comfy extension list
 comfy feedback
 comfy free
 comfy generate
