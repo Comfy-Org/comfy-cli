@@ -1784,6 +1784,31 @@ class TestExecutePartnerNodePreflight:
             extra = kwargs.get("extra_data") or {}
             assert extra.get("api_key_comfy_org") == "test-key-abc"
 
+    @pytest.mark.parametrize(
+        ("host", "partner_node_token"),
+        [("127.0.0.1", True), ("localhost", True), ("[::1]", True), ("10.0.0.5", False), ("gpu-box.lan", False)],
+    )
+    def test_only_a_loopback_comfyui_gets_a_partner_node_token(self, tmp_path, host, partner_node_token):
+        wf_file = self._wf_file(tmp_path)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch(
+                "comfy_cli.command.run._resolve_partner_credential",
+                return_value=("auth_token_comfy_org", "partner-node-token"),
+            ) as MockCred,
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host=host, port=8188, wait=True, timeout=30, allow_spend=True)
+
+        MockCred.assert_called_once_with(partner_node_token=partner_node_token)
+        assert MockExec.call_args.kwargs["extra_data"] == {"auth_token_comfy_org": "partner-node-token"}
+
     def test_non_partner_workflow_skips_preflight(self, workflow_file, monkeypatch):
         """The preflight must not gate ordinary workflows. ``_fetch_object_info``
         is allowed to be skipped when no partner nodes are present (or
