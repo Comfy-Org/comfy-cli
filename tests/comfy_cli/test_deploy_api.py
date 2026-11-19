@@ -149,7 +149,7 @@ def test_base_url_resolution_prefers_explicit_then_environment_then_default(monk
 def test_from_session_refreshes_and_uses_the_resolved_url(monkeypatch):
     # Given
     seen: list[bool] = []
-    session = type("Session", (), {"access_token": "fresh-jwt"})()
+    session = type("Session", (), {"access_token": "fresh-jwt", "base_url": "https://cloud.comfy.org"})()
     monkeypatch.setattr(
         "comfy_cli.deploy_api.credentials.get_session", lambda *, refresh: seen.append(refresh) or session
     )

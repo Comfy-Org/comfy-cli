@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import os
@@ -9,6 +10,7 @@ import socket
 import stat
 import sys
 import threading
+import urllib.error
 from pathlib import Path
 
 import jsonschema
@@ -405,6 +407,44 @@ def test_sandbox_status_treats_non_object_health_as_unavailable(monkeypatch):
     assert command._sandbox_status(8190) is None
     monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"sandbox": {"mode": "seatbelt"}}'))
     assert command._sandbox_status(8190) == {"sandbox": {"mode": "seatbelt"}}
+
+
+def test_sandbox_status_rejects_another_service_on_a_reused_port(monkeypatch):
+    """`{"status": "ok"}` from an unrelated service is not this agent.
+
+    It is the dangerous direction of the stale-port problem: reading it as a
+    live agent makes `allow`/`deny` refuse, which leaves the user no way to
+    edit the permission files at all.
+    """
+    from comfy_cli.agent import command
+
+    for body in (b'{"status": "ok"}', b'{"status": "healthy", "uptime": 12}', b"{}"):
+        monkeypatch.setattr(command, "_open_health", lambda url, b=body: _Resp(b))
+        assert command._sandbox_status(8190) is None, body
+
+    # One agent-only key is enough, even with no sandbox reported yet.
+    monkeypatch.setattr(
+        command,
+        "_open_health",
+        lambda url: _Resp(b'{"status": "ok", "cli": {"source": "pinned", "workspace": "/opt/ComfyUI"}}'),
+    )
+    assert command._sandbox_status(8190) == {"sandbox": None, "comfy_path": "/opt/ComfyUI"}
+
+
+def test_allow_writes_when_another_service_holds_the_agents_old_port(tmp_path: Path, monkeypatch):
+    """The reused-port case end to end: the write must not be refused."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(b'{"status": "ok"}'))
+
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    assert read_state(root).paths[0]["path"] == str(folder)
 
 
 def test_sandbox_status_normalizes_malformed_nested_health(monkeypatch):
@@ -855,3 +895,239 @@ def test_permissions_grant_names_the_cli_as_it_was_invoked(home: Path, monkeypat
     res = CliRunner().invoke(app, ["permissions"])
     assert res.exit_code == 0, res.stdout
     assert _envelope(res)["data"]["grant"]["deny"] == f"{want} agent deny <id>"
+
+
+def _live(monkeypatch, sandbox: dict | None = None) -> None:
+    """Make ``/health`` answer, so the CLI sees a live agent, not a stale file."""
+    from comfy_cli.agent import command
+
+    body = json.dumps({"sandbox": sandbox or {"mode": "seatbelt"}}).encode()
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(body))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["allow", "--approve", "0123456789abcdef"],
+        ["allow", "--path", "<folder>", "--reason", "reference photos"],
+        ["allow", "--host", "models.example.com", "--reason", "a VAE"],
+        ["deny", "0123456789abcdef"],
+    ],
+)
+def test_cli_refuses_to_write_while_an_agent_is_answering(tmp_path: Path, monkeypatch, argv: list[str]):
+    """A running agent is the only writer: the CLI refuses instead of losing the edit."""
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    before = (root / "permissions.json").read_text()
+    _live(monkeypatch)
+
+    argv = [str(folder) if a == "<folder>" else a for a in argv]
+    res = CliRunner().invoke(app, [*argv, "--data-dir", str(root)])
+    assert res.exit_code == 1, res.stdout
+    err = _envelope(res)["error"]
+    assert err["code"] == "agent_running"
+    assert "8190" in err["message"]
+    assert "agent panel" in err["hint"]
+    assert (root / "permissions.json").read_text() == before, "a refused write must leave the file alone"
+    assert not (root / "egress-allow.json").exists()
+
+
+def test_cli_writes_when_the_discovery_file_is_stale(tmp_path: Path, monkeypatch):
+    """A crashed agent leaves agent.json behind; that must not lock the user out."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    # Patch the probe, not `_sandbox_status`: the write guard calls the probe,
+    # so patching the wrapper would let this test reach the real loopback port.
+    monkeypatch.setattr(command, "_probe_agent", lambda port: (command._AGENT_GONE, None))
+
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["approved"]["target"] == str(folder)
+    assert "next start" in data["note"] and "20 second" not in data["note"]
+    _validate(data)
+    assert read_state(root).paths[0]["path"] == str(folder)
+
+
+def test_permissions_offers_no_cli_grant_while_an_agent_is_answering(tmp_path: Path, monkeypatch):
+    root = tmp_path / "data"
+    req = _req("0123456789abcdef", "host", "models.example.com", "a VAE")
+    _write_pending(root, req)
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    _live(monkeypatch)
+    runner = CliRunner()
+
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["agent"]["running"] is True
+    assert data["grant"] == {}, "no command here would take effect, so none is offered"
+    assert "agent panel" in data["answer_in"]
+    assert data["pending"] == [req]
+    _validate(data)
+
+    _pin_renderer(OutputMode.PRETTY)
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.output
+    assert res.exception is None
+    assert "agent panel" in res.output
+    assert "--approve" not in res.output, "the pretty output must not hand over a command that is refused"
+
+
+def _raises(exc):
+    """An `_open_health` stand-in that fails the way a real probe would."""
+
+    def _open(url):
+        raise exc
+
+    return _open
+
+
+def _refused_connection(url):
+    """What `_open_health` raises when nothing is listening on the port."""
+    raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+
+
+# Every JSON field name the standalone agent's /health can send, transcribed
+# from the `healthPayload` struct tags in the cloud repository at
+# services/agent/local/internal/server/server.go, pinned at commit
+# 6c54e20662aac9a9fc140aa15a5ae1adeecaf67f (the file's current head on cloud
+# `main`). Nothing in this repository can reach that server, so the list is
+# pinned here instead: if the agent renames or drops a field, this test fails
+# and names the rename, rather than `_probe_agent` silently reading a live
+# agent as gone and letting a permission write through.
+_CLOUD_HEALTH_FIELDS = (
+    "status",
+    "sandbox",
+    "skills",
+    "crdt",
+    "doc_host",
+    "prompt",
+    "cli",
+    "assets",
+    "assets_hint",
+    "memory",
+    "node_trees",
+)
+
+
+def test_health_markers_are_fields_the_agent_actually_sends():
+    """Each marker must be a real `healthPayload` field, and `status` must not be."""
+    from comfy_cli.agent import command
+
+    unknown = sorted(set(command._AGENT_HEALTH_KEYS) - set(_CLOUD_HEALTH_FIELDS))
+    assert not unknown, f"not fields the agent sends: {unknown}"
+    assert "status" not in command._AGENT_HEALTH_KEYS, "every health endpoint has a status"
+    # `assets_hint` only ever rides alongside `assets`, so it adds no reach.
+    missing = sorted(set(_CLOUD_HEALTH_FIELDS) - set(command._AGENT_HEALTH_KEYS) - {"status", "assets_hint"})
+    assert not missing, f"fields the agent sends that no marker covers: {missing}"
+
+
+@pytest.mark.parametrize("body", [b"ok", b"ok\n", b'"ok"'])
+def test_probe_reads_a_bare_ok_as_unconfirmed_not_gone(monkeypatch, body: bytes):
+    """A bare `ok` refuses the write without claiming an agent is answering.
+
+    Cloud's handler does end in `c.String(http.StatusOK, "ok")` while every
+    reporter is nil, so the body is two bytes of text/plain and not JSON. But
+    no agent can serve it *here*: `app.go` fills eight reporters (lines
+    233-255 on cloud main) before `net.Listen` (257) and before
+    `WriteDiscoveryWith` records the port (263), so nothing can connect to that
+    port, or even learn it, until the JSON payload is what the handler returns.
+    A bare `ok` on the port `agent.json` names is therefore some other program.
+
+    Both of the certainties are wrong for it. `live` is the one the earlier
+    round shipped, and it tells a user with no agent to stop to go answer the
+    request in the agent panel. `gone` is the silent-loss hole: parsing this
+    body as JSON before looking at it raised ValueError and fell through to
+    "gone", so `allow`/`deny` wrote files a running agent would overwrite with
+    nothing to show the approval was lost. `unconfirmed` refuses the write and
+    offers the stale-`agent.json` way out, which is the only one of the three
+    that is true. The JSON-quoted form is covered so a later `c.JSON` does not
+    reopen it.
+    """
+    from comfy_cli.agent import command
+
+    monkeypatch.setattr(command, "_open_health", lambda url: _Resp(body))
+    assert command._probe_agent(8190) == (command._AGENT_UNCONFIRMED, None)
+    # Still nothing to display, which is what `_sandbox_status` reports.
+    assert command._sandbox_status(8190) is None
+
+
+@pytest.mark.parametrize(
+    ("raiser", "want"),
+    [
+        (_refused_connection, "gone"),
+        (_raises(ConnectionRefusedError(111, "Connection refused")), "gone"),
+        (_raises(http.client.BadStatusLine("SSH-2.0-OpenSSH")), "gone"),
+        (_raises(http.client.RemoteDisconnected("closed without a response")), "unconfirmed"),
+        (_raises(http.client.IncompleteRead(b"")), "unconfirmed"),
+        (_raises(TimeoutError("timed out")), "unconfirmed"),
+        (_raises(urllib.error.URLError(TimeoutError("timed out"))), "unconfirmed"),
+        (
+            _raises(urllib.error.HTTPError("http://127.0.0.1:8190/health", 503, "busy", {}, None)),
+            "unconfirmed",
+        ),
+    ],
+)
+def test_probe_separates_a_proven_absence_from_an_unsettled_one(monkeypatch, raiser, want):
+    """Only what the probe proves is not the agent may permit a write."""
+    from comfy_cli.agent import command
+
+    monkeypatch.setattr(command, "_open_health", raiser)
+    assert command._probe_agent(8190) == (want, None)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _raises(TimeoutError("timed out")),
+        lambda url: _Resp(b"not json at all"),
+        lambda url: _Resp(b"[1, 2]"),
+    ],
+)
+def test_cli_refuses_to_write_when_it_cannot_confirm_the_agent_is_gone(tmp_path: Path, monkeypatch, answer):
+    """An unsettled probe must not write: the loss is silent, the refusal is not."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    before = (root / "permissions.json").read_text()
+    monkeypatch.setattr(command, "_open_health", answer)
+
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 1, res.stdout
+    err = _envelope(res)["error"]
+    assert err["code"] == "agent_unconfirmed"
+    assert "8190" in err["message"]
+    assert "agent.json" in err["hint"], "the hint must name the recovery when no agent is in fact running"
+    assert (root / "permissions.json").read_text() == before, "a refused write must leave the file alone"
+
+
+def test_permissions_offers_no_cli_grant_it_would_then_refuse(tmp_path: Path, monkeypatch):
+    """`permissions` and `allow` must agree: no handing over a refused command."""
+    from comfy_cli.agent import command
+
+    root = tmp_path / "data"
+    req = _req("0123456789abcdef", "host", "models.example.com", "a VAE")
+    _write_pending(root, req)
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    monkeypatch.setattr(command, "_open_health", _raises(TimeoutError("timed out")))
+
+    res = CliRunner().invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["agent"]["running"] is False, "an unsettled probe is not a confirmed agent"
+    assert data["grant"] == {}, "`allow` would refuse, so no command is offered"
+    assert "agent panel" in data["answer_in"]
+    _validate(data)

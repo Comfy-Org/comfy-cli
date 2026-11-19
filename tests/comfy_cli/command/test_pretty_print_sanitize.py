@@ -708,7 +708,8 @@ def test_status_glyph_keeps_its_own_tags_live(pretty):
 
     from comfy_cli.output.glyphs import status_glyph
 
-    console = Console(file=pretty, force_terminal=True, width=80)
+    # This tests authored styling, independently of the caller's terminal type.
+    console = Console(file=pretty, force_terminal=True, width=80, _environ={"TERM": "xterm-256color"})
     console.print(status_glyph("success"))
     out = pretty.getvalue()
 
@@ -806,3 +807,62 @@ def test_cloud_workflow_list_numeric_fields_do_not_crash(pretty):
         workflow.list_cmd(name=None, limit=20, sort="create_time", order="desc", where=None)
     out = assert_inert(pretty)
     assert "12345678…" in out, f"numeric id was not truncated as text: {out!r}"
+
+
+# ---------------------------------------------------------------------------
+# execution.py — the failing node's inputs never leave the process
+# ---------------------------------------------------------------------------
+
+
+def test_execution_error_inputs_are_redacted_in_the_pretty_dump(pretty):
+    """``current_inputs`` is the failing node's widget values; an API node's
+    key rides in it. The dump keeps the rest of the server payload."""
+    ex = _execution()
+    with pytest.raises(typer.Exit):
+        ex.on_error({"node_id": "1", "exception_message": "boom", "current_inputs": {"api_key": ["sk-redact-me"]}})
+    out = assert_inert(pretty)
+    assert "boom" in out
+    assert "sk-redact-me" not in out
+
+
+@pytest.mark.parametrize("mode", [OutputMode.JSON, OutputMode.NDJSON])
+def test_execution_error_inputs_are_redacted_in_machine_output(capsys, mode):
+    """Machine output is what agents and CI read: the ``execution_error`` event
+    and the error envelope keep the traceback but drop ``current_inputs``."""
+    set_renderer(Renderer(mode=mode))
+    ex = _execution()
+    with pytest.raises(typer.Exit):
+        ex.on_error(
+            {
+                "node_id": "1",
+                "exception_message": "boom",
+                "traceback": ["frame0"],
+                "current_inputs": {"api_key": ["sk-redact-me"]},
+            }
+        )
+    out = capsys.readouterr().out
+    assert "sk-redact-me" not in out
+    assert "frame0" in out
+
+
+def test_cloud_status_and_watch_print_the_targets_warning(pretty):
+    """Pretty `jobs status` and `jobs watch --where cloud` show the
+    --output-node-ids verdict, as `comfy run --wait` does; the async run's
+    note sends people to exactly these commands."""
+    from comfy_cli.command import jobs
+
+    snap = _cloud_snap(status="completed")
+    snap["warnings"] = [{"code": "partial_execution_targets_ignored", "message": "node(s) 12 ran [/] too"}]
+    client = MagicMock()
+    client.target.base_url = "https://cloud.example"
+    with (
+        patch.object(jobs, "cloud_preflight_or_exit"),
+        patch.object(jobs, "_cloud_client", return_value=client),
+        patch.object(jobs, "_cloud_status_snapshot", side_effect=lambda _pid: dict(snap)),
+    ):
+        jobs._cloud_status("p" * 12)
+        assert "node(s) 12 ran [/] too" in assert_inert(pretty)
+        pretty.seek(0)
+        pretty.truncate()
+        jobs._cloud_watch("p" * 12, poll_interval=0.0, max_wait=1.0)
+        assert "node(s) 12 ran [/] too" in assert_inert(pretty)

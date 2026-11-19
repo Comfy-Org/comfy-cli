@@ -49,6 +49,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build", "comfy-build"),
     ("comfy-deploy", "comfy-deploy"),
     ("comfy-custom-nodes", "comfy-custom-nodes"),
+    ("comfy-run-on-cloud", "comfy-run-on-cloud"),
 )
 
 
@@ -72,6 +73,16 @@ REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build-failures", "comfy-build-failures"),
     ("comfy-deploy-failures", "comfy-deploy-failures"),
     ("comfy-agent-permissions", "comfy-agent-permissions"),
+    ("comfy-custom-nodes-invocation", "comfy-custom-nodes-invocation"),
+    ("comfy-custom-nodes-search", "comfy-custom-nodes-search"),
+    ("comfy-custom-nodes-api-schema", "comfy-custom-nodes-api-schema"),
+    ("comfy-custom-nodes-validation", "comfy-custom-nodes-validation"),
+    ("comfy-custom-nodes-dependencies", "comfy-custom-nodes-dependencies"),
+    ("comfy-custom-nodes-troubleshooting", "comfy-custom-nodes-troubleshooting"),
+    ("comfy-custom-nodes-packaging", "comfy-custom-nodes-packaging"),
+    ("comfy-custom-nodes-frontend", "comfy-custom-nodes-frontend"),
+    ("comfy-custom-nodes-migration", "comfy-custom-nodes-migration"),
+    ("comfy-custom-nodes-caching", "comfy-custom-nodes-caching"),
 )
 
 

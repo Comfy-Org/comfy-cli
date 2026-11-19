@@ -334,6 +334,7 @@ def _render_serving(renderer: Renderer, serving: JsonObject | None, status: str)
     idle = status == "ready" and queue == 0 and not unhealthy and all(value == 0 for value in capacity.values())
     suffix = ": healthy idle (scale-to-zero)" if idle else ""
     renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
+    renderer.info("Counts are a sampled snapshot and may lag after workers scale down.")
 
 
 def _render_error(renderer: Renderer, deployment: JsonObject) -> None:

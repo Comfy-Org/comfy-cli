@@ -212,7 +212,7 @@ def test_defs_by_id_containment_walk_terminates_on_a_cycle():
 
 
 def test_a_class_named_like_a_definition_elsewhere_keeps_the_fallback_off():
-    """Christian's case, pinned as the intended rule: a definition named
+    """Pinned as the intended rule: a definition named
     ``Resize`` that holds a ``Resize`` class node proves ``Resize`` is a node
     class in this workflow, so a bare ``Resize`` type elsewhere is ambiguous
     (class or old-style instance). The index refuses ambiguous names (as it

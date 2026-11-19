@@ -186,4 +186,6 @@ def test_non_definition_op_rejects_definitions_field():
     with pytest.raises(ValueError, match="malformed_op.*definitions"):
         workflow_ops.apply_op(live, op, None)
 
-    assert live == {"nodes": [], "links": [], "_applied_ops": []}
+    # Amendment v1.11 (op-vocabulary-v1.md §20.2): a document that arrived
+    # without a ledger is never left carrying an empty one by a rejected op.
+    assert live == {"nodes": [], "links": []}

@@ -25,13 +25,24 @@ State-file contract (the same shape across local and cloud):
       "watcher_pid": <int> | null,
       "watcher_pid_create_time": <float epoch seconds> | null,
       "record": {<full final cloud history record>} | null,
-      "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null
+      "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null,
+      "output_node_ids": ["9", ...] | null,
+      "run_graph_node_ids": ["9", "4", ...] | null,
+      "output_node_ids_checked": true | false,
+      "client_id_borrowed": true | false
     }
 
 ``record`` is the node-keyed history record stashed when a cloud job reaches
 a terminal state; ``item_map`` maps blueprint foreach items to the node ids
 they produced (written at submit by ``comfy run``). Both are null for older
 files and local runs — readers must tolerate their absence.
+
+``output_node_ids`` / ``run_graph_node_ids`` are written at submit by a cloud
+``comfy run --output-node-ids``: the targets, and the node ids of the subgraph
+they run. ``output_node_ids_checked`` says whether the targets' classes were
+checked against the node catalog. ``comfy jobs status`` / ``jobs watch`` read
+them to judge a finished targeted job the way ``comfy run --wait`` does. Null
+(and false) for untargeted runs and older files.
 
 Terminal states (``completed``, ``error``, ``cancelled``) mean the file
 won't change further; agents can stop polling.
@@ -55,6 +66,17 @@ from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.utils import get_os
 
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
+
+# The ``extra_data`` key ``comfy run --client-id`` stamps on a submitted prompt
+# to say its client_id was BORROWED from a live client rather than minted for
+# the run. It rides the prompt because the state file below is not a shared
+# channel: the submitter and a later watcher are routinely different processes
+# under different config roots (the in-app agent runs the CLI under a sandboxed
+# HOME it deletes at turn end), and re-attaching to a borrowed id silently
+# strands the client it was borrowed from. ComfyUI preserves unknown extra_data
+# keys and serves the slot back from /queue and /history, so every watcher can
+# read it.
+BORROWED_CLIENT_ID_KEY = "comfy_client_id_borrowed"
 
 # Cloud's /api/jobs status enum (ingest ``toFilterStatus``: pending,
 # in_progress, completed, failed, cancelled) -> the CLI's published jobs
@@ -142,6 +164,17 @@ class JobState:
     # foreach item -> {"nodes": [...], "save_node": ..., "prefix": ...} map,
     # written at submit time by `comfy run` for composed workflows.
     item_map: dict[str, Any] | None = None
+    # `comfy run --output-node-ids` targets, the node ids of the subgraph they
+    # run, and whether the targets' classes were checked against the catalog.
+    # Written at submit for cloud runs so a later `jobs status`/`jobs watch`
+    # can judge the finished job the same way `comfy run --wait` does.
+    output_node_ids: list[str] | None = None
+    run_graph_node_ids: list[str] | None = None
+    output_node_ids_checked: bool = False
+    # True when `client_id` was borrowed from a live client via
+    # `comfy run --client-id` rather than minted for this run. Re-attaching to a
+    # borrowed id would evict that client's socket, so watchers must not.
+    client_id_borrowed: bool = False
 
     @property
     def is_terminal(self) -> bool:
@@ -287,6 +320,7 @@ def new(
     host: str | None = None,
     port: int | None = None,
     base_url: str | None = None,
+    client_id_borrowed: bool = False,
 ) -> JobState:
     """Build a fresh JobState in ``queued`` status. Call ``write()`` to persist."""
     now = _now_iso()
@@ -301,4 +335,5 @@ def new(
         submitted_at=now,
         updated_at=now,
         status="queued",
+        client_id_borrowed=client_id_borrowed,
     )

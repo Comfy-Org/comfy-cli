@@ -1,10 +1,10 @@
 """Bounds on the agent-facing payloads that carried whole option lists.
 
-Production (Langfuse, comfy-cloud-prod): one `validate` of a graph with eleven
-unknown model filenames over a 377-file folder returned ~340K tokens, because
-every `unknown_enum_value` error carried the folder's full listing twice
-(`suggestions` and `valid_options`); `nodes show LoraLoader` was ~31KB of LoRA
-filenames on every call. These tests pin the bound and the way back to the
+A `validate` of a graph with several unknown model filenames over a large
+model folder used to return an enormous payload, because every
+`unknown_enum_value` error carried the folder's full listing twice
+(`suggestions` and `valid_options`); `nodes show LoraLoader` likewise listed
+every LoRA filename on every call. These tests pin the bound and the way back to the
 full list.
 """
 

@@ -41,10 +41,10 @@ class _Server:
 def _install(monkeypatch, server: _Server, key: Credential | None, sign_in: str | None = "signed-in-token") -> list:
     refreshes: list = []
 
-    def sessions(*, refresh=True, force=False, allow_clear=True):
+    def sessions(*, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
         if force:
             refreshes.append(force)
-        return SimpleNamespace(access_token=sign_in) if sign_in else None
+        return SimpleNamespace(access_token=sign_in, base_url="https://cloud.comfy.org") if sign_in else None
 
     monkeypatch.setattr("comfy_cli.credentials.platform_api_key", lambda: key)
     monkeypatch.setattr("comfy_cli.credentials.get_session", sessions)
@@ -187,8 +187,10 @@ def test_a_refreshed_sign_in_the_builder_still_refuses_names_the_login(monkeypat
     server = _Server(status=401)
     refreshed = iter(["refreshed-token"])
 
-    def sessions(*, refresh=True, force=False, allow_clear=True):
-        return SimpleNamespace(access_token=next(refreshed) if force else "signed-in-token")
+    def sessions(*, refresh=True, force=False, allow_clear=True, rejected_access_token=None):
+        return SimpleNamespace(
+            access_token=next(refreshed) if force else "signed-in-token", base_url="https://cloud.comfy.org"
+        )
 
     monkeypatch.setattr("comfy_cli.credentials.get_session", sessions)
     monkeypatch.setattr("comfy_cli.builder_api.request_json", server)

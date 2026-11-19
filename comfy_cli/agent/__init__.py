@@ -12,12 +12,17 @@ lets it reach beyond the defaults lives in two files in its data dir:
 The agent's ``request_path`` / ``request_host`` tools only append to
 ``pending``: the model can ask, and injected content in a workflow can make it
 ask, but nothing it can call moves a target into an approved list. A human
-does that through a channel the model cannot reach — this module from a
-terminal (``comfy agent allow --approve <id>`` / ``comfy agent deny <id>``), or
-a panel button — after vetting the exact target the request names. The same
-module also grants a folder or host outright (``comfy agent allow --path`` /
-``--host``). A running agent re-reads both files every ~20 s; otherwise they
-apply at its next start. The data dir is ``AGENT_DATA_DIR`` when set, else
+does that through a channel the model cannot reach — the agent panel or the
+in-chat card while an agent is running, or this module from a terminal
+(``comfy agent allow --approve <id>`` / ``comfy agent deny <id>``) while none
+is — after vetting the exact target the request names. The same module also
+grants a folder or host outright (``comfy agent allow --path`` / ``--host``).
+
+**A running agent is the only writer of these files.** It loads them at start
+and saves its whole state on every change, so an edit written here while it
+runs is never read and is overwritten by its next save; the commands in this
+module refuse while an agent answers on its port, and otherwise apply at the
+agent's next start. The data dir is ``AGENT_DATA_DIR`` when set, else
 ``~/.comfy-agent`` — the same rule the agent and its launcher use.
 
 The checks here are a courtesy, not the fence: the agent's sandbox deny list

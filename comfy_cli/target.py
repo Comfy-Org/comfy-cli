@@ -89,8 +89,9 @@ def resolve_target(
         from comfy_cli.cloud import get_base_url
         from comfy_cli.credentials import resolve_cloud_credential
 
-        # OAuth-first: a live session is preferred over API keys (which are on
-        # a deprecation path). Precedence: OAuth session > env var > stored key.
+        # Precedence: a credential handed in by env (COMFY_CLOUD_AUTH_TOKEN,
+        # then COMFY_CLOUD_API_KEY) > OAuth session > stored key. With an env
+        # credential set the session is not read or refreshed at all.
         # ``base_url=`` arms the replay-guard: a session minted for a different
         # base_url (or expired) is ignored so credentials are never replayed to
         # a host the user didn't authenticate against; the API-key fallback or
@@ -119,6 +120,30 @@ def resolve_target(
     # env > 127.0.0.1:8188. host/port may be None here; callers that also honor
     # a persisted background server (run/jobs, and validate/nodes)
     # resolve that upstream via host_port.resolve_host_port before reaching us.
+    return local_target(host, port)
+
+
+def local_target(host: str | None = None, port: int | None = None) -> Target:
+    """A ``local`` Target for ``host``/``port``, skipping ``where`` resolution.
+
+    :func:`resolve_target` returns this for its local branch, so the two cannot
+    drift. Call it *directly* from a caller that is local by construction — a
+    filesystem question about the ComfyUI running on this machine — rather than
+    passing ``where=None`` and hoping auto-detection agrees. Routing such a
+    caller through :func:`resolve_target` has two failure modes that have nothing
+    to do with it: a stored Cloud session, ``COMFY_WHERE=cloud`` or a persisted
+    ``where_default`` sends it to the cloud branch, where the local server is
+    never asked; and that branch calls ``resolve_cloud_credential(refresh=True,
+    allow_clear=True)``, so a purely local lookup can spend a network round trip
+    refreshing a token — or, on a fatal refresh error, clear the stored session
+    — for a Target it then throws away.
+
+    ``host`` may arrive already bracketed — ``host_port.resolve_host_port``
+    brackets its return value — and ``_bracket_host`` is idempotent, so the URL
+    is well-formed either way. :attr:`Target.host` is documented as the raw
+    literal, so a caller holding a bracketed host should unbracket before
+    passing it if anything downstream reads that field.
+    """
     from comfy_cli.env_checker import _bracket_host
     from comfy_cli.local_address import resolve_local_host_port
 

@@ -112,6 +112,18 @@ class TestTemplateIds:
         )
         assert ops[0]["to_node"].endswith(":root:node:9")
 
+    def test_disconnect_resolves_bare_template_id(self, graph):
+        wf, connected = workflow_ops.connect(_canvas(), graph, 16, "IMAGE", 9, "images")
+
+        # A later local write advances the Lamport counter; equal counters are
+        # concurrent and intentionally use op_id as the deterministic tie-break.
+        wf, disconnected = workflow_ops.disconnect(wf, graph, 9, "images", base_version=1)
+
+        assert disconnected["to_node"].endswith(":root:node:9")
+        assert disconnected["link_id"] == connected["link_id"]
+        assert wf["links"] == []
+        assert wf["nodes"][1]["inputs"][0]["link"] is None
+
     def test_set_node_field_and_delete_node(self, graph):
         wf, op = workflow_ops.set_node_field(_canvas(), 16, "title", "Reference")
         assert op["node_id"].endswith(":root:node:16")
@@ -275,6 +287,28 @@ def test_a_reconnect_and_a_concurrent_grow_share_one_register(graph):
         assert [i["name"] for i in node["inputs"] if str(i.get("name", "")).startswith("speech")] == ["speech.audio"]
         results.append(workflow_ops.canonical(wf))
     assert results[0] == results[1] == results[2]
+
+
+def test_dynamic_link_disconnect_uses_the_same_name_register(graph):
+    base, audio, talk = _talking(graph, "audio")
+    wired, connect = workflow_ops.connect(
+        copy.deepcopy(base), graph, audio, "AUDIO", talk, "speech.audio", actor="agent", base_version=5
+    )
+    _, disconnect = workflow_ops.disconnect(
+        copy.deepcopy(wired), graph, talk, "speech.audio", actor="human", base_version=9
+    )
+
+    assert connect["grow"]["promoted"] is True
+    assert disconnect["grow"] == connect["grow"]
+    assert workflow_ops._write_target(connect) == workflow_ops._write_target(disconnect)
+
+    results = []
+    for order in ((connect, disconnect), (disconnect, connect)):
+        result = copy.deepcopy(base)
+        for op in order:
+            workflow_ops.apply_op(result, copy.deepcopy(op), graph)
+        results.append(workflow_ops.canonical(result))
+    assert results[0] == results[1]
 
 
 class TestStringWidgetValues:

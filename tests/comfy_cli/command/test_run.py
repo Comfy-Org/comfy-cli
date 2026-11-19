@@ -74,6 +74,25 @@ def mock_execution(workflow):
     )
 
 
+class _FakeClock:
+    """Independent wall/monotonic clocks for ``watch_execution``'s silence budget."""
+
+    START = 1000.0
+
+    def __init__(self):
+        self.wall = self.mono = self.START
+
+    def advance(self, seconds):
+        self.wall += seconds
+        self.mono += seconds
+
+    def patched(self):
+        fake_time = MagicMock()
+        fake_time.time.side_effect = lambda: self.wall
+        fake_time.monotonic.side_effect = lambda: self.mono
+        return patch("comfy_cli.command.run.execution.time", fake_time)
+
+
 def _make_msg(msg_type, prompt_id, **data_fields):
     return json.dumps({"type": msg_type, "data": {"prompt_id": prompt_id, **data_fields}})
 
@@ -316,6 +335,104 @@ class TestWatchExecution:
         mock_execution.watch_execution()
         assert len(mock_execution.remaining_nodes) == 0
 
+    def test_wall_clock_backstop_aborts_after_sleep(self, mock_execution):
+        """A dead connection whose socket timeout under-counted a system sleep
+        must still abort: once the WALL clock is past the silence budget, a
+        recv timeout re-raises instead of hanging."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            # A ~999s sleep: the wall clock jumps, the monotonic one does not.
+            clock.wall += 999
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert mock_ws.recv.call_count == 1
+
+    def test_recv_timeout_within_budget_keeps_waiting(self, mock_execution):
+        """A poll-interval timeout BEFORE the wall-clock budget elapses must not
+        abort — the loop keeps waiting for the server."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+        replies = iter(
+            [
+                WebSocketTimeoutException("poll tick"),  # 5s in — under the 30s budget
+                _make_msg("executing", "p", node=None),  # then the server finishes
+            ]
+        )
+
+        def recv():
+            clock.advance(5)
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched():
+            mock_execution.watch_execution()  # returns normally, no raise
+
+    def test_recv_poll_interval_is_capped(self, mock_execution):
+        """The per-recv socket timeout is capped so the loop regains control
+        regularly even when --timeout is large."""
+        mock_execution.timeout = 3600
+        mock_execution.prompt_id = "p"
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [_make_msg("executing", "p", node=None)]
+        mock_execution.ws = mock_ws
+
+        mock_execution.watch_execution()
+        mock_ws.settimeout.assert_called_once_with(30)
+
+    def test_abort_lands_on_requested_deadline(self, mock_execution):
+        """A budget that is not a multiple of the poll interval must abort at
+        the requested deadline, not round up to the next poll boundary."""
+        mock_execution.timeout = 45
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            # A silent server: each recv blocks for its full socket timeout.
+            clock.advance(mock_ws.settimeout.call_args.args[0])
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert [c.args[0] for c in mock_ws.settimeout.call_args_list] == [30, 15]
+        assert clock.mono == pytest.approx(_FakeClock.START + 45)
+
+    def test_backward_wall_clock_step_cannot_extend_wait(self, mock_execution):
+        """A wall clock stepped BACKWARD (an NTP correction) must not keep the
+        loop waiting past --timeout: the monotonic elapsed time still counts."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            clock.mono += mock_ws.settimeout.call_args.args[0]
+            clock.wall -= 1000
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert mock_ws.recv.call_count == 1
+
     def test_skips_other_prompt_messages(self, mock_execution):
         prompt_id = "my-prompt"
         mock_execution.prompt_id = prompt_id
@@ -435,6 +552,22 @@ class TestWatchExecution:
 
 
 class TestExecuteErrorHandling:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Keep execute() off a live server: an empty catalog skips preflight."""
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return {}
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
     def _run_execute_expect_exit(self, workflow_file, **overrides):
         kwargs = dict(host="127.0.0.1", port=8188, wait=True, verbose=False, timeout=30)
         kwargs.update(overrides)
@@ -449,6 +582,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -462,6 +596,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.connect.side_effect = ConnectionError("Connection refused")
 
@@ -475,6 +610,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketException("Connection lost")
 
@@ -490,6 +626,7 @@ class TestExecuteErrorHandling:
             mock_progress = MagicMock()
             MockProgress.return_value = mock_progress
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -510,6 +647,7 @@ class TestExecuteErrorHandling:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -580,6 +718,7 @@ class TestExecuteErrorHandling:
             mock_progress = MagicMock()
             MockProgress.return_value = mock_progress
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.watch_execution.side_effect = WebSocketTimeoutException("timed out")
 
@@ -606,8 +745,14 @@ class TestWaitStateFile:
 
     def _mock_exec(self, prompt_id):
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = prompt_id
         mock_exec.client_id = "cid-wait"
+        # Explicit, not the MagicMock default: an unconfigured attribute
+        # auto-vivifies as a truthy MagicMock(), which would make every test
+        # using this fixture look like a borrowed-client run to
+        # _reject_borrowed_wait.
+        mock_exec.borrowed_client_id = False
         mock_exec.outputs = []
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
@@ -1350,7 +1495,8 @@ class TestResolvePartnerCredential:
         self._no_session(monkeypatch)
         assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
 
-    def test_a_live_session_outranks_the_forwarded_bearer(self, monkeypatch: pytest.MonkeyPatch):
+    def test_the_forwarded_bearer_outranks_a_live_session(self, monkeypatch: pytest.MonkeyPatch):
+        """The token handed in for this run wins; the stored session is not even read."""
         monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1360,8 +1506,10 @@ class TestResolvePartnerCredential:
         session.access_token = "live-session"
         session.base_url = "https://cloud.comfy.org"
         monkeypatch.setattr(auth_store, "get", lambda _: None)
-        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: session)
-        assert _resolve_partner_credential() == ("auth_token_comfy_org", "live-session")
+        refreshed = []
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: refreshed.append(kw) or session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+        assert refreshed == []
 
     def test_the_forwarded_bearer_outranks_the_cloud_api_key(self, monkeypatch: pytest.MonkeyPatch):
         """Same order the `purpose="cloud"` chain uses: bearer, then env key."""
@@ -1623,6 +1771,7 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             # allow_spend=True: consent granted, so the spend gate is a no-op
@@ -1652,6 +1801,7 @@ class TestExecutePartnerNodePreflight:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -1710,6 +1860,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k", allow_spend=True)
@@ -1738,6 +1889,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, allow_spend=True)
@@ -1762,6 +1914,7 @@ class TestPartnerNodesDetectedTelemetry:
             patch("comfy_cli.tracking.track_event") as mock_track,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -2071,6 +2224,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             # A stored api_key means the missing-credential path is satisfied,
@@ -2096,6 +2250,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -2145,6 +2300,7 @@ class TestExecuteSpendGate:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(wf_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="k")
@@ -2223,14 +2379,33 @@ class TestSpendGateStdinAndMarkup:
 
 
 class TestExecuteUiWorkflow:
+    @pytest.fixture(autouse=True)
+    def local_preflight_catalog(self, monkeypatch):
+        """Validate against the complete conversion fixture without a live server."""
+        from copy import deepcopy
+
+        def target_catalog(host, port):
+            assert (host, port) == ("127.0.0.1", 8188)
+            return deepcopy(self.OBJECT_INFO)
+
+        monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", target_catalog)
+
+        def unexpected_catalog_request(*args, **kwargs):
+            pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+        monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+        monkeypatch.setattr("comfy_cli.cql.engine._load_from_target", unexpected_catalog_request)
+
+    # The conversion success fixture must also be an executable graph:
+    # PreviewImage consumes IMAGE, not an EmptyLatentImage's LATENT output.
     UI = {
         "nodes": [
             {
                 "id": 1,
-                "type": "EmptyLatentImage",
+                "type": "EmptyImage",
                 "inputs": [],
-                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-                "widgets_values": [512, 512, 1],
+                "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+                "widgets_values": [512, 512, 1, 0],
                 "mode": 0,
             },
             {
@@ -2244,19 +2419,20 @@ class TestExecuteUiWorkflow:
         "links": [[10, 1, 0, 2, 0, "IMAGE"]],
     }
     OBJECT_INFO = {
-        "EmptyLatentImage": {
+        "EmptyImage": {
             "input": {
                 "required": {
                     "width": ["INT", {"default": 512}],
                     "height": ["INT", {"default": 512}],
                     "batch_size": ["INT", {"default": 1}],
+                    "color": ["INT", {"default": 0}],
                 }
             },
-            "input_order": {"required": ["width", "height", "batch_size"]},
-            "output": ["LATENT"],
-            "output_name": ["LATENT"],
+            "input_order": {"required": ["width", "height", "batch_size", "color"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
             "output_node": False,
-            "display_name": "Empty Latent Image",
+            "display_name": "Empty Image",
         },
         "PreviewImage": {
             "input": {"required": {"images": ["IMAGE"]}},
@@ -2285,6 +2461,7 @@ class TestExecuteUiWorkflow:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -2294,7 +2471,7 @@ class TestExecuteUiWorkflow:
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             api_workflow = MockExec.call_args.args[0]
             assert set(api_workflow) == {"1", "2"}
-            assert api_workflow["1"]["class_type"] == "EmptyLatentImage"
+            assert api_workflow["1"]["class_type"] == "EmptyImage"
             assert api_workflow["2"]["inputs"]["images"] == ["1", 0]
             mock_exec.queue.assert_called_once()
 
@@ -2334,6 +2511,7 @@ class TestExecuteUiWorkflow:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
 
@@ -3066,6 +3244,7 @@ class TestRunStripsComposeMeta:
             patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
         ):
             mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
             MockExec.return_value = mock_exec
             mock_exec.outputs = []
             execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
@@ -3104,13 +3283,14 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
 
     def _mock_exec(self, prompt_id):
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = prompt_id
         mock_exec.client_id = "cid-local"
         mock_exec.outputs = []
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
         mock_exec.executed_node_ids = []
-        # `_emit_queued` hands these to `json.dumps` in NDJSON mode. Unstubbed
+        # `_emit_queued_event` hands these to `json.dumps` in NDJSON mode. Unstubbed
         # MagicMocks make its `default` hook recurse forever on `isoformat`,
         # retaining every child mock — ~28GB, and the OOM killed the suite.
         mock_exec.validation_warnings = []
@@ -3269,6 +3449,7 @@ class TestRunJournal:
     def test_local_submit_journals_inside_project(self, proj_dir):
         workflow_file = self._workflow_file(proj_dir)
         mock_exec = MagicMock()
+        mock_exec.borrowed_client_id = False
         mock_exec.prompt_id = "prompt-local-journal"
         mock_exec.client_id = "cid"
         mock_exec.outputs = []

@@ -1,5 +1,8 @@
 # Op vocabulary — v1 (frozen)
 
+The accepted architectural role of this frozen, versioned contract is recorded
+in [ADR-OPERATIONS-0002](adr/OPERATIONS-0002-version-structured-workflow-operations.md).
+
 Status: **FROZEN**. This document is the normative contract for the structured-edit
 op vocabulary in `comfy_cli/workflow_ops.py`: the op kinds, their argument shapes,
 their idempotency and conflict rules, and the batch protocol. Downstream
@@ -11,20 +14,22 @@ Machine-readable projection: `workflow_ops.FROZEN_OPS`, `workflow_ops.DEFERRED_O
 enforces that this document, those constants, and the `apply_op` / `apply_specs`
 dispatch tables agree. A change to any of the three without the others fails CI.
 
-This freeze describes the code on the **unmerged branch
-`fix/validate-lowers-ui-to-api`**. Until that branch merges to `master`, a SHA
-citation must point at a commit on that branch.
+This freeze describes code on `main`. A SHA citation points at the commit that
+contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
-Eight kinds as of amendment v1.6 (§15, below) — `set_node_field` is the
-eighth and is **PROPOSED**, not yet ratified; see §1.8. `apply_op` rejects an
-unknown kind with `ValueError("unknown op ...")` — it never ignores one.
+Nine kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
+that amendment; see §1.2.1. `set_node_field` is the eighth and is **PROPOSED**,
+not yet ratified; see §1.8 and §15. No other kind is valid in v1: `apply_op`
+rejects an unknown kind with `ValueError("unknown op ...")` — it never ignores
+one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
+| `disconnect` | yes | `comfy workflow disconnect` | Remove the link from one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
 | `set_node_field` | yes | `comfy workflow set-node-field` | Set or clear one node's durable field — `title`, `mode`, `flags.collapsed`, `flags.pinned` (§1.8, PROPOSED) |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
@@ -38,6 +43,15 @@ document, so they are standalone-only: a batch containing either is rejected
 atomically with its own registered error code —
 `workflow_clear_not_batchable` / `workflow_reset_doc_not_batchable` — and a hint
 naming the standalone command. Nothing from such a batch is applied.
+
+`set_dynamic_group_rows` is a batch spec, not an op kind. It replaces a
+DynamicGroup's rows (`{"op": "set_dynamic_group_rows", "node": ..., "group":
+"loras", "rows": [{...}]}`) and emits only `set_widget` ops: the row count, then
+every widget of each written row, including a field's `<field>.0` control mode.
+Rows with a connected or promoted field keep their index, are not rewritten, and
+are left out of `rows`. comfy-cli's `apply_op` replays these in order because its
+workflow model materializes rows from the count; the shared document accepts them
+in any order. An earlier write to the group in the same batch is refused.
 
 Every op carries the common envelope stamped by `_new_op`:
 
@@ -76,10 +90,17 @@ refused with `node_deprecated` unless it is `true`.
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.
-* Conflict: none — ids are minted leaderlessly (section 6), so two concurrent
-  `add_node` ops never target the same identity.
+* Conflict: Agent-bound frontend and structured-edit ranges are disjoint. Two
+  structured-edit writers still share one random range regardless of their
+  `actor`, so they can mint the same id; two different `add_node` ops with that
+  id are resolved first-arrival-wins, without a collision signal. Amendment
+  v1.10 adds one explicit ordering conflict between a reused-subgraph add and a
+  concurrent mutation inside the definition it turns from single-instance to
+  shared.
 * Invalid: an unknown `class_type` is rejected at mint time (`UnknownNodeType`,
-  rendered as `node_not_found` with close matches).
+  rendered as `node_not_found` with close matches), except for the exact id of
+  a definition already present with a reusable top-level host instance as
+  specified by amendment v1.10 (§19).
 
 ### 1.2 `connect`
 
@@ -107,6 +128,39 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
   both survive.
 * Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
+
+### 1.2.1 `disconnect` (amendment v1.8)
+
+Spec form: `{"op": "disconnect", "to": "$sampler.model"}`. The standalone
+command accepts the same `<node>.<input>` target. Minted fields are `link_id`
+(the occupant observed at mint time), `to_node`, and the resolved numeric
+`to_slot`. A dynamic destination additionally carries exactly one identity
+field:
+
+* `grow` is present for a promoted subgraph input and names the declaration;
+  it claims `("input", to_node, "grow", grow.name)`.
+* `grow_id` is present for an ordinary autogrow or widget-converted input and
+  preserves the creating connect's collision-free slot identity; it claims
+  `("input", to_node, "grow_id", grow_id)`. A reconnect to that existing input
+  carries the same `grow_id` and therefore shares the register. For an interior
+  input, the target is path-scoped as
+  `("input", tuple(path), to_node, "grow_id", grow_id)`.
+
+For either dynamic form, replay uses the identity field above rather than
+treating the observed numeric `to_slot` as a concrete-slot register.
+
+`disconnect` and concrete `connect` claim the same scalar LWW register,
+`("input", to_node, to_slot)`. A winning disconnect removes whichever link
+occupies the slot when it is replayed, including both endpoint references; a
+losing disconnect changes nothing. A missing node or drifted slot is a replay
+no-op. Minting against an existing empty input is rejected so callers cannot
+mistake an already-disconnected or incorrectly addressed slot for a mutation.
+
+When the destination is an interior node, the op also carries `path` (the
+subgraph instance path) and scopes the same numeric-slot register to that path.
+It removes only a link whose source and destination are both inside the same
+single-instance definition. A boundary-crossing link and a definition shared
+by multiple live instances are rejected at mint time.
 
 ### 1.3 `set_widget`
 
@@ -145,9 +199,19 @@ Spec form:
 ```
 
 Minted op fields: `node_id`, `removed_links` (ids of every link incident to the
-node at mint time). Replay removes the node, drops incident links (both the
-recorded ones and any link whose endpoint is the node), and scrubs dangling
-input/output references.
+node at mint time). An interior address such as `70/22` additionally carries
+the owner-instance `path` (`["70"]`); it is refused when the definition is
+shared by multiple live instances, or when the node is the source of a
+promoted widget (its host value would shift onto the wrong input). Replay
+removes the node, drops incident links (both the recorded ones and any link
+whose endpoint is the node), and scrubs dangling input/output references in
+that same graph scope — for an interior delete, including the definition's
+boundary `inputs[].linkIds` and `outputs[].linkIds`.
+
+An interior delete reuses the `delete_node` kind, so a consumer that predates
+`path` cannot reject it. comfy-multi-player 0.3.11 and earlier ignore `path`,
+remove the top-level node with the same id, and report the op `applied`. Send
+interior deletes only to a doc host on comfy-multi-player 0.3.12 or later.
 
 * Idempotency: `op_id` no-op; replaying a delete of an already-absent node is a
   no-op.
@@ -159,8 +223,9 @@ input/output references.
 
 Command: `comfy workflow clear <file>`. Minted op fields: `removed_nodes` (ids
 present at mint time). Replay empties `nodes`, `links`, and `groups`.
-`last_node_id` / `last_link_id` are preserved so ids minted after a clear stay
-monotonic — id reuse would let a merge resurrect a deleted node's identity.
+`last_node_id` / `last_link_id` are preserved for legacy frontend allocators so
+their ids stay monotonic — id reuse would let a merge resurrect a deleted
+node's identity. Structured-edit ids from `mint_id` do not use these marks.
 
 * Batchable: **no**. `apply_specs` rejects it with the registered code
   `workflow_clear_not_batchable`; the batch is discarded atomically and the hint
@@ -175,11 +240,12 @@ present at mint time), same as `clear`.
 
 Replaces the entire document with the empty baseline, **including apply
 bookkeeping** — unlike `clear`, which preserves the id high-water marks and the
-applied-op history. `last_node_id` / `last_link_id` go to 0 (safe: ids come from
-`mint_id`, never from the high-water marks — §8.3), `_applied_ops` and
-`_widget_stamps` are dropped, and only the document `id` survives. Because it
-erases replay history it is a **history barrier**: ops minted against a
-pre-reset `base_version` do not replay across it.
+applied-op history. `last_node_id` / `last_link_id` go to 0, `_applied_ops` and
+`_widget_stamps` are dropped, and only the document `id` survives. This resets
+legacy frontend allocators as well as the graph. It is safe only because reset
+is a **history barrier**: no pre-reset identity survives, and ops minted against
+a pre-reset `base_version` do not replay across it. Structured-edit ids remain
+independent random draws (§8.3).
 
 * Guard: the CLI surface requires an explicit `--confirm`; without it the
   command fails closed with `workflow_reset_doc_unconfirmed` and writes nothing.
@@ -293,11 +359,15 @@ local model can need it.
 * Every op carries `op_id`: uuid4 hex, minted by the **creator, before
   dispatch** (`_new_op`). Receivers never regenerate or rewrite an `op_id`.
 * `apply_op` records applied `op_id`s in the document's `_applied_ops` list and
-  drops any op whose `op_id` is already there. **Uniqueness scope is
+  their canonical digests in `_applied_op_digests`. An identical retry is a
+  no-op; the same `op_id` carrying a different canonical payload rejects with
+  `op_id_reuse`. A legacy document with only the list keeps its historical
+  duplicate behavior. See **Amendment v1.11** (§20) for the canonical form,
+  the bounds and the ledger contract. **Uniqueness scope is
   PER-WORKFLOW**: the same `op_id` can exist in two different workflow documents
   without interaction; within one document each op applies exactly once.
-* `_applied_ops` (and `_widget_stamps`) are apply-time bookkeeping, stripped
-  before serialization to disk (`strip_internal`).
+* `_applied_ops`, `_applied_op_digests` (and `_widget_stamps`) are apply-time
+  bookkeeping, stripped before serialization to disk (`strip_internal`).
 
 ## 3. Conflict rules
 
@@ -329,7 +399,7 @@ and `"7"` two registers for one node.
 | update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; a `connect` whose destination is gone is a no-op; a `connect` whose SOURCE is gone still claims its input register and leaves that input empty (v1.2 — otherwise the incumbent's survival depends on when the delete arrives); replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
-| duplicate entity creation | impossible by construction across writers (random 53-bit `mint_id`, no shared counter); a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
+| duplicate entity creation | Agent-bound frontend and structured-edit ranges are disjoint; legacy frontend counters seeded from `last_node_id` are outside that guarantee, because `_apply_add_node` raises the mark to any minted id; all structured-edit writers share one random range regardless of `actor`; a collision is unlikely but possible and resolves first-arrival-wins without a collision signal; a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
 | concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; their display order is the one sequence decision a leaderless writer cannot make and is surfaced by `detect_conflict` for the merge consumer | `_apply_connect` (grow path), `detect_conflict` |
 | invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index` |
 
@@ -381,18 +451,22 @@ specs in the same batch reference the minted node by alias.
 
 * `op_id`: uuid4 hex, minted by the creator pre-dispatch. Receivers never
   regenerate one (section 2).
-* Node and link ids: `mint_id()` — random ints in `[2^40, 2^53)`. Leaderless
-  and collision-free without coordination; always inside JS
-  `Number.MAX_SAFE_INTEGER`; always larger than small frontend counter ids.
-  `last_node_id` / `last_link_id` are advisory high-water marks, never
-  allocators.
+* Node and link ids: `mint_id()` — random ints with bit 40 set, all below
+  `2^52`. They are leaderless and always inside JS `Number.MAX_SAFE_INTEGER`.
+  Agent-bound frontend ids clear bit 40 (and set bit 41), so bit 40 is the sole
+  frontend-versus-structured-edit discriminator; Agent ids may also have bit 41
+  set. Random draws from any structured-edit writers can still collide. The
+  structured-edit path maintains `last_node_id` / `last_link_id` as advisory
+  high-water marks but never allocates from them; legacy frontend code may still
+  allocate from the marks.
 * Subgraph-scoped ids: an interior node is addressed as `57:3` (the flattened
   form the UI→API lowering mints and `validate` / server errors print) or
   `57/3` (the edit-path form); both resolve to the same interior target. **Ops
   must carry fully-scoped ids** — a bare interior id is meaningless at the top
   level and is rejected, not guessed.
-* OPEN: ID representation is to be reconciled with the FE stable-ID workstream
-  before this document's v1.1. Until then, the shapes above are the contract.
+* The frontend stable-ID reconciliation sets bit 41 for Agent-bound frontend
+  ids and clears bit 40. Clearing bit 40 is what keeps them disjoint from
+  `mint_id()` ids; bit 41 is not reserved from Agent random draws.
 
 ## 7. Attribution origins
 
@@ -445,9 +519,10 @@ changes who wins ties. Receivers never regenerate or normalize an `op_id`.
 
 ### 8.3 `last_node_id` / `last_link_id` are max-registers
 
-Both are advisory high-water marks, never allocators (ids come from
-`mint_id`). Register semantics: **max-register** — a write is
-`max(current, new)`, and merging two replicas' values is `max(a, b)`; a plain
+Both are advisory high-water marks for the structured-edit path, which allocates
+ids with `mint_id`, not from these fields. Legacy frontend code may still use
+them as counters. Register semantics under op replay: **max-register** — a write
+is `max(current, new)`, and merging two replicas' values is `max(a, b)`; a plain
 overwrite is wrong under concurrency.
 
 `_apply_add_node` implements this for nodes:
@@ -504,26 +579,36 @@ event; replication starts from that snapshot.
 
 Current contract, pinned:
 
-* **Only `set_widget` is subgraph-scoped.** Three address forms are accepted
-  and normalize to ONE write target: flat promoted (`57.text`, routed through
-  the instance's `proxyWidgets`), nested interior (`57/3.steps`), and the
-  flattened UI→API alias (`57:3.cfg`). The minted op carries the **resolved**
-  `path` (e.g. `["57", "27"]`) plus `inner_widget`, so replay needs no
-  proxyWidgets logic, and the LWW target is
-  `("widget", ("57", "27"), "text")` — a flat-form and a nested-form
-  concurrent write to the same interior widget converge under 8.1.
-* **`connect` refuses subgraph scope** with a structural explanation: an
-  interior endpoint is rejected with "a link cannot cross the subgraph
-  boundary"; a promoted-widget target is rejected with "promoted widget (a
-  value), not a link input".
-* **`add_node` and `delete_node` cannot address interior nodes** at all; an
-  interior id fails as node-not-found against the top-level inventory.
-* An interior write to a **shared** definition forks the definition at apply
-  time (`engine._isolate_shared_subgraph`): the definition is deep-copied
+* **`set_widget`, `connect`, and `disconnect` have subgraph-scoped forms.** For
+  `set_widget`, three address forms are accepted and normalize to ONE write
+  target: flat promoted (`57.text`, routed through the instance's
+  `proxyWidgets`), nested interior (`57/3.steps`), and the flattened UI→API
+  alias (`57:3.cfg`). The minted op carries the **resolved** `path` (e.g.
+  `["57", "27"]`) plus `inner_widget`, so replay needs no proxyWidgets logic,
+  and the LWW target is `("widget", ("57", "27"), "text")` — a flat-form and
+  a nested-form concurrent write to the same interior widget converge under
+  8.1.
+* **`connect` and `disconnect` permit links wholly inside one supported,
+  single-instance definition.** Their ops carry the instance `path`, and their
+  LWW input identity is scoped by that path. A link that crosses the subgraph
+  boundary is still rejected with "a link cannot cross the subgraph boundary";
+  a promoted-widget target is still rejected with "promoted widget (a value),
+  not a link input". Both operations refuse a shared definition rather than
+  silently rewiring every instance that uses it.
+* **`delete_node` permits an interior node in one supported, single-instance
+  definition.** Its op carries the owner-instance `path`; its node-presence
+  identity is scoped by that path, and replay removes incident definition
+  links plus their endpoint references. It refuses a shared definition rather
+  than deleting from every instance, and refuses a node that backs a promoted
+  widget. A later interior `set_widget` on the deleted node is a no-op (delete
+  wins). `add_node` still cannot address an interior location from the CLI
+  authoring surface.
+* An interior **widget** write to a shared definition forks the definition at
+  apply time (`engine._isolate_shared_subgraph`): the definition is deep-copied
   under `"sg-" + sha256(def_id + "\x00" + instance_id)[:32]` — deterministic,
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
-  are never aliased.
+  are never aliased. Interior connect/disconnect use the refusal above instead.
 * **Promoted widgets are HOST writes** (`cql.promoted`). A
   `set_widget` on a promoted input carries `promoted: {instance_path,
   value_index}` instead of `path`, and its LWW target is the host register
@@ -698,8 +783,11 @@ discard one writer's connection. That target keeps its §3 role as conflict
   gap above, on a target that is deliberately not a register.
 * Two `add_node` ops with the SAME `node_id` and different payloads resolve
   first-writer-wins by arrival (`("node", node_id)` is reserved but ungated).
-  §1.1 rules this out by construction — `mint_id` draws 53-bit random ids — so
-  it is a property of hand-authored or replayed streams, not of minted ones.
+  Clearing bit 40 on Agent-bound frontend ids prevents those ids from colliding
+  with structured-edit ones; a legacy frontend counter seeded from
+  `last_node_id` is outside that guarantee. Different structured-edit actors
+  still share the `mint_id` range, so their random draws can collide; v1 has no
+  collision signal or redraw path.
 
 **Batch caveat, now stated.** `apply_specs` stamps every op in one batch with
 the same `base_version`, so two writes to the SAME target inside one batch are
@@ -850,7 +938,7 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 ## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
 
-The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+The frontend (ComfyUI_frontend ADR-SUBGRAPH-PROMOTION-0009) keeps a promoted subgraph widget's
 value on the HOST instance — `widgets_values[i]` on the instance, positional
 over the definition's inputs that resolve to an interior widget — and runs
 that value over the interior default. Interior `path` writes (§8.7) therefore
@@ -1052,4 +1140,523 @@ contend — `add_node` mints the node before any `set_node_field` write could
 target it — and neither depends on the other landing.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 17. Amendment v1.8 — 2026-09-22 (`disconnect`)
+
+This amendment adds `disconnect` as the ninth frozen op kind so a caller can
+remove an input link without replacing the whole workflow or deleting either
+endpoint. It is batchable, has the standalone `comfy workflow disconnect`
+command, and shares each destination input's last-write-wins register with
+`connect`; §1.2.1 defines the wire shape and replay semantics.
+
+Dynamic inputs keep their logical identity instead of treating a shifted
+numeric slot as the register. Promoted inputs use `grow.name`; ordinary
+autogrow and widget-converted inputs use the creating connect's `grow_id`.
+Interior links wholly inside one eligible, single-instance definition carry
+the instance path in that identity. Links that cross a subgraph boundary, and
+links inside a shared definition, remain refused.
+
+The `grow_id` rule deliberately re-scopes a reconnect-shaped `connect` from
+the older concrete `("input", to_node, to_slot)` target to
+`("input", to_node, "grow_id", grow_id)`. It is therefore a coordinated
+applier upgrade: an older replica that does not recognize `connect.grow_id`
+must not participate in mixed-version replay with v1.8. Downstream appliers
+must add the same target before moving their pinned vocabulary SHA to this
+amendment.
+
+The replay path also retains a winning reconnect that arrives before the
+connect which materializes its grown input, then applies that pending write
+when the stable `grow_id` slot appears. Tests cover both replay orders for
+ordinary autogrow and widget-converted inputs, concrete and promoted inputs,
+and path-scoped interior links.
+
+`FROZEN_OPS` and `BATCHABLE_OPS`, the spec and replay dispatch tables, the
+standalone CLI, and this contract change together as required by §9.
+`DEFERRED_OPS` remains empty; no existing op kind is removed.
+
+## 18. Amendment v1.9 — 2026-09-22 (authorable annotation nodes: `Note` / `MarkdownNote` carry `text`)
+
+### 18.1 `add_node` mints `Note` and `MarkdownNote`
+
+§1.1 / §13.2 stated that `add_node` rejects every UI-only type. Production
+agent traces show the agent repeatedly asking for `Note` / `MarkdownNote` and
+being refused; every downstream replica (comfy-multi-player applier, frontend
+follower) already round-trips those nodes — the applier stores an uncatalogued
+positional `widgets_values` opaquely and the follower materializes a note with
+its text box — so the catalog refusal on this surface was the only thing
+between "add a note" and a note on the canvas.
+
+`add_node` now mints the two **annotation** UI-only types. The authorable set
+is `AUTHORABLE_VIRTUAL_NODE_TYPES = {"Note", "MarkdownNote"}` (a strict subset
+of `UI_ONLY_NODE_TYPES`). The spec gains one optional, spec-and-node key:
+
+```json
+{"op": "add_node", "class_type": "Note", "text": "trigger word: zxc", "as": "n"}
+```
+
+* `text` (string, default `""`) becomes the note's single positional widget:
+  `op.node.widgets_values == [text]`. The minted node has no sockets
+  (`inputs == outputs == []`), `mode`/`flags`/`properties` at their defaults,
+  and a layout-assigned `pos`/`size` unless `at` is given. `op.node` stays
+  authoritative for replay (§8.5), so a replica with no notion of `Note`
+  inserts it verbatim.
+* A non-string `text` is `ValueError` at mint time (batch: aborts atomically,
+  `applied_count == 0`, §4). An explicit `"text": null` in a spec counts as
+  non-string — omit the key for an empty note. `text` on a **catalog** class is likewise
+  `ValueError` — catalog widgets are addressed by name through `set_widget`;
+  a stray `text` is an error, not a dropped field.
+* CLI: `comfy workflow add-node <file> Note --text "..."`. Envelope unchanged.
+* The class is decided by **name, before the catalog**: `Note` / `MarkdownNote`
+  mint the annotation shape even if a backend happens to register a class with
+  that name (the frontend treats those names as editor-only regardless of the
+  backend, so the CLI must not turn an agent's note into an executable node).
+* Recipe `${param}` substitution (`apply --param`, `foreach`) does **not**
+  interpolate `text`: a note is prose for a human reader, so
+  `"text": "seed is ${seed}"` applies verbatim and does not require a declared
+  `seed` param. Every other add_node key still interpolates.
+* Execution: unchanged. `workflow_to_api` owns the exclusion of UI-only types
+  from the API prompt and keeps dropping these nodes; a test pins the exact
+  shape `add_node` mints against the converter.
+* Telemetry: `text` joins the redacted argument names (it is user prose, like
+  a prompt), so a `--text` value never reaches the tracking payload.
+
+`Reroute`, `PrimitiveNode`, `GetNode`, `SetNode` remain refused
+(`node_not_found`, `details.ui_only: true`): they carry data flow the converter
+resolves specially, and authoring them here would need link semantics this
+surface does not model.
+
+### 18.2 `capture` deliberately unchanged
+
+§13.2's capture behaviour stands: `capture` still skips UI-only nodes,
+including `Note` / `MarkdownNote`, and reports them as `ui_only_node_skipped`
+warnings — worded as "skipped by design", not "apply cannot mint them", since
+the latter is no longer true for the two annotation types. The recipe
+rebuilds the executable graph, not the canvas decoration. Capturing notes into
+recipes (now that `apply` would accept them) is a possible follow-up; it is not
+part of this amendment so a recipe captured before v1.9 and one captured after
+stay byte-identical.
+
+### 18.3 `replace_ops` carries `text` on the spec half
+
+`replace_ops` (behind `templates fetch --emit-ops` / `replace`) emits
+dual-shape `add_node` entries: the op half carries the full `node`, the spec
+half is what `apply_specs` replays. For a `Note` / `MarkdownNote` the spec
+half now includes `text` (= the source node's `widgets_values[0]` when it is a
+string, else `""`), so replaying the emitted batch through `apply` reproduces
+the note body instead of reminting every note as `""`.
+
+### 18.4 `set_widget` on a note
+
+A minted note has no named widgets, so `set_widget` on it is refused with a
+targeted message ("its body is `text`, set at add time; delete and re-add"),
+instead of the generic "(none — all inputs are links)". Editing an existing
+note's body in place is a follow-up (it needs a positional write path every
+replica agrees on, like the `legacy_primitive` one); it is out of scope for
+v1.9.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
+pinning this document by SHA move the SHA together with their comfy-cli pin.
+
+## 19. Amendment v1.10 — 2026-10-25 (`add_node` reuses an existing subgraph definition)
+
+An `add_node` spec may use the **exact definition id** of a subgraph already in
+the workflow when that definition also has at least one top-level host instance.
+This is an extension of the existing `add_node` kind, not a new operation kind.
+Unknown ids and definitions with no reusable top-level host still fail closed as
+`node_not_found`; definition names are not an authoring alias.
+
+The first matching top-level host in document order is the authoritative schema
+template. Legacy hosts whose `type` is the definition name are resolved through
+the same definition index as the rest of the engine. The fresh host copies the
+template's `inputs`, `outputs`, `properties`, `widgets_values`, optional
+`widgets_values_form`, and valid saved `size`. It clears every input/output link,
+resets `flags`, `order`, and `mode`, mints a fresh collision-free node id, and
+uses the requested position/title. Malformed host containers fail closed rather
+than emitting a partially shaped node. The copied host state is independent;
+the definition is deliberately shared.
+
+The minted op carries the complete authoritative `node` payload as before and
+adds:
+
+```json
+{
+  "subgraph_reuse": {
+    "definition_id": "2454ad83-157c-40dd-9f19-5daaf4041ce0",
+    "existing_instance_paths": [["88"]]
+  }
+}
+```
+
+`existing_instance_paths` is captured before the new host is applied and
+includes nested live paths that resolve to the reused definition. It is
+conflict metadata: `detect_conflict` flags this add against a concurrent
+interior `set_widget`, `connect`, `disconnect`, `delete_node`, or promoted-input
+repair whose mutated definition path is that instance path or a descendant.
+Without that flag, replaying the interior mutation before versus after the new
+shared instance can fork/refuse in different orders (§8.7) and silently diverge.
+The merge consumer must therefore ask for an order for such a pair; all other
+`add_node` identity/idempotency rules remain unchanged.
+
+Batch layout uses the same normalized saved host size as the emitted node,
+including LiteGraph's object form (`{"0": width, "1": height}`), so an
+unpinned sibling in the same batch is not placed through the reused host.
+
+No operation kind is added or removed. `FROZEN_OPS`, `DEFERRED_OPS`, and
+`BATCHABLE_OPS` are unchanged. Downstream consumers that move their pinned
+vocabulary SHA to v1.10 must preserve `subgraph_reuse` conflict metadata even
+though replay itself continues to insert `op.node` opaquely.
+
+## 20. Amendment v1.11 — 2026-10-24 (canonical op identity: `op_id` binds one payload)
+
+**`op_id` identifies one immutable semantic-op envelope, not just one delivery.**
+Before this amendment `apply_op` dropped any op whose `op_id` was already in
+`_applied_ops` without looking at the payload, so a sender that reused an id
+with a changed payload had its second edit silently discarded — and two
+replicas that received the pair in different orders ended up with different
+documents and no error on either side. This mirrors comfy-multi-player schema
+**Amendment A8**; the two implementations must agree byte-for-byte on the
+canonical form, because the digest is the only thing that distinguishes an
+identical retry from reuse.
+
+### 20.1 The canonical form
+
+Compact JSON over the **whole envelope**:
+
+* object keys sorted by **Unicode code point** at every depth; array order
+  preserved; no insignificant whitespace (`,`/`:` separators, no spaces). The
+  same caveat as 8.1 applies: for ASCII, JS UTF-16 `<` agrees with code-point
+  order, but above the Basic Multilingual Plane it does not, so an
+  implementation must sort by code point and not rely on
+  `Object.keys(...).sort()`'s default comparator. Every key an op envelope
+  carries today is ASCII, so this only bites a dict widget whose own keys are
+  not;
+* **numbers rendered as ECMAScript renders them** (`Number::toString`), not as
+  Python's float repr does. An integral float is `20`, not `20.0`; negative zero
+  is `0`; an exponent is `1e-7`, not `1e-07`. This is load-bearing rather than
+  cosmetic: the counterpart builds the canonical form with `JSON.stringify`, so
+  without it a FLOAT widget op relayed through JS digests differently on the two
+  sides and an identical redelivery is rejected as `op_id_reuse`;
+* **every non-finite number renders as `null`**, which is what `JSON.stringify`
+  does. The alternative — rejecting the op — made a widget whose *current* value
+  is `NaN`/`Infinity` impossible to overwrite, because the op captures that
+  value in `old` (and `json.load` accepts both spellings on the way in);
+* a **lone surrogate** renders as a `\udXXX` escape, matching ES2019
+  well-formed `JSON.stringify`. Emitted raw it cannot be UTF-8 encoded at all,
+  so the digest died with a bare `UnicodeEncodeError` outside the
+  `malformed_op:` prefix callers classify errors by.
+
+The ledger records the lowercase SHA-256 hex digest of that string.
+
+### 20.2 The ledger contract
+
+* `_applied_op_digests` maps `op_id` → digest, beside `_applied_ops`. Both are
+  stripped by `canonical()` and `strip_internal()`, and `reset_doc` clears both
+  as one history barrier.
+* **Rejects before mutation.** `op_id`, `_applied_ops` and `_applied_op_digests`
+  all arrive from untrusted JSON and are all validated before any handler runs:
+  a non-string `op_id`, or a ledger that is not an object/array, is
+  `malformed_op`. So is a payload canonicalization refuses. A document that
+  arrived without a ledger is never left carrying an empty one by a rejected op.
+* **A deferred op is already bound.** A `set_widget` waiting in
+  `_deferred_widget_ops` for a selector to reveal its target has not reached
+  `_applied_ops`, so the gate checks the deferred queue too; a second payload on
+  that `op_id` rejects instead of overwriting the pending entry.
+* **The enriched envelope is what is bound.** A promoted or `legacy_primitive`
+  `set_widget` only learns the host's materialized `host_widgets_values` by
+  reading back the document the write produced, so the ledger entry is corrected
+  to the envelope the caller actually broadcasts. If that enriched envelope is
+  not canonical the earlier digest stands: the document is already written, and
+  reporting failure for an applied op is worse than holding a digest a
+  redelivery will refuse in the pre-mutation branch.
+* **Legacy documents are untouched.** One carrying `_applied_ops` and no
+  `_applied_op_digests` keeps the historical drop-the-duplicate behavior, and
+  deliberately without digesting the replayed payload first — a non-canonical
+  replay must still be the documented no-op rather than a new error.
+
+### 20.3 Bounds
+
+Canonicalization is bounded to **64 levels of nesting**, **4,096 entries per
+collection** and **262,144 approximate cost units**. These are not chosen here:
+they are mirrored exactly from `comfy-multi-player`'s `src/limits.ts` at
+`221b2b2e470c79afaface24b1edcb53cdafc8922` (`MAX_PAYLOAD_DEPTH`,
+`MAX_COLLECTION_ENTRIES`, `MAX_OP_COST`), cited by SHA rather than by branch.
+
+They exist only so a hostile or runaway payload cannot pin a replica inside
+canonicalization, and every ordinary op has to pass. "The digest is computed on
+every apply, not only on a reuse comparison" is true of **both** sides — CMP's
+A8 canonicalizer charges the whole envelope in `applyOps` before its dedupe gate
+— so a looser bound on one side rescues no edit. It only moves where an
+oversized op fails, from a local `malformed_op` to a `malformed_op` from the
+shared package after this side already accepted the payload. A comfy-cli-only
+budget was briefly carried here (1,048,576 / 33,554,432) and is withdrawn as
+exactly the cross-implementation validation drift one shared op package exists
+to prevent. If a real edit needs more room, widen it in `comfy-multi-player` and
+move this pin.
+
+Measured headroom at the shared values: the widest op this vocabulary mints from
+a real workflow fixture is ~1.6K cost units over 13 entries, under 1% of the
+budget. The three edits previously said to need a looser bound bind only well
+past anything observed — `clear`/`reset_doc` at more than 4,096 nodes in one
+document, a hub `delete_node` at more than 4,096 incident links on one node, and
+a widget string at 131,064 characters when the op also captures an equal-sized
+`old` (262,133 without one). The largest workflow in the comfy-cli fixtures has
+11 nodes.
+
+The asymmetric case is the one to keep in mind: `{value: 25}` followed by the
+same `op_id` carrying `{value: 30}` rejects, while the same payload with its keys
+in a different insertion order is an ordinary no-op.
+
+**No change to §§1, 3-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. §2's identity
+bullet now cites this section. Downstream repos pinning this document by SHA
+move the SHA together with their comfy-cli pin, and must move their CMP A8 pin
+with it.
+
+## 21. Amendment v1.12 — 2026-10-31 (a batch is bounded at 1,024 ops)
+
+**A batch carries at most 1,024 ops.** `comfy-multi-player`'s `src/limits.ts` at
+`221b2b2e470c79afaface24b1edcb53cdafc8922` fixes `MAX_OPS_PER_BATCH` at 1024 and
+refuses a longer batch **whole** — `applyOps` checks it before any op is
+processed and returns a `malformed_op` rejection for every op in the batch, and
+`inspectOps` raises `malformed_op` from the storage preflight. comfy-cli had no
+counterpart, so `apply_specs` would accept and apply a batch of any length and
+`replace_ops` would hand a caller one, and the refusal arrived from the shared
+package only after this side had committed to the write.
+
+That is the same mint-then-refuse divergence v1.11 §20.3 closed for the three
+payload bounds, one level up: §4's abort-remainder contract is about which ops in
+a batch apply, and an over-long batch has no answer under it at all because none
+of them do. The bound is therefore mirrored, not chosen here, and cited by SHA
+rather than by branch for the same reason §20.3 gives. If a real edit needs a
+longer batch, widen it in `comfy-multi-player` and move this pin; never widen it
+here alone.
+
+Where it is enforced, and the two different refusals:
+
+* **`apply_specs`** checks it TWICE, because one spec is not one op. On entry
+  it raises `malformed_op: batch of <n> specs exceeds the 1024-op limit;
+  rejected before any op was processed` — before the `at` coercion and before
+  the position planner, both of which are per-spec work, so the message's
+  promise is literally true. That check cannot be the whole bound:
+  `set_dynamic_group_rows` expands into a row-count write plus one `set_widget`
+  per row field, so a spec list within the bound can still mint a batch
+  past it. After the loop, and still inside the batch's discard handler, it
+  raises `malformed_op: batch mints <n> ops, more than the 1024-op limit`;
+  `applied_count` is 0 there like every other mid-batch refusal.
+* **`replace_ops`** raises **`NotExpressibleError`**, the existing "there is no
+  legal batch for this graph" signal, rather than a bare `ValueError`. Its
+  reasons are now *structure no frozen kind can create*, *a translation longer
+  than the bound*, and *one op whose own payload is out of §20.3's bounds* —
+  that last one because these ops are handed to a caller without ever passing
+  through `apply_op`, so nothing else canonicalizes them. All three want the
+  same caller behaviour, which both production callers already implement —
+  `templates fetch --emit-ops` and `generate`'s emit path each report
+  `ops_skipped` beside the file they still wrote. The count binds on the SUM of
+  `old` and `new`, because §8.8's replacement shape emits a `delete_node` per
+  node already in `old` before the adds.
+
+Measured headroom, and what the measurement does NOT cover. Across all 735
+workflows in `Comfy-Org/workflow_templates` — the gallery
+`templates fetch --emit-ops` reads — the longest batch `replace_ops` actually
+mints is **50 ops**, 4.9% of the bound. That measured the `new` side only. The
+`old` side is whatever document the caller is replacing, which is user data and
+is bounded by nothing here: a fetch or an emit into a path already holding a
+workflow of ~1,000 nodes can exceed the bound on the `delete_node` half alone
+while the incoming template is tiny. Both callers degrade rather than fail on
+that case (`ops_skipped` beside a file they still write). 447 of those templates carry a
+subgraph definition, a canvas group or a reroute point and are refused as
+inexpressible before size is considered; across all 735, nodes+links peaks at
+212, so even if every one of them became expressible the worst case stays a fifth
+of the bound. The largest expressible workflow in comfy-cli's own fixtures mints
+3 ops.
+
+The one document-sized payload this bound does **not** cover is a standalone
+`clear` or `reset_doc`, which enumerates every node id inside ONE op rather than
+as one op each. Those are bounded by §20.3's 4,096-entry collection cap instead,
+and §1.5/§1.6 keep them out of `BATCHABLE_OPS`, so no large document turns into a
+long batch behind a caller's back.
+
+**No change to §§1-3, 5-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. §4 gains an outer
+precondition — a batch must be within the bound before abort-remainder has
+anything to say about it — and is otherwise unaltered. Downstream repos pinning
+this document by SHA move the SHA together with their comfy-cli pin.
+
+## 22. Amendment v1.13 — 2026-10-31 (v1.11 corrections: canonical form and ledger edges)
+
+Six corrections to Amendment v1.11, all found by review of the implementation
+rather than by a failure in the field. None of them re-scopes an op kind and none
+needs a change in `comfy-multi-player`; each is comfy-cli coming into line with
+what v1.11 and CMP A8 already say.
+
+### 22.1 An integer past 2^53 is spelled as the double it becomes
+
+**§20.1's "numbers rendered as ECMAScript renders them" covers integers too, and
+comfy-cli did not implement it that way.** It rendered every `int` with Python's
+`str`, which is exact at any magnitude. The counterpart has no such type: JSON
+carries no integer, `JSON.parse` reads every numeric literal as an IEEE-754
+double, and CMP's canonicalizer refuses a `BigInt` payload outright
+(`applier.ts`: `rejectBigIntPayload`). So past 2^53 the other side holds the
+ROUNDED value and `Number::toString` spells that.
+
+The consequence was the failure §20.1's float rule exists to prevent, one type
+over. A seed at an INT widget's `0xffffffffffffffff` maximum spelled
+`18446744073709551615` here and `18446744073709552000` after a relay through JS,
+and `10**21` spelled `1e+21` there — so an **identical** op echoed back through
+the shared package digested differently and was refused as `op_id_reuse`.
+
+The rule, which changes nothing inside the exact range:
+
+* `-2^53 <= n <= 2^53` keeps its exact digits — the two spellings already agree
+  there, and this is every integer any widget, node id, link id or stamp
+  carries;
+* outside it, the value is rendered through the same double path as a float, so
+  it reads as `JSON.stringify(JSON.parse(literal))` would;
+* past the double range entirely (`10**400`), `JSON.parse` yields `Infinity` and
+  `JSON.stringify` renders `null`, matching §20.1's non-finite bullet;
+* an integer **object key** is the one place the two diverge, because a property
+  name is coerced with `String()` rather than rendered by `JSON.stringify`:
+  there the non-finite end is `"Infinity"` / `"-Infinity"`. Only a
+  programmatically built op can reach a non-`str` key at all — parsed JSON
+  always has string keys.
+
+The **cost charge is unchanged** at a flat 8 units per number, deliberately:
+`src/limits.ts` documents the model as "8 per numeric/leaf", so charging a huge
+integer by its digit count would refuse a payload CMP accepts — the same
+validation drift §20.3 withdrew a comfy-cli-only budget to avoid.
+
+CMP already produces these spellings, because it canonicalizes with
+`JSON.stringify`; this records that comfy-cli now agrees with it. The only
+behavioural effect is on an op carrying an integer past 2^53, which now digests
+as its JS spelling.
+
+### 22.2 The cost bound refuses at the charge, not after the render
+
+§20.3's budget exists to cap the WORK a hostile payload costs, and it was
+checked only at the END of each `_canonical_value` call. A string is charged by
+length and then handed to the renderer, which runs `json.dumps` plus a surrogate
+scan over the whole thing and allocates up to ~6x its size for control-heavy
+input — so an oversized string, or an oversized object key at the `+= len(name)`
+charge, was fully rendered before being refused. The bound therefore did not
+bound the work.
+
+Charging and refusing at the same point fixes that, and it does not change
+WHETHER a payload is refused, because the budget only ever grows: every payload
+that exceeded at the end exceeds at the charge that crossed the line, and every
+charge that crosses the line is followed by an end that is also over. The shared
+package already has this property for the same reason — `opBoundsRefusal` walks
+and charges the payload before `normalize` renders anything.
+
+What it can change is WHICH refusal a payload that breaks two bounds at once
+reports. An object with an oversized key AND a value nested past the depth limit
+used to charge every key without checking, reach the values, and report
+`payload_too_deep:`; it now reports the cost budget at the key. Both are
+refusals of the same payload, and the cost-first order is the one CMP's
+depth-first walk already produces, so this moves comfy-cli toward the
+counterpart rather than away from it. No single-violation payload changes its
+code.
+
+### 22.3 Object keys that collide after coercion are `malformed_op`
+
+§20.1 renders an object key as "its string form, matching ECMAScript property
+coercion", and that coercion is not injective: `1` and `"1"`, `True` and
+`"true"`, `None` and `"null"`, `1.5` and `"1.5"` are distinct Python keys naming
+the same JS property. Emitting both members produced an object literal no JS
+object can hold, and because the member sort is stable the digest of such a dict
+then depended on INSERTION order — so the same logical payload could digest two
+ways and §20's whole "one `op_id`, one payload" guarantee had a hole in it.
+
+Such a pair is refused as `malformed_op` rather than merged: there is no intent
+in it a merge would preserve. Only a programmatically built op can reach the
+case at all, since parsed JSON always has `str` keys, so no wire payload
+changes behaviour.
+
+### 22.4 A `null` digest entry is malformed, not a legacy ledger
+
+§20.2's "legacy documents are untouched" rule is keyed on a document having
+`_applied_ops` and **no** `_applied_op_digests` entry for the op. comfy-cli
+decided that with `recorded is None`, which cannot tell a MISSING entry apart
+from an explicit `null` one, and the up-front validation checks the ledger's
+type rather than its values — both arrive from the same untrusted JSON.
+
+So a document carrying `{<op_id>: null}` read as a legacy list-only ledger and
+returned a changed-payload redelivery as a silent no-op, which is precisely the
+divergence v1.11 exists to stop. Every other non-string value failed closed on
+the digest comparison, so `null` was the one shape that failed open.
+
+The legacy case is now decided by MEMBERSHIP, and a present-but-non-string
+digest entry is `malformed_op` — not `op_id_reuse`, because the document's
+bookkeeping is broken rather than the sender's id being reused. It is refused on
+read rather than by walking every ledger entry on every apply.
+
+### 22.5 The deferred-queue digest is taken defensively
+
+§20.2's deferred-queue gate digested the QUEUED entry with the strict
+canonicalizer, under a comment claiming it could not raise because a queued op
+was canonicalized on the way in. `_deferred_widget_ops` comes off the document
+and is never validated on load, so that does not hold: an oversized or deeply
+nested queued entry raised its own `malformed_op:` / `payload_too_deep:` against
+the INCOMING op, blocking a well-formed op with an error naming a payload that
+is not the one being applied.
+
+The queued entry is now digested with the same tolerant helper the retry loop
+uses, and a `None` digest is a mismatch — correctly, because the incoming op has
+already been digested at that point and is therefore canonical, so an
+uncanonical queued entry cannot be the same payload. The refusal is
+`op_id_reuse`, which is what it is.
+
+### 22.6 Kind and `definitions` are validated before the ledger is seeded
+
+§20.2 promises that "a document that arrived without a ledger is never left
+carrying an empty one by a rejected op". Two validations sat on the wrong side of
+that line: the read of the op's `op` field, and the refusal of `definitions` on
+a non-`insert_workflow` op, both ran after `_applied_ops` had been seeded and
+both raise outside the handler rollback. So a first-seen op with no `op` key, or
+a non-insert op carrying `definitions`, was correctly rejected and left
+`{"_applied_ops": []}` behind on a document that had no ledger at all.
+
+Both now run before the seed. No message or code changes.
+
+## 23. Amendment v1.14 — 2026-11-03 (later write in a batch wins)
+
+`apply_specs` stamps every op in a batch with the same `[base_version,
+actor]`, so two writes to one register in a batch tied on the stamp and the
+random uuid4 `op_id` picked the winner (the §11.1 batch caveat). The later
+write could be a silent no-op, and a write to a structural register (a
+dynamic-combo selector, a DynamicGroup count) could lose to an earlier one and
+make the specs that followed it fail.
+
+**The rule.** `_new_op` now mints `op_id` as 16 hex chars of a nanosecond
+clock that never repeats or goes backwards within the process, then 16 hex
+chars of random bits. Ops a writer mints later compare higher, so within one
+batch the later spec wins. This supersedes "uuid4 hex" in §§1, 2, 6 and 8.2
+(including the `"<uuid4 hex>"` envelope examples) and the §11.1 batch caveat.
+
+**Scope of the ordering.** The guarantee holds for ops one process mints.
+Across separate invocations the prefix follows the wall clock, so a clock step
+can reverse two runs' ops at the same stamp. A uuid4 `op_id` minted before this
+amendment starts with a random hex digit, so at an equal stamp it usually
+outranks a new one (whose prefix starts with `1`), where two uuid4 ids were an
+even split. Ordering across processes needs a different stamp, not this
+tiebreak. The prefix also carries the minting host's clock, to the nanosecond,
+wherever the `op_id` travels.
+
+**Still refused.** Three batch guards stay, and each refuses the whole batch
+instead of letting the later spec win: a `set_dynamic_group_rows` whose group
+was already written at the batch's stamp; a `set_widget` to a count or row
+field an earlier `set_dynamic_group_rows` in the batch replaced; and a second
+`connect` / `disconnect` to the same input. A follow-up may retire the first
+two.
+
+**Wire shape unchanged.** `op_id` is still exactly 32 lowercase hex chars
+(§8.2), the stamp is still `[base_version, actor]`, and `_stamp_key` /
+`_lww_gate` are unchanged. Receivers never parse or regenerate an `op_id`, so
+ops minted before this amendment replay as before. One batch shape still lands
+differently by apply order: a sub-widget write followed by a rebuild of its
+selector or count, because the rebuild resets the value but not the stamp
+(comfy-cli #1101).
+
+**No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/extension_list.json",
+  "title": "comfy extension list",
+  "description": "Custom node folders whose frontend code ComfyUI serves, and whether each is switched off in the frontend's Comfy.Extension.DisabledPacks setting. A switched-off folder that ComfyUI no longer serves is listed with served=false.",
+  "type": "object",
+  "required": ["extensions", "setting"],
+  "additionalProperties": true,
+  "properties": {
+    "extensions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["folder", "path", "scripts", "enabled", "served"],
+        "additionalProperties": true,
+        "properties": {
+          "folder": { "type": "string" },
+          "path": { "type": "string", "description": "The /extensions/<folder>/ key the frontend uses." },
+          "scripts": { "type": "integer", "minimum": 0 },
+          "enabled": { "type": "boolean" },
+          "served": { "type": "boolean" }
+        }
+      }
+    },
+    "setting": { "type": "string" }
+  }
+}

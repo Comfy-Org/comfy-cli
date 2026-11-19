@@ -112,8 +112,31 @@ _SENSITIVE_EXACT = frozenset(
         "from_workflow",
         "workflow",
         "capability",
+        # A ComfyUI clientId is capability-bearing: anyone who can reach the
+        # server and knows it both receives that client's execution events and
+        # evicts its socket by connecting as it. Redacted rather than dropped,
+        # so "was --client-id used" stays measurable.
+        "client_id",
         "query",
         "repo",
+        "repository",
+        "commit",
+        "file",
+        # `workflow add-node --text`: a note body is verbatim user content, like
+        # `--prompt` — analytics only learns that the option was supplied.
+        "text",
+        # `deploy run --allow-upload` names the hashes of a person's own files.
+        "allow_upload",
+        # `model upload --workspace` names a Comfy Cloud workspace, which can
+        # identify a customer; `--expected-sha256` names one of their files.
+        # The kwarg is `workspace_id`, not `workspace`, so `deploy --workspace`
+        # (a bool) stays measurable.
+        "workspace_id",
+        "expected_sha256",
+        # `--models-dir` (repeatable, so a list: the whole list is redacted) and
+        # `--out` are local paths, typed `str` like `--workflow`.
+        "models_dir",
+        "out",
     }
 )
 

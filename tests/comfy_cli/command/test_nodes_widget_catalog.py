@@ -87,6 +87,35 @@ def _object_info() -> dict[str, Any]:
             "display_name": "CLIP Text Encode",
             "python_module": "nodes",
         },
+        # AUDIO_RECORD is a frontend-built DOM widget. Although its uppercase
+        # custom type looks link-shaped in object_info, it serializes one slot.
+        "RecordAudio": {
+            "input": {"required": {"audio": ["AUDIO_RECORD", {}]}},
+            "input_order": {"required": ["audio"]},
+            "output": ["AUDIO"],
+            "output_name": ["AUDIO"],
+            "category": "audio",
+            "display_name": "Record Audio",
+            "python_module": "comfy_extras.nodes_audio",
+        },
+        # The frontend's saved WebcamCapture fixture starts with an image
+        # capture slot before the three schema-declared control widgets.
+        "WebcamCapture": {
+            "input": {
+                "required": {
+                    "image": ["WEBCAM", {}],
+                    "width": ["INT", {"default": 0}],
+                    "height": ["INT", {"default": 0}],
+                    "capture_on_queue": ["BOOLEAN", {"default": True}],
+                }
+            },
+            "input_order": {"required": ["image", "width", "height", "capture_on_queue"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "image",
+            "display_name": "Webcam Capture",
+            "python_module": "comfy_extras.nodes_webcam",
+        },
         # Zero widgets — a real, load-bearing state. The applier must be able to
         # tell "this class has no widgets" from "this class is unknown".
         "VAEDecode": {
@@ -227,9 +256,51 @@ class TestWidgetOrder:
         assert types["VAEDecode"]["widget_order"] == []
         assert "VAEDecode" in types, "a widget-less class must still be present, not dropped"
 
+    def test_record_audio_names_its_frontend_built_widget(self, patched_loader, capsys):
+        types = _run(["widget-catalog"], capsys)["data"]["types"]
+        assert types["RecordAudio"]["widget_order"] == ["audio"]
+
+    def test_webcam_names_its_frontend_built_widget_before_controls(self, patched_loader, capsys):
+        types = _run(["widget-catalog"], capsys)["data"]["types"]
+        assert types["WebcamCapture"]["widget_order"] == ["image", "width", "height", "capture_on_queue"]
+
     def test_dynamic_combo_sub_widgets_expand(self, patched_loader, capsys):
         types = _run(["widget-catalog"], capsys)["data"]["types"]
         assert types["DynNode"]["widget_order"] == ["model", "model.resolution", "seed", "control_after_generate"]
+
+    def test_unsupported_dynamic_group_class_is_left_out_with_a_warning(self, monkeypatch, capsys):
+        """One custom node with a DynamicGroup schema the CLI refuses must not
+        take down the catalog for every other class."""
+        data = _object_info()
+        data["SockGroup"] = {
+            "input": {
+                "required": {
+                    "rows": [
+                        "COMFY_DYNAMICGROUP_V3",
+                        {
+                            "template": {"required": {"image": ["IMAGE", {}], "strength": ["FLOAT", {}]}},
+                            "min": 0,
+                            "max": 4,
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["rows"]},
+            "output": [],
+            "name": "SockGroup",
+            "python_module": "custom_nodes.sock",
+        }
+        monkeypatch.setattr(nodes_cmd, "_get_graph", lambda *a, **kw: _graph(data))
+
+        env = _run(["widget-catalog"], capsys)
+
+        assert env["ok"] is True
+        types = env["data"]["types"]
+        assert "SockGroup" not in types
+        assert set(types) == {m.id for m in _graph().all_nodes()}
+        assert env["data"]["class_count"] == len(types)
+        assert [w["code"] for w in env["data"]["warnings"]] == ["dynamic_group_unsupported"]
+        assert env["data"]["warnings"][0]["message"].startswith("SockGroup left out: DynamicGroup template")
 
 
 # ---------------------------------------------------------------------------

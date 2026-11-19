@@ -18,6 +18,7 @@ code == "node_not_found") never fired on this path.
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -29,6 +30,7 @@ from test_workflow_edit import (  # type: ignore[import-not-found]
     reset_singleton,  # noqa: F401  (autouse fixture)
 )
 
+from comfy_cli import layout, workflow_ops
 from comfy_cli.command import workflow_edit
 
 
@@ -55,10 +57,14 @@ def test_unknown_class_emits_node_not_found_with_close_matches(patched_graph, tm
 
 
 def test_ui_only_node_is_rejected_with_a_specific_reason(patched_graph, tmp_path, capsys):
-    """Note/MarkdownNote/Reroute/GetNode/SetNode/PrimitiveNode exist only in the
-    UI graph. difflib gives no useful match for them (and for GetNode returns
-    actively misleading ones), so they need their own message."""
-    for cls in ("Note", "MarkdownNote", "GetNode", "Reroute"):
+    """Reroute/GetNode/SetNode/PrimitiveNode exist only in the UI graph and carry
+    data flow, so they stay refused. difflib gives no useful match for them (and
+    for GetNode returns actively misleading ones), so they need their own message.
+
+    Note/MarkdownNote used to be in this list; they are now authorable (see
+    test_add_node_virtual_notes.py) — the two traces at the top of this file were
+    the agent asking for exactly that."""
+    for cls in ("GetNode", "Reroute", "SetNode", "PrimitiveNode"):
         env = _add(tmp_path, capsys, cls)
         assert env["ok"] is False, cls
         err = env["error"]
@@ -69,9 +75,7 @@ def test_ui_only_node_is_rejected_with_a_specific_reason(patched_graph, tmp_path
 
 
 def test_uuid_class_type_is_named_as_a_subgraph_instance(patched_graph, tmp_path, capsys):
-    """A subgraph INSTANCE's `type` is its definition UUID, and ls-nodes passes
-    it through verbatim — so the agent sees a UUID that looks like a class name.
-    There is no instantiate command, so this can never succeed; say so."""
+    """An unknown UUID is still rejected as a missing subgraph definition."""
     env = _add(tmp_path, capsys, "2454ad83-157c-40dd-9f19-5daaf4041ce0")
     assert env["ok"] is False
     err = env["error"]
@@ -80,62 +84,182 @@ def test_uuid_class_type_is_named_as_a_subgraph_instance(patched_graph, tmp_path
     assert "subgraph" in blob, f"must explain the UUID is a subgraph instance id: {err}"
 
 
+def _workflow_with_subgraph_instance() -> tuple[dict, str]:
+    definition_id = "2454ad83-157c-40dd-9f19-5daaf4041ce0"
+    workflow = _base_workflow()
+    workflow["definitions"] = {
+        "subgraphs": [
+            {
+                "id": definition_id,
+                "name": "Prompt module",
+                "inputs": [],
+                "outputs": [],
+                "nodes": [],
+                "links": [],
+            }
+        ]
+    }
+    workflow["nodes"].append(
+        {
+            "id": 88,
+            "type": definition_id,
+            "pos": [400, 300],
+            "size": [240, 160],
+            "flags": {"collapsed": True},
+            "order": 3,
+            "mode": 2,
+            "inputs": [
+                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 51},
+                {"name": "clip", "type": "CLIP", "link": 52},
+            ],
+            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [53]}],
+            "properties": {"Node name for S&R": "Prompt module"},
+            "widgets_values": ["a photo of a pier", 7],
+            "widgets_values_form": {"order": ["text", "seed"]},
+            "title": "custom first instance",
+        }
+    )
+    workflow["last_node_id"] = 88
+    return workflow, definition_id
+
+
+def test_existing_subgraph_definition_reuses_exact_host_schema_with_fresh_instance_state(
+    patched_graph, tmp_path, capsys
+):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    path = _write(tmp_path, workflow)
+
+    env = _run(["add-node", str(path), definition_id, "--at", "700,300"], capsys)
+
+    assert env["ok"] is True, env
+    op = env["data"]["op"]
+    saved = json.loads(path.read_text())
+    instances = [node for node in saved["nodes"] if node["type"] == definition_id]
+    assert len(instances) == 2
+    original, reused = instances
+    assert reused == op["node"]
+    assert op["subgraph_reuse"] == {
+        "definition_id": definition_id,
+        "existing_instance_paths": [["88"]],
+    }
+    assert reused["id"] != original["id"]
+    assert reused["pos"] == [700.0, 300.0]
+    assert reused["size"] == original["size"]
+    assert reused["widgets_values"] == original["widgets_values"]
+    assert reused["widgets_values_form"] == original["widgets_values_form"]
+    assert reused["properties"] == original["properties"]
+    assert [item["link"] for item in reused["inputs"]] == [None, None]
+    assert reused["outputs"][0]["links"] == []
+    assert reused["flags"] == {}
+    assert reused["order"] == 0
+    assert reused["mode"] == 0
+    assert "title" not in reused
+
+    reused["widgets_values"][0] = "second instance"
+    assert original["widgets_values"][0] == "a photo of a pier"
+
+
+def test_legacy_name_typed_host_is_resolved_by_definition_id(patched_graph, tmp_path, capsys):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["type"] = "Prompt module"
+    path = _write(tmp_path, workflow)
+
+    env = _run(["add-node", str(path), definition_id, "--at", "700,300"], capsys)
+
+    assert env["ok"] is True, env
+    assert env["data"]["op"]["node"]["type"] == definition_id
+    assert env["data"]["op"]["subgraph_reuse"]["existing_instance_paths"] == [["88"]]
+
+
+def test_definition_without_top_level_host_stays_node_not_found(patched_graph, tmp_path, capsys):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"].pop()
+    path = _write(tmp_path, workflow)
+
+    env = _run(["add-node", str(path), definition_id], capsys)
+
+    assert env["ok"] is False
+    assert env["error"]["code"] == "node_not_found"
+    assert "matching definition and reusable instance" in json.dumps(env["error"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("inputs", 1),
+        ("outputs", {}),
+        ("properties", []),
+        ("widgets_values", "not-a-container"),
+        ("widgets_values_form", []),
+    ],
+)
+def test_malformed_reusable_host_schema_fails_closed(field, value):
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1][field] = value
+
+    with pytest.raises(ValueError, match=f"host field {field!r}"):
+        workflow_ops.add_node(workflow, _graph(), definition_id)
+
+
+def test_reused_host_preserves_object_form_size_as_a_list():
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["size"] = {"0": 640, "1": 360}
+
+    _saved, op = workflow_ops.add_node(workflow, _graph(), definition_id, pos=[900, 300])
+
+    assert op["node"]["size"] == [640.0, 360.0]
+
+
+def test_reused_host_rejects_string_size_instead_of_reading_characters():
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["size"] = "640,360"
+
+    _saved, op = workflow_ops.add_node(workflow, _graph(), definition_id, pos=[900, 300])
+
+    assert op["node"]["size"] == list(layout.DEFAULT_SIZE)
+
+
+def test_batch_layout_uses_reused_host_size_for_collision_avoidance():
+    workflow, definition_id = _workflow_with_subgraph_instance()
+    workflow["nodes"][-1]["size"] = {"0": 640, "1": 360}
+
+    saved, ops, _aliases = workflow_ops.apply_specs(
+        workflow,
+        _graph(),
+        [
+            {"op": "add_node", "class_type": definition_id, "as": "copy"},
+            {"op": "add_node", "class_type": "VAEDecode", "as": "decode"},
+        ],
+    )
+
+    copied, decode = (next(node for node in saved["nodes"] if node["id"] == op["node_id"]) for op in ops)
+    copied_rect = layout.occupied(copied["pos"], copied["size"])
+    decode_rect = layout.occupied(decode["pos"], decode["size"])
+    assert not layout._overlaps(copied_rect, decode_rect)
+
+
+def test_reuse_and_concurrent_interior_write_are_reported_as_a_conflict():
+    base, definition_id = _workflow_with_subgraph_instance()
+    inner = copy.deepcopy(next(node for node in _base_workflow()["nodes"] if node["type"] == "KSampler"))
+    inner["id"] = 27
+    base["definitions"]["subgraphs"][0]["nodes"] = [inner]
+
+    _with_copy, reuse = workflow_ops.add_node(copy.deepcopy(base), _graph(), definition_id, actor="copy")
+    _with_edit, interior = workflow_ops.set_widget(copy.deepcopy(base), _graph(), "88/27", "steps", 9, actor="edit")
+    copy_then_edit = workflow_ops.apply_op(
+        workflow_ops.apply_op(copy.deepcopy(base), reuse, _graph()), interior, _graph()
+    )
+    edit_then_copy = workflow_ops.apply_op(
+        workflow_ops.apply_op(copy.deepcopy(base), interior, _graph()), reuse, _graph()
+    )
+
+    assert workflow_ops.canonical(copy_then_edit) != workflow_ops.canonical(edit_then_copy)
+    assert workflow_ops.detect_conflict(reuse, interior) is True
+
+
 def test_known_class_still_adds(patched_graph, tmp_path, capsys):
     env = _add(tmp_path, capsys, "VAEDecode")
     assert env["ok"] is True, env
-
-
-@pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
-def test_note_refusal_hints_the_insert_workflow_route(patched_graph, tmp_path, capsys, cls):
-    """Asked to add a Note, an agent could call add_node {"class_type": "Note"},
-    read the hint "use a real node class; to annotate the graph, set a
-    title/widget on an existing node instead", and tell the user notes cannot
-    be added. They can: an insert_workflow carrying the note node (with an `id`
-    and its text in widgets_values) lands it. The hint must name that route,
-    and the example it gives must itself be accepted by
-    `workflow insert-workflow`."""
-    env = _add(tmp_path, capsys, cls)
-    assert env["ok"] is False
-    err = env["error"]
-    assert err["code"] == "node_not_found"
-    hint = err.get("hint") or ""
-    assert "insert-workflow" in hint, f"must name the route that adds a note: {err}"
-    assert "set a title/widget on an existing node instead" not in hint, err
-
-    example = json.loads(hint[hint.index("{") : hint.rindex("}") + 1])
-    node = example["nodes"][0]
-    assert node["type"] == cls and "id" in node and node["widgets_values"], example
-
-    tpl = _write(tmp_path, example, name="note.json")
-    ins = _run(["insert-workflow", str(_write(tmp_path, _base_workflow())), str(tpl)], capsys)
-    assert ins["ok"] is True, ins
-    assert ins["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
-
-
-@pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
-def test_note_hint_is_a_runnable_invocation_whose_op_must_be_applied(patched_graph, tmp_path, capsys, cls):
-    """`insert-workflow` takes the template as a FILE PATH or `-` (stdin), never
-    inline JSON, and it only EMITS an op. A hint reading "insert {json}" is not
-    something a caller can run, and following it without applying the op
-    leaves no note on the canvas. The hint must spell a stdin invocation and
-    say the emitted op has to be applied to the source workflow."""
-    hint = _add(tmp_path, capsys, cls)["error"].get("hint") or ""
-    assert "comfy workflow insert-workflow <workflow.json> -" in hint, hint
-    assert "apply" in hint.lower(), hint
-
-    payload = hint[hint.index("echo '") + len("echo '") : hint.index("' | comfy workflow insert-workflow")]
-    from test_workflow_edit import _force_json_renderer  # type: ignore[import-not-found]
-    from typer.testing import CliRunner
-
-    from comfy_cli.command import workflow as workflow_cmd
-
-    _force_json_renderer()
-    src = _write(tmp_path, _base_workflow())
-    res = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", str(src), "-"], input=payload, standalone_mode=False)
-    out = capsys.readouterr().out or res.stdout
-    env = json.loads([ln for ln in out.splitlines() if ln.strip()][-1])
-    assert env["ok"] is True, env
-    assert env["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
 
 
 def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys):

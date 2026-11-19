@@ -1,6 +1,10 @@
 # DESIGN: Unified Dependency Resolution (--uv-compile) Implementation
 
-## Architecture Decision: Pass-Through
+The established architecture decision is recorded in
+[ADR-DEPENDENCIES-0001](adr/DEPENDENCIES-0001-delegate-unified-resolution-to-comfyui-manager.md).
+This document retains the implementation detail.
+
+## Implemented design: pass-through
 
 cm_cli already fully implements `--uv-compile` and `UnifiedDepResolver`, so
 comfy-cli adopts a **pass-through** approach.

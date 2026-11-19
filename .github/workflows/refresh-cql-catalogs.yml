@@ -40,7 +40,9 @@ name: Refresh CQL catalogs
 #     logs are world-readable, so a variable would be republished on every run —
 #     exactly what moving them out of the file was meant to prevent. Secrets are
 #     masked in that block. Nothing here echoes either value: the error paths
-#     below name the setting, never its contents.
+#     below name the setting, never its contents, and the trimmed copies the
+#     verify step hands to the fetch step are re-registered with `::add-mask::`
+#     so they stay masked in that block too.
 
 on:
   schedule:
@@ -65,13 +67,159 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Every prerequisite is checked HERE, in one step, before anything that
+      # consumes one. Two reasons it is one step and not several.
+      #
+      # `create-github-app-token` fails on an empty `private-key` with a generic
+      # "input must be set to a non-empty string", which on a daily schedule
+      # reads as a mystery red and tells nobody what to do about it. This ran
+      # red every day from 2026-10-21 for exactly that reason: nobody could tell
+      # an unprovisioned repo from a broken refresh.
+      #
+      # And failing on the FIRST missing item would make an admin fix one
+      # secret, wait for tomorrow's schedule, and meet the next one. None of
+      # these checks needs a checkout or a token, so they all run here and the
+      # job reports the complete list once.
+      #
+      # Values are whitespace-stripped before testing. A variable saved as a
+      # stray space is not empty to `[ -z ]`, but the action trims its inputs,
+      # so it would reach the action as empty and fail with the same generic
+      # error this step exists to replace.
+      - name: Verify every prerequisite is configured
+        shell: bash
+        env:
+          APP_ID: ${{ vars.APP_ID }}
+          CLOUD_CODE_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+          CLOUD_REPO_READ_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
+          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
+          SRC_PATH: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
+        run: |
+          # Trim surrounding whitespace ONLY. A value saved as a stray space is
+          # not empty to `[ -z ]`, but the token action trims its inputs, so it
+          # arrives empty and fails with the generic error this step exists to
+          # replace. Internal whitespace is NOT removed: `12 34` is reported
+          # as malformed here rather than silently normalised to `1234`. The
+          # trimmed values are what every later step consumes (see the
+          # GITHUB_ENV export at the end of this step), so what is validated
+          # here is exactly what the consumer receives.
+          trim() { local v="${1:-}"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
+
+          APP_ID="$(trim "${APP_ID:-}")"
+          CLOUD_REPO_READ_TOKEN="$(trim "${CLOUD_REPO_READ_TOKEN:-}")"
+          SRC_REPO="$(trim "${SRC_REPO:-}")"
+          SRC_PATH="$(trim "${SRC_PATH:-}")"
+          # The PEM is deliberately NOT trimmed: its surrounding newlines are
+          # part of the value. Emptiness is tested on a stripped copy instead.
+          key_probe="$(printf '%s' "${CLOUD_CODE_BOT_PRIVATE_KEY:-}" | tr -d '[:space:]')"
+
+          missing=""
+          [ -z "$APP_ID" ]                 && missing="${missing}\n  - vars.APP_ID (repository variable): the CLOUD_CODE_BOT app's numeric app id"
+          [ -z "$key_probe" ]              && missing="${missing}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY: that app's PEM private key"
+          [ -z "$CLOUD_REPO_READ_TOKEN" ]  && missing="${missing}\n  - secrets.CLOUD_REPO_READ_TOKEN: Contents:Read on the private source repo"
+          [ -z "$SRC_REPO" ]               && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_REPO: that repo's 'owner/name'"
+          [ -z "$SRC_PATH" ]               && missing="${missing}\n  - secrets.CQL_NO_GPU_SOURCE_PATH: path to no_gpu_nodes.json within it"
+
+          # Shape checks for values that ARE set, so a provisioned-but-wrong
+          # credential names itself here instead of failing downstream with an
+          # error about something else.
+          #
+          # `[[ =~ ]]` rather than a `grep` pipeline, and anchored: it matches
+          # against the WHOLE value, so an embedded newline cannot smuggle a bad
+          # segment past a per-line match.
+          #
+          # SRC_REPO and SRC_PATH are spliced into a REST path below and are
+          # mutable by anyone with repo admin without code review. Rejecting `?`
+          # and `#` is not cosmetic: either character ends the path component and
+          # drops the `?ref=main` pin, so the fetch would silently read the
+          # source's default branch instead of the pinned one. `..` is rejected
+          # for the obvious traversal reason. No value is ever echoed; the
+          # message names the setting only.
+          malformed=""
+          if [ -n "$APP_ID" ] && [[ ! "$APP_ID" =~ ^[0-9]+$ ]]; then
+            malformed="${malformed}\n  - vars.APP_ID must be the app's numeric id (digits only, no name, slug or spaces)"
+          fi
+          if [ -n "$key_probe" ] && [[ ! "$CLOUD_CODE_BOT_PRIVATE_KEY" =~ -----BEGIN[A-Z\ ]*PRIVATE\ KEY----- ]]; then
+            malformed="${malformed}\n  - secrets.CLOUD_CODE_BOT_PRIVATE_KEY has no PEM private-key header (paste the whole .pem, including its BEGIN line)"
+          fi
+          if [ -n "$SRC_REPO" ] && [[ ! "$SRC_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            malformed="${malformed}\n  - secrets.CQL_NO_GPU_SOURCE_REPO must be a bare 'owner/name' — no URL, no scheme, no extra path segments"
+          fi
+          if [ -n "$SRC_PATH" ] && { [[ ! "$SRC_PATH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || [[ "$SRC_PATH" == *..* ]]; }; then
+            malformed="${malformed}\n  - secrets.CQL_NO_GPU_SOURCE_PATH must be a repo-relative path — no leading '/', no '..', no query or fragment characters"
+          fi
+
+          if [ -n "${missing}${malformed}" ]; then
+            [ -n "${missing}" ]   && printf 'Not configured in this repository:%b\n' "${missing}"
+            [ -n "${malformed}" ] && printf 'Configured but malformed:%b\n' "${malformed}"
+            echo
+            echo "This workflow refreshes the CQL data files under comfy_cli/cql/data/"
+            echo "from their canonical upstream sources. It needs the CLOUD_CODE_BOT app"
+            echo "credentials to author its auto-PR as the bot rather than as a human"
+            echo "(see this file's header for why that matters to the PR's CI), and the"
+            echo "read token plus coordinates to fetch the private source file."
+            echo
+            echo "These are secrets rather than variables because Actions echoes a step's"
+            echo "resolved env: block into the (public) run log. A repository admin has to"
+            echo "set them under Settings > Secrets and variables > Actions."
+            echo
+            echo "Until then this job fails every day on its schedule. That failure is"
+            echo "NOT a signal about the catalogs or about main."
+            echo "::error::Refresh prerequisites are not configured; see this step's log for the full list."
+            exit 1
+          fi
+
+          # Hand the VALIDATED values to the steps that consume them. Every
+          # check above ran on the trimmed copy, so the trimmed copy is what
+          # has to arrive downstream; a consumer that re-reads the raw secret
+          # is reading a value this step never validated.
+          #
+          # Without this, a coordinate saved with a stray space or newline
+          # passes here (it is trimmed before testing) and the fetch step still
+          # splices the untrimmed value into `repos/$SRC_REPO/contents/$SRC`,
+          # dying on a 404 that says nothing about the real cause — the exact
+          # failure mode this step exists to replace. The per-step check this
+          # one replaced tested the RAW value and so rejected that case; moving
+          # the checks here is what dropped the rejection.
+          #
+          # `::add-mask::` comes first and is load-bearing, not belt-and-braces.
+          # A secret is masked in the (public) run log by exact string match, so
+          # a trimmed copy is a DIFFERENT string and would print in clear in the
+          # consumer step's resolved `env:` block. Registering it restores the
+          # masking the raw `secrets.*` read had. APP_ID is a repository
+          # variable, never masked and already echoed on every run today, so it
+          # is exported without a mask rather than implying it is a secret.
+          #
+          # Single-line `NAME=value` writes are safe here precisely because the
+          # shape checks above are anchored to [A-Za-z0-9._-] plus `/`: none of
+          # these three can carry the newline that would turn a GITHUB_ENV write
+          # into an injection.
+          #
+          # CLOUD_CODE_BOT_PRIVATE_KEY and CLOUD_REPO_READ_TOKEN are
+          # deliberately NOT re-exported and their consumers keep reading
+          # `secrets.*`. Neither is part of this gap: the PEM is never trimmed
+          # (only its emptiness probe is), and the token's verdict here is the
+          # same trimmed or raw, so both behave exactly as they did before the
+          # checks were consolidated. Re-exporting a trimmed copy of the PAT
+          # would only trade that for a value whose masking depends on the line
+          # above being right.
+          echo "::add-mask::$SRC_REPO"
+          echo "::add-mask::$SRC_PATH"
+          {
+            echo "APP_ID=$APP_ID"
+            echo "SRC_REPO=$SRC_REPO"
+            echo "SRC_PATH=$SRC_PATH"
+          } >> "$GITHUB_ENV"
+
       # Mint a CLOUD_CODE_BOT installation token so the auto-PR is authored by
       # the bot, not by a human — see the header prerequisites for why.
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.APP_ID }}
+          # env.APP_ID, not vars.APP_ID: the verify step validated the trimmed
+          # value, so that is the one to pass. The PEM stays a raw secret read —
+          # it is never trimmed, for the reason given in the verify step.
+          app-id: ${{ env.APP_ID }}
           private-key: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
 
       - uses: actions/checkout@v6
@@ -81,54 +229,6 @@ jobs:
           # the `synchronize` event — a GITHUB_TOKEN push would silently skip CI
           # on the auto-PR, leaving its required checks stuck pending.
           token: ${{ steps.app-token.outputs.token }}
-
-      - name: Verify the private-source token and coordinates are set
-        env:
-          CLOUD_REPO_READ_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
-          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
-          SRC_PATH: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
-        run: |
-          if [ -z "${CLOUD_REPO_READ_TOKEN:-}" ]; then
-            echo "::error::CLOUD_REPO_READ_TOKEN secret is not set."
-            echo "This workflow needs a PAT (or app token) with:"
-            echo "  - Contents: Read on the repo named by the CQL_NO_GPU_SOURCE_REPO"
-            echo "    secret (to fetch the canonical no_gpu_nodes.json)"
-            echo "  (PR creation is handled separately by the CLOUD_CODE_BOT app token, not this PAT.)"
-            exit 1
-          fi
-          # Checked HERE, beside the token, rather than at the fetch step: an
-          # unset secret expands to the empty string, so `repos//contents/`
-          # is a 404 that reads like the file moved rather than like a missing
-          # prerequisite. Same FAILS-LOUDLY contract as the token above.
-          if [ -z "${SRC_REPO:-}" ] || [ -z "${SRC_PATH:-}" ]; then
-            echo "::error::CQL_NO_GPU_SOURCE_REPO / CQL_NO_GPU_SOURCE_PATH secrets are not set."
-            echo "Set both under Settings > Secrets and variables > Actions > Secrets:"
-            echo "  - CQL_NO_GPU_SOURCE_REPO: the 'owner/name' of the private source repo"
-            echo "  - CQL_NO_GPU_SOURCE_PATH: the path to no_gpu_nodes.json within it"
-            echo "They are kept out of this file because comfy-cli is public, and"
-            echo "they are secrets rather than variables because Actions echoes"
-            echo "a step's resolved env: block into the (public) run log."
-            exit 1
-          fi
-          # Shape checks. Both values are spliced into a REST path below and are
-          # mutable by anyone with repo admin without code review, so validate
-          # them here rather than letting a malformed value degrade into an
-          # ambiguous 404 — or, worse, silently redirect the fetch. Rejecting
-          # `?` and `#` also protects the `?ref=main` pin: either character would
-          # end the path component and drop the branch pin, so the fetch would
-          # fall back to the source's default branch.
-          # No value is echoed on failure; the message names the setting only.
-          # Bash `[[ =~ ]]` rather than a `grep` pipeline: it anchors against the
-          # whole value, so an embedded newline cannot smuggle a bad segment
-          # past a per-line match.
-          if [[ ! "$SRC_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
-            echo "::error::CQL_NO_GPU_SOURCE_REPO must be a bare 'owner/name' — no URL, no scheme, no extra path segments."
-            exit 1
-          fi
-          if [[ ! "$SRC_PATH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || [[ "$SRC_PATH" == *..* ]]; then
-            echo "::error::CQL_NO_GPU_SOURCE_PATH must be a repo-relative path — no leading '/', no '..', no query or fragment characters."
-            exit 1
-          fi
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -157,8 +257,12 @@ jobs:
         id: fetch-no-gpu
         env:
           GH_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
-          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
-          SRC: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
+          # The coordinates come from the verify step's GITHUB_ENV export, not
+          # from `secrets.*` directly: those are the trimmed values it actually
+          # validated, so a secret saved with a stray space cannot pass the
+          # check and then reach this `gh api` path untrimmed as a bare 404.
+          SRC_REPO: ${{ env.SRC_REPO }}
+          SRC: ${{ env.SRC_PATH }}
         run: |
           set -euo pipefail
           # Resolve the blob SHA via Contents (explicitly pinned to @main so we

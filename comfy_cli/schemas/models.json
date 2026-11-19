@@ -17,6 +17,7 @@
       }
     },
     "total": { "type": "integer", "description": "Total items before capping (list-folder, search)." },
+    "total_is_lower_bound": { "type": "boolean", "description": "search: true when the Cloud scan stopped at its page cap, so `total` counts only the assets it reached and more matches may exist. Narrow the query. Always false on local." },
     "shown": { "type": "integer", "description": "Number of items in the response after capping." },
     "count": { "type": "integer", "description": "Count of folders (list-folders)." },
     "folder": { "type": "string", "description": "Folder name that was listed (list-folder)." },

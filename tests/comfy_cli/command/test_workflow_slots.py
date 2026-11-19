@@ -1040,3 +1040,263 @@ class TestRoutingErrorEnvelope:
         path = _write_workflow(tmp_path, _direct_workflow())
         env = _run(["slots", str(path), "--input", str(oi)], capsys)
         assert env["ok"] is True, env
+
+
+class TestSlotsCorruptDefinitions:
+    """End-to-end: a corrupt ``definitions`` block must still yield an envelope.
+
+    Before the shape checks in ``_subgraph_defs_by_id`` a truthy wrong-typed
+    container exited ``comfy workflow slots`` on a rich traceback
+    (``AttributeError`` on ``definitions``, ``TypeError`` on ``subgraphs``)
+    with NOTHING on stdout — the JSON caller saw a hard crash instead of a
+    parseable result. ``slots_cmd``'s ``except (ValueError, KeyError)`` does
+    not catch either, and there is no catch-all above it.
+    """
+
+    @pytest.mark.parametrize(
+        "definitions",
+        [5, {"subgraphs": 5}, {"subgraphs": "abc"}, ["x"]],
+        ids=["non-dict-definitions", "non-list-subgraphs", "str-subgraphs", "list-definitions"],
+    )
+    def test_slots_degrades_to_an_empty_index(self, patched_graph, tmp_path, capsys, definitions):
+        path = _write_workflow(tmp_path, {"nodes": [], "links": [], "definitions": definitions})
+        captured, _err, result = _invoke(["slots", str(path)], capsys)
+        assert result.exception is None, f"crashed instead of degrading: {result.exception!r}"
+        assert result.exit_code == 0, captured
+        env = json.loads([ln for ln in captured.strip().splitlines() if ln.strip()][-1])
+        assert env["ok"] is True
+        assert env["data"]["count"] == 0
+        assert env["data"]["slots"] == []
+
+    def test_top_level_nodes_are_still_read_past_a_corrupt_definitions_block(self, patched_graph, tmp_path, capsys):
+        """Degrading is not the same as giving up: only the definitions block is
+        unreadable, so the top-level graph's slots must still come back."""
+        wf = dict(_direct_workflow(), definitions=5)
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] > 0
+        assert "6.text" in {s["address"] for s in env["data"]["slots"]}
+
+    def test_slots_survives_an_instance_of_a_def_with_non_list_nodes(self, patched_graph, tmp_path, capsys):
+        """The def's ``nodes`` is truthy but not a list: the instance must not
+        walk it (``TypeError``) — the def is dropped from the index instead."""
+        wf = dict(_direct_workflow())
+        wf["nodes"] = [*wf["nodes"], {"id": 99, "type": "u1", "inputs": [], "outputs": [], "widgets_values": []}]
+        wf["definitions"] = {"subgraphs": [{"id": "u1", "nodes": 5}]}
+        path = _write_workflow(tmp_path, wf)
+        _captured, _err, result = _invoke(["slots", str(path)], capsys)
+        assert result.exception is None, f"crashed instead of degrading: {result.exception!r}"
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        assert "6.text" in {s["address"] for s in env["data"]["slots"]}
+
+    def test_set_slot_reports_a_domain_error_instead_of_crashing(self, patched_graph, tmp_path, capsys):
+        """``set-slot`` reaches the same helper before any of its own guards, so
+        it crashed on the same input. It should now fail on the real problem —
+        the address doesn't resolve — through the normal error envelope."""
+        path = _write_workflow(tmp_path, {"nodes": [], "links": [], "definitions": {"subgraphs": 5}})
+        _captured, _err, result = _invoke(["set-slot", str(path), "3.seed=1"], capsys)
+        assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+        env = _run(["set-slot", str(path), "3.seed=1"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_slot_invalid"
+
+
+# ---------------------------------------------------------------------------
+# slots — source_address on promoted subgraph widget rows
+# ---------------------------------------------------------------------------
+#
+# A promoted widget is advertised at ``<instance>.<name>`` and its interior
+# widget is hidden, so the row names the interior node + widget it stands for
+# in ``source_address`` — the only way a consumer recovers the real widget
+# behind a renamed promotion or tells two same-class loaders apart.
+
+
+def _gallery_workflow(name: str) -> dict:
+    return json.loads((_FIXTURES / "gallery" / name).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def patched_promoted_graph(monkeypatch):
+    oi = json.loads((_FIXTURES / "object_info_subgraph_promoted.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: Graph.from_object_info(oi))
+
+
+class TestSlotsSourceAddress:
+    def test_promoted_row_names_its_interior_widget(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("image_z_image_turbo.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        row = by_addr["57.unet_name"]
+        assert row["source_address"] == "57/28.unet_name"
+        # Additive only: the editable address and the UUID node_type stay.
+        assert row["node_type"] == "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
+        assert "57/28.unet_name" not in by_addr
+        # A labelled promotion still names the interior widget.
+        assert by_addr["57.text"]["source_address"] == "57/27.text"
+
+    def test_minimax_promoted_loader(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("audio_minimax_music_3.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert by_addr["37.unet_name"]["source_address"] == "37/6.unet_name"
+
+    def test_renamed_promotion_carries_the_real_widget_name(self, patched_promoted_graph, tmp_path, capsys):
+        wf = _gallery_workflow("image_z_image_turbo.json")
+        sg = wf["definitions"]["subgraphs"][0]
+        next(i for i in sg["inputs"] if i["name"] == "unet_name")["name"] = "diffusion_model"
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "57.unet_name" not in by_addr
+        assert by_addr["57.diffusion_model"]["source_address"] == "57/28.unet_name"
+
+    def test_top_level_row_has_no_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("image_z_image_turbo.json"))
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "source_address" not in by_addr["9.filename_prefix"]
+
+    def test_nested_promotion_resolves_to_the_deepest_widget(self, patched_subgraph_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _subgraph_workflow())
+        env = _run(["slots", str(path)], capsys)
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        # 10.value -> inner instance 3's promoted value -> node 7's widget.
+        assert by_addr["10.value"]["source_address"] == "10/3/7.value"
+        # A legacy proxyWidgets promotion the frontend repairs on load.
+        assert by_addr["10.seed"]["source_address"] == "10/9.seed"
+        # Interior rows are not promotions.
+        assert "source_address" not in by_addr["10/9.prompt"]
+
+    def test_select_projects_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _gallery_workflow("audio_minimax_music_3.json"))
+        env = _run(["slots", str(path), "--select", "slots.#.source_address"], capsys)
+        assert env["ok"] is True
+        # Rows without the key (plain top-level widgets) are dropped, not null.
+        assert "37/6.unet_name" in env["data"]
+        assert all(isinstance(a, str) for a in env["data"])
+
+    @staticmethod
+    def _materialized_loader(interior_type: str) -> dict:
+        # Host value materialized for every promotion, so the unet_name row is
+        # emitted even when the interior widget no longer resolves.
+        wf = _gallery_workflow("image_z_image_turbo.json")
+        next(n for n in wf["nodes"] if n["id"] == 57)["widgets_values"] = [
+            "a cat",
+            1024,
+            1024,
+            0,
+            8,
+            "z.safetensors",
+            "qwen.safetensors",
+            "ae.safetensors",
+        ]
+        sg = wf["definitions"]["subgraphs"][0]
+        next(n for n in sg["nodes"] if n["id"] == 28)["type"] = interior_type
+        return wf
+
+    def test_stale_interior_widget_omits_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        # The catalog's VAELoader has no unet_name: the row stays (the host
+        # value runs) but names no dangling interior widget.
+        path = _write_workflow(tmp_path, self._materialized_loader("VAELoader"))
+        env = _run(["slots", str(path)], capsys)
+        row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
+        assert row["current_value"] == "z.safetensors"
+        assert "source_address" not in row
+
+    def test_uncatalogued_interior_class_keeps_source_address(self, patched_promoted_graph, tmp_path, capsys):
+        # A custom node the catalog does not know is trusted as saved.
+        path = _write_workflow(tmp_path, self._materialized_loader("SomeCustomUnetLoader"))
+        env = _run(["slots", str(path)], capsys)
+        row = {s["address"]: s for s in env["data"]["slots"]}["57.unet_name"]
+        assert row["source_address"] == "57/28.unet_name"
+
+    def test_null_interior_node_does_not_crash_the_chain(self, patched_subgraph_graph, tmp_path, capsys):
+        # Every other walk skips a non-dict ``nodes`` entry; the source chain
+        # must too rather than raising out of ``slots`` with no envelope.
+        wf = _subgraph_workflow()
+        for sg in wf["definitions"]["subgraphs"]:
+            sg["nodes"].insert(0, None)
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert by_addr["10.value"]["source_address"] == "10/3/7.value"
+
+    @pytest.mark.parametrize(
+        ("selection", "widget", "expected"),
+        [
+            ("seedream 5.0 pro", "model.size_preset", "50/1.model.size_preset"),
+            # max_images exists only on the lite option: the saved pro
+            # selection has no such widget, so no dangling address.
+            ("seedream 5.0 pro", "model.max_images", None),
+            ("seedream 5.0 lite", "model.max_images", "50/1.model.max_images"),
+            ("seedream 5.0 pro", "model.bogus", None),
+        ],
+    )
+    def test_dynamic_combo_sub_widget_follows_saved_selection(self, selection, widget, expected):
+        from comfy_cli.cql import engine as cql_engine
+        from comfy_cli.cql.promoted import PromotedInput
+
+        inner = _seedream_workflow()["nodes"][0]
+        if selection == "seedream 5.0 lite":
+            # lite inlines size_preset, width, height, max_images, fail_on_partial.
+            inner["widgets_values"] = ["p", selection, "(1K) 1024x1024 (1:1)", 2048, 2048, 3, False, 0, "fixed", False]
+        else:
+            assert inner["widgets_values"][1] == selection
+        pi = PromotedInput(
+            name=widget, type="INT", index=0, value_index=0, source_node="1", source_input=widget, source_widget=widget
+        )
+        assert cql_engine._promoted_source_address("50", {"nodes": [inner]}, pi, {}, _seedream_graph()) == expected
+
+    @pytest.mark.parametrize(
+        ("host_selection", "linked", "expected"),
+        [
+            # The host's promoted selector runs over the interior's saved
+            # "pro", so lite's max_images is the live widget.
+            ("seedream 5.0 lite", False, "50/1.model.max_images"),
+            ("seedream 5.0 pro", False, None),
+            # A link feeds the selector: its value is only known at run time,
+            # so the interior's saved selection (pro) decides.
+            ("seedream 5.0 lite", True, None),
+        ],
+    )
+    def test_dynamic_combo_sub_widget_follows_promoted_selector(self, host_selection, linked, expected):
+        from comfy_cli.cql import engine as cql_engine
+        from comfy_cli.cql import promoted as _promoted
+
+        inner = _seedream_workflow()["nodes"][0]
+        assert inner["widgets_values"][1] == "seedream 5.0 pro"
+        base = len(inner.get("inputs") or [])
+        inner["inputs"] = list(inner.get("inputs") or []) + [
+            {"name": "model", "type": "COMBO", "widget": {"name": "model"}, "link": 1},
+            {"name": "model.max_images", "type": "INT", "widget": {"name": "model.max_images"}, "link": 2},
+        ]
+        sg = {
+            "id": "sg-seedream",
+            "nodes": [inner],
+            "inputs": [
+                {"name": "model", "type": "COMBO", "linkIds": [1]},
+                {"name": "max_images", "type": "INT", "linkIds": [2]},
+            ],
+            "links": [
+                {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": base, "type": "COMBO"},
+                {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": 1, "target_slot": base + 1, "type": "INT"},
+            ],
+        }
+        defs = {"sg-seedream": sg}
+        instance = {
+            "id": 50,
+            "type": "sg-seedream",
+            "inputs": [{"name": "model", "link": 99 if linked else None}, {"name": "max_images", "link": None}],
+            "widgets_values": [host_selection, 3],
+        }
+        workflow = {
+            "nodes": [instance, {"id": 60, "type": "PrimitiveNode"}],
+            "links": [[99, 60, 0, 50, 0, "COMBO"]] if linked else [],
+            "definitions": {"subgraphs": [sg]},
+        }
+        pi = _promoted.find_promoted(sg, defs, "max_images")
+        address = cql_engine._promoted_source_address("50", sg, pi, defs, _seedream_graph(), instance, workflow)
+        assert address == expected

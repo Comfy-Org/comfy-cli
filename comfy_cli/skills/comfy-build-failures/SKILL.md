@@ -26,8 +26,8 @@ From a snapshot or a scan:
 - **`notInRegistry`** — the pin names nothing the registry publishes. Correct it
   or drop the pack.
 - **`unresolvedNodes`** — every pack the definition cannot install, and a superset
-  of `notInRegistry` and `registryPending`. Read those two instead, or a publish
-  that is merely pending reads as a wrong pin.
+  of `notInRegistry` and `registryPending`. Its advisory line leaves out the packs
+  those two name, so a publish that is merely pending does not read as a wrong pin.
 - **`collidingNodes`** — a pack was left out because another claimed its folder.
   The build proceeds without it.
 - **`pythonSatisfied: false`** — no curated base image matches the scanned Python,
@@ -38,8 +38,8 @@ From a snapshot or a scan:
 - **`skippedPins`** — normal. The build owns those packages.
 - **`unpinnablePins`** — a package with no PyPI version to write: an editable or a
   direct URL. Not owned by the build, just undeclarable. A pack may still need it.
-- **`registryPending`** — the pin is right and not servable yet, so a retry later
-  works.
+- **`registryPending`** — the pin is right and not servable yet, so the import
+  left the pack out and importing again later works.
 - **`unverifiedPins`** — the registry never answered, so nothing was checked.
 
 From a workflow, six more:
@@ -101,9 +101,15 @@ can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), fi
 - `must set exactly one of sourceUri or blobId` — an entry has both or neither.
 - `resolves to a duplicate node directory` — two entries claim one folder, so one
   of them goes.
-- `build_registry_pin_missing` — the builder could not place a public pack.
-  The message names each identity; correct the `registryVersion` against a
-  registry search, or remove the pack.
+- `build_registry_pin_missing` — the builder could not place a public pack, or
+  the registry never answered for it (its `unverifiedPins`; retry later).
+  `push --dry-run` refuses the same way, before anything is uploaded or saved.
+  The message names each identity but not why. A version the registry has
+  Flagged lands here: check its `status` at
+  `https://api.comfy.org/nodes/<id>/versions`, and pin a version that is not
+  `NodeVersionStatusFlagged`, or the pack's `repository` and a commit `gitRef`.
+  Otherwise correct the `registryVersion` against a registry search, or remove
+  the pack.
 - `build_spec_stale` — the remote moved under you, or `--id` names a Build the
   spec's `syncedRevision` does not belong to. See *Revising*.
 
@@ -121,8 +127,12 @@ and none is fixed by editing anything:
   theirs. A delete takes the build's releases with it, so ask the user first;
   `comfy skills show comfy-build` carries the rules for it.
 - **`build_release_limit`** — the workspace holds its maximum number of releases.
-  A retry does not clear it; deleting one does. `comfy build release delete` is the
-  procedure, and `comfy skills show comfy-build` carries the rules for it.
+  A retry does not clear it; deleting one does. Under `--json`, `details.builds`
+  says which Builds hold releases and whether a deployment uses them,
+  `comfy build release ls --id <build>` lists one Build's, and
+  `comfy build quota` reads the limit, which comes from the plan. `comfy build
+  release delete` is the procedure, and `comfy skills show comfy-build` carries
+  the rules for it.
 - **`429 CONCURRENCY_LIMIT`**, which arrives as `build_builder_error` with the
   builder's own message — too many builds running at once. Transient, unlike the
   two above. Wait for one to finish, or say which are running.
@@ -152,6 +162,22 @@ several symptoms: three packs failing to import can be one wrong pin. Fix that
 cause completely, in one cut. Do not split its edits across cuts, and do not guess
 at a second cause in the same cut. Before each new cut, tell the user the cause,
 the exact edit, and which build this is, and wait.
+
+**A missing import needs an installation mechanism before another cut.** Read
+the selected pack's verified source and declared requirements, or establish a
+supported builder installation path. A `name==version` pin in `pipDependencies`
+forces the version of a package something else installs; adding
+`PyYAML==<version>` does not by itself install a missing `yaml` import. The
+builder installs two kinds of line on their own: a wheel by its address
+(`name @ https://.../name-1.0-py3-none-any.whl`), and an exact, unmarked
+`nvidia-vfx==<version>` pin. First
+verify what will install the package, then select a compatible constraint if
+needed. A changed local source bundle also needs approval for its changed
+contents and bytes before upload.
+When no verified installation mechanism exists, report that blocker and ask for
+the missing source or supported installation choice. Do not propose or create a
+fresh paid cut merely to try an otherwise unsupported pin, even if the previous
+repair plan was approved.
 
 **Read in this order.**
 

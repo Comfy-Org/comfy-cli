@@ -1,5 +1,5 @@
 {
-  "_comment": "Language-neutral conformance corpus for the --select grammar (comfy_cli/selector.py). Each case is (expr) over `data` -> (matched, result). The cloud agent's Go twin (services/agent/internal/loop/selector.go) replays a verbatim copy of this file, so the two implementations cannot drift. Run by tests/comfy_cli/test_selector_conformance.py.",
+  "_comment": "Language-neutral conformance corpus for the --select grammar (comfy_cli/selector.py). Each case is (expr) over `data` -> (matched, result). A Go port of this grammar in a downstream consumer replays a verbatim copy of this file, so the two implementations cannot drift. Run by tests/comfy_cli/test_selector_conformance.py.",
   "version": 2,
   "data": {
     "rows": [

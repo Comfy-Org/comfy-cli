@@ -89,6 +89,7 @@ class FakeDeploy:
         strip_move_reply: bool = False,
         serves_names: bool = False,
         name_races: int = 0,
+        keeps_editor: bool = False,
     ) -> None:
         self.rows = {str(row["id"]): copy.deepcopy(row) for row in rows or []}
         self.generation_barrier = generation_barrier
@@ -116,6 +117,14 @@ class FakeDeploy:
         self.serves_names = serves_names
         self.name_races = name_races
         self.create_names: list[str | None] = []
+        # The `editor` each create and move carried, None where it sent none,
+        # and each editor-alone edit.
+        self.create_editors: list[bool | None] = []
+        self.move_editors: list[bool | None] = []
+        self.editor_calls: list[tuple[str, bool]] = []
+        # A comfy-deploy whose editor write fails: every deployment keeps its
+        # editor server on, and each answer says so.
+        self.keeps_editor = keeps_editor
         self.rename_calls: list[tuple[str, str]] = []
         self.move_calls: list[tuple[str, int, str]] = []
         self.promote_calls: list[tuple[str, int, str]] = []
@@ -124,7 +133,7 @@ class FakeDeploy:
         # Each deployment's revisions, oldest first, as the service lists them.
         self.revisions: dict[str, list[JsonObject]] = {}
         # Raised by the next worker-bounds edit, when set.
-        self.update_error: DeployAPIError | None = None
+        self.update_error: Exception | None = None
         # Merged into the row on each read after a move, one per read.
         self.get_patches = list(get_patches or [])
         self.get_ids: list[str] = []
@@ -137,7 +146,11 @@ class FakeDeploy:
         call_count = getattr(self._local, "list_count", 0) + 1
         self._local.list_count = call_count
         with self._lock:
-            snapshot = copy.deepcopy(list(self.rows.values()))
+            # comfy-deploy's list answers no `editor`; a read of one deployment does.
+            snapshot = [
+                {key: copy.deepcopy(value) for key, value in row.items() if key != "editor"}
+                for row in self.rows.values()
+            ]
             self.generation_deleted_counts.append(
                 sum(row.get("releaseId") == "release-5" and row.get("deletedAt") is not None for row in snapshot)
             )
@@ -154,11 +167,13 @@ class FakeDeploy:
         *,
         idempotency_key: str | None = None,
         name: str | None = None,
+        editor: bool | None = None,
     ) -> JsonObject:
         assert idempotency_key is not None
         with self._lock:
             self.create_keys.append(idempotency_key)
             self.create_names.append(name)
+            self.create_editors.append(editor)
             existing_id = self._keys.get(idempotency_key)
             if existing_id is not None:
                 existing = self.rows[existing_id]
@@ -178,6 +193,7 @@ class FakeDeploy:
             if self.serves_names:
                 row["name"] = name or self._default_name()
             row["computeConfig"] = copy.deepcopy(compute_config)
+            self._write_editor(row, editor)
             self.rows[deployment_id] = row
             self._keys[idempotency_key] = deployment_id
             if self.tombstone_all_creates or (self.tombstone_first_create and not self._tombstoned_once):
@@ -240,10 +256,28 @@ class FakeDeploy:
             self.rows[deployment_id]["computeConfig"] = copy.deepcopy(compute_config)
             return copy.deepcopy(self.rows[deployment_id])
 
-    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
+    def set_deployment_editor(self, deployment_id: str, editor: bool) -> JsonObject:
+        with self._lock:
+            self.editor_calls.append((deployment_id, editor))
+            self._write_editor(self.rows[deployment_id], editor)
+            return copy.deepcopy(self.rows[deployment_id])
+
+    def _write_editor(self, row: JsonObject, editor: bool | None) -> None:
+        """Call with the lock held."""
+        if editor is not None:
+            row["editor"] = True if self.keeps_editor else editor
+
+    def move_deployment(
+        self, deployment_id: str, base_revision: int, release_id: str, *, editor: bool | None = None
+    ) -> JsonObject:
         with self._lock:
             self.move_calls.append((deployment_id, base_revision, release_id))
-            return self._apply_move(deployment_id, base_revision, release_id)
+            self.move_editors.append(editor)
+            moved = self._apply_move(deployment_id, base_revision, release_id)
+            self._write_editor(self.rows[deployment_id], editor)
+            if "editor" in self.rows[deployment_id]:
+                moved["editor"] = self.rows[deployment_id]["editor"]
+            return moved
 
     def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> JsonObject:
         with self._lock:

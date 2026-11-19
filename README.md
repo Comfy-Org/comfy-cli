@@ -19,7 +19,7 @@ workflows, and call hosted partner image models, all from your terminal.
 ## Features
 
 - 🚀 One-command ComfyUI install and launch
-- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Stability, Gemini/nano-banana, Kling, Luma, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
+- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Reve, Gemini/nano-banana, Kling, Luma, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
 - 🔧 Custom node management — install, update, snapshot, bisect
 - 📦 Fast dependency resolution with `uv` (`--fast-deps`, `--uv-compile`)
 - 🗄️ Model downloads from CivitAI, Hugging Face, and direct URLs
@@ -263,10 +263,15 @@ comfy provides a convenient way to manage custom nodes for extending ComfyUI's f
 - Show custom nodes' information:
 
 ```
-comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list]
+comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snapshot|snapshot-list|agent-created]
                              ?[--channel <channel name>]
                              ?[--mode [remote|local|cache]]
 ```
+
+  `agent-created` lists the packs that carry the local Comfy agent's install record
+  (`.comfy-agent-install`), including ones switched off with a `.disabled` suffix or moved to
+  `custom_nodes/.disabled`. It reads the workspace directly. comfy-cli cannot verify the record's
+  signature, so a listed pack says the agent made it; ask the agent to confirm.
 
 - `comfy node show all --channel recent`
 
@@ -298,6 +303,21 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 - Generate deps:
 
   `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
+
+- Turn a pack's frontend code off or on, without a restart:
+
+  `comfy extension list`
+
+  `comfy extension disable <folder>` / `comfy extension enable <folder>`
+
+  `list` reads the frontend's `Comfy.Extension.DisabledPacks` setting from the running local
+  ComfyUI (frontend 1.59 or later) and shows which folders are off. `disable` adds a folder to
+  that setting, so its scripts are not loaded after the next page reload; `enable` removes it, so
+  they load again after a reload. Reload every open ComfyUI page, so none of them saves an older
+  copy of the setting.
+  The pack's Python nodes stay installed. To turn off the whole pack, use `comfy node disable`,
+  which needs a ComfyUI restart. `--host`/`--port` pick the server (default: the running local
+  one), and `--user <user id>` is required when ComfyUI runs with `--multi-user`.
 
 #### `install` vs `registry-install`
 
@@ -440,6 +460,20 @@ the bisect tool can help you pinpoint the custom node that causes the issue.
 
   `comfy model list ?[--relative-path <PATH>]`
 
+- Model upload to Comfy Cloud
+
+  `comfy model upload <FILE> --type <FOLDER> --where cloud ?[--dry-run] ?[--workspace <ID>] ?[--expected-sha256 <SHA256>] ?[--yes]`
+
+  - Puts one local `.safetensors` file (up to 25 GB on servers with resumable uploads) into your Comfy Cloud model library, so a workflow run on Comfy Cloud can load it. `--type` is the model folder, e.g. `loras` or `checkpoints`; `comfy model list-folders --where cloud` lists them.
+  - Uploads use 64 MiB pieces when the server supports them. A dropped connection retries from the bytes storage holds. If the command stops, run it again with the same file, model folder, account and workspace to continue while its saved session remains valid. Sessions expire no later than seven days after creation; the server can expire them earlier. A paused upload tells you whether its session was saved. Without saved state, a rerun starts a new upload. The CLI hashes the file again before resuming. Older servers keep using one PUT and enforce their own size limit. Upload sessions are credentials, kept in a private `model-uploads` directory under the CLI config folder and removed after completion.
+  - After 30 minutes without progress, the command exits with the held byte count. The final check on Comfy Cloud can take longer than fifteen minutes; the command waits until it ends. It reports the task id before waiting. In JSON mode, the `upload_storing` event goes to stderr; in streaming mode it goes to stdout. If the wait is interrupted, the id identifies the task at Cloud's `GET /api/tasks/<task_id>` endpoint.
+  - Only the file you name is uploaded, and only the bytes hashed before the upload: each block is checked against its hash before it is sent. The upload succeeds only once Comfy Cloud's hash of the stored file matches your file's.
+  - `--dry-run` uploads nothing. It reports the file's `sha256` and whether Comfy Cloud already has the file.
+  - The output's `loader_path` is the value a loader node takes for the model on Comfy Cloud, as Comfy Cloud's record of the model gives it. It is null for a dry run that would upload, or when Comfy Cloud gives none.
+  - `--workspace` and `--expected-sha256` tie an approval to one workspace and one set of bytes. If you are signed in to another workspace, or the file changed since the dry run, nothing is uploaded.
+  - It asks before uploading, unless you pass `--yes`.
+  - It refuses a name that the folder already holds with different bytes in your workspace's model library (any member's upload), since a second file under that name would change what the name loads in every workflow.
+
 ### Running on Comfy Cloud (`--where cloud`)
 
 Comfy Cloud runs your workflow on Comfy's GPUs — no local ComfyUI install and no GPU required. The same verbs you use locally take `--where cloud`; the only extra step is signing in once.
@@ -469,15 +503,15 @@ Notes:
 - `comfy run --prompt "<text>"` (no `--workflow`) runs a bundled default text2img graph. **That graph loads the SD1.5 checkpoint `v1-5-pruned-emaonly.ckpt`, which comfy-cli does not download for you** — install it into `models/checkpoints`, or point the graph at a checkpoint you do have with `comfy run --prompt "…" --set checkpoint=<name>`. The same applies on cloud, where the checkpoint must exist in your cloud assets.
 - `comfy download` also reads a `prompt_id` from piped stdin, so `comfy run ... --where cloud | comfy download --where cloud` works.
 - Models and custom nodes must exist on the cloud side. `comfy models search --where cloud` lists the cloud asset catalog, and `comfy nodes ls --where cloud` lists the node classes cloud can run.
-- Sign out with `comfy cloud logout`. If a run fails with `cloud_unauthorized`, your session expired — re-run `comfy cloud login`.
+- Sign out with `comfy cloud logout`. If a run fails with `cloud_unauthorized`, your session expired — re-run `comfy cloud login`. Re-login is also required after Comfy Cloud adds permissions: a session from before the change fails with a `cloud_unauthorized` that says it predates a permission change, and refreshing cannot fix it.
 
 ### Calling partner nodes (`comfy generate`)
 
 `comfy generate` calls Comfy's partner nodes directly from the terminal — no
 local ComfyUI or workflow JSON required. It hits the same hosted partner nodes
 you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls. Image
-models (Flux, Ideogram, DALL·E, Recraft, Stability, Runway, Reve, xAI Grok,
-Google Gemini Flash Image aka **nano-banana**, …) and video models (Kling,
+models (Flux, Ideogram, DALL·E, Recraft, Runway, Reve, xAI Grok, Google
+Gemini Flash Image aka **nano-banana**, …) and video models (Kling,
 Luma, Runway Gen-3, Pika, Vidu, Moonvalley, Hailuo, Grok video, ByteDance
 **Seedance**) are all covered; video jobs run async and the CLI polls until
 the result is ready.
@@ -667,9 +701,9 @@ refreshes during `comfy skills install` and in the background during
 
 ## Analytics
 
-Analytics are **opt-in and off by default**. The first time you run the CLI in an
-interactive terminal it asks whether to enable tracking, and that prompt defaults
-to no. Nothing is sent unless you answer yes. A non-interactive run (a pipe, CI,
+Product analytics (Mixpanel) are **opt-in and off by default**. The first time you
+run the CLI in an interactive terminal it asks whether to enable tracking, and
+that prompt defaults to no. No product analytics are sent unless you answer yes. A non-interactive run (a pipe, CI,
 an agent) never enables it on its own. Setting `DO_NOT_TRACK` or
 `COMFY_NO_TELEMETRY` in the environment overrides the setting and suppresses
 everything.
@@ -680,6 +714,12 @@ Change your mind at any time:
 comfy tracking enable
 comfy tracking disable
 ```
+
+Uploads to Comfy Cloud (`comfy assets library upload` and `comfy model upload`)
+send Comfy Cloud an upload status with the upload by default: which client sent it,
+whether the transfer resumed, and why a transfer stopped. The tracking setting
+does not cover it, because it is part of the upload request to Comfy Cloud,
+not product tracking. `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns it off.
 
 When tracking is on, we use Mixpanel to understand usage patterns and know where
 to prioritize our efforts.

@@ -1,6 +1,8 @@
 """``comfy models`` — live model discovery against local or cloud.
 
-Four subcommands, all routed by ``--where`` (cloud auto-detect by default):
+Four subcommands, all routed by ``--where`` (cloud auto-detect by default);
+each also accepts ``--host``/``--port`` to aim a *local* query at a specific
+ComfyUI (rejected against a cloud target), mirroring ``comfy upload``:
 
     comfy models list-folders           # GET /api/experiment/models  | /models
     comfy models list-folder <folder>   # GET /api/experiment/models/<folder> | /models/<folder>
@@ -178,7 +180,20 @@ def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: st
     raise typer.Exit(code=1) from e
 
 
-def _resolve_and_stamp(renderer, where: str | None):
+# How a `cloud` routing decision was reached, in words, for the --host/--port
+# rejection message. Keys are `where.WhereResolution.source` values. Mirrors the
+# copy `cmdline.upload` uses — kept local rather than imported so this
+# module stays free of a `cmdline` import cycle.
+_WHERE_SOURCE_PHRASES = {
+    "flag": "targeting cloud via --where cloud",
+    "env": "targeting cloud via the COMFY_WHERE environment variable",
+    "project": "targeting cloud via this project's configured default",
+    "config": "targeting cloud via your saved `where_default` setting",
+    "auto": "targeting cloud because you're signed in (no explicit --where)",
+}
+
+
+def _resolve_and_stamp(renderer, where: str | None, *, command: str, host: str | None = None, port: int | None = None):
     """Resolve the routing Target for a ``models`` verb and stamp it on the renderer.
 
     Every verb here calls this at the point it decides local-vs-cloud, so the
@@ -186,10 +201,85 @@ def _resolve_and_stamp(renderer, where: str | None):
     Errors raised *before* this (an unsafe path segment) keep ``where: null``,
     which is correct — nothing had routed yet. Explicit
     ``emit(..., where=...)`` arguments still take precedence over the stamp.
+
+    ``host``/``port`` route a **local** ``models`` query at a specific ComfyUI
+    (the ``--host``/``--port`` flags), mirroring ``comfy upload``:
+    they are validated the same way, rejected against an effective ``cloud``
+    target, and otherwise handed to ``resolve_target``, which applies the local
+    precedence explicit flag > ``COMFY_LOCAL_URL`` > ``127.0.0.1:8188``. With
+    both ``None`` (no flags), resolution is exactly what it was before the flags
+    existed. The cloud target's address comes from the signed-in account and
+    ignores host/port entirely, so pairing them with a cloud target is a usage
+    error rather than a silently-ignored flag — the root cause of the comfy-mcp
+    bug where ``search_models`` answered from the local machine regardless of
+    the configured remote target.
     """
+    from comfy_cli import where as where_module
+    from comfy_cli.host_port import report_usage_error, validate_host
     from comfy_cli.target import resolve_target
 
-    target = resolve_target(where=where)
+    # Stamp the subcommand too, so every failure envelope from here down —
+    # the usage-error, ``where_invalid`` and ``host_flag_cloud`` rejections
+    # and the verb's own downstream errors — names the same ``command`` as
+    # the verb's success envelope rather than the renderer's group default.
+    renderer.command = command
+
+    # Validate the flags before resolving anything: the host lands verbatim in
+    # ``http://{host}:{port}/...``, so a URL-special or control character is a
+    # usage error (BadParameter, exit 2) regardless of target. Port range is
+    # checked the same way ``comfy upload`` does. ``report_usage_error`` emits
+    # the terminating envelope for that rejection in JSON/NDJSON mode; the
+    # exception still escapes, so click's exit-2 usage contract is unchanged.
+    with report_usage_error(renderer):
+        if host is not None:
+            host = validate_host(host)
+            # ``validate_host`` only proves the host *can* be IDNA-encoded; it
+            # hands back the Unicode form. ``urllib`` copies the URL authority
+            # into the ``Host`` header, which ``http.client`` encodes as
+            # Latin-1, so ``--host 例え.test`` would raise an uncaught
+            # ``UnicodeEncodeError`` before connecting. Forward the ASCII
+            # (punycode) form instead; IP literals are already ASCII. IDNA's
+            # NFKC step can fold characters into ones ``validate_host`` rejects
+            # (fullwidth ``％`` becomes ``%``, so ``localhost％0d％0a`` turns into
+            # a percent-encoded CRLF), so validate the converted form too.
+            if not host.isascii():
+                host = validate_host(host.encode("idna").decode("ascii"))
+        if port is not None and not (1 <= port <= 65535):
+            raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
+
+    # ``resolve_default_or_exit`` reads the persisted ``where_default``
+    # defensively (a broken config drops to the next precedence source, as
+    # ``resolve_target`` did before these flags existed) and turns a bad
+    # --where / COMFY_WHERE / project / config value into a ``where_invalid``
+    # envelope whose hint names all of those sources.
+    decision = where_module.resolve_default_or_exit(flag=where)
+
+    effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # Routing is decided, so every error envelope from here down can name the
+    # target — including the `host_flag_cloud` rejection immediately below.
+    renderer.where = effective_where
+    # --host/--port address a local ComfyUI; the cloud target's address comes
+    # from the signed-in account and ignores them (``Target.host``/``port`` are
+    # documented local-only). Reject the combination rather than silently
+    # answering from a machine the caller didn't name.
+    if effective_where == "cloud" and (host is not None or port is not None):
+        # The cloud target can come from an explicit --where, but equally from
+        # COMFY_WHERE, a project/config default, or credential auto-detection —
+        # so name the source rather than accusing the user of a flag they may
+        # never have typed.
+        source = _WHERE_SOURCE_PHRASES.get(decision.source, f"resolved to cloud by {decision.source}")
+        renderer.error(
+            code="host_flag_cloud",
+            message=f"--host/--port target a local ComfyUI server, but this run is {source}",
+            hint=(
+                "pass --where local to aim at a local server; to reach a different cloud address "
+                "set COMFY_CLOUD_BASE_URL or run `comfy cloud set-base-url`"
+            ),
+            details={"host": host, "port": port, "where": effective_where, "where_source": decision.source},
+        )
+        raise typer.Exit(code=1)
+
+    target = resolve_target(where=effective_where, host=host, port=port)
     renderer.where = target.kind
     return target
 
@@ -211,9 +301,17 @@ def list_folders_cmd(
         str | None,
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+    ] = None,
 ):
     renderer = get_renderer()
-    target = _resolve_and_stamp(renderer, where)
+    target = _resolve_and_stamp(renderer, where, command="models list-folders", host=host, port=port)
     url = target.url(*_models_path_parts(target))
 
     try:
@@ -286,10 +384,18 @@ def list_folder_cmd(
         int | None,
         typer.Option("--limit", show_default=False, help="Cap output to N rows."),
     ] = None,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+    ] = None,
 ):
     renderer = get_renderer()
     _reject_unsafe_path_segment(folder, kind="folder", renderer=renderer)
-    target = _resolve_and_stamp(renderer, where)
+    target = _resolve_and_stamp(renderer, where, command="models list-folder", host=host, port=port)
     # Percent-encoded for the same reason `_local_folder_matches` does it: the
     # relaxed validation above admits spaces, `?`/`#`, and non-ASCII, none of
     # which may be allowed to alter the request. Error payloads below carry the
@@ -424,35 +530,113 @@ def _cloud_search(
     type_: str | None,
     limit: int,
     include_public: bool,
-) -> tuple[list[dict[str, Any]], int]:
-    """Page through /api/assets, returning (rows, total).
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Page through /api/assets, returning ``(rows, total, total_is_lower_bound)``.
 
     The ``include_tags`` parameter is comma-separated, not repeated — cloud
     rejects the repeated-key form (``include_tags=a&include_tags=b``) per its
     OpenAPI spec (``style: form, explode: false``).
+
+    ``name_contains`` is one case-insensitive substring over the whole name, so
+    a query the user writes with spaces ("MiniMax H3") can never match the
+    filename (``minimax_h3_…``). Search therefore follows the local rule
+    (``_name_matches``: every word, separators ignored) in up to two passes:
+
+    1. Ask the server for the query's longest fragment, the cheap narrowing
+       (for one plain word that is the whole query, sent unchanged), and check
+       every word client-side.
+    2. If that finds nothing, the fragment may be split in the filename
+       (``sdxl`` vs ``sd_xl_base_1.0``), which the server cannot see. Scan
+       without ``name_contains`` and match client-side.
+
+    A scan stops after ``_CLOUD_TOKEN_SCAN_MAX_PAGES`` pages; when it stops
+    with more assets left, ``total`` counts only what it saw and the third
+    value is True.
     """
     tags = ["models"]
     if type_:
         tags.append(_TYPE_TO_FOLDER.get(type_, type_))
-    params: dict[str, Any] = {
+    base: dict[str, Any] = {
         "include_tags": ",".join(tags),
-        "limit": min(max(limit, 1), 500),
         "include_public": str(include_public).lower(),
     }
-    if text:
-        params["name_contains"] = text
+    tokens = _search_tokens(text)
+    if tokens is None:
+        # No filter: one page, the server's own total.
+        body = _assets_page(target, {**base, **_EXACT_TOTAL, "limit": min(max(limit, 1), 500)})
+        rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
+        return rows, int(body.get("total") or len(rows)), False
+    if not tokens:
+        # Only separators: a filter nothing satisfies (same as local).
+        return [], 0, False
 
-    qs = urllib.parse.urlencode(params)
-    url = target.url("assets") + "?" + qs
+    fragments = [f for f in _NAME_SEPARATORS.split(text.lower()) if f]
+    plain_word = len(fragments) == 1 and fragments[0] == text.lower().strip()
+    if plain_word:
+        # The server's substring match is already exact for a plain word:
+        # one page, and its total, when it finds anything.
+        body = _assets_page(target, {**base, **_EXACT_TOTAL, "name_contains": text, "limit": min(max(limit, 1), 500)})
+        rows = [_asset_to_row(a) for a in body.get("assets") or [] if isinstance(a, dict)]
+        if rows:
+            return rows, int(body.get("total") or len(rows)), False
+    else:
+        found = _scan_assets(target, {**base, "name_contains": max(fragments, key=len)}, tokens, limit)
+        if found[1]:
+            return found
+    return _scan_assets(target, base, tokens, limit)
+
+
+# The two one-page answers above report the server's `total` as exact.
+# `capped_total=false` asks Comfy Cloud for that exact count; without it the
+# server may answer with a capped one. A scan counts its own matches and
+# does not send it.
+_EXACT_TOTAL = {"capped_total": "false"}
+
+
+def _scan_assets(
+    target, params: dict[str, Any], tokens: list[tuple[str, str]], limit: int
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Page ``/api/assets`` with ``params``, keeping assets whose name or display name passes ``tokens``.
+
+    Returns ``(rows, total, total_is_lower_bound)``: ``rows`` holds at most
+    ``limit`` matches, ``total`` counts every match seen, and the flag is True
+    when the page cap stopped the scan before the server ran out.
+    """
+    rows: list[dict[str, Any]] = []
+    total = 0
+    offset = 0
+    for _ in range(_CLOUD_TOKEN_SCAN_MAX_PAGES):
+        body = _assets_page(target, {**params, "limit": _CLOUD_TOKEN_SCAN_PAGE, "offset": offset})
+        page = [a for a in body.get("assets") or [] if isinstance(a, dict)]
+        for asset in page:
+            names = (asset.get("name") or "", asset.get("display_name") or "")
+            if any(isinstance(n, str) and n and _name_matches(n, tokens) for n in names):
+                total += 1
+                if len(rows) < max(limit, 0):
+                    rows.append(_asset_to_row(asset))
+        offset += len(page)
+        if not page or not body.get("has_more"):
+            return rows, total, False
+    return rows, total, True
+
+
+# A scan pages until the server runs out, because the server's filter (one
+# fragment, or none) returns rows the other words still reject. Capped so a
+# broad query cannot page forever: 20 × 500 = 10k assets per scan.
+_CLOUD_TOKEN_SCAN_PAGE = 500
+_CLOUD_TOKEN_SCAN_MAX_PAGES = 20
+
+
+def _assets_page(target, params: dict[str, Any]) -> dict[str, Any]:
+    """GET one page of ``/api/assets`` with ``params`` and return the JSON object."""
+    url = target.url("assets") + "?" + urllib.parse.urlencode(params)
     body = _http_get_json(url, target)
     if not isinstance(body, dict):
         # Callers route JSONDecodeError to an envelope error; a non-object
         # top-level body (list/scalar) must surface the same way, not crash
         # on body.get().
         raise json.JSONDecodeError(f"unexpected response shape (not an object) from {url}", "", 0)
-    assets = body.get("assets") or []
-    rows = [_asset_to_row(a) for a in assets if isinstance(a, dict)]
-    return rows, int(body.get("total") or len(rows))
+    return body
 
 
 def _local_folder_names(target) -> list[str]:
@@ -662,17 +846,28 @@ def search_cmd(
         str | None,
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
+    host: Annotated[
+        str | None,
+        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+    ] = None,
 ):
     renderer = get_renderer()
     if type_ is not None:
         _reject_unsafe_path_segment(type_, kind="type", renderer=renderer)
-    target = _resolve_and_stamp(renderer, where)
+    target = _resolve_and_stamp(renderer, where, command="models search", host=host, port=port)
 
     try:
         if target.is_cloud:
-            rows, total = _cloud_search(target, text=text, type_=type_, limit=limit, include_public=include_public)
+            rows, total, total_is_lower_bound = _cloud_search(
+                target, text=text, type_=type_, limit=limit, include_public=include_public
+            )
         else:
             rows, total = _local_search(target, text=text, type_=type_, limit=limit)
+            total_is_lower_bound = False
     except urllib.error.HTTPError as e:
         _emit_http_error(
             e,
@@ -693,6 +888,9 @@ def search_cmd(
         "mode": "cloud" if target.is_cloud else "local",
         "filters": {"text": text, "type": type_, "include_public": include_public if target.is_cloud else None},
         "total": total,
+        # True when the cloud scan hit its page cap: `total` counts only the
+        # assets it reached, so more matches may exist. Narrow the query.
+        "total_is_lower_bound": total_is_lower_bound,
         "shown": len(rows),
         "rows": rows,
     }
@@ -715,7 +913,11 @@ def search_cmd(
                 sanitize_markup((r["source_url"] or "")[:48]),
             )
         renderer.console().print(tbl)
-        tail = f" (of {total} total)" if total != len(rows) else ""
+        tail = (
+            f" (of {total}{'+' if total_is_lower_bound else ''} total)"
+            if total != len(rows) or total_is_lower_bound
+            else ""
+        )
         rprint(f"[dim]{len(rows)} model(s){tail} ({payload['mode']})[/dim]")
     knowledge.attach(
         payload,
@@ -738,9 +940,23 @@ def show_cmd(
         str | None,
         typer.Option("--where", show_default=False, help="Override the resolved routing mode."),
     ] = None,
+    host: Annotated[
+        str | None,
+        typer.Option(
+            help="Server host, for parity with the other `models` verbs. `show` needs the cloud asset "
+            "catalog, so a local target (including one named here) is reported as unsupported."
+        ),
+    ] = None,
+    port: Annotated[
+        int | None,
+        typer.Option(
+            help="Server port, for parity with the other `models` verbs. `show` needs the cloud asset "
+            "catalog, so a local target (including one named here) is reported as unsupported."
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
-    target = _resolve_and_stamp(renderer, where)
+    target = _resolve_and_stamp(renderer, where, command="models show", host=host, port=port)
 
     if not target.is_cloud:
         # On local there's no asset catalog. We can confirm the file exists by
@@ -764,7 +980,16 @@ def show_cmd(
     max_pages = 50  # safety cap (10k results) so a misbehaving server can't loop forever
     for _ in range(max_pages):
         qs = urllib.parse.urlencode(
-            {"include_tags": "models", "name_contains": name, "limit": page_size, "offset": offset}
+            {
+                "include_tags": "models",
+                # `show` looks the name up in the whole catalog. Said explicitly:
+                # Comfy Cloud's default for an omitted include_public is planned
+                # to change to own assets only.
+                "include_public": "true",
+                "name_contains": name,
+                "limit": page_size,
+                "offset": offset,
+            }
         )
         url = target.url("assets") + "?" + qs
         try:

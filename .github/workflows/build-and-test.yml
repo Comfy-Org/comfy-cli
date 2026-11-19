@@ -62,6 +62,12 @@ jobs:
         run: |
           uv run --locked --extra dev pytest tests/comfy_cli/command/test_jobs_pid_alive.py -v
 
+      - name: Test model upload and resume
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          uv run --locked --extra dev pytest tests/comfy_cli/command/test_assets_library.py tests/comfy_cli/command/test_model_upload_resume.py
+
       - name: Test e2e
         env:
           PYTHONPATH: ${{ github.workspace }}

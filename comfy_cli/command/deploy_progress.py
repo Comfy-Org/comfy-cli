@@ -43,6 +43,12 @@ STALE_SECONDS: Final = 60.0
 
 STAGING_STEP: Final = "staging_models"
 
+# True on every provider once every byte is in: the service sends
+# placingModels for Modal and RunPod alike and names neither. On Modal the step
+# may also wait on the release image built beside the upload, which these words
+# do not name: a RunPod deploy builds no image there.
+FINISHING_WORDS: Final = "finishing: putting the models in place"
+
 _STEP_LABELS: Final = {
     STAGING_STEP: "Staging models",
     "creating_endpoint": "Creating the endpoint",
@@ -143,12 +149,14 @@ def _bytes_part(progress: JsonObject) -> str | None:
     return f"{human_bytes(done)} {of} {human_bytes(total)}"
 
 
-def _parts(progress: JsonObject, now: datetime) -> tuple[str, str | None, list[str]]:
+def _parts(progress: JsonObject, now: datetime, *, numbers_first: bool = False) -> tuple[str, str | None, list[str]]:
     """The step's name, the model it is on, and the numbers, kept apart.
 
     The sentence and the live bar want the same facts in different shapes: one
     joins them with commas, the other spreads them across columns and has to
-    know which piece may be truncated when the terminal is narrow.
+    know which piece may be truncated when the terminal is narrow. With
+    `numbers_first` the finishing words follow the time left instead of
+    preceding it, so a terminal cropping from the right cuts words, not a number.
     """
     label = step_label(progress)
     model: str | None = None
@@ -166,15 +174,20 @@ def _parts(progress: JsonObject, now: datetime) -> tuple[str, str | None, list[s
         else:
             model = _model_part(progress)
             rate, left = _number(progress, "bytesPerSecond"), _number(progress, "etaSeconds")
-            parts.extend(
-                part
-                for part in (
-                    _bytes_part(progress),
-                    None if not rate else f"{human_bytes(rate)}/s",
-                    None if left is None else f"{human_seconds(left)} left",
-                )
-                if part is not None
+            copied = _bytes_part(progress)
+            per_second = None if not rate else f"{human_bytes(rate)}/s"
+            time_left = None if left is None else f"{human_seconds(left)} left"
+            # Only the service says the step is finishing, never bytes done
+            # matching the total: once every byte is in it is still putting the
+            # models in place, and on Modal may be waiting on an image built
+            # beside them.
+            finishing = FINISHING_WORDS if progress.get("placingModels") is True else None
+            order = (
+                (copied, per_second, time_left, finishing)
+                if numbers_first
+                else (copied, per_second, finishing, time_left)
             )
+            parts.extend(part for part in order if part is not None)
     return label, model, parts
 
 
@@ -209,8 +222,9 @@ def live_line(progress: JsonObject, *, now: datetime) -> str:
     form, because a restart or a silent service changes how every number after
     them reads. The model's name goes last: it is the one piece long enough to
     need cutting and the only one a reader can lose without losing a number.
+    The finishing words sit between the two, after every number.
     """
-    label, model, parts = _parts(progress, now)
+    label, model, parts = _parts(progress, now, numbers_first=True)
     notes = _notes(progress, now, short=True)
     if notes:
         label = f"{label} ({', '.join(notes)})"
