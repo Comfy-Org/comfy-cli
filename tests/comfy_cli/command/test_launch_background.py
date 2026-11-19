@@ -13,6 +13,7 @@ import pytest
 
 from comfy_cli.caller import Caller
 from comfy_cli.command import launch
+from comfy_cli.workspace_manager import WorkspaceType
 from comfy_cli.output.renderer import (
     OutputMode,
     Renderer,
@@ -198,3 +199,58 @@ def test_background_log_path_override_env_and_default(tmp_path, monkeypatch):
 
     monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG")
     assert launch.background_log_path(8188, str(tmp_path), override="given.log") == os.path.abspath("given.log")
+
+
+@pytest.fixture
+def _launchable_workspace(monkeypatch, tmp_path):
+    """Make launch()'s module-level workspace_manager point at tmp_path."""
+    cfg = {"DEFAULT": {}}
+    ws = patch(
+        "comfy_cli.command.launch.workspace_manager",
+        **{
+            "workspace_path": str(tmp_path),
+            "workspace_type": WorkspaceType.DEFAULT,
+            "config_manager.config": cfg,
+            "set_recent_workspace.return_value": None,
+        },
+    ).start()
+    monkeypatch.setattr(launch, "resolve_workspace_python", lambda _ws: "python")
+    monkeypatch.setattr(launch, "_get_manager_flags", lambda: [])
+    (tmp_path / "user").mkdir(exist_ok=True)  # chdir target for the callers
+    yield tmp_path
+    patch.stopall()
+
+
+def test_launch_anchors_relative_log_file_before_chdir(
+    _launchable_workspace, monkeypatch
+):
+    """A relative --log-file must resolve against the caller's cwd, not the
+    workspace launch() chdirs into (the mirror image of the argv[0] anchor)."""
+    monkeypatch.delenv("COMFY_CLI_BACKGROUND_LOG", raising=False)
+    monkeypatch.chdir(_launchable_workspace / "user")  # start somewhere else
+
+    captured = {}
+    with patch.object(launch, "background_launch", side_effect=lambda *a, **k: captured.update(k)):
+        launch.launch(background=True, log_file="comfy.log")
+
+    assert captured["log_file"] == os.path.abspath(
+        os.path.join(_launchable_workspace / "user", "comfy.log")
+    )
+    # and the process is left in the workspace, as before
+    assert os.path.realpath(os.getcwd()) == os.path.realpath(_launchable_workspace)
+
+
+def test_launch_anchors_relative_background_log_env_before_chdir(
+    _launchable_workspace, monkeypatch
+):
+    """COMFY_CLI_BACKGROUND_LOG anchors the same way: a supervisor that sets a
+    relative path means "next to my own logs", not the workspace."""
+    caller_dir = _launchable_workspace / "user"
+    monkeypatch.chdir(caller_dir)
+    monkeypatch.setenv("COMFY_CLI_BACKGROUND_LOG", "env.log")
+
+    captured = {}
+    with patch.object(launch, "background_launch", side_effect=lambda *a, **k: captured.update(k)):
+        launch.launch(background=True)
+
+    assert captured["log_file"] == os.path.abspath(caller_dir / "env.log")

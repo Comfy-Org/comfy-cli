@@ -443,6 +443,13 @@ def launch(
     # Update the recent workspace
     workspace_manager.set_recent_workspace(resolved_workspace)
 
+    # Anchor a relative --log-file (or COMFY_CLI_BACKGROUND_LOG) to the caller's
+    # cwd BEFORE the chdir below; after it, "comfy.log" would silently land in
+    # the workspace instead of where the supervisor asked for it.
+    log_override = log_file or os.environ.get("COMFY_CLI_BACKGROUND_LOG")
+    if log_override:
+        log_file = os.path.abspath(log_override)
+
     os.chdir(resolved_workspace)
     python = resolve_workspace_python(resolved_workspace)
 
