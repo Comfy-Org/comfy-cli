@@ -4245,6 +4245,22 @@ class LoadError(Exception):
         self.details = details or {}
 
 
+def load_error_envelope_fields(e: LoadError, default_hint: str) -> tuple[str, dict[str, Any]]:
+    """The ``hint`` and ``details`` a ``cql_no_graph`` envelope should carry for ``e``.
+
+    A ``LoadError`` that knows its own cause states the next step in
+    ``details["hint"]``; everything else falls back to ``default_hint``. The
+    chosen hint is lifted into the envelope's own ``hint`` field, so it is
+    removed from ``details`` here rather than rendered twice in one envelope —
+    these hints are a few hundred characters and every ``cql_no_graph``
+    consumer is an agent paying for both copies.
+    """
+    return (
+        e.details.get("hint") or default_hint,
+        {k: v for k, v in e.details.items() if k != "hint"},
+    )
+
+
 def _load_from_file(path: str) -> dict[str, Any]:
     """Read object_info from a local JSON file."""
     from pathlib import Path
@@ -4282,7 +4298,18 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
         if not is_loopback_host(parsed_host):
             raise LoadError(
                 f"Refusing to fetch object_info from non-loopback host {parsed_host!r} "
-                f"in local mode (potential SSRF). Use --where cloud for remote targets."
+                f"in local mode (potential SSRF). Use --where cloud for remote targets.",
+                # No `url` here, unlike the branches below: this one is reached
+                # only for a host the caller configured, and a configured URL is
+                # where a proxy token rides. The message already names the host.
+                details={
+                    "hint": (
+                        "the catalog fetch is loopback-only in local mode; for Comfy Cloud pass "
+                        "`--where cloud`, and for a self-hosted remote save its catalog and read the "
+                        "file: `curl -s http://<remote>:8188/object_info > object_info.json`, then "
+                        "pass `--input object_info.json`"
+                    ),
+                },
             )
 
     req = urllib.request.Request(url)
@@ -4300,7 +4327,16 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
             if len(raw) > _MAX_OBJECT_INFO_BYTES:
                 raise LoadError(
                     f"response exceeds {_MAX_OBJECT_INFO_BYTES} bytes",
-                    details={"url": url},
+                    details={
+                        "url": url,
+                        "hint": (
+                            f"this server's object_info is over the "
+                            f"{_MAX_OBJECT_INFO_BYTES // (1024 * 1024)} MiB fetch cap, so the server "
+                            f"being up is not the problem and `comfy launch` is not the fix; save the "
+                            f"catalog and read the file instead — `curl -s {url} > object_info.json`, "
+                            f"then pass `--input object_info.json` (the file loader has no size cap)"
+                        ),
+                    },
                 )
             return json.loads(raw)
     except urllib.error.HTTPError as e:
