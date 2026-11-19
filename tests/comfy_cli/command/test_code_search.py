@@ -1926,6 +1926,35 @@ class TestRootCLIWiring:
         assert command is not None
         assert command.hidden is True
 
+    @pytest.mark.parametrize("name", ["code-search", "cs"])
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["--repo", "ComfyUI", "--count", "1", "--json", "LoadImage"], id="flags-first"),
+            pytest.param(["LoadImage", "--repo", "ComfyUI", "--count", "1", "--json"], id="flags-last"),
+            pytest.param(["--repo", "ComfyUI", "LoadImage", "--count", "1", "--json"], id="interleaved"),
+        ],
+    )
+    @patch("comfy_cli.tracking.prompt_tracking_consent")
+    @patch("comfy_cli.cmdline.workspace_manager")
+    @patch("comfy_cli.command.code_search._fetch_results")
+    def test_flag_order_does_not_change_the_result(self, mock_fetch, mock_ws, mock_track, raw_api_response, argv, name):
+        """`comfy code-search KSampler --repo X` must behave exactly like
+        `comfy code-search --repo X KSampler`. Through the installed root group
+        the query-first order used to fail with `Missing argument 'query'.` and
+        a `COMMAND [ARGS]...` usage line, because the command was mounted as a
+        Typer subgroup. Only the root group exercises that; invoking the
+        module's own app directly never did."""
+        from comfy_cli.cmdline import app as root_app
+
+        mock_fetch.return_value = raw_api_response
+        result = runner.invoke(root_app, [name, *argv])
+        assert result.exit_code == 0, result.output
+        assert "results" in json.loads(result.output)
+        # Identical, not merely successful: every option must bind to the same
+        # value whichever side of the query it was typed on.
+        assert mock_fetch.call_args.args[0] == (r"repo:^github\.com/Comfy\-Org/ComfyUI$ type:file count:1 (LoadImage)")
+
     @patch("comfy_cli.tracking.prompt_tracking_consent")
     @patch("comfy_cli.cmdline.workspace_manager")
     @patch("comfy_cli.command.code_search._fetch_results")

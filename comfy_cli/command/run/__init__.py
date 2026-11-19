@@ -28,6 +28,7 @@ from comfy_cli.caller import stream_is_tty
 from comfy_cli.command.run.execution import ExecutionProgress as ExecutionProgress
 from comfy_cli.command.run.execution import WorkflowExecution as WorkflowExecution
 from comfy_cli.command.run.execution import _safe_close as _safe_close
+from comfy_cli.command.run.execution import target_subgraph as target_subgraph
 from comfy_cli.command.run.execution import workflow_manifest as workflow_manifest
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW as _MAX_BODY_PREVIEW
 from comfy_cli.command.run.loader import WorkflowLoadError as WorkflowLoadError
@@ -162,6 +163,23 @@ def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, detail
         raise typer.Exit(code=1)
 
 
+def _consent_partner_nodes(
+    workflow: dict, object_info: dict, run_partner_nodes: list[str], output_node_ids
+) -> list[str]:
+    """Partner nodes the spend gate must ask about.
+
+    A targeted run still submits the whole graph, and
+    ``partial_execution_targets`` is advisory: a server that ignores it runs
+    every branch, paid ones included, with whatever credential was sent. So
+    consent covers the full submitted workflow, not just the targets'
+    subgraph. ``run_partner_nodes`` (the subgraph's) is reused when there are
+    no targets, since the two graphs are then the same.
+    """
+    if not output_node_ids:
+        return run_partner_nodes
+    return _detect_partner_nodes(workflow, object_info)
+
+
 # Mapping from the deleted legacy `comfy run --json` dialect (JsonEmitter,
 # `{"event": …, "error": {"kind": …}}`) to the renderer dialect
 # (`{"schema": "event/1", "type": …}` events + final `type: "envelope"` line).
@@ -218,6 +236,7 @@ def execute(
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
+    output_node_ids: list[str] | None = None,
     client_id: str | None = None,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
@@ -320,33 +339,36 @@ def execute(
 
     # Stream mode: emit the workflow graph so agents have a complete audit
     # trail of what the CLI is about to submit (no-op otherwise).
-    renderer.event("prompt_preview", prompt=workflow)
+    renderer.event("prompt_preview", prompt=workflow, **_targets_field(output_node_ids))
+
+    # Before the dry-run return so `--print-prompt` checks the ids too
+    # (existence only there: it fetches no object_info).
+    if output_node_ids:
+        _validate_output_node_ids_or_exit(renderer, workflow, object_info, output_node_ids)
 
     # --print-prompt: emit/print the workflow and exit without submitting. No
     # server hit (documented) — the graph is shown as-is, before any
     # server-dependent checkpoint resolution.
     if print_prompt:
-        if renderer.is_pretty():
-            print(json.dumps(workflow, indent=2, ensure_ascii=False))
-        else:
-            renderer.emit(
-                {"workflow": workflow_name, "status": "preview", "prompt": workflow},
-                command="run",
-                where="local",
-            )
+        _print_preview(renderer, workflow, workflow_name, output_node_ids, where="local")
         return
 
-    partner_nodes = _detect_partner_nodes(workflow, object_info)
+    # What actually runs: a targeted run executes only the targets' subgraph,
+    # so a broken node in a skipped branch must not fail it.
+    run_graph = target_subgraph(workflow, output_node_ids) if output_node_ids else workflow
+
+    partner_nodes = _detect_partner_nodes(run_graph, object_info)
     # Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before resolving a credential or submitting. Fires
     # BEFORE _resolve_partner_credential() below so a refusal never triggers a
     # network OAuth refresh. Detection stays fail-open (object_info == {} → no
     # partner_nodes → no gate), same posture as run-template.
+    consent_nodes = _consent_partner_nodes(workflow, object_info, partner_nodes, output_node_ids)
     _spend_gate(
         renderer,
-        partner_nodes,
+        consent_nodes,
         allow_spend,
-        details={"partner_nodes": partner_nodes, "host": host, "port": port},
+        details={"partner_nodes": consent_nodes, "host": host, "port": port},
     )
     extra_data: dict | None = None
     if api_key:
@@ -415,7 +437,9 @@ def execute(
             extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
-    _preflight_validate(renderer, workflow, object_info, target_label="server", where="local")
+    _preflight_validate(
+        renderer, run_graph, object_info, target_label="server", where="local", submitted_workflow=workflow
+    )
 
     progress = None
     start = time.time()
@@ -433,7 +457,9 @@ def execute(
         local_paths,
         timeout,
         extra_data=extra_data,
+        output_node_ids=output_node_ids,
         client_id=client_id,
+        run_graph=run_graph,
     )
     # Wire SIGINT → close the WebSocket so the loop exits promptly.
     token = cancellation.get_token()
@@ -915,7 +941,7 @@ def _load_workflow_or_exit(renderer, workflow, preloaded):
         raise typer.Exit(code=1) from e
 
 
-def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, **where_fields):
+def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, targets=None, **where_fields):
     """Create + persist the initial ``queued`` job state. Shared by the local
     async path and the cloud non-wait path — the ``--wait`` paths (local and
     cloud) build the state inline instead, since they also stamp their own
@@ -924,6 +950,10 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     ``where_fields`` carries the target-specific locators (``host``/``port`` for
     local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair,
     whose second element is None when the write could not land.
+
+    ``targets`` is the ``(output_node_ids, run_graph, ids_checked)`` triple of
+    a cloud ``--output-node-ids`` run, recorded so ``comfy jobs watch`` can
+    judge the finished job; see :func:`_record_targets`.
 
     The write goes through ``_write_state``, not ``jobs_state.write`` directly,
     and that is load-bearing: both callers run *after* the server accepted the
@@ -944,8 +974,20 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
         **where_fields,
     )
     state.item_map = (compose_meta or {}).get("items")
+    if targets is not None:
+        _record_targets(state, *targets)
     state_file = _write_state(state)
     return state, state_file
+
+
+def _record_targets(state, output_node_ids, run_graph: dict, ids_checked: bool) -> None:
+    """Stamp a ``--output-node-ids`` run's targets on its job record. A no-op
+    for an untargeted run, so its record keeps the null defaults."""
+    if not output_node_ids:
+        return
+    state.output_node_ids = list(output_node_ids)
+    state.run_graph_node_ids = [str(nid) for nid in run_graph]
+    state.output_node_ids_checked = bool(ids_checked)
 
 
 def _announce_async_queued(
@@ -958,6 +1000,7 @@ def _announce_async_queued(
     state_file,
     watcher_spawned,
     locator_fields,
+    note=None,
 ):
     """Async-submit ``queued`` tail shared by the local async path and the
     cloud non-wait path: the pretty status panel (+ watcher-failure warning),
@@ -993,6 +1036,8 @@ def _announce_async_queued(
         )
         if not watcher_spawned:
             pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
+        if note:
+            pprint(f"  [dim]{sanitize_markup(note)}[/dim]")
     renderer.emit(
         {
             "workflow": workflow_name,
@@ -1006,6 +1051,7 @@ def _announce_async_queued(
             # Lets a consumer know whether something is keeping the state file
             # fresh, or whether it must poll `comfy jobs status` itself.
             "watcher_spawned": watcher_spawned,
+            **({"note": note} if note else {}),
         },
         command="run",
         where=where,
@@ -1033,6 +1079,71 @@ def _count_output_nodes(workflow: dict, object_info: dict) -> int | None:
     return count
 
 
+def parse_output_node_ids(raw: str | list[str]) -> list[str]:
+    """Split ``--output-node-ids`` value(s) (``"9,12"``, or one string per
+    repeated flag) into node ids, in order, without blanks or repeats."""
+    values = [raw] if isinstance(raw, str) else raw
+    parts = (part.strip() for value in values for part in value.split(","))
+    return list(dict.fromkeys(part for part in parts if part))
+
+
+def _targets_field(output_node_ids: list[str] | None) -> dict:
+    """``{"partial_execution_targets": [...]}`` for a targeted run, else ``{}``
+    — merged into the preview so it shows what the submit would send."""
+    return {"partial_execution_targets": list(output_node_ids)} if output_node_ids else {}
+
+
+def _print_preview(renderer, workflow: dict, workflow_name: str, output_node_ids, *, where: str) -> None:
+    """The ``--print-prompt`` output. Pretty mode keeps stdout the bare graph
+    (pipeable JSON) and names the targets on stderr."""
+    if renderer.is_pretty():
+        print(json.dumps(workflow, indent=2, ensure_ascii=False))
+        if output_node_ids:
+            print(f"partial_execution_targets: {', '.join(output_node_ids)}", file=sys.stderr)
+    else:
+        renderer.emit(
+            {"workflow": workflow_name, "status": "preview", "prompt": workflow, **_targets_field(output_node_ids)},
+            command="run",
+            where=where,
+        )
+
+
+def _validate_output_node_ids_or_exit(renderer, workflow: dict, object_info: dict, node_ids: list[str]) -> None:
+    """Reject ``--output-node-ids`` that name no node in the submitted graph, or
+    a node whose class is not an output node. ComfyUI quietly drops a target
+    that is not an output node, so without this a typo runs nothing (or the
+    wrong thing) instead of failing. The output-node check needs object_info;
+    with none (`--print-prompt`, or a catalog that failed to load) only
+    existence is checked, and a class object_info does not know is left to the
+    preflight's unknown-node error."""
+    unknown = [nid for nid in node_ids if not isinstance(workflow.get(nid), dict)]
+    if unknown:
+        renderer.error(
+            code="invalid_output_node_ids",
+            message=f"--output-node-ids names node(s) not in the workflow: {', '.join(unknown)}",
+            hint="pass ids of output nodes (e.g. SaveImage) from the submitted API-format graph; "
+            "`comfy run --print-prompt` shows it",
+            details={"unknown_node_ids": unknown, "non_output_node_ids": []},
+        )
+        raise typer.Exit(code=1)
+    if not object_info:
+        return
+    non_output = []
+    for nid in node_ids:
+        ct = workflow[nid].get("class_type")
+        spec = object_info.get(ct) if isinstance(ct, str) else None
+        if isinstance(spec, dict) and spec.get("output_node") is not True:
+            non_output.append(nid)
+    if non_output:
+        renderer.error(
+            code="invalid_output_node_ids",
+            message=f"--output-node-ids names node(s) that are not output nodes: {', '.join(non_output)}",
+            hint="target output nodes (e.g. SaveImage, PreviewImage); ComfyUI runs whatever they depend on",
+            details={"unknown_node_ids": [], "non_output_node_ids": non_output},
+        )
+        raise typer.Exit(code=1)
+
+
 def _returned_output_node_count(record: dict) -> int:
     """How many distinct nodes actually produced outputs in the cloud history
     record. The record's ``outputs`` map is keyed by node id."""
@@ -1040,6 +1151,74 @@ def _returned_output_node_count(record: dict) -> int:
     if not isinstance(outputs, dict):
         return 0
     return sum(1 for v in outputs.values() if isinstance(v, dict) and v)
+
+
+def _nodes_with_outputs(record: dict) -> list[str]:
+    """Ids of the nodes that actually produced something in the cloud history
+    record: an entry with at least one non-empty output list. ``{"images": []}``
+    is a node that ran and produced nothing, and ``animated`` is a flag core
+    emits alongside images, not an output (same skip as
+    ``extract_output_entries``). Non-file lists such as ``text`` count."""
+    outputs = record.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return []
+    return [
+        str(nid)
+        for nid, entry in outputs.items()
+        if isinstance(entry, dict)
+        and any(key != "animated" and isinstance(value, list) and value for key, value in entry.items())
+    ]
+
+
+def _targeted_run_warnings(record: dict, output_node_ids: list[str], run_graph: dict, ids_checked: bool) -> list[dict]:
+    """Warnings for a ``--output-node-ids`` cloud run, judged on its targets.
+
+    ``partial_execution`` when a target produced nothing: the rest of the graph
+    was never meant to run, so neither an untargeted output node that stayed
+    empty nor outputs from one standing in for a target count. Emitted even
+    when ``ids_checked`` is false (no object_info, so the ids were only checked
+    to exist), with wording that allows a target may not be an output node.
+
+    ``partial_execution_targets_ignored`` when a node outside the targets'
+    subgraph produced outputs: the server ran more than was asked for (one
+    that predates ``partial_execution_targets`` drops it and runs the whole
+    graph, including any branch the user meant to skip)."""
+    produced = _nodes_with_outputs(record)
+    missing = [nid for nid in output_node_ids if nid not in produced]
+    warnings: list[dict] = []
+    if missing:
+        message = (
+            f"targeted {len(output_node_ids)} output node(s) but the cloud returned outputs for only "
+            f"{len(output_node_ids) - len(missing)}; no outputs from node(s) {', '.join(missing)}"
+        )
+        message += (
+            " (pruned server-side, likely failed validation)"
+            if ids_checked
+            else " (pruned server-side, or not output nodes: their class could not be checked)"
+        )
+        warnings.append(
+            {
+                "code": "partial_execution",
+                "message": message,
+                "submitted_output_nodes": len(output_node_ids),
+                "returned_output_nodes": len(output_node_ids) - len(missing),
+                "missing_output_node_ids": missing,
+            }
+        )
+    untargeted = [nid for nid in produced if nid not in run_graph]
+    if untargeted:
+        warnings.append(
+            {
+                "code": "partial_execution_targets_ignored",
+                "message": (
+                    f"ran with --output-node-ids but node(s) outside the targets also produced outputs: "
+                    f"{', '.join(untargeted)}; the server likely ignored partial_execution_targets and ran "
+                    "the whole graph"
+                ),
+                "untargeted_output_node_ids": untargeted,
+            }
+        )
+    return warnings
 
 
 def execute_cloud(
@@ -1053,6 +1232,7 @@ def execute_cloud(
     workflow_id: str | None = None,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
+    output_node_ids: list[str] | None = None,
 ):
     """Run a workflow against Comfy Cloud via the stored OAuth session.
 
@@ -1063,7 +1243,7 @@ def execute_cloud(
     (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
-    from comfy_cli.command._cloud_errors import emit_status_error
+    from comfy_cli.command._cloud_errors import emit_status_error, insufficient_scope_error
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -1166,31 +1346,39 @@ def execute_cloud(
     # unconditionally, like the local path — docs/json-output.md documents
     # `prompt_preview` in every stream except the pre-flight-failure archetype,
     # so gating it behind --print-prompt made the cloud stream undocumented.
-    renderer.event("prompt_preview", prompt=parsed_workflow)
+    renderer.event("prompt_preview", prompt=parsed_workflow, **_targets_field(output_node_ids))
+
+    if output_node_ids:
+        _validate_output_node_ids_or_exit(renderer, parsed_workflow, cloud_object_info, output_node_ids)
 
     if print_prompt:
         # Documented dry-run: show the API-format graph that WOULD be sent and
         # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch,
         # including returning (rather than raising `typer.Exit(0)`) so both
         # targets end this stream the same way.
-        if renderer.is_pretty():
-            print(json.dumps(parsed_workflow, indent=2, ensure_ascii=False))
-        else:
-            renderer.emit(
-                {"workflow": workflow_name, "status": "preview", "prompt": parsed_workflow},
-                command="run",
-                where="cloud",
-            )
+        _print_preview(renderer, parsed_workflow, workflow_name, output_node_ids, where="cloud")
         return
 
+    # Only the targets' subgraph runs on a targeted submit (see `execute`).
+    run_graph = target_subgraph(parsed_workflow, output_node_ids) if output_node_ids else parsed_workflow
+
     # Pre-submit validation via pure-Python CQL engine.
-    _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud", where="cloud")
+    _preflight_validate(
+        renderer,
+        run_graph,
+        cloud_object_info,
+        target_label="cloud",
+        where="cloud",
+        submitted_workflow=parsed_workflow,
+    )
 
     # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
     # Client() so a refusal never triggers cloud auth.
-    partner_nodes = _detect_partner_nodes(parsed_workflow, cloud_object_info)
+    partner_nodes = _consent_partner_nodes(
+        parsed_workflow, cloud_object_info, _detect_partner_nodes(run_graph, cloud_object_info), output_node_ids
+    )
     _spend_gate(
         renderer,
         partner_nodes,
@@ -1222,9 +1410,13 @@ def execute_cloud(
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
+                submit = client.submit_prompt(
+                    parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+                )
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
+            submit = client.submit_prompt(
+                parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+            )
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
@@ -1237,6 +1429,9 @@ def execute_cloud(
             message=f"Cloud server rejected the workflow (HTTP {e.status}): {e.message}",
             hint="check the workflow is valid and the cloud server has the required nodes",
             details={"status": e.status, "body": e.body[:2000]},
+            # Detection reads the whole body; only the rendered detail is capped.
+            scope_body=e.body,
+            www_authenticate=getattr(e, "www_authenticate", None),
             # A 429 alone does not prove the submit had no effect, and the
             # client never repeats a submit on its own. Look for the job before
             # re-running so one that did get through is not queued twice.
@@ -1311,6 +1506,7 @@ def execute_cloud(
             workflow_name,
             where="cloud",
             compose_meta=compose_meta,
+            targets=(output_node_ids, run_graph, bool(cloud_object_info)),
             base_url=target.base_url,
         )
         _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1321,15 +1517,26 @@ def execute_cloud(
         watcher_spawned = state_file is not None and _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
+        watch_command = f"comfy jobs watch {submit.prompt_id} --where cloud"
         _announce_async_queued(
             submit.prompt_id,
             client_id,
             workflow_name,
             where="cloud",
-            watch_command=f"comfy jobs watch {submit.prompt_id} --where cloud",
+            watch_command=watch_command,
             state_file=state_file,
             watcher_spawned=watcher_spawned,
             locator_fields={"base_url": target.base_url},
+            # Nothing judges the returned outputs at submit time, so say
+            # where the --output-node-ids check happens instead.
+            # Only when the targets reached the state file: without it the
+            # watch has nothing to judge against.
+            note=(
+                f"--output-node-ids is checked when the job finishes: run `{watch_command}` "
+                "to see whether the server ran only the targets"
+                if output_node_ids and state_file is not None
+                else None
+            ),
         )
         return
 
@@ -1349,6 +1556,7 @@ def execute_cloud(
         base_url=target.base_url,
     )
     state.item_map = (compose_meta or {}).get("items")
+    _record_targets(state, output_node_ids, run_graph, bool(cloud_object_info))
     jobs_state.stamp_watcher_identity(state)
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1419,7 +1627,14 @@ def execute_cloud(
                 )
             else:
                 state.status = "error"
-                state.error = {"code": "cloud_http_error", "message": str(e)}
+                # Record the same re-login verdict ``emit_status_error`` renders
+                # below, so a later `comfy jobs status` keeps the reason.
+                state.error = insufficient_scope_error(
+                    e.status,
+                    e.body,
+                    getattr(e, "www_authenticate", None),
+                    details={"status": e.status, "prompt_id": submit.prompt_id},
+                ) or {"code": "cloud_http_error", "message": str(e)}
             jobs_state.write(state)
             emit_status_error(
                 renderer,
@@ -1430,6 +1645,8 @@ def execute_cloud(
                 hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
                 rate_limited_next_step=follow_up,
+                scope_body=e.body,
+                www_authenticate=getattr(e, "www_authenticate", None),
             )
             raise typer.Exit(code=1) from e
         except KeyboardInterrupt:
@@ -1479,21 +1696,24 @@ def execute_cloud(
         # nodes we submitted against the ones that actually returned outputs so a
         # vanished branch surfaces instead of passing as a clean success.
         warnings: list[dict] = []
-        submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
-        returned_outputs = _returned_output_node_count(record)
-        if submitted_outputs is not None and returned_outputs < submitted_outputs:
-            warnings.append(
-                {
-                    "code": "partial_execution",
-                    "message": (
-                        f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
-                        f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
-                        "were pruned server-side (likely failed validation) and produced nothing"
-                    ),
-                    "submitted_output_nodes": submitted_outputs,
-                    "returned_output_nodes": returned_outputs,
-                }
-            )
+        if output_node_ids:
+            warnings.extend(_targeted_run_warnings(record, output_node_ids, run_graph, bool(cloud_object_info)))
+        else:
+            submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
+            returned_outputs = _returned_output_node_count(record)
+            if submitted_outputs is not None and returned_outputs < submitted_outputs:
+                warnings.append(
+                    {
+                        "code": "partial_execution",
+                        "message": (
+                            f"submitted {submitted_outputs} output node(s) but the cloud returned outputs "
+                            f"for only {returned_outputs}; {submitted_outputs - returned_outputs} branch(es) "
+                            "were pruned server-side (likely failed validation) and produced nothing"
+                        ),
+                        "submitted_output_nodes": submitted_outputs,
+                        "returned_output_nodes": returned_outputs,
+                    }
+                )
 
         if renderer.is_pretty():
             if output_urls:

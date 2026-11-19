@@ -101,15 +101,36 @@ def _parse_retry_after(headers: Any) -> float | None:
     return float(max(0, round((when - datetime.now(timezone.utc)).total_seconds())))
 
 
+def _www_authenticate(headers: Any) -> tuple[str, ...]:
+    """Every ``WWW-Authenticate`` value: a server may send one field per challenge."""
+    if headers is None:
+        return ()
+    try:
+        get_all = getattr(headers, "get_all", None)
+        values = get_all("WWW-Authenticate") if callable(get_all) else [headers.get("WWW-Authenticate")]
+    except Exception:  # noqa: BLE001
+        return ()
+    return tuple(v for v in (values or []) if isinstance(v, str) and v)
+
+
 class HTTPError(Exception):
     """Server returned a non-2xx response.
 
     ``retry_after`` carries the server's ``Retry-After`` header (seconds)
     when one was present, so retry layers above ``_request`` (e.g. the
-    wait_for_completion poll loop) can honor it.
+    wait_for_completion poll loop) can honor it. ``www_authenticate`` carries
+    every ``WWW-Authenticate`` value, which names a missing OAuth scope.
     """
 
-    def __init__(self, status: int, message: str, body: str = "", *, retry_after: float | None = None):
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        body: str = "",
+        *,
+        retry_after: float | None = None,
+        www_authenticate: tuple[str, ...] = (),
+    ):
         # Redact before super().__init__ so str(self) is safe to log.
         message = _redact(message)
         body = _redact(body)
@@ -118,6 +139,7 @@ class HTTPError(Exception):
         self.message = message
         self.body = body
         self.retry_after = retry_after
+        self.www_authenticate = www_authenticate
 
 
 class Unauthenticated(Exception):
@@ -252,9 +274,10 @@ class Client:
         method: str,
         path_parts: tuple[str, ...],
         *,
-        body: dict | None = None,
+        body: Any = None,
         body_factory: Callable[[], dict] | None = None,
         timeout: float | None = None,
+        headers: dict[str, str] | None = None,
         _retried: bool = False,
         _attempt: int = 0,
     ) -> Any:
@@ -280,6 +303,8 @@ class Client:
         # It also carries the `is_cloud` gate, so a stray auth_token on a
         # local target can't leak credentials to a plaintext server.
         for header, value in target_auth_headers(self.target).items():
+            req.add_header(header, value)
+        for header, value in (headers or {}).items():
             req.add_header(header, value)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
@@ -320,6 +345,7 @@ class Client:
                     body=body,
                     body_factory=body_factory,
                     timeout=timeout,
+                    headers=headers,
                     _retried=True,
                 )
             # Transient: back off and retry, for idempotent requests only.
@@ -332,6 +358,7 @@ class Client:
                     body=body,
                     body_factory=body_factory,
                     timeout=timeout,
+                    headers=headers,
                     _retried=_retried,
                     _attempt=_attempt + 1,
                 )
@@ -340,6 +367,7 @@ class Client:
                 e.reason or "HTTP error",
                 body_text,
                 retry_after=_parse_retry_after(getattr(e, "headers", None)),
+                www_authenticate=_www_authenticate(getattr(e, "headers", None)),
             ) from e
 
     # ----- submit -----
@@ -352,6 +380,7 @@ class Client:
         timeout: float | None = None,
         extra_data: dict | None = None,
         workflow_id: str | None = None,
+        output_node_ids: list[str] | None = None,
     ) -> SubmitResult:
         """POST {prefix}/prompt — submit a workflow for execution.
 
@@ -360,6 +389,9 @@ class Client:
         forwarded as a top-level ``workflow_id`` field so the server can associate
         the job with an existing workflow and auto-promote a draft on run. Omitted
         from the body entirely when unset.
+        ``output_node_ids`` is sent as top-level ``partial_execution_targets`` so
+        the server runs only those output nodes and what they depend on; omitted
+        from the body entirely when unset, which queues the whole graph.
         For cloud submissions, the user's OAuth token is injected as
         ``auth_token_comfy_org`` so partner-API nodes (BFL Flux Pro, Gemini
         Nano Banana, etc.) can call out to comfy.org — matching what the web
@@ -390,6 +422,8 @@ class Client:
             # workflow (auto-promotes a draft on run). Only sent when provided.
             if workflow_id:
                 request_payload["workflow_id"] = workflow_id
+            if output_node_ids:
+                request_payload["partial_execution_targets"] = list(output_node_ids)
             return request_payload
 
         resp = self._request("POST", ("prompt",), body_factory=payload, timeout=timeout)
@@ -496,6 +530,31 @@ class Client:
             body={"unload_models": unload_models, "free_memory": free_memory},
             timeout=timeout,
         )
+
+    # ----- frontend extensions and settings -----
+
+    def get_extensions(self, *, timeout: float | None = None) -> Any:
+        """GET {prefix}/extensions: the frontend script URLs ComfyUI serves, core ones included."""
+        return self._request("GET", ("extensions",), timeout=timeout)
+
+    def get_users(self, *, timeout: float | None = None) -> Any:
+        """GET {prefix}/users: carries a ``users`` map only when ComfyUI runs with --multi-user."""
+        return self._request("GET", ("users",), timeout=timeout)
+
+    def get_setting(self, setting_id: str, *, user: str | None = None, timeout: float | None = None) -> Any:
+        """GET {prefix}/settings/{id}: one frontend setting value, or None when it was never set.
+
+        ``user`` is sent as the ``comfy-user`` header, which picks the settings file under --multi-user.
+        """
+        headers = {"comfy-user": user} if user else None
+        return self._request("GET", ("settings", setting_id), timeout=timeout, headers=headers)
+
+    def post_setting(
+        self, setting_id: str, value: Any, *, user: str | None = None, timeout: float | None = None
+    ) -> None:
+        """POST {prefix}/settings/{id}: replace one frontend setting value (``user`` as for get_setting)."""
+        headers = {"comfy-user": user} if user else None
+        self._request("POST", ("settings", setting_id), body=value, timeout=timeout, headers=headers)
 
     # ----- polling helpers -----
 

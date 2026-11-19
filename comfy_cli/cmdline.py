@@ -1759,13 +1759,44 @@ def update(
         raise typer.Exit(code=1)
 
     if "cli" == target:
-        from comfy_cli.update import upgrade_cli
+        from comfy_cli.update import UpgradeUnavailable, upgrade_cli
 
         rprint("Updating comfy-cli...")
-        upgrade_cli()
+        try:
+            upgrade_cli()
+        except UpgradeUnavailable as e:
+            get_renderer().error(code="update_cli_failed", message=str(e), hint=e.hint)
+            raise typer.Exit(code=1) from e
+        except subprocess.CalledProcessError as e:
+            get_renderer().error(
+                code="update_cli_failed",
+                message=f"`{' '.join(map(str, e.cmd))}` failed with exit code {e.returncode}.",
+                hint="see the installer output above; re-running `comfy update cli` is safe",
+                details={"returncode": e.returncode},
+            )
+            raise typer.Exit(code=1) from e
+        except OSError as e:
+            get_renderer().error(
+                code="update_cli_failed",
+                message=f"Could not start the comfy-cli installer: {e}",
+                hint="check the installer executable and its permissions, then re-run `comfy update cli`",
+            )
+            raise typer.Exit(code=1) from e
+        get_renderer().emit({"target": "cli"}, command="update")
         return
 
-    comfy_path = workspace_manager.workspace_path
+    try:
+        comfy_path = workspace_manager.workspace_path
+    except typer.Exit as error:
+        if target != "comfy":
+            raise
+        get_renderer().error(
+            code="not_in_workspace",
+            message="ComfyUI workspace could not be resolved.",
+            hint="run `comfy install`, or pass `--workspace` to point at an existing install",
+            exit_code=error.exit_code,
+        )
+        raise
 
     if "all" == target:
         # Without raise_on_error, execute_cm_cli swallows a cm-cli exit 1 and returns None,
@@ -1798,10 +1829,20 @@ def update(
             )
             raise typer.Exit(code=code) from e
     else:
-        rprint(f"Updating ComfyUI in {comfy_path}...")
-        if comfy_path is None:
-            rprint("ComfyUI path is not found.")
+        # The default workspace path comes from config and can name a directory that
+        # was never installed (or was deleted), so check existence, not just None.
+        if comfy_path is None or not os.path.isdir(comfy_path):
+            get_renderer().error(
+                code="not_in_workspace",
+                message=(
+                    "ComfyUI workspace not found."
+                    if comfy_path is None
+                    else f"ComfyUI workspace not found: {comfy_path}"
+                ),
+                hint="run `comfy install`, or pass `--workspace` to point at an existing install",
+            )
             raise typer.Exit(code=1)
+        rprint(f"Updating ComfyUI in {comfy_path}...")
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
@@ -2002,6 +2043,19 @@ def run(
             ),
         ),
     ] = False,
+    output_node_ids: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--output-node-ids",
+            show_default=False,
+            help=(
+                "Comma-separated ids of output nodes to run (e.g. 9,12; repeatable); only they and "
+                "the nodes they depend on execute, the rest of the graph is skipped. Ids are the "
+                "API-format graph's node ids and must be output nodes. Sent to /prompt as "
+                "partial_execution_targets. Omit to run the whole graph."
+            ),
+        ),
+    ] = None,
     client_id: Annotated[
         str | None,
         typer.Option(
@@ -2048,7 +2102,7 @@ def run(
         try:
             decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
         except ValueError as e:
-            renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+            renderer.error(code="where_invalid", message=str(e), hint=where_module.WHERE_INVALID_HINT)
             raise typer.Exit(code=1)
 
         # The routing target is now known, so every downstream error envelope
@@ -2093,6 +2147,18 @@ def run(
         # agents (they shouldn't get surprise side-channel processes they didn't
         # ask for). The user can override either way with --notify/--no-notify.
         effective_notify = notify if notify is not None else (renderer.is_pretty() and not wait)
+
+        target_ids: list[str] | None = None
+        if output_node_ids:
+            target_ids = run_inner.parse_output_node_ids(output_node_ids)
+            if not target_ids:
+                renderer.error(
+                    code="invalid_output_node_ids",
+                    message="--output-node-ids was given but names no node ids",
+                    hint="pass comma-separated output node ids, e.g. --output-node-ids 9,12; omit it to run the whole graph",
+                    details={"unknown_node_ids": [], "non_output_node_ids": []},
+                )
+                raise typer.Exit(code=1)
 
         # --prompt/--set build an in-memory API-format graph from the bundled
         # default text2img workflow (no --workflow file). The aliases resolve
@@ -2148,6 +2214,7 @@ def run(
                 workflow_id=workflow_id,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                output_node_ids=target_ids,
             )
         else:
             # Both targets must fall off the END of this try suite: Python skips
@@ -2186,6 +2253,7 @@ def run(
                 print_prompt=print_prompt,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                output_node_ids=target_ids,
                 client_id=client_id,
             )
     except typer.Exit as e:
@@ -2307,7 +2375,7 @@ def upload(
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
-        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        renderer.error(code="where_invalid", message=str(e), hint=where_module.WHERE_INVALID_HINT)
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
@@ -2373,7 +2441,7 @@ def download(
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
-        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        renderer.error(code="where_invalid", message=str(e), hint=where_module.WHERE_INVALID_HINT)
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
@@ -2748,7 +2816,8 @@ def set_default(
 @tracking.track_command()
 def which():
     renderer = get_renderer()
-    comfy_path = workspace_manager.workspace_path
+    workspace = workspace_manager.discovery_data()
+    comfy_path = workspace["path"]
     if comfy_path is None:
         renderer.error(
             code="not_in_workspace",
@@ -2757,15 +2826,16 @@ def which():
         )
         raise typer.Exit(code=1)
 
-    workspace_type_value = (
-        workspace_manager.workspace_type.value if workspace_manager.workspace_type is not None else None
-    )
+    workspace_type_value = workspace["type"]
+    # A missing directory stays a success (exit 0, as in envelope/1 before):
+    # ``exists: false`` and a ``workspace_not_found`` warning say so.
     if renderer.is_pretty():
         import sys as _sys
 
         from comfy_cli.env_checker import _display_url
         from comfy_cli.local_address import resolve_local_host_port
         from comfy_cli.output.panels import which_panel
+        from comfy_cli.output.sanitize import sanitize_value
 
         host, port = resolve_local_host_port(None, None, background=ConfigManager().background)
         try:
@@ -2781,12 +2851,17 @@ def which():
                 server_running=server_running,
                 server_url=_display_url(host, port),
                 version=ConfigManager().get_cli_version(),
+                desktop=workspace.get("desktop"),
             )
         )
+        for warning in workspace.get("warnings", []):
+            renderer.console().print(sanitize_value(warning["message"]), markup=False)
     renderer.emit(
         {
             "workspace_path": str(comfy_path),
             "workspace_type": workspace_type_value,
+            "exists": workspace["exists"],
+            **{key: workspace[key] for key in ("desktop", "warnings") if key in workspace},
         },
         command="which",
     )
@@ -2866,6 +2941,9 @@ def env():
     # JSON path: collect structured data without printing the table.
     data = EnvChecker().fill_data()
     data["workspace"] = workspace_manager.fill_data()
+    warnings = data["workspace"].pop("warnings", None)
+    if warnings:
+        data["warnings"] = warnings
     renderer.emit(data, command="env")
 
 
@@ -3086,6 +3164,10 @@ _RootGroup.lazy_subcommands = {
     "node": LazySubcommand("comfy_cli.command.custom_nodes", help="Manage custom nodes."),
     "nodes": LazySubcommand(
         "comfy_cli.command.nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories)."
+    ),
+    "extension": LazySubcommand(
+        "comfy_cli.command.extensions",
+        help="Turn a custom node pack's frontend code off or on (no restart; reload the page).",
     ),
     "templates": LazySubcommand("comfy_cli.command.templates", help="Browse the Comfy workflow-template gallery."),
     "knowledge": LazySubcommand(

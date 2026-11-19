@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_update.json",
   "title": "comfy build update --json data payload",
-  "description": "The rescan diff, and the definition it would write or wrote.",
+  "description": "The rescan diff, and the definition it would write or wrote. `source` is `scan`, `snapshot` or `workflow`, or `spec` when `--comfy-version` alone set the version in a spec with no install beside it, without a rescan.",
   "type": "object",
   "required": ["spec_file", "models_dir", "dry_run", "written", "summary", "diff", "definition"],
   "additionalProperties": true,
@@ -62,6 +62,16 @@
           "localPath": {"type": "string", "minLength": 1},
           "member": {"type": "string", "minLength": 1}
         }
+      }
+    },
+    "warnings": {
+      "description": "Gaps in the definition that do not stop this command but stop a later one, as `{code, message}`: `build_comfy_version_missing` (no `baseComfyVersion`, which `release create` refuses), and for a snapshot import `build_snapshot_empty` (the import carries no custom nodes or models: either the snapshot lists none, so it is likely older than the install, or every pack it lists was left out, which the message counts by cause: disabled, or the importer's own advisory line for each cause its report gives (each pack under one cause, and those lines are not warned again on their own), and no cause where its report gives none). Empty when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": false,
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
       }
     },
     "definition": {"type": "object"}

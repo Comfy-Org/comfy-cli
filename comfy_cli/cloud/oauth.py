@@ -45,7 +45,7 @@ import urllib.request
 import webbrowser
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 
 from comfy_cli.cloud import (
@@ -55,6 +55,11 @@ from comfy_cli.cloud import (
     get_base_url,
 )
 from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from comfy_cli.auth.store import CloudSession
 
 # ---------------------------------------------------------------------------
 # Error types — caller maps these to renderer.error(code=...) codes.
@@ -90,6 +95,19 @@ class OAuthRefreshError(OAuthError):
 
 class OAuthTimeout(OAuthError):
     code = "oauth_timeout"
+
+
+class SessionReplaced(Exception):
+    """The stored sign-in is not the one ``ensure_fresh_session(expect=...)`` was asked to refresh.
+
+    Raised before anything is refreshed, persisted or cleared, so another
+    sign-in stored while the caller waited is left exactly as it was.
+    ``session`` is the sign-in found in its place.
+    """
+
+    def __init__(self, session: CloudSession) -> None:
+        super().__init__("the stored sign-in was replaced by another")
+        self.session = session
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +776,14 @@ def take_last_fatal_refresh_reason() -> str | None:
     return reason
 
 
-def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear: bool = True):
+def ensure_fresh_session(
+    *,
+    leeway_s: int = 60,
+    force: bool = False,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
+):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
     is available.
@@ -779,6 +804,10 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     ``expires_at`` recorded — still thinks it is valid. The refresh token is
     still required; without one this is a no-op.
 
+    ``rejected_access_token`` identifies the token that received the 401. If a
+    peer already replaced it, adopt that session instead of refreshing again.
+    This also covers a late 401 that arrives after the peer released the lock.
+
     ``allow_clear=False`` keeps the stored session on disk even when a refresh
     hits a fatal token error (reuse-detection / ``invalid_grant``). Background,
     read-mostly callers (the detached ``comfy run`` watcher) pass this so a
@@ -786,6 +815,13 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     can never wipe the login out from under the foreground command that owns the
     session lifecycle. The refresh still returns ``None`` so the caller knows it
     could not freshen the token; it just declines to destroy the shared session.
+
+    ``expect`` is for a caller bound to one sign-in (an upload finished as the
+    account that started it). It is called with the stored session on the first
+    read and again under the lock, before any refresh, persist or clear; when it
+    returns ``False`` another sign-in replaced that one (``comfy cloud login`` in
+    another shell), so :class:`SessionReplaced` is raised and the store is left
+    untouched. Without it every stored session is refreshed, as before.
 
     Concurrency: the auth server rotates the refresh token on every refresh and
     invalidates the old one. A parallel ``comfy run`` fan-out (plus background
@@ -800,6 +836,8 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
     from comfy_cli.auth import store as auth_store
 
     session = auth_store.get_cloud_session()
+    if session is not None and expect is not None and not expect(session):
+        raise SessionReplaced(session)
     if session is None or not session.refresh_token:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
@@ -821,6 +859,8 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
                 leeway_s=leeway_s,
                 force=force,
                 allow_clear=allow_clear,
+                expect=expect,
+                rejected_access_token=rejected_access_token,
             )
     except TimeoutError:
         # A peer has held the lock longer than a refresh should take. Don't
@@ -833,7 +873,16 @@ def ensure_fresh_session(*, leeway_s: int = 60, force: bool = False, allow_clear
         return session
 
 
-def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, force: bool, allow_clear: bool = True):
+def _locked_refresh(
+    auth_store,
+    *,
+    observed_refresh_token: str,
+    leeway_s: int,
+    force: bool,
+    allow_clear: bool = True,
+    expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
+):
     """Decide → POST → persist, executed while holding the secrets lock.
 
     Re-reads the persisted session first (double-checked locking): if a peer
@@ -841,14 +890,32 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     one rather than spending the now-consumed token we observed before locking.
     """
     session = auth_store.get_cloud_session()
+    # Checked under the lock: another login stored since the first read is
+    # neither refreshed nor cleared on this caller's behalf.
+    if session is not None and expect is not None and not expect(session):
+        raise SessionReplaced(session)
     if session is None or not session.refresh_token:
+        return session
+
+    # The rejected request may have been in flight while a peer finished its
+    # refresh, before even our first store read. Don't rotate that peer's token
+    # again just because this client's older request was refused.
+    if (
+        rejected_access_token is not None
+        and session.access_token != rejected_access_token
+        and session.expires_at is not None
+        and not session.is_expired(leeway_s=leeway_s)
+    ):
         return session
 
     # Double-check after acquiring the lock. A peer may have refreshed while we
     # blocked: if the stored refresh token rotated away from what we observed
     # before locking, the family already advanced — use it, never re-send the
     # consumed token (that is exactly what trips reuse-detection).
-    if session.refresh_token != observed_refresh_token:
+    # A usable reactive peer already returned above. Otherwise refresh its
+    # current family, never replaying the older token observed before locking.
+    # Ordinary proactive callers still coalesce on any peer rotation.
+    if session.refresh_token != observed_refresh_token and rejected_access_token is None:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
         # Peer advanced the access token's expiry without us noticing a token

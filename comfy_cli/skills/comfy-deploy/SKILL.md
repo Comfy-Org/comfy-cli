@@ -171,11 +171,17 @@ provisioning". Things to read correctly:
 - No `progress` at all is an older service, or a status other than the two above.
 
 Interrupting the wait leaves the deployment coming up on the service's side;
-`comfy deploy status --deployment <id> --watch` attaches again. A deploy API that
+read `comfy deploy show --deployment <id>` from any folder. To watch again,
+use `comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's
+verified spec. A deploy API that
 stops answering (a 5xx or a dropped connection, as during its own rollout) is
 retried for about a minute; if it is still down, the wait ends with
 `deploy_watch_lost` and **exit 75**, not 1. That is not a failed deployment:
 attach again with the command in the hint rather than redeploying.
+`watch_auth_lost`, also exit 75, is a read refused with a 401 despite session
+recovery, while a refreshable sign-in remains stored. Parallel requests adopt a
+peer's refreshed token and retry at most once. Attach again the same way before
+considering a new sign-in; the deployment may still be coming up.
 
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,
 `credits`, or `policy`. `credits` is a billing problem and not something a retry
@@ -185,7 +191,8 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-watch]
+                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-editor]
+                       [--no-watch]
 comfy deploy rename [PATH] <name> [--deployment <name|id>]
 ```
 
@@ -206,6 +213,14 @@ comfy deploy rename [PATH] <name> [--deployment <name|id>]
   finds the deployment holding that name. `up` refuses `--name` when it would
   update a deployment holding another name: `comfy deploy rename` names an
   existing one, and without `--deployment` renames the Build's only one.
+- **Pass `--no-editor` for a deployment only called through the API**, never
+  opened in the editor: without it comfy-deploy gives a new deployment a CPU
+  server for the editor, running beside it. With neither flag an existing
+  deployment keeps what it has, on or off. On an existing deployment the flag
+  goes with the move, or alone, starting no new copy; `--editor` turns the
+  server back on. A value comfy-deploy does not confirm, a failed read to
+  confirm it included, exits 1 with `deploy_editor_unchanged`, and the rest of
+  what `up` did stands: `data` and `changed` still say what it did.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an
@@ -316,6 +331,7 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
 comfy deploy run [PATH] --workflow <api-workflow>.json
                         [--output-dir outputs] [--timeout <s>]
                         [--no-wait] [--no-upload] [--asset-root <dir>]
+                        [--allow-upload <hash> ...]
 ```
 
 - **API format only.** A UI-format export (the one with `nodes` and `links`) is
@@ -341,6 +357,9 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   `uploaded`/`deduped`/`bytes` totals never name a filename. A user who is about
   to send files off their machine is owed that list. `--no-upload` turns a needed
   upload into `deploy_asset_missing` instead, for when nothing may leave the box.
+  Its `details.missing[]` lists every file it would have sent: the absolute
+  `local_path`, `bytes` and `hash`. `--allow-upload <hash>` (repeatable) then
+  uploads only those exact files; any other file fails the same way.
 - **It waits and downloads by default.** Outputs land in `./outputs/` unless
   `--output-dir` says otherwise, and each is reported with its `node_id`, `name`,
   `type` and `path`. `--no-wait` returns the job id immediately instead.
@@ -353,9 +372,11 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   have been created**, and the CLI cannot settle which: no `comfy` command looks
   a job up by the idempotency key it carried (`details.idempotency_key`). Read
   `comfy deploy status` anyway — the deployment's own state may be what caused
-  the timeout, and `serving` plus `jobsInQueue` say whether *something* is
-  running — but it cannot tell you that something is your job. Report what it
-  showed and let the user decide. Never resubmit on your own.
+  the timeout. The `serving` worker counts and `jobsInQueue` describe only the
+  sample time (`sampledAt`) and may lag after workers scale down. They cannot
+  establish whether a worker or job is running now, or identify your job.
+  Report the sample's timestamp and age with the counts, and let the user
+  decide. Never resubmit on your own.
 
 ## Reading a deployment
 
@@ -396,7 +417,9 @@ The rest are narrower:
   there; `up --release` takes a release id. This is how you find out *why*
   something reached `failed`, which `status` only reports as a state.
 - **`ls`** — live deployments of this Build, each row with its `releaseVersion`.
-  `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
+  Run with no PATH where there is no spec, it lists every Build's, as `--workspace`
+  does; `--json` says which in `data.scope` (`build`, with `data.buildId`, or
+  `workspace`). `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
   keep only the `releaseId`), `--status` filters server-side, `--limit` defaults
   to 20 and caps at 100. Reach for `--workspace` when hunting for compute nobody
   accounted for.
@@ -419,6 +442,17 @@ The rest are narrower:
 
 **Prefer `stop` to `delete`** unless the user asked to tear it down. Both end the
 compute charge; only one is undoable.
+
+**A workspace may hold only so many active deployments.** Every undeleted
+deployment that is not `failed`, `stopped` or `stop_failed` takes a slot, and a
+create, restart or move past the limit is `deploy_quota_exceeded` with the
+holders in `details.activeDeployments`. A stopped deployment moving to another release can
+still hold a slot through its queued replacement, so that list, and a count
+`comfy build quota` prints as "at least" (`exact: false`), can come up short of the limit; the
+refusal itself is the answer. `stop` frees a slot. The number comes from the plan,
+so read it with `comfy build quota` rather than quoting one; that command also
+counts the workspace's releases against its release limit, which
+`comfy build release delete` frees. Ask the user which deployment to stop.
 
 ## Before you deploy
 

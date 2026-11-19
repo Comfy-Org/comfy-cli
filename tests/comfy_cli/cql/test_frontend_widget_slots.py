@@ -333,11 +333,9 @@ class TestDomWidgetInputs:
         # adds only the viewport component, not Load3D's three buttons.
         assert graph.widget_order("Load3DAdvanced") == ["model_file", "viewport_state", "width", "height"]
 
-    def test_load3d_advanced_legacy_button_shape_stays_value_aligned(self, graph: Graph):
-        # Workflows saved before the dedicated LOAD_3D_ADVANCED factory can
-        # still carry the LOAD_3D buttons.  The static catalog describes the
-        # current buttonless shape, while value-aware editing must preserve
-        # the legacy positions so width is not written into a button slot.
+    def test_load3d_advanced_legacy_button_shape_is_rewritten_to_the_frontends_shape(self, graph: Graph):
+        # Workflows written by an older comfy-cli can still carry the LOAD_3D
+        # buttons. Reads stay value-aware so the legacy slots are named...
         values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
         assert graph.widget_order_for_node("Load3DAdvanced", values) == [
             "model_file",
@@ -346,32 +344,162 @@ class TestDomWidgetInputs:
             "width",
             "height",
         ]
+        # ...but the frontend builds this node with four widgets and restores
+        # widgets_values by position, so an edit writes what the canvas would
+        # serialize (the cloud doc host normalizes legacy slots the same way).
         wf = _workflow(_node(1, "Load3DAdvanced", values))
         wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
-        assert wf["nodes"][0]["widgets_values"] == [
-            "motor.fbx",
-            "upload3dmodel",
-            "uploadExtraResources",
-            "clear",
-            "",
-            512,
-            600,
-        ]
+        assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", "", 512, 600]
+
+    def test_an_edited_legacy_load3d_advanced_matches_the_frontends_serialization(self, graph: Graph):
+        # The written array lines up name-for-name with the live node's
+        # widgets: [model_file, viewport_state, width, height].
+        viewport = {"cameraState": {"zoom": 2}}
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", viewport, 800, 600]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "height", 480)
+        written = wf["nodes"][0]["widgets_values"]
+        frontend_order = graph.widget_order("Load3DAdvanced")
+        assert frontend_order == ["model_file", "viewport_state", "width", "height"]
+        assert dict(zip(frontend_order, written, strict=True)) == {
+            "model_file": "motor.fbx",
+            "viewport_state": viewport,
+            "width": 800,
+            "height": 480,
+        }
+        assert graph.widget_order_for_node("Load3DAdvanced", written) == frontend_order
 
     def test_load3d_advanced_truncated_legacy_prefix_is_padded_before_edit(self, graph: Graph):
-        # The first two fixed markers are enough to distinguish a truncated
-        # legacy button layout from the current viewport/width positions.
+        # The first two fixed markers are enough to identify a truncated
+        # legacy run; it is stripped, then viewport is padded before width.
         values = ["motor.fbx", "upload3dmodel", "uploadExtraResources"]
         wf = _workflow(_node(1, "Load3DAdvanced", values))
         wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", "", 512]
+
+    def test_a_batch_edit_of_a_legacy_load3d_advanced_writes_four_values(self, graph: Graph):
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _ops, _aliases = workflow_ops.apply_specs(
+            wf,
+            graph,
+            [
+                {"op": "set_widget", "node": 1, "widget": "width", "value": 512},
+                {"op": "set_widget", "node": 1, "widget": "height", "value": 256},
+            ],
+        )
+        assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", "", 512, 256]
+
+    def test_plain_load3d_keeps_its_real_button_slots_on_edit(self, graph: Graph):
+        # Load3D's buttons are real widgets on the canvas, so nothing is stripped.
+        values = ["toy.glb", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024]
+        wf = _workflow(_node(1, "Load3D", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
         assert wf["nodes"][0]["widgets_values"] == [
-            "motor.fbx",
+            "toy.glb",
             "upload3dmodel",
             "uploadExtraResources",
             "clear",
             "",
             512,
+            1024,
         ]
+
+    def test_load3d_advanced_single_marker_edit_and_convert_agree(self, graph: Graph):
+        # One marker is not a legacy prefix: it is the viewport's own value.
+        # Editing and converting must both read it that way, or a width edit
+        # lands in a slot the converter then reports as the viewport.
+        values = ["m.fbx", "upload3dmodel", 800, 600]
+        assert graph.widget_order_for_node("Load3DAdvanced", values) == [
+            "model_file",
+            "viewport_state",
+            "width",
+            "height",
+        ]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == ["m.fbx", "upload3dmodel", 512, 600]
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "upload3dmodel", "width": 512, "height": 600}
+
+    def test_load3d_advanced_two_marker_prefix_edit_and_convert_agree(self, graph: Graph):
+        # Two markers make the legacy layout, so the editor places all three
+        # button slots even when the third value is not "clear". The converter
+        # must skip the same three, not stop at the last marker it recognises.
+        values = ["m.fbx", "upload3dmodel", "uploadExtraResources", 800, 600, 512, 512]
+        assert graph.widget_order_for_node("Load3DAdvanced", values) == [
+            "model_file",
+            *_LOAD_3D_BUTTONS,
+            "viewport_state",
+            "width",
+            "height",
+        ]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 640)
+        # The edit also drops those same three slots, so the written node is
+        # the frontend's four-widget shape and still agrees with the converter.
+        assert wf["nodes"][0]["widgets_values"] == ["m.fbx", 600, 640, 512]
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": 600, "width": 640, "height": 512}
+
+    def test_a_current_load3d_advanced_viewport_is_left_untouched(self, graph: Graph):
+        viewport = {"cameraState": {"zoom": 2}}
+        wf = _workflow(_node(1, "Load3DAdvanced", ["motor.fbx", viewport, 800, 600]))
+        wf, _op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", viewport, 512, 600]
+
+    def test_a_legacy_run_with_a_non_constant_clear_slot_strips_all_three(self, graph: Graph):
+        # Reads name slot 3 as ``clear`` once slots 1-2 hold the two markers,
+        # whatever it holds; the edit must drop that same slot so width is
+        # written where the read said it was.
+        viewport = {"cameraState": {"zoom": 2}}
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", None, viewport, 800, 600]
+        wf = _workflow(_node(1, "Load3DAdvanced", values))
+        wf, op = workflow_ops.set_widget(wf, graph, 1, "width", 512)
+        assert wf["nodes"][0]["widgets_values"] == ["motor.fbx", viewport, 512, 600]
+        assert op["old"] == 800
+
+    def test_a_button_name_on_a_legacy_load3d_advanced_is_refused_as_injected(self, graph: Graph):
+        values = ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        for name in _LOAD_3D_BUTTONS:
+            wf = _workflow(_node(1, "Load3DAdvanced", list(values)))
+            with pytest.raises(ValueError, match="frontend-injected") as ei:
+                workflow_ops.set_widget(wf, graph, 1, name, "x")
+            assert "not found" not in str(ei.value)
+            assert wf["nodes"][0]["widgets_values"] == values
+
+    def test_load3d_advanced_catalog_entry_names_no_button(self, graph: Graph):
+        # The exported catalog is what the cloud doc host projects saved
+        # documents through, so it must carry the live node's shape too.
+        from comfy_cli.cql.widget_catalog import build_types
+
+        types = build_types(graph)
+        assert types["Load3DAdvanced"]["widget_order"] == ["model_file", "viewport_state", "width", "height"]
+        # Plain Load3D keeps them: its LOAD_3D slot IS built by the button factory.
+        assert types["Load3D"]["widget_order"] == ["model_file", *_LOAD_3D_BUTTONS, "image", "width", "height"]
+
+    def test_a_fresh_load3d_advanced_serializes_the_frontends_exact_shape(self, graph: Graph):
+        wf, _ = workflow_ops.add_node(_empty_workflow(), graph, "Load3DAdvanced")
+        assert wf["nodes"][0]["widgets_values"] == ["none", "", 1024, 1024]
+
+    def test_a_button_name_is_not_a_widget_of_a_fresh_load3d_advanced(self, graph: Graph):
+        wf, op = workflow_ops.add_node(_empty_workflow(), graph, "Load3DAdvanced")
+        nid = op["node_id"]
+        for name in _LOAD_3D_BUTTONS:
+            with pytest.raises(ValueError, match=name):
+                workflow_ops.set_widget(wf, graph, nid, name, "x")
+        wf, _ = workflow_ops.set_widget(wf, graph, nid, "width", 640)
+        assert wf["nodes"][0]["widgets_values"] == ["none", "", 640, 1024]
+
+    def test_an_edited_legacy_load3d_advanced_still_converts(self, graph: Graph):
+        # A file saved with the old button layout, edited by name and then
+        # converted: the edit must not shift width into a button slot, and
+        # the conversion must not read a button value as an input.
+        legacy = ["m.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024]
+        wf = _workflow(_node(1, "Load3DAdvanced", legacy))
+        wf, _ = workflow_ops.set_widget(wf, graph, 1, "width", 640)
+        inputs = convert_ui_to_api(wf, _object_info())["1"]["inputs"]
+        assert inputs == {"model_file": "m.fbx", "viewport_state": "", "width": 640, "height": 1024}
 
     def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
         # ``hasModelFileWidget`` gates the injection: this node is fed by a
