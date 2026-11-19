@@ -54,6 +54,11 @@ class ConfigManager:
                     if not self.config.has_section(section_name):
                         self.config.add_section(section_name)
                     for option, value in disk.items(section_name):
+                        # items() mixes in the [DEFAULT] section; adopting
+                        # those here would copy every default into every
+                        # concrete section, permanently
+                        if option in disk.defaults():
+                            continue
                         if not self.config.has_option(section_name, option):
                             # escape % so the storage interpolation convention
                             # holds for values this process did not load
@@ -64,6 +69,12 @@ class ConfigManager:
                     if option not in self.config["DEFAULT"]:
                         self.config["DEFAULT"][option] = value.replace("%", "%%")
             self._atomic_write(config_file_path, self._render())
+            # The removals are committed: disk no longer carries these keys,
+            # so the adoption guard above has nothing left to protect and
+            # must not outlive this write — otherwise a live key another
+            # process wrote after our load() would be skipped by every later
+            # set() and erased from disk.
+            self._removed_keys.clear()
 
     def _render(self) -> str:
         return self._render_of(self.config)
