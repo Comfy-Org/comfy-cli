@@ -2014,6 +2014,7 @@ def _schema_widget_pairs(
     if not isinstance(input_order, dict):
         input_order = {}
     ordered: list[tuple[str, Any]] = []
+    optional_inputs: set[str] = set()
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
@@ -2023,6 +2024,8 @@ def _schema_widget_pairs(
         if isinstance(section_order, list):
             listed = [n for n in section_order if n in section_def]
             names = listed + [n for n in names if n not in listed]
+        if section == "optional":
+            optional_inputs.update(names)
         ordered.extend((n, section_def[n]) for n in names)
 
     def walk(strict: bool, saved_node: dict | None = node) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
@@ -2037,6 +2040,25 @@ def _schema_widget_pairs(
         warnings: list[tuple[Any, ...]] = []
         vidx = 0
         short = False
+
+        # Evidence for whether a widget the array ran out of values for was on
+        # the saved node at all, computed lazily on the first padding decision.
+        # `pairs` restarts empty each walk and the filled-widget test inside
+        # `_saved_widget_names` reads it, so the cache must not outlive the
+        # walk that filled it.
+        coverage_state: list = [None, False]  # [coverage or None, computed]
+
+        def marker_coverage() -> frozenset[str] | None:
+            if not coverage_state[1]:
+                coverage_state[1] = True
+                # `filled_widget_names` is the walk's pairs so far: a save whose
+                # markers omit a widget the array positionally filled is a
+                # legacy converted-only list rather than a complete inventory,
+                # and proves nothing about absence — issue #1152's
+                # promoted-sub-input save is exactly that shape.
+                saved = _saved_widget_names(node, schema, [n for n, _v in pairs])
+                coverage_state[0] = None if saved is None else _marker_coverage(saved)
+            return coverage_state[0]
 
         def consume(name: str, spec: Any, depth: int = 0, next_spec: Any = None) -> None:
             # ``next_spec`` is the schema of the widget that follows this one at the
@@ -2074,6 +2096,30 @@ def _schema_widget_pairs(
                     # LOAD_3D slot; emit the component's empty state rather than
                     # dropping a required input.
                     pairs.append((name, ""))
+                    return
+                if (
+                    depth == 0
+                    and not is_dynamic
+                    and name in optional_inputs
+                    and not _widget_absent_from_the_save(name, spec, "optional", marker_coverage())
+                ):
+                    # A save short only by trailing optional widgets still agrees
+                    # with the schema's positional order: the frontend fills the
+                    # missing trailing widgets with their defaults, so pad them
+                    # instead of calling the walk inexact. A ComfyUI update that
+                    # appends a widget at the end of a node (TextGenerate's `mtp`)
+                    # must not disqualify the otherwise correctly aligned walk —
+                    # that is what used to strand the save on a partial
+                    # sub-order from a promoted dynamic-combo input, shifting
+                    # every value after it (issue #1152). A dynamic combo stays
+                    # un-padded: its selected option's sub-inputs own slots, so
+                    # a missing selector is not a trailing-widget shortfall. A
+                    # widget the saved node proves it never carried is left out
+                    # entirely, exactly as `_collect_default_inputs` omits it —
+                    # the walk stays inexact there, which is what makes both
+                    # stream shapes agree and keeps the omission.
+                    default = _extract_default(spec)
+                    pairs.append((name, None if default is _MISSING else default))
                     return
                 short = True
                 return
