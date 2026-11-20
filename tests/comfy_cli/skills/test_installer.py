@@ -1671,16 +1671,13 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
 def test_target_accepts_the_names_users_actually_type():
     """`--target claude` and `--target AGENTS.md` are the same two targets as
     `claude-code` and `agents-md`. Telemetry on released versions shows these
-    spellings, plus `codex`, arriving and being refused, which ends the install
-    before anything is written."""
+    spellings arriving and being refused, which ends the install before anything
+    is written."""
     from comfy_cli.skills.command import _kinds
 
     assert _kinds(["claude"]) == ["claude-code"]
     assert _kinds(["AGENTS.md"]) == ["agents-md"]
     assert _kinds([" Cursor "]) == ["cursor"]
-    # Codex and Aider read AGENTS.md, which is what this target writes.
-    assert _kinds(["codex"]) == ["agents-md"]
-    assert _kinds(["aider"]) == ["agents-md"]
     # The canonical spellings still mean exactly themselves.
     assert _kinds(["claude-code", "cursor", "agents-md"]) == ["claude-code", "cursor", "agents-md"]
 
@@ -1689,6 +1686,33 @@ def test_target_does_not_write_one_target_twice_for_two_spellings_of_it():
     from comfy_cli.skills.command import _kinds
 
     assert _kinds(["claude", "claude-code"]) == ["claude-code"]
+
+
+def test_a_tool_is_not_aliased_onto_a_file_it_does_not_read():
+    """`codex` and `aider` are the names people type most after `claude`, and
+    neither reads what `agents-md` writes at the default scope: Codex takes its
+    global instructions from ~/.codex/AGENTS.md, and Aider loads a conventions
+    file only when one is passed to it. Resolving them to `agents-md` would
+    report `wrote` and `Done` for an install the named agent never sees, so they
+    are refused with the reason and the thing to do instead."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for name, expected in (
+        ("codex", "~/.codex/AGENTS.md"),
+        ("aider", "--read"),
+        ("agents", "ambiguous"),
+    ):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([name.upper()])  # the refusal is case-insensitive too
+        text = str(refused.value)
+        assert f"no {name} target" in text, text
+        assert expected in text, text
+    # And the alias table does not quietly contain them.
+    from comfy_cli.skills.command import _TARGET_ALIASES
+
+    assert not {"codex", "aider", "agents"} & set(_TARGET_ALIASES)
 
 
 def test_unknown_target_says_which_mistake_it_looks_like():
@@ -1712,6 +1736,42 @@ def test_unknown_target_says_which_mistake_it_looks_like():
     assert "agents-md" in str(unknown.value)
 
 
+def test_a_destination_path_is_pointed_at_its_own_target_name():
+    """`--target ~/.cursor/rules` names a destination this command already has a
+    target for, so saying "that is the cursor target" beats sending the user to
+    --skill for a second refusal."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token, kind in (("~/.cursor/rules", "cursor"), ("./.claude", "claude-code"), ("./AGENTS.md", "agents-md")):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert f"--target {kind}" in str(refused.value), str(refused.value)
+
+
+def test_option_values_are_classified_without_touching_the_filesystem(tmp_path, monkeypatch):
+    """The shape check must not probe the filesystem. An `exists()` call makes an
+    unknown name that happens to collide with a file in the working directory
+    read as a path, and it raises OSError -- ENAMETOOLONG on a long value -- out
+    of what should be a BadParameter."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds, _scope
+
+    (tmp_path / "hermes").write_text("not a target")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(typer.BadParameter) as collided:
+        _kinds(["hermes"])
+    assert "unknown target" in str(collided.value)
+
+    for value in ("x" * 4096, ""):
+        with pytest.raises(typer.BadParameter):
+            _kinds([value])
+        with pytest.raises(typer.BadParameter):
+            _scope(value)
+
+
 def test_scope_is_case_insensitive_and_names_the_mistake():
     import typer
 
@@ -1727,6 +1787,22 @@ def test_scope_is_case_insensitive_and_names_the_mistake():
     with pytest.raises(typer.BadParameter) as path:
         _scope("/Users/someone/.agents")
     assert "does not take a destination" in str(path.value)
+
+
+def test_no_refusal_message_names_a_command_that_may_be_the_wrong_one():
+    """`_kinds` is shared with `uninstall` and `_scope` with `uninstall` and
+    `status`, so a message that says `comfy skills install --help` points two
+    thirds of its readers at the wrong command."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds, _scope
+
+    messages = []
+    for call, value in ((_kinds, ["--help"]), (_kinds, ["nope"]), (_scope, "--help"), (_scope, "nope")):
+        with pytest.raises(typer.BadParameter) as refused:
+            call(value)
+        messages.append(str(refused.value))
+    assert not [m for m in messages if "skills install" in m], messages
 
 
 def test_install_help_names_the_three_targets():

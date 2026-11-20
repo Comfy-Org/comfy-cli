@@ -33,6 +33,7 @@ direct ``install()`` call, still writes one, and ``uninstall <name>`` removes it
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -84,9 +85,7 @@ def _print_skill_panel(title: str, body) -> None:
 
 
 # The names people pass to ``--target``, mapped onto the three kinds that exist.
-# This command's own help promises "Claude, Cursor, Aider, and any AGENTS.md-aware
-# tool", so an agent that reads AGENTS.md resolves to ``agents-md`` instead of
-# being refused for not being one of three internal spellings. Matching is
+# Only spellings of a kind this command actually writes are in here. Matching is
 # case-insensitive and ignores surrounding whitespace.
 _TARGET_ALIASES: dict[str, TargetKind] = {
     "claude-code": "claude-code",
@@ -98,37 +97,108 @@ _TARGET_ALIASES: dict[str, TargetKind] = {
     "agents.md": "agents-md",
     "agents_md": "agents-md",
     "agentsmd": "agents-md",
-    "agents": "agents-md",
-    # Both read AGENTS.md, which is what the `agents-md` target writes.
-    "aider": "agents-md",
-    "codex": "agents-md",
 }
 
 _TARGET_CHOICES = ("claude-code", "cursor", "agents-md")
+
+# Names that are NOT aliases, each with the reason and what to do instead. A
+# tool only earns an alias when the file it actually reads is the file the
+# target writes; mapping it on anyway turns a loud refusal into a silent no-op,
+# which is strictly worse than being refused. ``agents-md`` writes
+# ``~/AGENTS.md`` at user scope and ``<project root>/AGENTS.md`` at project
+# scope, and that is the whole of what it writes.
+_TARGET_NOT_AN_ALIAS: dict[str, str] = {
+    "codex": (
+        "Codex reads its global instructions from ~/.codex/AGENTS.md, which is not the ~/AGENTS.md "
+        "that `--target agents-md` writes at the default --scope user. Inside a repository, "
+        "`--target agents-md --scope project` writes an AGENTS.md that Codex does read"
+    ),
+    "aider": (
+        "Aider does not pick up AGENTS.md on its own: it reads a conventions file only when one is "
+        "passed with --read or listed under read: in .aider.conf.yml. Install `--target agents-md` "
+        "and then point Aider at the file it reports writing"
+    ),
+    "agents": (
+        "`agents` is ambiguous between the AGENTS.md file and a .agents/ skills directory, and this "
+        "command writes only the first. Pass agents-md for it"
+    ),
+}
+
+# A path-shaped value is often one of our own destinations, named instead of
+# chosen. Mapping it back saves the user a second refusal from --skill.
+_DESTINATION_PARTS: dict[str, TargetKind] = {
+    ".claude": "claude-code",
+    ".cursor": "cursor",
+    "agents.md": "agents-md",
+}
+
+
+def _shaped_like_path(token: str) -> bool:
+    """Classify an option value as path-shaped on its spelling alone.
+
+    Deliberately does not touch the filesystem. ``skills._looks_like_path``
+    ends in an ``exists()`` probe, which is right for a ``--skill`` token (it
+    may genuinely be a file) and wrong here: on an option value it makes an
+    unknown name that happens to collide with a file in the working directory
+    read as a path, and it can raise ``OSError`` — ENAMETOOLONG on a long value,
+    EACCES from an unsearchable cwd — out of what should be a ``BadParameter``.
+    """
+    return bool(token) and ("/" in token or os.sep in token or token.startswith((".", "~")))
+
+
+def _destination_hint(token: str) -> TargetKind | None:
+    """The target a path-shaped value is pointing at, when it names one.
+
+    A markdown file other than AGENTS.md gets no hint even under a destination
+    directory: ``~/.claude/skills/x/SKILL.md`` is a skill file that belongs to
+    ``--skill``, and telling that user to pass ``--target claude-code`` would
+    answer a question they did not ask.
+    """
+    parts = [part for part in token.lower().replace(os.sep, "/").split("/") if part]
+    if not parts:
+        return None
+    if parts[-1] == "agents.md":
+        return "agents-md"
+    if parts[-1].endswith(".md"):
+        return None
+    for part in parts:
+        kind = _DESTINATION_PARTS.get(part)
+        if kind is not None:
+            return kind
+    return None
 
 
 def _unknown_target(token: str) -> typer.BadParameter:
     """Refuse one ``--target`` token, saying which mistake it looks like.
 
-    Three shapes show up in practice and each needs a different sentence: a
-    flag the option swallowed as its value, a filesystem path meant for
-    ``--skill``, and a name we simply do not have a target for. The old single
-    message named the choices for all three, which answers none of them.
+    Four shapes show up in practice and each needs a different sentence: a tool
+    we have deliberately not aliased, a flag the option swallowed as its value,
+    a filesystem path meant for ``--skill``, and a name we simply do not have a
+    target for. The old single message named the choices for all four, which
+    answers only the last. No message names a command, because ``_kinds`` is
+    shared with ``uninstall``: the choices are spelled out instead.
     """
-    if token.startswith("-"):
+    normalized = token.strip().lower()
+    reason = _TARGET_NOT_AN_ALIAS.get(normalized)
+    if reason is not None:
+        return typer.BadParameter(f"--target has no {normalized} target. {reason}")
+    if normalized.startswith("-"):
         return typer.BadParameter(
             f"--target got {token!r}, which looks like another flag rather than a value. "
-            f"Pass one of {', '.join(_TARGET_CHOICES)}, or run `comfy skills install --help`"
+            f"Pass one of {', '.join(_TARGET_CHOICES)}"
         )
-    if _looks_like_path(token):
+    if _shaped_like_path(normalized):
+        hint = _destination_hint(normalized)
+        if hint is not None:
+            return typer.BadParameter(
+                f"--target got {token!r}, which looks like a path. --target takes a target name, "
+                f"and that destination is the {hint} target; pass `--target {hint}`"
+            )
         return typer.BadParameter(
             f"--target got {token!r}, which looks like a path. --target picks where skills are "
             f"written ({', '.join(_TARGET_CHOICES)}); a skill file or directory goes to --skill"
         )
-    return typer.BadParameter(
-        f"unknown target {token!r}; pick {', '.join(_TARGET_CHOICES)}. "
-        "Any agent that reads AGENTS.md (Codex, Aider, and others) is covered by agents-md"
-    )
+    return typer.BadParameter(f"unknown target {token!r}; pick {', '.join(_TARGET_CHOICES)}")
 
 
 def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
@@ -199,12 +269,11 @@ def _scope(scope: str) -> Literal["user", "project"]:
     normalized = scope.strip().lower()
     if normalized in ("user", "project"):
         return normalized  # type: ignore[return-value]
-    if scope.startswith("-"):
+    if normalized.startswith("-"):
         raise typer.BadParameter(
-            f"--scope got {scope!r}, which looks like another flag rather than a value. "
-            "Pass user or project, or run `comfy skills install --help`"
+            f"--scope got {scope!r}, which looks like another flag rather than a value. Pass user or project"
         )
-    if _looks_like_path(scope):
+    if _shaped_like_path(normalized):
         raise typer.BadParameter(
             f"--scope got {scope!r}, which looks like a path. --scope is user (your home) or "
             "project (this directory); it does not take a destination"
