@@ -1666,3 +1666,75 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
     assert "Do not fetch it again" in text
     assert "`spend_consent_required`" in text
     assert "`--allow-spend`" in text
+
+
+def test_target_accepts_the_names_users_actually_type():
+    """`--target claude` and `--target AGENTS.md` are the same two targets as
+    `claude-code` and `agents-md`. Telemetry on released versions shows these
+    spellings, plus `codex`, arriving and being refused, which ends the install
+    before anything is written."""
+    from comfy_cli.skills.command import _kinds
+
+    assert _kinds(["claude"]) == ["claude-code"]
+    assert _kinds(["AGENTS.md"]) == ["agents-md"]
+    assert _kinds([" Cursor "]) == ["cursor"]
+    # Codex and Aider read AGENTS.md, which is what this target writes.
+    assert _kinds(["codex"]) == ["agents-md"]
+    assert _kinds(["aider"]) == ["agents-md"]
+    # The canonical spellings still mean exactly themselves.
+    assert _kinds(["claude-code", "cursor", "agents-md"]) == ["claude-code", "cursor", "agents-md"]
+
+
+def test_target_does_not_write_one_target_twice_for_two_spellings_of_it():
+    from comfy_cli.skills.command import _kinds
+
+    assert _kinds(["claude", "claude-code"]) == ["claude-code"]
+
+
+def test_unknown_target_says_which_mistake_it_looks_like():
+    """A swallowed flag, a path and an unknown name are three different user
+    errors; naming the choices answers only the third."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    with pytest.raises(typer.BadParameter) as flag:
+        _kinds(["--help"])
+    assert "looks like another flag" in str(flag.value)
+
+    with pytest.raises(typer.BadParameter) as path:
+        _kinds(["/home/someone/.claude/skills/comfy-deploy/SKILL.md"])
+    assert "goes to --skill" in str(path.value)
+
+    with pytest.raises(typer.BadParameter) as unknown:
+        _kinds(["hermes"])
+    assert "unknown target" in str(unknown.value)
+    assert "agents-md" in str(unknown.value)
+
+
+def test_scope_is_case_insensitive_and_names_the_mistake():
+    import typer
+
+    from comfy_cli.skills.command import _scope
+
+    assert _scope("User") == "user"
+    assert _scope(" project ") == "project"
+
+    with pytest.raises(typer.BadParameter) as flag:
+        _scope("--help")
+    assert "looks like another flag" in str(flag.value)
+
+    with pytest.raises(typer.BadParameter) as path:
+        _scope("/Users/someone/.agents")
+    assert "does not take a destination" in str(path.value)
+
+
+def test_install_help_names_the_three_targets():
+    """The option's help never said what the three targets were, so a user who
+    ran `--help` still had to guess."""
+    result = CliRunner().invoke(app, ["install", "--help"])
+    assert result.exit_code == 0
+    text = _ANSI_RE.sub("", result.output)
+    assert "claude-code" in text
+    assert "cursor" in text
+    assert "agents-md" in text

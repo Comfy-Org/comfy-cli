@@ -83,14 +83,66 @@ def _print_skill_panel(title: str, body) -> None:
     get_renderer().console().print(branded_panel(body, title=title, version=ConfigManager().get_cli_version()))
 
 
+# The names people pass to ``--target``, mapped onto the three kinds that exist.
+# This command's own help promises "Claude, Cursor, Aider, and any AGENTS.md-aware
+# tool", so an agent that reads AGENTS.md resolves to ``agents-md`` instead of
+# being refused for not being one of three internal spellings. Matching is
+# case-insensitive and ignores surrounding whitespace.
+_TARGET_ALIASES: dict[str, TargetKind] = {
+    "claude-code": "claude-code",
+    "claude": "claude-code",
+    "claudecode": "claude-code",
+    "claude_code": "claude-code",
+    "cursor": "cursor",
+    "agents-md": "agents-md",
+    "agents.md": "agents-md",
+    "agents_md": "agents-md",
+    "agentsmd": "agents-md",
+    "agents": "agents-md",
+    # Both read AGENTS.md, which is what the `agents-md` target writes.
+    "aider": "agents-md",
+    "codex": "agents-md",
+}
+
+_TARGET_CHOICES = ("claude-code", "cursor", "agents-md")
+
+
+def _unknown_target(token: str) -> typer.BadParameter:
+    """Refuse one ``--target`` token, saying which mistake it looks like.
+
+    Three shapes show up in practice and each needs a different sentence: a
+    flag the option swallowed as its value, a filesystem path meant for
+    ``--skill``, and a name we simply do not have a target for. The old single
+    message named the choices for all three, which answers none of them.
+    """
+    if token.startswith("-"):
+        return typer.BadParameter(
+            f"--target got {token!r}, which looks like another flag rather than a value. "
+            f"Pass one of {', '.join(_TARGET_CHOICES)}, or run `comfy skills install --help`"
+        )
+    if _looks_like_path(token):
+        return typer.BadParameter(
+            f"--target got {token!r}, which looks like a path. --target picks where skills are "
+            f"written ({', '.join(_TARGET_CHOICES)}); a skill file or directory goes to --skill"
+        )
+    return typer.BadParameter(
+        f"unknown target {token!r}; pick {', '.join(_TARGET_CHOICES)}. "
+        "Any agent that reads AGENTS.md (Codex, Aider, and others) is covered by agents-md"
+    )
+
+
 def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
     if not targets:
         return None
     valid: list[TargetKind] = []
     for t in targets:
-        if t not in ("claude-code", "cursor", "agents-md"):
-            raise typer.BadParameter(f"unknown target {t!r}; pick claude-code, cursor, or agents-md")
-        valid.append(t)  # type: ignore[arg-type]
+        kind = _TARGET_ALIASES.get(t.strip().lower())
+        if kind is None:
+            raise _unknown_target(t)
+        # An alias and its canonical name can both be passed in one command
+        # line; writing that target twice is not what either meant.
+        if kind not in valid:
+            valid.append(kind)
     return valid
 
 
@@ -144,9 +196,20 @@ def _validate_skills(skills: list[str] | None, *, refuse_reference: bool = True)
 
 
 def _scope(scope: str) -> Literal["user", "project"]:
-    if scope not in ("user", "project"):
-        raise typer.BadParameter("scope must be 'user' or 'project'")
-    return scope  # type: ignore[return-value]
+    normalized = scope.strip().lower()
+    if normalized in ("user", "project"):
+        return normalized  # type: ignore[return-value]
+    if scope.startswith("-"):
+        raise typer.BadParameter(
+            f"--scope got {scope!r}, which looks like another flag rather than a value. "
+            "Pass user or project, or run `comfy skills install --help`"
+        )
+    if _looks_like_path(scope):
+        raise typer.BadParameter(
+            f"--scope got {scope!r}, which looks like a path. --scope is user (your home) or "
+            "project (this directory); it does not take a destination"
+        )
+    raise typer.BadParameter(f"unknown scope {scope!r}; scope must be 'user' or 'project'")
 
 
 _PROJECT_MARKERS = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "AGENTS.md")
@@ -178,7 +241,7 @@ def install_cmd(
         list[str] | None,
         typer.Option(
             "--target",
-            help="Install only the named target(s). Repeatable. Default: all three.",
+            help="Install only the named target(s): claude-code, cursor, agents-md. Repeatable. Default: all three.",
         ),
     ] = None,
     skill: Annotated[
@@ -273,7 +336,10 @@ def install_cmd(
 @tracking.track_command("skill")
 def uninstall_cmd(
     scope: Annotated[str, typer.Option("--scope")] = "user",
-    target: Annotated[list[str] | None, typer.Option("--target")] = None,
+    target: Annotated[
+        list[str] | None,
+        typer.Option("--target", help="Remove from the named target(s): claude-code, cursor, agents-md."),
+    ] = None,
     skill: Annotated[
         list[str] | None,
         typer.Option(

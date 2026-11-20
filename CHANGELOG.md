@@ -120,6 +120,14 @@ history.
   call the Cloud secrets and agent APIs. A refresh does not widen an
   existing grant; a session minted before this change needs a re-login
   for those scopes.
+- `comfy skills install --target` takes the names people type: `claude` for
+  `claude-code`, `AGENTS.md` or `agents` for `agents-md`, and `codex` or `aider`
+  for `agents-md` too, since that is the file those agents read. Matching ignores
+  case and surrounding spaces, and passing two spellings of one target writes it
+  once. `--scope` is matched the same way. A refused value now says which mistake
+  it looks like — a flag the option swallowed, a path meant for `--skill`, or a
+  name with no target — and both `--target` options' help names the three
+  choices, which it never did.
 - The `comfy-run-on-cloud` skill makes a custom build from the person's whole
   install (Path A of `comfy-build`), not from the workflow alone
   (`--from-workflow`). Its custom build step is short and uploads nothing
