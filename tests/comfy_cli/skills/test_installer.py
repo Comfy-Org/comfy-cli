@@ -1814,3 +1814,44 @@ def test_install_help_names_the_three_targets():
     assert "claude-code" in text
     assert "cursor" in text
     assert "agents-md" in text
+
+
+def test_agents_md_install_says_who_still_has_to_be_pointed_at_the_file(tmp_path: Path, monkeypatch):
+    """Claude Code and Cursor find their own files. An AGENTS.md is read only by
+    the agents that look for one, and several have to be told where it is -- so
+    "Done" by itself reports success for an install the named agent never sees.
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["install", "--scope", "project", "--target", "agents-md"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert "need pointing at" in text, text
+    assert "--read" in text, text
+    assert ".codex/AGENTS.md" in text, text
+
+
+def test_a_claude_code_install_is_not_told_to_go_point_an_agent_at_a_file(tmp_path: Path, monkeypatch):
+    """The pointing line belongs to the agents-md target only. Claude Code finds
+    ~/.claude/skills itself, and telling that user about Aider and Codex is noise
+    on the happy path."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["install", "--scope", "project", "--target", "claude-code"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert "Done." in text, text
+    assert "need pointing at" not in text, text
+
+
+def test_the_command_does_not_promise_a_tool_it_only_half_serves():
+    """The help promised "Claude, Cursor, Aider, and any AGENTS.md-aware tool",
+    and that sentence is where this PR's first, wrong `aider` alias came from.
+    Aider reads a conventions file only when one is passed to it, so naming it
+    beside the two targets that work on their own is the claim that has to go."""
+    from comfy_cli.skills import command as skills_command
+
+    assert "Aider" not in (skills_command.app.info.help or "")
+    assert "Aider" not in (skills_command.__doc__ or "")
+    install_help = _ANSI_RE.sub("", CliRunner().invoke(app, ["install", "--help"]).output)
+    assert "Aider" not in install_help, install_help

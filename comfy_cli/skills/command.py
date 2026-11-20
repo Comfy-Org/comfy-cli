@@ -1,4 +1,4 @@
-"""``comfy skills`` — install the agent skills so Claude / Cursor / Aider can drive comfy directly.
+"""``comfy skills`` — install the agent skills so Claude / Cursor / an AGENTS.md reader can drive comfy.
 
 The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
@@ -71,7 +71,7 @@ from comfy_cli.skills import (
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Install the comfy agent skills — Claude, Cursor, Aider, and any AGENTS.md-aware tool.",
+    help="Install the comfy agent skills — Claude Code, Cursor, and an AGENTS.md any agent can be pointed at.",
 )
 
 
@@ -389,6 +389,21 @@ def install_cmd(
                     style="bold green",
                 ),
             )
+            # Claude Code and Cursor find their own files; an AGENTS.md is only
+            # read by the agents that look for one, and several have to be told
+            # where it is. Saying "Done" and nothing else is how an install the
+            # named agent never sees reads as a success.
+            agents_md = [r for r in results if r.action == "wrote" and r.kind == "agents-md"]
+            if agents_md:
+                body = Group(
+                    body,
+                    Text(
+                        f"Agents that do not read AGENTS.md on their own need pointing at "
+                        f"{agents_md[0].path} — Aider with `--read`, Codex from inside this "
+                        f"directory (it reads ~/.codex/AGENTS.md, not ~/AGENTS.md).",
+                        style="yellow",
+                    ),
+                )
         _print_skill_panel("skill install", body)
     renderer.emit(
         {
