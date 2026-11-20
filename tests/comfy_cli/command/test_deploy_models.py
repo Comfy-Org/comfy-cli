@@ -3,11 +3,16 @@ layers, and the pointer the two library uploads print first."""
 
 from __future__ import annotations
 
+import _thread
 import copy
 import hashlib
+import http.client
 import io
 import json
+import shlex
+import signal
 import threading
+import time
 import urllib.error
 from email.message import Message
 from pathlib import Path
@@ -20,7 +25,8 @@ from blake3 import blake3
 from deploy_up_support import FakeBuilder, deployment
 from typer.testing import CliRunner
 
-from comfy_cli.builder_api import BuilderClient
+from comfy_cli import builder_api
+from comfy_cli.builder_api import BuilderClient, PartsUpload
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
 from comfy_cli.command import deploy_models
@@ -369,7 +375,10 @@ def test_a_404_says_adding_is_not_on_and_sends_no_bytes(tmp_path, monkeypatch) -
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_models_unavailable"
     assert error["message"] == "Adding models to a deployment is not on for this workspace yet."
-    assert error["hint"] == f"To upload it to the workspace library instead: comfy assets library upload {model}"
+    assert error["hint"] == (
+        f"To upload it to the workspace library instead: comfy assets library upload {shlex.quote(str(model))} "
+        "--type loras"
+    )
     assert storage.puts == []
     assert not any("/complete" in line for line in log)
 
@@ -427,6 +436,142 @@ def test_a_409_prints_comfy_deploys_sentence_and_sends_no_bytes(tmp_path, monkey
     assert error["message"] == sentence
     assert error["details"]["server_code"] == "MODEL_STORAGE_EXCEEDED"
     assert storage.puts == []
+
+
+def test_a_builder_without_pieces_sends_the_whole_file_before_adding_is_refused(tmp_path, monkeypatch) -> None:
+    # Given a builder that answers one link, and a comfy-deploy where adding models is off
+    log: list[str] = []
+    control, storage = Control(log, refusal=(404, {"message": "Not Found"})), Storage(log)
+    answer = {"blobId": "blob-1", "deduplicated": False, "uploadUrl": "https://storage.test/whole?sig=a"}
+    model, _ = _install(monkeypatch, tmp_path, control, answer, storage)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then the refusal is the same, but only after the whole file went up, which the docs now say
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "deploy_models_unavailable"
+    assert storage.bodies() == {"https://storage.test/whole?sig=a": _CONTENT}
+    assert log.index("put https://storage.test/whole?sig=a") < log.index(f"deploy POST {_MODELS}")
+
+
+def test_a_file_removed_after_the_check_is_a_file_error_not_a_crash(tmp_path, monkeypatch) -> None:
+    # Given a file that is gone by the time it is hashed
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    real = deploy_models.file_digests
+
+    def removed_first(path: Path):
+        path.unlink()
+        return real(path)
+
+    monkeypatch.setattr(deploy_models, "file_digests", removed_first)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_asset_upload_failed"
+    assert error["details"] == {"local_path": str(model), "reason": "file_not_found"}
+    assert storage.puts == []
+    assert control.count("POST", _MODELS) == 0
+
+
+def test_a_file_removed_between_pieces_is_a_file_error_and_is_not_joined(tmp_path, monkeypatch) -> None:
+    # Given pieces sent one at a time, and a file that is gone once the first piece lands
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
+    storage = Storage(log)
+
+    def put_then_remove(url, **kwargs):
+        answer = storage(url, **kwargs)
+        model.unlink(missing_ok=True)
+        return answer
+
+    monkeypatch.setattr("requests.put", put_then_remove)
+    monkeypatch.setattr(builder_api, "_PARTS_AT_ONCE", 1)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_asset_upload_failed"
+    assert error["details"]["reason"] == "file_not_found"
+    assert [url for url, _, _, _ in storage.puts] == ["https://storage.test/part-1?sig=a"]
+    assert not any("/complete" in line for line in log)
+
+
+def test_a_piece_whose_file_read_fails_is_a_file_error_not_a_dropped_connection() -> None:
+    # Given a piece reader over a file that fails to read
+    class Broken(io.BytesIO):
+        def read(self, *_args) -> bytes:
+            raise PermissionError(13, "Permission denied")
+
+    reader = builder_api._PieceReader(Broken(), 4, None, threading.Event(), Path("lora.safetensors"))
+
+    # When / Then: not an OSError, so requests passes it through instead of calling it a dropped connection
+    with pytest.raises(builder_api.BlobFileError) as raised:
+        reader.read(4)
+    assert not isinstance(raised.value, OSError)
+    assert isinstance(raised.value.error, PermissionError)
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    [http.client.RemoteDisconnected("Remote end closed connection without response"), http.client.IncompleteRead(b"")],
+)
+def test_a_control_plane_answer_cut_short_is_a_server_error_not_a_crash(tmp_path, monkeypatch, dropped) -> None:
+    # Given a comfy-deploy whose answer to the add is cut short while it is read
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    def cut_short(url, target, *, method="GET", body=None, **kwargs):
+        if (method, urlsplit(url).path) == ("POST", _MODELS):
+            raise dropped
+        return control(url, target, method=method, body=body, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", cut_short)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["message"]
+    assert storage.puts == []
+
+
+def test_a_connection_reset_quoting_a_signed_link_is_a_server_error_without_the_signature(
+    tmp_path, monkeypatch
+) -> None:
+    # Given the bucket's connection reset with a message that quotes the presigned link
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
+
+    def reset(url, **_kwargs):
+        raise ConnectionResetError(f"connection reset sending to {url}")
+
+    monkeypatch.setattr("requests.put", reset)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert "https://storage.test/part-" in error["message"]
+    assert "sig=" not in result.output
 
 
 def test_a_file_that_fails_while_waited_on_exits_without_its_failure_text(tmp_path, monkeypatch) -> None:
@@ -607,6 +752,157 @@ def test_rm_of_a_file_the_deployment_does_not_hold_is_refused(tmp_path, monkeypa
     assert control.count("DELETE", f"{_MODELS}/model-1") == 0
 
 
+def test_rm_of_a_name_in_two_folders_hints_with_the_deployment(tmp_path, monkeypatch) -> None:
+    # Given the same file name in two folders
+    twice = [{**_ENTRY, "status": "ready"}, {**_ENTRY, "id": "model-2", "type": "checkpoints", "status": "ready"}]
+    control = Control([], models=twice)
+    _install(monkeypatch, tmp_path, control)
+
+    # When
+    result = _invoke("rm", "dep-1", "lora.safetensors", "--yes")
+
+    # Then the hint is a command that runs as written
+    assert result.exit_code == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_model_not_found"
+    assert "`comfy deploy models ls dep-1 --json`" in error["hint"]
+    assert control.count("DELETE", f"{_MODELS}/model-1") == 0
+
+
+def test_the_model_names_given_to_the_models_commands_are_not_tracked(tmp_path, monkeypatch) -> None:
+    # Given analytics recording every event, and a private model file name
+    events: list[tuple[str, JsonObject]] = []
+    monkeypatch.setattr(
+        "comfy_cli.tracking.track_event", lambda name, properties=None, **_kw: events.append((name, properties or {}))
+    )
+    control, asked = Control([], models=[{**_ENTRY, "filename": "client-secret.safetensors"}]), []
+    _install(monkeypatch, tmp_path, control)
+    _promptable(monkeypatch, False, asked)
+
+    # When the removal is declined, and the file is listed
+    removed = _invoke("rm", "dep-1", "client-secret.safetensors", pretty=True)
+    listed = _invoke("ls", "dep-1")
+
+    # Then the name never leaves the machine, while the positional syntax still works
+    assert removed.exit_code == 0, removed.output
+    assert listed.exit_code == 0, listed.output
+    assert len(asked) == 1
+    started = dict(events)
+    assert started["deploy:rm_cmd"]["file"] == "<redacted>"
+    assert started["deploy:ls_cmd"] == {"deployment": "dep-1"}
+    assert "client-secret" not in json.dumps(events)
+
+
+def test_the_file_given_to_models_add_is_not_tracked(tmp_path, monkeypatch) -> None:
+    # Given analytics recording every event
+    events: list[tuple[str, JsonObject]] = []
+    monkeypatch.setattr(
+        "comfy_cli.tracking.track_event", lambda name, properties=None, **_kw: events.append((name, properties or {}))
+    )
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert dict(events)["deploy:add_cmd"] == {"deployment": "dep-1", "folder": "loras", "wait": False}
+    assert str(tmp_path) not in json.dumps(events)
+
+
+# --- stopping an upload in pieces -------------------------------------------------------
+
+
+def _parts_upload() -> PartsUpload:
+    return PartsUpload("blob-1", False, builder_api._blob_parts({"parts": _parts(1, 2, 3)}), None)
+
+
+@pytest.fixture
+def default_sigint():
+    """Ctrl-C as Python's default handler raises it, whatever an earlier test installed."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_ctrl_c_stops_the_pieces_still_reading_the_file(tmp_path, monkeypatch, default_sigint) -> None:
+    # Given pieces that keep reading their file until something stops them, and Ctrl-C once they started
+    log: list[str] = []
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, _in_pieces(), Storage(log)))
+    model = tmp_path / "lora.safetensors"
+    model.write_bytes(_CONTENT)
+    started, begun, stopped = threading.Event(), [], []
+
+    def slow_put(url, data=None, **_kwargs):
+        begun.append(url)
+        if not started.is_set():
+            started.set()
+            _thread.interrupt_main()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                data.read(1)
+            except Exception:
+                stopped.append(url)
+                raise
+            time.sleep(0.01)
+        return _Response(200)
+
+    monkeypatch.setattr("requests.put", slow_put)
+    upload = _parts_upload()
+
+    # When
+    began = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        BuilderClient("https://builder.test", "tok").upload_blob_parts(upload.blob_id, upload.parts, model)
+
+    # Then every piece that began stopped reading, well before it would have finished, and nothing was joined
+    assert time.monotonic() - began < 4
+    assert begun
+    assert sorted(stopped) == sorted(begun)
+    assert "builder POST /v1/blobs/blob-1/complete" not in log
+
+
+def test_ctrl_c_is_raised_without_waiting_on_a_piece_waiting_for_its_answer(
+    tmp_path, monkeypatch, default_sigint
+) -> None:
+    # Given a piece whose bytes are all sent and whose answer never comes, and Ctrl-C then
+    log: list[str] = []
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, _in_pieces(), Storage(log)))
+    monkeypatch.setattr(builder_api, "_CANCEL_GRACE_SECONDS", 0.2, raising=False)
+    model = tmp_path / "lora.safetensors"
+    model.write_bytes(_CONTENT)
+    answer, threads = threading.Event(), []
+
+    def hung_put(url, data=None, **_kwargs):
+        b"".join(iter(lambda: data.read(3), b""))
+        if not threads:
+            threads.append(threading.current_thread())
+            _thread.interrupt_main()
+        answer.wait(10)
+        return _Response(200)
+
+    monkeypatch.setattr("requests.put", hung_put)
+    upload = _parts_upload()
+
+    # When
+    began = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            BuilderClient("https://builder.test", "tok").upload_blob_parts(upload.blob_id, upload.parts, model)
+        waited = time.monotonic() - began
+    finally:
+        answer.set()
+
+    # Then it is raised within the grace, and the stuck PUT's thread cannot hold the process open at exit
+    assert waited < 5
+    assert threads[0].daemon
+
+
 # --- the library uploads ---------------------------------------------------------------
 
 
@@ -626,7 +922,9 @@ def test_the_library_uploads_point_at_deploy_models_first_and_still_upload(tmp_p
 
     # Then
     assert result.exit_code == 0, result.output
-    assert DEPLOYMENT_POINTER == "To add a model to a deployment, use: comfy deploy models add <deployment> <file>"
+    assert DEPLOYMENT_POINTER == (
+        "To add a model to a deployment, use: comfy deploy models add <deployment> <file> --type <folder>"
+    )
     assert DEPLOYMENT_POINTER in result.stdout
     assert len(uploads) == 1
     assert uploads[0][0] == (model, "loras")

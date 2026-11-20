@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import http.client
 import os
+import shlex
 import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -14,7 +16,7 @@ import requests
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.builder_api import BuilderAuthError, BuilderClient, PartsUpload
+from comfy_cli.builder_api import BlobFileError, BuilderAuthError, BuilderClient, PartsUpload
 from comfy_cli.command.build import DEFAULT_BUILDER_URL
 from comfy_cli.command.build import _without_signed_query as without_signed_query
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
@@ -64,10 +66,28 @@ class DeploymentModelsClient(DeploymentListClient, Protocol):
 class ModelsUnavailableError(DeployResolveError):
     code = "deploy_models_unavailable"
 
-    def __init__(self, deployment_id: str, file: Path) -> None:
-        self.hint = f"To upload it to the workspace library instead: comfy assets library upload {file}"
+    def __init__(self, deployment_id: str, file: Path, folder: str) -> None:
+        self.hint = (
+            "To upload it to the workspace library instead: "
+            f"comfy assets library upload {shlex.quote(str(file))} --type {shlex.quote(folder)}"
+        )
         self.details = {"deploymentId": deployment_id}
         super().__init__(_NOT_ON)
+
+
+class ModelFileError(DeployResolveError):
+    """The model file was removed or became unreadable after it was checked, while hashing or sending it."""
+
+    code = "deploy_asset_upload_failed"
+
+    def __init__(self, file: Path, error: OSError) -> None:
+        if isinstance(error, FileNotFoundError):
+            reason, message = "file_not_found", f"{file} does not exist or is not a file"
+        else:
+            reason, message = "file_unreadable", f"{file} cannot be read ({error.strerror or error})"
+        self.hint = "check the file is still there and readable, then add it again"
+        self.details = {"local_path": str(file), "reason": reason}
+        super().__init__(message)
 
 
 class ModelNotAddedError(DeployResolveError):
@@ -87,7 +107,9 @@ class ModelNotFoundError(DeployResolveError):
         shown: list[JsonValue] = [_shown(entry) for entry in matches]
         self.details = {"deploymentId": deployment_id, "name": name, "matches": shown}
         if matches:
-            self.hint = "name it as <folder>/<file>, or by the id `comfy deploy models ls --json` gives"
+            self.hint = (
+                f"name it as <folder>/<file>, or by the id `comfy deploy models ls {deployment_id} --json` gives"
+            )
             message = f"{name} names {len(matches)} model files of deployment {deployment_id}"
         else:
             self.hint = f"run `comfy deploy models ls {deployment_id}` to see its model files"
@@ -136,7 +158,7 @@ def _added(client: DeploymentModelsClient, deployment_id: str, blob_id: str, fol
         return client.add_deployment_model(deployment_id, blob_id, folder)
     except DeployAPIError as error:
         if error.status == 404 and error.details.get("server_code") not in _KNOWN_NOT_FOUND:
-            raise ModelsUnavailableError(deployment_id, file) from error
+            raise ModelsUnavailableError(deployment_id, file, folder) from error
         raise
 
 
@@ -148,10 +170,16 @@ def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, 
         reporter.deduplicated(item, 1, 1)
         return
     with reporter.uploading(item, 1, 1) as progress:
-        if upload.upload_url is not None:
-            blobs.upload_blob(upload.upload_url, file, progress=progress)
-        else:
-            blobs.upload_blob_parts(upload.blob_id, upload.parts, file, progress)
+        try:
+            if upload.upload_url is not None:
+                blobs.upload_blob(upload.upload_url, file, progress=progress)
+            else:
+                blobs.upload_blob_parts(upload.blob_id, upload.parts, file, progress)
+        except BlobFileError as error:
+            raise ModelFileError(file, error.error) from error
+        except (FileNotFoundError, PermissionError, IsADirectoryError) as error:
+            # The one PUT opening a file removed or locked since it was hashed; a dropped connection is another OSError.
+            raise ModelFileError(file, error) from error
 
 
 def _wait_ready(
@@ -181,7 +209,10 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
     blobs = _blob_client()
     if renderer.is_pretty():
         renderer.info(f"Hashing {file.name}...")
-    digests = file_digests(file)
+    try:
+        digests = file_digests(file)
+    except OSError as error:  # removed or locked since typer checked it; nothing is sent yet
+        raise ModelFileError(file, error) from error
     blake3 = digests.blake3.removeprefix("blake3:")
     upload = blobs.create_blob_parts("model", file.name, digests.sha256, digests.size, blake3=blake3)
     item = _Upload("model", file.name, digests.size)
@@ -190,7 +221,8 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
         _send(blobs, upload, file, item, renderer)
     else:
-        # A builder without the pieces routes: comfy-deploy takes a one-PUT upload once it is whole.
+        # A builder without the pieces routes: comfy-deploy takes a one-PUT upload once it is whole,
+        # so here the whole file is sent before a refusal, `deploy_models_unavailable` included, is known.
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
     if wait:
@@ -211,9 +243,18 @@ def _reported(renderer: Renderer) -> Iterator[None]:
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))
         raise typer.Exit(code=1) from error
-    except (ResponseTooLarge, TimeoutError, urllib.error.URLError, requests.RequestException, KeyError) as error:
-        # A failed piece PUT quotes its presigned URL, whose query string is the credential.
-        renderer.error(code="deploy_server_error", message=without_signed_query(error))
+    except (
+        ResponseTooLarge,
+        TimeoutError,
+        urllib.error.URLError,
+        requests.RequestException,
+        http.client.HTTPException,
+        OSError,
+        KeyError,
+    ) as error:
+        # A connection dropped or an answer cut short mid-read comes as http.client's or a bare OSError, which
+        # neither client maps. A failed piece PUT quotes its presigned URL, whose query string is the credential.
+        renderer.error(code="deploy_server_error", message=without_signed_query(error) or type(error).__name__)
         raise typer.Exit(code=1) from error
 
 
@@ -283,16 +324,19 @@ def _named(models: list[JsonObject], name: str) -> list[JsonObject]:
 def rm_cmd(
     ctx: typer.Context,
     deployment: DeploymentArgument,
-    name: Annotated[str, typer.Argument(help="The file's name, <folder>/<name>, or its id.", show_default=False)],
+    # `file`, not `name`: the tracked kwargs redact `file`, and a model's name can be private. NAME on screen.
+    file: Annotated[
+        str, typer.Argument(metavar="NAME", help="The file's name, <folder>/<name>, or its id.", show_default=False)
+    ],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Remove without asking.")] = False,
 ) -> None:
     renderer = get_renderer()
     with _reported(renderer):
         builder, client = _clients()
         deployment_id = deployment_id_for(builder, client, deployment)
-        matches = _named(_entries(client.list_deployment_models(deployment_id)), name)
+        matches = _named(_entries(client.list_deployment_models(deployment_id)), file)
         if len(matches) != 1:
-            raise ModelNotFoundError(deployment_id, name, matches)
+            raise ModelNotFoundError(deployment_id, file, matches)
         entry = matches[0]
         question = _REMOVE_QUESTION.format(file=required_string(entry, "filename"))
         details = {"deploymentId": deployment_id, "modelId": required_string(entry, "id")}

@@ -2079,7 +2079,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "mints no asset and reports `hash_mismatch` in `details.server_code`. With `--allow-upload`, it also "
         "covers a private temporary copy of the file that could not be made (a full disk, say): "
         "`details.local_path` names the file and `details.temp_dir` the folder. That file was not uploaded; "
-        "approved files before it may already be, and a retry reuses them.",
+        "approved files before it may already be, and a retry reuses them. `comfy deploy models add` uses it for "
+        "a model file removed or made unreadable after it was checked, while hashing or sending it: "
+        "`details.local_path` names the file and `details.reason` is `file_not_found` or `file_unreadable`.",
         "verify the local file is stable and readable, then retry the upload",
     ),
     ErrorCode(
@@ -2099,9 +2101,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_models_unavailable",
         "`comfy deploy models add` reached a comfy-deploy where adding models to a deployment is not on for "
-        "the workspace: it answered 404 with no error code. Nothing was added. `details.deploymentId` names the "
-        "deployment.",
-        "upload the file to the workspace library instead with `comfy assets library upload <file>`",
+        "the workspace: it answered 404 with no error code. Nothing was added. Sent in pieces, no byte was sent; "
+        "a builder that answers one upload link instead has the whole file sent before the refusal is known. "
+        "`details.deploymentId` names the deployment.",
+        "upload the file to the workspace library instead with `comfy assets library upload <file> --type <folder>`",
     ),
     ErrorCode(
         "deploy_model_not_found",

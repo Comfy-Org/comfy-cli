@@ -24,11 +24,12 @@ Field names match services/comfy-builder/openapi.yaml exactly:
 
 from __future__ import annotations
 
+import queue
 import threading
+import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +70,29 @@ _PARTS_AT_ONCE = 8
 _LINK_MARGIN = timedelta(minutes=2)
 # What a presigned PUT answers for a link that expired or no longer matches its signature.
 _LINK_REFUSED = frozenset({400, 401, 403})
+# How often the thread waiting on the pieces wakes, so Ctrl-C reaches it on every platform.
+_WAIT_STEP_SECONDS = 0.2
+# How long Ctrl-C waits for the pieces in flight to stop before it is raised anyway. A piece
+# reading its file stops at its next block; one whose bytes are all sent and is waiting on the
+# bucket's answer cannot be stopped from here, and its daemon thread ends with the process.
+_CANCEL_GRACE_SECONDS = 2.0
+
+
+class BlobFileError(Exception):
+    """The file being uploaded could not be opened or read once its upload began; ``__cause__`` is the OSError.
+
+    Not an ``OSError`` itself: raised inside a PUT's body, an ``OSError`` would come
+    back from ``requests`` as a dropped connection rather than as the file's fault.
+    """
+
+    def __init__(self, path: Path, error: OSError) -> None:
+        self.path = path
+        self.error = error
+        super().__init__(f"{path} cannot be read ({error.strerror or error})")
+
+
+class _UploadStopped(Exception):
+    """Raised by a piece's read once its upload is stopped, so ``requests`` drops that PUT's connection."""
 
 
 class _CountingReader:
@@ -118,18 +142,34 @@ class _PieceReader:
     piece's end. No ``fileno``: ``requests`` would size the body from the whole file.
     """
 
-    def __init__(self, raw: BinaryIO, size: int, progress: Callable[[int], None] | None) -> None:
+    def __init__(
+        self,
+        raw: BinaryIO,
+        size: int,
+        progress: Callable[[int], None] | None,
+        stop: threading.Event | None = None,
+        path: Path | None = None,
+    ) -> None:
         self._raw = raw
         self._size = size
         self._left = size
         self._progress = progress
+        self._stop = stop
+        self._path = path
 
     def __len__(self) -> int:
         return self._size
 
     def read(self, size: int = -1) -> bytes:
+        if self._stop is not None and self._stop.is_set():
+            raise _UploadStopped
         wanted = self._left if size is None or size < 0 else min(size, self._left)
-        block = self._raw.read(wanted) if wanted > 0 else b""
+        try:
+            block = self._raw.read(wanted) if wanted > 0 else b""
+        except OSError as error:
+            if self._path is None:
+                raise
+            raise BlobFileError(self._path, error) from error
         self._left -= len(block)
         if block and self._progress is not None:
             self._progress(len(block))
@@ -389,6 +429,10 @@ class BuilderClient:
         no longer good, asks the builder once for fresh links to the pieces not
         landed. A piece that answer leaves out has landed, as has one whose
         create-only link answers 412.
+
+        A failed piece stops the others and is raised. Ctrl-C stops every piece
+        still reading the file and is raised within ``_CANCEL_GRACE_SECONDS``. A
+        file that can no longer be opened or read raises :class:`BlobFileError`.
         """
         links = {part.number: part for part in parts}
         # One lock for the links, held across a refresh; another for the progress
@@ -412,13 +456,20 @@ class BuilderClient:
         def send(number: int) -> None:
             part = link(number)
             for attempt in range(2):
-                if part is None:
+                if part is None or stop.is_set():
                     return
-                with path.open("rb") as f:
-                    f.seek(part.offset)
+                try:
+                    f = path.open("rb")
+                except OSError as error:
+                    raise BlobFileError(path, error) from error
+                with f:
+                    try:
+                        f.seek(part.offset)
+                    except OSError as error:
+                        raise BlobFileError(path, error) from error
                     resp = requests.put(
                         part.url,
-                        data=_PieceReader(f, part.size, counted),
+                        data=_PieceReader(f, part.size, counted, stop, path),
                         headers={"x-goog-if-generation-match": "0"},
                         timeout=_UPLOAD_TIMEOUT,
                         allow_redirects=False,
@@ -435,12 +486,51 @@ class BuilderClient:
                 resp.raise_for_status()
                 return
 
-        pool = ThreadPoolExecutor(max_workers=_PARTS_AT_ONCE, thread_name_prefix="comfy-upload-part")
+        # Bare daemon threads, not a ThreadPoolExecutor: its cleanup, and its exit hook, join
+        # every running PUT, so Ctrl-C would wait while the pieces kept going up.
+        stop = threading.Event()
+        pending: queue.SimpleQueue[int] = queue.SimpleQueue()
+        for part in parts:
+            pending.put(part.number)
+        failures: list[BaseException] = []
+        failures_lock = threading.Lock()
+
+        def work() -> None:
+            while not stop.is_set():
+                try:
+                    number = pending.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    send(number)
+                except BaseException as error:  # noqa: BLE001 -- raised again on the calling thread
+                    with failures_lock:
+                        failures.append(error)
+                    # The first failure stops the rest; theirs, after it, are only that stop.
+                    stop.set()
+                    return
+
+        threads = [
+            threading.Thread(target=work, daemon=True, name=f"comfy-upload-part-{index}")
+            for index in range(min(_PARTS_AT_ONCE, len(parts)))
+        ]
         try:
-            for future in [pool.submit(send, part.number) for part in parts]:
-                future.result()
-        finally:
-            pool.shutdown(wait=True, cancel_futures=True)
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                while thread.is_alive():
+                    thread.join(_WAIT_STEP_SECONDS)
+        except BaseException:
+            # Ctrl-C: every piece reading its file stops at its next block, then this is raised,
+            # however long a PUT already sent takes to be answered.
+            stop.set()
+            deadline = time.monotonic() + _CANCEL_GRACE_SECONDS
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(max(0.0, deadline - time.monotonic()))
+            raise
+        if failures:
+            raise failures[0]
         self.complete_blob(blob_id)
 
     def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:

@@ -480,6 +480,24 @@ def test_deploy_skills_describe_approved_uploads():
     assert "details.temp_dir" in row
 
 
+def test_deploy_skills_say_when_a_refused_model_add_already_sent_the_file():
+    """`deploy_models_unavailable` sends no bytes only for an upload in pieces: a
+    builder that answers one upload link has the whole file sent before the
+    refusal. Each place that says what was sent says so, and the library
+    command it offers instead carries the library's required `--type`."""
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_models_unavailable` |")
+    )
+    assert "nothing was sent" not in row
+    assert "one upload link" in row
+    assert "`comfy assets library upload <file> --type <folder>`" in row
+    deploy = " ".join(skill_content("comfy-deploy").split())
+    assert "answers one upload link instead sends the whole file before the refusal" in deploy
+    assert "`comfy assets library upload <file> --type <folder>`" in deploy
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 

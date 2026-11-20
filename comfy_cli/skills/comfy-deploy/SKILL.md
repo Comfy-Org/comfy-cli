@@ -340,9 +340,10 @@ comfy deploy models rm <deployment> <name> [--yes]
   deployment can use it, printing each status; `--no-wait` returns once the
   bytes are in. `<deployment>` is a name, an id or `<build>/<name>`.
 - **Not on for every workspace yet:** where it is off, `add` exits 1 with
-  `deploy_models_unavailable` before sending the pieces;
-  `comfy assets library upload <file>` puts the file in the workspace library
-  instead. A 409 (the
+  `deploy_models_unavailable` before sending the pieces (a builder that
+  answers one upload link instead sends the whole file before the refusal);
+  `comfy assets library upload <file> --type <folder>` puts the file in the
+  workspace library instead. A 409 (the
   release's model policy, the name taken, the deployment busy, too little
   storage) is `deploy_conflict` with comfy-deploy's own sentence.
 - **`ls` lists folder, name, size and status** (`adding`, `ready`, `failed`,
