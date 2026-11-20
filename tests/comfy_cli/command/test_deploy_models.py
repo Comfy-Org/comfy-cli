@@ -10,7 +10,9 @@ import http.client
 import io
 import json
 import shlex
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -435,6 +437,48 @@ def test_on_windows_the_rm_and_ls_hints_quote_the_way_cmd_reads_them(monkeypatch
     assert "`comfy deploy models ls dep-1 --json`" in twice.hint
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        r"C:\My Models\$(whoami).safetensors",
+        r"C:\models\%USERPROFILE%.safetensors",
+        r"C:\models\lo`ra.safetensors",
+        r'C:\models\lo"ra.safetensors',
+        r"C:\models\lora!.safetensors",
+        "C:\\models\\it\u2019s.safetensors",
+    ],
+)
+def test_on_windows_a_path_a_shell_would_expand_is_a_placeholder_in_the_library_hint(monkeypatch, path: str) -> None:
+    # Given a Windows shell, which may be CMD or PowerShell, and a path one of them would expand or end a quote on
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # When
+    error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
+
+    # Then the command shows where the path goes, and the path itself is named after it, outside the command
+    assert error.hint == (
+        "To upload it to the workspace library instead: comfy assets library upload <file> --type loras, "
+        f"where <file> is {path}"
+    )
+
+
+def test_on_windows_a_server_file_name_a_shell_would_expand_is_a_placeholder_in_the_rm_hint(monkeypatch) -> None:
+    # Given a Windows shell and a file name, from comfy-deploy, holding a PowerShell variable
+    monkeypatch.setattr(sys, "platform", "win32")
+    entry = {**_ENTRY, "filename": "lora$env:USERNAME.safetensors", "status": "failed"}
+
+    # When
+    not_added = deploy_models.ModelNotAddedError("dep-1", entry)
+    missing = deploy_models.ModelNotFoundError("dep-$x", "lora.safetensors", [])
+
+    # Then the commands hold placeholders, and the message and details still name the values
+    assert not_added.hint == "run `comfy deploy models rm dep-1 <file>`, then add it again"
+    assert str(not_added).startswith("lora$env:USERNAME.safetensors was not added")
+    assert not_added.details["model"]["filename"] == "lora$env:USERNAME.safetensors"
+    assert missing.hint == "run `comfy deploy models ls <deployment>` to see its model files"
+    assert "deployment dep-$x" in str(missing)
+
+
 def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> None:
     # Given a POSIX shell
     monkeypatch.setattr(sys, "platform", "linux")
@@ -448,6 +492,75 @@ def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> No
         "To upload it to the workspace library instead: "
         "comfy assets library upload '/models/my lora.safetensors' --type loras"
     )
+
+
+def test_elsewhere_a_path_with_a_subexpression_is_shown_single_quoted_not_as_a_placeholder(monkeypatch) -> None:
+    # Given a POSIX shell, where single quotes keep every character literal
+    monkeypatch.setattr(sys, "platform", "linux")
+    model = Path("/models/$(whoami) `id` %HOME%.safetensors")
+
+    # When
+    error = deploy_models.ModelsUnavailableError("dep-1", model, "loras")
+
+    # Then
+    upload = shlex.join(["comfy", "assets", "library", "upload", str(model), "--type", "loras"])
+    assert error.hint == f"To upload it to the workspace library instead: {upload}"
+
+
+def _pwsh_reads(command: str, pwsh: str) -> subprocess.CompletedProcess[str]:
+    """``command`` pasted into PowerShell, with ``comfy`` a function printing the arguments it got as JSON."""
+    script = (
+        "function pwned { 'PWNED' }\n"
+        "function comfy { ConvertTo-Json -Compress -InputObject @($args | ForEach-Object { [string]$_ }) }\n"
+        f"{command}\n"
+    )
+    return subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=60
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        r"C:\models\lora.safetensors",
+        r"C:\My Models\lora.safetensors",
+        r"C:\My Models\lora (v2) [best] {x} @home, #1 + co's & more; ~=.safetensors",
+    ],
+)
+def test_powershell_reads_the_windows_library_hint_path_literally(monkeypatch, path: str) -> None:
+    # Given PowerShell's own parser
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is not on PATH")
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # When the suggested command is pasted into it
+    error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
+    command = error.hint.removeprefix("To upload it to the workspace library instead: ")
+    read = _pwsh_reads(command, pwsh)
+
+    # Then comfy gets the path as it is
+    assert read.returncode == 0, read.stderr
+    assert json.loads(read.stdout) == ["assets", "library", "upload", path, "--type", "loras"]
+
+
+def test_powershell_runs_nothing_a_windows_hint_path_names(monkeypatch) -> None:
+    # Given PowerShell's own parser and a path holding a subexpression
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is not on PATH")
+    monkeypatch.setattr(sys, "platform", "win32")
+    entry = {**_ENTRY, "filename": "$(pwned).safetensors", "status": "failed"}
+
+    # When the suggested commands are pasted into it
+    library = deploy_models.ModelsUnavailableError("dep-1", Path(r"C:\My Models\$(pwned).safetensors"), "loras")
+    upload = library.hint.removeprefix("To upload it to the workspace library instead: ").split(", where ")[0]
+    rm = deploy_models.ModelNotAddedError("dep-1", entry).hint.split("`")[1]
+
+    # Then the subexpression never runs
+    for command in (upload, rm):
+        read = _pwsh_reads(command, pwsh)
+        assert "PWNED" not in read.stdout + read.stderr
 
 
 @pytest.mark.parametrize("server_code", ["NOT_FOUND", "UPLOAD_NOT_FOUND"])

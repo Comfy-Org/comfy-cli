@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import shlex
-import subprocess
 import sys
 import urllib.error
 from collections.abc import Iterator
@@ -56,15 +56,56 @@ _REMOVE_QUESTION: Final = (
 _KNOWN_NOT_FOUND: Final = frozenset({"NOT_FOUND", "UPLOAD_NOT_FOUND"})
 
 
-def _command(*args: str) -> str:
-    """A suggested ``comfy`` command line, quoted for the user's shell so it runs when pasted.
+# What a Windows hint may print in double quotes, read literally there by both CMD and PowerShell; which of the two
+# the user has is not known. Word characters (letters, digits and _ in any script) and the space; . : \ / - in
+# paths; and + = , ; @ ( ) [ ] { } # ~ ' &, which PowerShell and CMD read as special only outside quotes. Left out on
+# purpose: " ends the quotes in both; $ and ` expand and escape in PowerShell; % expands in CMD, ! too with delayed
+# expansion; PowerShell ends a string on the smart quotes U+2018 to U+201E; control characters and line breaks.
+_WINDOWS_QUOTED: Final = re.compile(r"[\w .:\\/+=,;@()\[\]{}#~'&-]*")
+# What it may print bare: nothing either shell reads specially unquoted.
+_WINDOWS_BARE: Final = re.compile(r"[A-Za-z0-9_.:\\/-]+")
 
-    CMD and PowerShell keep single quotes as part of the argument, so Windows gets double quotes, and only where
-    an argument needs them.
+
+@dataclass(frozen=True, slots=True)
+class _Given:
+    """An argument from the user or comfy-deploy, which may hold any character, and the placeholder a Windows hint
+    shows in its place when no quoting of it is literal in both CMD and PowerShell."""
+
+    value: str
+    placeholder: str
+
+
+def _windows_word(value: str) -> str | None:
+    """``value`` as both Windows shells read it literally when pasted, or None when no form of it is."""
+    if _WINDOWS_BARE.fullmatch(value):
+        return value
+    # A backslash before the closing quote would escape it in the program's own reading of its arguments.
+    if _WINDOWS_QUOTED.fullmatch(value) and not value.endswith("\\"):
+        return f'"{value}"'
+    return None
+
+
+def _pastes_literally(value: str) -> bool:
+    return sys.platform != "win32" or _windows_word(value) is not None
+
+
+def _command(*args: str | _Given) -> str:
+    """A suggested ``comfy`` command line, quoted so it runs as shown when pasted into the user's shell.
+
+    sh, bash and zsh read a single-quoted argument literally. Windows may be CMD, which keeps single quotes as part
+    of the argument, or PowerShell, which expands ``$(...)`` and ``$var`` inside double quotes, so there an argument
+    is printed bare or in double quotes only when both read it literally, and as its placeholder otherwise.
     """
-    if sys.platform == "win32":
-        return subprocess.list2cmdline(["comfy", *args])
-    return shlex.join(["comfy", *args])
+    values = [arg.value if isinstance(arg, _Given) else arg for arg in args]
+    if sys.platform != "win32":
+        return shlex.join(["comfy", *values])
+    words = ["comfy"]
+    for arg, value in zip(args, values, strict=True):
+        word = _windows_word(value)
+        if word is None:
+            word = arg.placeholder if isinstance(arg, _Given) else "<argument>"
+        words.append(word)
+    return " ".join(words)
 
 
 @runtime_checkable
@@ -80,8 +121,13 @@ class ModelsUnavailableError(DeployResolveError):
     code = "deploy_models_unavailable"
 
     def __init__(self, deployment_id: str, file: Path, folder: str) -> None:
-        upload = _command("assets", "library", "upload", str(file), "--type", folder)
+        given = (_Given(str(file), "<file>"), _Given(folder, "<folder>"))
+        upload = _command("assets", "library", "upload", given[0], "--type", given[1])
         self.hint = f"To upload it to the workspace library instead: {upload}"
+        # Neither is in the message or details, so one left out of the command is named after it.
+        named = [f"{arg.placeholder} is {arg.value}" for arg in given if not _pastes_literally(arg.value)]
+        if named:
+            self.hint += f", where {'; '.join(named)}"
         self.details = {"deploymentId": deployment_id}
         super().__init__(_NOT_ON)
 
@@ -106,7 +152,8 @@ class ModelNotAddedError(DeployResolveError):
 
     def __init__(self, deployment_id: str, entry: JsonObject) -> None:
         file = required_string(entry, "filename")
-        self.hint = f"run `{_command('deploy', 'models', 'rm', deployment_id, file)}`, then add it again"
+        rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(file, "<file>"))
+        self.hint = f"run `{rm}`, then add it again"
         self.details = {"deploymentId": deployment_id, "model": _shown(entry)}
         super().__init__(_failed_line(file))
 
@@ -118,11 +165,12 @@ class ModelNotFoundError(DeployResolveError):
         shown: list[JsonValue] = [_shown(entry) for entry in matches]
         self.details = {"deploymentId": deployment_id, "name": name, "matches": shown}
         if matches:
-            listing = _command("deploy", "models", "ls", deployment_id, "--json")
+            listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"), "--json")
             self.hint = f"name it as <folder>/<file>, or by the id `{listing}` gives"
             message = f"{name} names {len(matches)} model files of deployment {deployment_id}"
         else:
-            self.hint = f"run `{_command('deploy', 'models', 'ls', deployment_id)}` to see its model files"
+            listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
+            self.hint = f"run `{listing}` to see its model files"
             message = f"deployment {deployment_id} has no added model file named {name}"
         super().__init__(message)
 
@@ -291,9 +339,10 @@ def add_cmd(
             if model.get("status") == "ready":
                 renderer.success(f"Added {where} to deployment {deployment_id}; it is ready.")
             else:
+                listing = _command("deploy", "models", "ls", _Given(str(deployment_id), "<deployment>"))
                 renderer.success(
                     f"Sent {where} to deployment {deployment_id}; it reads {model.get('status')}. "
-                    f"`{_command('deploy', 'models', 'ls', deployment_id)}` shows when it is ready."
+                    f"`{listing}` shows when it is ready."
                 )
         renderer.emit(result, command="deploy models add", changed=True)
 
