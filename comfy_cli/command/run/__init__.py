@@ -379,7 +379,13 @@ def execute(
         # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
         # Resolved once — the result feeds both the telemetry prop below and the
         # credential gate that follows.
-        cred = _resolve_partner_credential() if not extra_data else None
+        from comfy_cli.cql._net import is_loopback_host
+
+        cred = (
+            _resolve_partner_credential(partner_node_token=is_loopback_host(host.strip("[]")))
+            if not extra_data
+            else None
+        )
         # Fired BEFORE the reject-for-missing-credential branch so runs that are
         # turned away are still counted: that funnel is exactly what the metric
         # is for, and `credential_present: False` marks them. class_types are

@@ -123,16 +123,23 @@ def login_cmd(
         # We can't write an envelope to a dead stream — just fail fast.
         raise typer.Exit(code=1)
 
-    session = store.save_cloud_session(
-        base_url=result.base_url,
-        resource=result.resource,
-        client_id=result.client_id,
-        scope=result.scope,
-        access_token=result.tokens.access_token,
-        refresh_token=result.tokens.refresh_token,
-        token_type=result.tokens.token_type,
-        expires_at=result.tokens.expires_at,
-    )
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
+
+    with locking.file_lock(store.lock_path()):
+        replaced_record = store.get_partner_node_token()
+        session = store.save_cloud_session(
+            base_url=result.base_url,
+            resource=result.resource,
+            client_id=result.client_id,
+            scope=result.scope,
+            access_token=result.tokens.access_token,
+            refresh_token=result.tokens.refresh_token,
+            token_type=result.tokens.token_type,
+            expires_at=result.tokens.expires_at,
+        )
+
+    partner_token.warn_if_replaced_token_kept(renderer, partner_token.revoke_replaced(replaced_record))
 
     # Fill the knowledge cache while the user is online and freshly signed
     # in, so the cache-only attach path has a bundle on a brand-new install.
@@ -162,11 +169,23 @@ def login_cmd(
     )
 
 
-@app.command("logout", help="Sign out of Comfy Cloud (clears the local OAuth session).")
+@app.command(
+    "logout",
+    help=(
+        "Sign out of Comfy Cloud: clears the local OAuth session and revokes every partner-node session "
+        "of the sign-in, which also ends token renewal for Cloud jobs submitted with it."
+    ),
+)
 @tracking.track_command("cloud")
 def logout_cmd():
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
+    from comfy_cli.credentials import get_session
+
     renderer = get_renderer()
-    removed = store.clear_cloud_session()
+    with locking.file_lock(store.lock_path()):
+        session, record = get_session(refresh=False), store.get_partner_node_token()
+        removed = store.clear_cloud_session()
     if not removed:
         renderer.error(
             code="auth_not_signed_in",
@@ -174,9 +193,20 @@ def logout_cmd():
             hint="run: comfy cloud login",
         )
         raise typer.Exit(code=1)
+    revoked = partner_token.revoke_sessions(session, record)
+    if revoked == "failed":
+        renderer.warn(
+            "Could not revoke this sign-in's partner-node tokens, if it has any. A local ComfyUI that ran "
+            "with one can keep renewing it for up to 7 days; restart that ComfyUI to drop it."
+        )
+    elif revoked == "token":
+        renderer.warn(
+            "Revoked only the cached partner-node token. A local ComfyUI that ran with an earlier one "
+            "can keep renewing it for up to 7 days; restart that ComfyUI to drop it."
+        )
     if renderer.is_pretty():
         rprint("[bold]Signed out of Comfy Cloud.[/bold]")
-    renderer.emit({"action": "logout"}, command="cloud logout", changed=True)
+    renderer.emit({"action": "logout", "partner_node_revocation": revoked}, command="cloud logout", changed=True)
 
 
 @app.command("whoami", help="Show the current Comfy Cloud sign-in status.")
@@ -651,14 +681,20 @@ def set_base_url_cmd(
     cleaned = url.rstrip("/")
     config.set(CONFIG_KEY_BASE_URL, cleaned)
 
+    from comfy_cli import locking
+    from comfy_cli.cloud import partner_token
     from comfy_cli.credentials import get_session
 
     cleared_stale_session = False
-    session = get_session(refresh=False)
-    if session is not None and session.base_url != cleaned:
-        if session.is_expired():
-            store.clear_cloud_session()
-            cleared_stale_session = True
+    cleared_record = None
+    with locking.file_lock(store.lock_path()):
+        session = get_session(refresh=False)
+        if session is not None and session.base_url != cleaned:
+            if session.is_expired():
+                cleared_record = store.get_partner_node_token()
+                store.clear_cloud_session()
+                cleared_stale_session = True
+    partner_token.warn_if_replaced_token_kept(renderer, partner_token.revoke_replaced(cleared_record))
 
     if renderer.is_pretty():
         rprint(f"[bold green]Persisted cloud base URL[/bold green] → [cyan]{cleaned}[/cyan]")
