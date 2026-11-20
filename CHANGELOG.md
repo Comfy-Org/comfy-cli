@@ -131,6 +131,9 @@ history.
 
 ### Fixed
 
+- Converting a UI workflow to API format keeps a record widget's saved value,
+  such as `ImageCropV2.crop_region`, instead of replacing it with the schema
+  default.
 - A long partner-node run on a local ComfyUI, signed in with `comfy cloud
   login`, no longer stops with "Unauthorized: Please login first" after the
   provider task was created, wherever Comfy Cloud issues partner-node tokens
