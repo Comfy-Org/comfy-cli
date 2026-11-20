@@ -50,6 +50,8 @@ def create_workspace_venv(workspace_path: str) -> str:
     python = _get_python_binary(venv_dir)
     if not os.path.isfile(python):
         raise RuntimeError(f"Failed to create venv: {python} not found after creation")
+    # The pip that venv seeds can be too old for the PyTorch index (flit_core error).
+    subprocess.run([python, "-m", "pip", "install", "-q", "-U", "pip"], check=False)
     return python
 
 
