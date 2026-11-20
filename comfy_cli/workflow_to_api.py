@@ -2470,6 +2470,7 @@ def _collect_widget_inputs(
         if isinstance(section_def, dict)
         for spec in section_def.values()
     ]
+    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     group_ui_names: set[str] = set()
     group_prefixes: tuple[str, ...] = ()
     group_entry_names: set[str] = set()
@@ -2513,7 +2514,13 @@ def _collect_widget_inputs(
     if not isinstance(widget_values, list):
         return {}
 
-    if any(_is_absorbable_dict(v) for v in widget_values):
+    # A dict entry only ever self-names a Power-Lora-style stack, which the
+    # frontend serializes for nodes whose schema declares no widgets at all
+    # (``Power Lora Loader``). A node whose schema DOES declare a widget --
+    # ``ImageCropV2.crop_region``, ``CurveEditor.curve`` and the rest -- stores
+    # its record there on purpose, so it must reach the ordinary schema walk
+    # below rather than being absorbed as if it were an unrelated lora slot.
+    if not schema_widgets and any(isinstance(v, dict) for v in widget_values):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
@@ -2523,9 +2530,7 @@ def _collect_widget_inputs(
     # a dynamic combo before a seed steal the seed's slot, e.g. Seedream's
     # ``model`` before ``seed``). It also skips connection-only sub-inputs
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
-    schema = _schema_for(node_type, node, object_info)
     pairs = _schema_widget_pairs(schema, widget_values, node_type=node_type, node=node) if schema else []
-    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
             if not name or name in link_inputs:
@@ -2562,11 +2567,6 @@ def _collect_widget_inputs(
     return out
 
 
-def _is_absorbable_dict(value: Any) -> bool:
-    """True only for the self-naming dict entries ``_absorb_dict_widget_values`` understands."""
-    return isinstance(value, dict) and bool(value) and ("type" in value or "lora" in value)
-
-
 def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], link_inputs: dict[str, list]) -> None:
     lora_counter = 0
     for value in widget_values:
@@ -2575,7 +2575,9 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                 continue
             if "type" in value:
                 name = value.get("type")
-                if name and name not in link_inputs:
+                if not isinstance(name, str) or not name:
+                    logger.warning("Dropping a dict widget value with an unusable 'type' key: %r", value)
+                elif name not in link_inputs:
                     out[name] = value
             elif "lora" in value:
                 lora_counter += 1
@@ -2584,9 +2586,13 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                     continue
                 clean = {k: v for k, v in value.items() if k != "strengthTwo" or v is not None}
                 out[name] = clean
+            else:
+                logger.warning("Dropping a dict widget value absorption does not understand: %r", value)
         elif isinstance(value, str) and value == "":
             # Frontend's "Add Lora" button serializes as an empty string trailer.
             out.setdefault("➕ Add Lora", value)
+        else:
+            logger.warning("Dropping a widget value absorption does not understand: %r", value)
 
 
 def _saved_widget_names(

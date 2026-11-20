@@ -63,6 +63,19 @@ _OBJECT_INFO = {
         "output": ["MODEL"],
         "output_name": ["MODEL"],
     },
+    "CurveEditor": {
+        "input": {
+            "required": {
+                "curve": [
+                    "CURVE",
+                    {"default": {"type": "linear", "points": []}, "socketless": True},
+                ],
+            }
+        },
+        "input_order": {"required": ["curve"]},
+        "output": ["CURVE"],
+        "output_name": ["CURVE"],
+    },
 }
 
 _SAVED_CROP = {"x": 0, "y": 0, "width": 1669, "height": 2688}
@@ -187,3 +200,80 @@ def test_a_lora_entry_mixed_with_a_record_still_takes_the_lora_path():
     }
     api = convert_ui_to_api(wf, _OBJECT_INFO)
     assert "lora_1" in api["11"]["inputs"]
+
+
+def test_a_type_keyed_record_on_a_declared_widget_is_not_absorbed():
+    """A record that happens to carry a ``type`` key must still reach its own
+    widget when the schema declares one, not the Power Lora self-naming path.
+
+    ``CurveEditor.curve`` serializes a record like ``{"type": "linear",
+    "points": [...]}``. Routing on the dict's *shape* alone -- "has a `type`
+    key" -- absorbed this exactly like a Power-Lora type-keyed entry, writing
+    it to an input named ``"linear"`` instead of ``curve`` and silently
+    dropping the input ``_collect_default_inputs`` then filled from schema.
+    """
+    wf = {
+        "nodes": [
+            {
+                "id": 21,
+                "type": "CurveEditor",
+                "widgets_values": [{"type": "linear", "points": [[0, 0], [1, 1]]}],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, _OBJECT_INFO)
+    assert api["21"]["inputs"]["curve"] == {"type": "linear", "points": [[0, 0], [1, 1]]}
+    assert "linear" not in api["21"]["inputs"]
+
+
+def test_an_unhashable_type_value_does_not_drop_the_whole_node():
+    """A malformed ``type`` value must not raise and must not take out the node.
+
+    ``_absorb_dict_widget_values`` used the ``type`` value directly as a dict
+    key (``out[name] = value``). A list or dict there is unhashable, and the
+    per-node exception handler in the caller drops every input on the node --
+    including the unrelated, well-formed lora entry beside it.
+    """
+    wf = {
+        "nodes": [
+            {
+                "id": 22,
+                "type": "Power Lora Loader",
+                "widgets_values": [
+                    {"type": ["not", "hashable"], "value": "x"},
+                    {"on": True, "lora": "a.safetensors"},
+                ],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, _OBJECT_INFO)
+    assert api["22"]["inputs"]["lora_1"]["lora"] == "a.safetensors"
+
+
+def test_an_empty_lora_stack_still_absorbs_to_the_add_lora_trailer():
+    """A Power Lora Loader saved with no loras yet must still take the
+    self-naming path, not the ordinary schema/positional walk.
+
+    Narrowing the shortcut's trigger to dicts carrying ``type`` or ``lora``
+    stopped counting an empty ``{}`` placeholder slot, so a widget_values list
+    of only empty dicts and the ``""`` Add-Lora trailer no longer tripped the
+    shortcut at all -- the exact shape a freshly-added, still-empty Power Lora
+    Loader saves.
+    """
+    wf = {
+        "nodes": [
+            {
+                "id": 23,
+                "type": "Power Lora Loader",
+                "widgets_values": [{}, ""],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, _OBJECT_INFO)
+    assert api["23"]["inputs"]["➕ Add Lora"] == ""
