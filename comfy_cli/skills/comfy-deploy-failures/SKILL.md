@@ -57,6 +57,11 @@ argument you pass.
 | `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | Read `comfy deploy show --deployment <id>` from any folder; watching requires `comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's verified spec. After a move, read until no `pendingUpdate`; do not redeploy |
 | `watch_auth_lost` | A watch's read was refused with a 401 despite session recovery, and a refreshable sign-in remains stored (exit 75); the deployment may still be coming up | Reattach as for `deploy_watch_lost` before considering a new sign-in; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
+| `deploy_models_unavailable` | `models add` where adding models to a deployment is not on for the workspace; nothing was sent | `comfy assets library upload <file>` puts it in the workspace library instead |
+| `deploy_model_not_ready` | `run` named a model file still being added to the deployment; the job was not created | Wait until `comfy deploy models ls <deployment>` shows it ready, then run again |
+| `deploy_model_failed` | A model file added to the deployment was not added (`run` names it, or `models add` saw it fail) | `comfy deploy models rm <deployment> <file>`, then add it again |
+| `deploy_model_not_found` | `models rm` matched no added file, or one name in two folders | `comfy deploy models ls <deployment>`; name it as `<folder>/<file>` or by id |
+| `deploy_model_remove_needs_confirm` | `models rm` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow
 

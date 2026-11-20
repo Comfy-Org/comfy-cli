@@ -198,7 +198,7 @@ def test_deploy_run_is_registered_with_the_complete_option_surface() -> None:
     } <= option_names("run")
 
 
-def test_deploy_tree_is_exactly_the_seventeen_designed_commands() -> None:
+def test_deploy_tree_is_exactly_the_eighteen_designed_commands() -> None:
     # Given / When
     command = typer.main.get_command(deploy.app)
     assert hasattr(command, "commands"), command
@@ -223,6 +223,7 @@ def test_deploy_tree_is_exactly_the_seventeen_designed_commands() -> None:
         "delete",
         "run",
         "refs",
+        "models",
     }
 
 
@@ -519,6 +520,50 @@ def test_an_oversize_workflow_is_refused_after_its_assets_are_uploaded(
     message = str(error["message"])
     assert "nothing was sent" not in message
     assert "the job was not submitted, so no job was created" in message
+
+
+@pytest.mark.parametrize(
+    ("server_code", "client_code", "sentence"),
+    [
+        (
+            "model_not_ready",
+            "deploy_model_not_ready",
+            "lora.safetensors is still being added to this deployment. Try again when it shows Ready.",
+        ),
+        (
+            "model_failed",
+            "deploy_model_failed",
+            "lora.safetensors was not added to this deployment. Remove it and add it again.",
+        ),
+    ],
+)
+def test_a_job_naming_an_added_model_that_is_not_ready_is_refused_once_with_the_gateways_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server_code: str, client_code: str, sentence: str
+) -> None:
+    # Given a gateway that refuses the job: the workflow names a file added to the deployment, not ready
+    workflow = write_workflow(tmp_path / "workflow.json")
+    sent: list[str] = []
+
+    def refuse(url: str, *_args: object, **_kwargs: object) -> None:
+        sent.append(url)
+        body = io.BytesIO(json.dumps({"error": {"code": server_code, "message": sentence}}).encode())
+        raise urllib.error.HTTPError(url, 422, "Unprocessable Entity", http.client.HTTPMessage(), body)
+
+    control = FakeControl("https://dep-id.run.comfy.app")
+    monkeypatch.setattr(deploy_run, "_command_clients", lambda: (FakeBuilder(), control))
+    monkeypatch.setattr(deploy_run, "DeployAssetClient", lambda *_args, **_kwargs: FakeAssetClient())
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: None)
+    monkeypatch.setattr(deploy_jobs, "request_json", refuse)
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+
+    # Then it exits with the code, says the gateway's sentence, and sent the job once
+    assert result.exit_code == 1
+    error = envelope_error(result)
+    assert error["code"] == client_code
+    assert error["message"] == sentence
+    assert len(sent) == 1
 
 
 def test_the_release_version_the_gateway_names_is_printed_and_emitted(

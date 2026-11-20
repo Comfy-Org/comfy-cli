@@ -2082,6 +2082,40 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "approved files before it may already be, and a retry reuses them.",
         "verify the local file is stable and readable, then retry the upload",
     ),
+    ErrorCode(
+        "deploy_model_not_ready",
+        "`comfy deploy run`: the workflow names a model file still being added to the deployment "
+        "(`comfy deploy models add`), so the gateway refused the job before creating it; `message` is its sentence. "
+        "Not retried.",
+        "wait until `comfy deploy models ls <deployment>` shows the file ready, then run the job again",
+    ),
+    ErrorCode(
+        "deploy_model_failed",
+        "A model file added straight to a deployment was not added: `comfy deploy run` was refused because the "
+        "workflow names it (`message` is the gateway's sentence), or `comfy deploy models add` saw it fail, or "
+        "removed, while waiting. Why it failed is in comfy-deploy's log, never in the output.",
+        "remove it with `comfy deploy models rm <deployment> <file>` and add it again",
+    ),
+    ErrorCode(
+        "deploy_models_unavailable",
+        "`comfy deploy models add` reached a comfy-deploy where adding models to a deployment is not on for "
+        "the workspace: it answered 404 with no error code. Nothing was added. `details.deploymentId` names the "
+        "deployment.",
+        "upload the file to the workspace library instead with `comfy assets library upload <file>`",
+    ),
+    ErrorCode(
+        "deploy_model_not_found",
+        "`comfy deploy models rm` matched no model file added to the deployment, or more than one (the same "
+        "name in two folders). `details.name` is what was asked for and `details.matches` the entries it matched.",
+        "run `comfy deploy models ls <deployment>`, then name the file as <folder>/<file> or by its id",
+    ),
+    ErrorCode(
+        "deploy_model_remove_needs_confirm",
+        "`comfy deploy models rm` was run without `--yes` in a non-interactive context. Removing deletes the file "
+        "from the deployment's disk, so it is refused without consent; `details.deploymentId` and "
+        "`details.modelId` name what it would remove and `details.question` carries the question.",
+        "pass `--yes` to remove the file",
+    ),
     # --- knowledge -----------------------------------------------------------
     ErrorCode(
         "knowledge_unavailable",

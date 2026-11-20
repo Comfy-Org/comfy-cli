@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_models.json",
+  "title": "comfy deploy models add / ls / rm --json data payload",
+  "description": "`ls` carries `models`, every file added straight to the deployment, oldest first. `add` and `rm` carry `model`, the entry they made or are removing; `add` also says whether it sent bytes. An entry never carries comfy-deploy's failure text: a failed file reads `status: failed`, and the fix is to remove it and add it again.",
+  "type": "object",
+  "required": ["deploymentId"],
+  "additionalProperties": false,
+  "oneOf": [{"required": ["models"]}, {"required": ["model"]}],
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["id", "type", "filename", "status", "sizeBytes"],
+      "additionalProperties": true,
+      "not": {"required": ["failure"]},
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1, "description": "The model folder the file is in, such as loras."},
+        "filename": {"type": "string", "minLength": 1},
+        "status": {
+          "enum": ["adding", "ready", "failed", "removing"],
+          "description": "adding until the deployment's workers can use the file, then ready, or failed; removing once a removal was asked."
+        },
+        "sizeBytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "properties": {
+    "deploymentId": {"type": "string", "minLength": 1},
+    "models": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+    "model": {"$ref": "#/$defs/entry"},
+    "uploaded": {
+      "type": "boolean",
+      "description": "`add` only: false where the workspace already held these exact bytes, so none were sent."
+    }
+  }
+}

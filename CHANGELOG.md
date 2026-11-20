@@ -17,6 +17,16 @@ history.
 
 ### Added
 
+- `comfy deploy models add <deployment> <file> --type <folder>`, `comfy deploy
+  models ls <deployment>` and `comfy deploy models rm <deployment> <name>` add a
+  model file straight to a deployment with no new release, list those files,
+  and remove one. `add` uploads in pieces, 8 at a time, adds the file before
+  its bytes land, and waits until it is ready (`--no-wait` returns once sent);
+  where adding models is not on it exits 1 with `deploy_models_unavailable`
+  before sending the pieces. `comfy deploy run` reports a job naming a file still
+  being added as `deploy_model_not_ready` and one naming a failed file as
+  `deploy_model_failed`, without retrying. `comfy assets library upload` and
+  `comfy model upload` now say first how to add a model to a deployment.
 - `comfy extension list`, `comfy extension disable <folder>` and
   `comfy extension enable <folder>` turn a custom node pack's frontend code off
   or on through the running local ComfyUI's `Comfy.Extension.DisabledPacks`

@@ -8,6 +8,10 @@ URL and never transit the builder.
 
 Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
+  POST /v1/blobs {..., blake3, reuse, parts: true} -> {blobId, deduplicated, parts?: [{partNumber, offsetBytes,
+                                                      sizeBytes, uploadUrl, expiresAt}]}
+  POST /v1/blobs/{id}/parts                       -> {blobId, parts}: fresh links for the pieces not landed
+  POST /v1/blobs/{id}/complete                    -> {blobId, sizeBytes}: the pieces joined into one object
   POST /v1/builds {name, definition}              -> {id, ...}
   POST /v1/snapshots/resolve {snapshot}           -> {definition, report}
   POST /v1/workflows/resolve {workflow}           -> {definition, report, format}
@@ -20,10 +24,13 @@ Field names match services/comfy-builder/openapi.yaml exactly:
 
 from __future__ import annotations
 
+import threading
 import urllib.error
 import urllib.parse
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO
 
@@ -56,6 +63,12 @@ _WORKFLOW_IMPORT_TIMEOUT = 90.0
 # instead of calling `read`. Only the chunked path does, and only for an empty
 # file, so the size is not a tuning knob.
 _UPLOAD_ITER_BYTES = 1024 * 1024
+# How many pieces of an upload in pieces are sent at once.
+_PARTS_AT_ONCE = 8
+# A piece whose link expires sooner than this gets a fresh link before it starts.
+_LINK_MARGIN = timedelta(minutes=2)
+# What a presigned PUT answers for a link that expired or no longer matches its signature.
+_LINK_REFUSED = frozenset({400, 401, 403})
 
 
 class _CountingReader:
@@ -95,6 +108,79 @@ class _CountingReader:
 
     def __iter__(self) -> Iterator[bytes]:
         return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
+class _PieceReader:
+    """One piece of a file as ``requests`` sees it, reporting each block it reads.
+
+    ``len`` is the piece's size, so the PUT carries exactly the Content-Length its
+    link is signed for and streams without chunked transfer; reads stop at the
+    piece's end. No ``fileno``: ``requests`` would size the body from the whole file.
+    """
+
+    def __init__(self, raw: BinaryIO, size: int, progress: Callable[[int], None] | None) -> None:
+        self._raw = raw
+        self._size = size
+        self._left = size
+        self._progress = progress
+
+    def __len__(self) -> int:
+        return self._size
+
+    def read(self, size: int = -1) -> bytes:
+        wanted = self._left if size is None or size < 0 else min(size, self._left)
+        block = self._raw.read(wanted) if wanted > 0 else b""
+        self._left -= len(block)
+        if block and self._progress is not None:
+            self._progress(len(block))
+        return block
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
+@dataclass(frozen=True, slots=True)
+class BlobPart:
+    """One piece of an upload in pieces: its place from 1, where it starts in the file, its length, its link."""
+
+    number: int
+    offset: int
+    size: int
+    url: str
+    expires_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class PartsUpload:
+    """The builder's answer to a create asking for pieces.
+
+    ``deduplicated`` is the workspace already holding these exact bytes: nothing
+    to send. Else ``parts`` holds a link per piece, or, from a builder without
+    the pieces routes, ``parts`` is empty and ``upload_url`` is the one link.
+    """
+
+    blob_id: str
+    deduplicated: bool
+    parts: tuple[BlobPart, ...]
+    upload_url: str | None
+
+
+def _blob_parts(answer: dict) -> tuple[BlobPart, ...]:
+    from comfy_cli.utils import parse_rfc3339
+
+    parts: list[BlobPart] = []
+    for raw in answer.get("parts") or []:
+        try:
+            expires_at = parse_rfc3339(str(raw["expiresAt"]))
+        except (KeyError, ValueError):
+            expires_at = None
+        size = int(raw["sizeBytes"])
+        parts.append(BlobPart(int(raw["partNumber"]), int(raw["offsetBytes"]), size, str(raw["uploadUrl"]), expires_at))
+    return tuple(sorted(parts, key=lambda part: part.number))
+
+
+def _expiring(part: BlobPart) -> bool:
+    return part.expires_at is not None and part.expires_at - _LINK_MARGIN <= datetime.now(timezone.utc)
 
 
 class BuilderAuthError(Exception):
@@ -262,6 +348,100 @@ class BuilderClient:
                 f"presigned upload was redirected ({resp.status_code}); refusing to follow", response=resp
             )
         resp.raise_for_status()
+
+    def create_blob_parts(self, kind: str, filename: str, sha256: str, size_bytes: int, *, blake3: str) -> PartsUpload:
+        """Claim a blob for these bytes, to be sent in pieces, or the blob the workspace already holds for them.
+
+        Sends ``reuse``, so bytes held under the same kind, name, size and both
+        hashes come back ``deduplicated`` with nothing to send. ``blake3`` is the
+        bare hex digest. A builder without the pieces routes ignores ``parts``
+        and answers one ``uploadUrl``, which :meth:`upload_blob` sends.
+        """
+        body = {
+            "kind": kind,
+            "filename": filename,
+            "sha256": sha256,
+            "blake3": blake3,
+            "sizeBytes": size_bytes,
+            "reuse": True,
+            "parts": True,
+        }
+        r = self._post(("blobs",), body)
+        if r.get("deduplicated") is True:
+            return PartsUpload(r["blobId"], True, (), None)
+        parts = _blob_parts(r)
+        return PartsUpload(r["blobId"], False, parts, None if parts else r["uploadUrl"])
+
+    def refresh_blob_parts(self, blob_id: str) -> tuple[BlobPart, ...]:
+        """POST /v1/blobs/{id}/parts -> a fresh link for each piece not landed yet; a landed piece gets none."""
+        return _blob_parts(self._post(("blobs", blob_id, "parts"), {}))
+
+    def complete_blob(self, blob_id: str) -> dict:
+        """POST /v1/blobs/{id}/complete -> join the landed pieces into the upload's one object."""
+        return self._post(("blobs", blob_id, "complete"), {})
+
+    def upload_blob_parts(
+        self, blob_id: str, parts: tuple[BlobPart, ...], path: Path, progress: Callable[[int], None] | None = None
+    ) -> None:
+        """PUT every piece of ``path``, in order and ``_PARTS_AT_ONCE`` at a time, then join them.
+
+        A piece whose link is about to expire, or whose PUT is refused as a link
+        no longer good, asks the builder once for fresh links to the pieces not
+        landed. A piece that answer leaves out has landed, as has one whose
+        create-only link answers 412.
+        """
+        links = {part.number: part for part in parts}
+        # One lock for the links, held across a refresh; another for the progress
+        # count, so a refresh never stalls the bytes the other pieces are reading.
+        links_lock, progress_lock = threading.Lock(), threading.Lock()
+
+        def link(number: int, stale: BlobPart | None = None) -> BlobPart | None:
+            with links_lock:
+                current = links.get(number)
+                if current is not None and current is not stale and not _expiring(current):
+                    return current
+                links.clear()
+                links.update({part.number: part for part in self.refresh_blob_parts(blob_id)})
+                return links.get(number)
+
+        def counted(n: int) -> None:
+            if progress is not None:
+                with progress_lock:
+                    progress(n)
+
+        def send(number: int) -> None:
+            part = link(number)
+            for attempt in range(2):
+                if part is None:
+                    return
+                with path.open("rb") as f:
+                    f.seek(part.offset)
+                    resp = requests.put(
+                        part.url,
+                        data=_PieceReader(f, part.size, counted),
+                        headers={"x-goog-if-generation-match": "0"},
+                        timeout=_UPLOAD_TIMEOUT,
+                        allow_redirects=False,
+                    )
+                if 300 <= resp.status_code < 400:
+                    raise requests.HTTPError(
+                        f"presigned upload was redirected ({resp.status_code}); refusing to follow", response=resp
+                    )
+                if resp.status_code == 412:
+                    return
+                if resp.status_code in _LINK_REFUSED and attempt == 0:
+                    part = link(number, stale=part)
+                    continue
+                resp.raise_for_status()
+                return
+
+        pool = ThreadPoolExecutor(max_workers=_PARTS_AT_ONCE, thread_name_prefix="comfy-upload-part")
+        try:
+            for future in [pool.submit(send, part.number) for part in parts]:
+                future.result()
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+        self.complete_blob(blob_id)
 
     def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:
         """Create a build from a definition. Returns the created build, carrying

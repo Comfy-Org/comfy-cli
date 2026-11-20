@@ -258,6 +258,9 @@ def test_429_without_retry_after_is_terminal(monkeypatch, server_code, client_co
         # reader the workflow was invalid, when the workflow is fine and an
         # input it names is not reachable.
         ("missing_asset", "deploy_asset_missing"),
+        # A file added straight to the deployment, still being added or failed: a retry meets the same.
+        ("model_not_ready", "deploy_model_not_ready"),
+        ("model_failed", "deploy_model_failed"),
     ],
 )
 def test_terminal_422_is_never_retried(monkeypatch, server_code, client_code):

@@ -352,6 +352,28 @@ class DeployClient:
             _Request(operation="logs", parts=("deployments", deployment_id, "logs"), max_bytes=_MAX_LOG_JSON)
         )
 
+    def add_deployment_model(self, deployment_id: str, blob_id: str, folder: str) -> dict:
+        """POST /v1/deployments/{id}/models: add the workspace's model upload to the deployment, with no new
+        release, under the upload's own file name. 202 with the entry, reading ``adding``.
+
+        An upload sent in pieces may be added before its pieces land. Where adding
+        models is not on, comfy-deploy answers 404 as an unknown route does, with
+        no error code; ``NOT_FOUND`` and ``UPLOAD_NOT_FOUND`` are the deployment
+        and the upload. Each 409 names why in ``error`` and says so in ``message``.
+        """
+        return self._post("models", ("deployments", deployment_id, "models"), {"blobId": blob_id, "type": folder})
+
+    def list_deployment_models(self, deployment_id: str) -> dict:
+        """GET /v1/deployments/{id}/models -> ``{models: [{id, type, filename, status, sizeBytes, failure?}]}``,
+        oldest first, whether or not adding models is on."""
+        return self._get("models", ("deployments", deployment_id, "models"))
+
+    def remove_deployment_model(self, deployment_id: str, model_id: str) -> dict:
+        """DELETE /v1/deployments/{id}/models/{modelId}: 202 with the entry, reading ``removing``."""
+        return self._request(
+            _Request(operation="models", parts=("deployments", deployment_id, "models", model_id), method="DELETE")
+        )
+
     def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> dict:
         return self._get(
             "estimate", ("deploy-estimate",), {"releaseId": release_id, "gpuClass": gpu_class, "region": region}

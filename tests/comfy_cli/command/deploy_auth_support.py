@@ -44,6 +44,9 @@ class DeployFixtureKind(Enum):
     DELETE = "delete"
     RUN = "run"
     REFS_COMPUTE = "refs compute"
+    MODELS_ADD = "models add"
+    MODELS_LS = "models ls"
+    MODELS_RM = "models rm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,10 @@ def _deployment() -> JsonObject:
         "serving": None,
         "revision": 2,
     }
+
+
+def _model() -> JsonObject:
+    return {"id": "model-matrix", "type": "loras", "filename": "lora.safetensors", "status": "ready", "sizeBytes": 7}
 
 
 def _revisions() -> list[JsonObject]:
@@ -126,6 +133,12 @@ class DeployRecordingTransport:
                 {"deploymentId": DEPLOYMENT_ID, "events": []},
             ),
             ("GET", "/v1/compute-catalog"): (200, {"regions": []}),
+            ("GET", f"/v1/deployments/{DEPLOYMENT_ID}/models"): (200, {"models": [_model()]}),
+            ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/models"): (202, {**_model(), "status": "adding"}),
+            ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}/models/model-matrix"): (
+                202,
+                {**_model(), "status": "removing"},
+            ),
             ("GET", "/v1/limits"): (200, {"maxActiveDeployments": 3, "maxModelStorageGb": 100}),
         }
         if method == "PATCH" and path == f"/v1/deployments/{DEPLOYMENT_ID}":
@@ -211,6 +224,16 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
             ]
         case DeployFixtureKind.REFS_COMPUTE:
             return ["deploy", "refs", "compute"]
+        case DeployFixtureKind.MODELS_ADD:
+            # The builder answers that the workspace holds these bytes, so no PUT leaves the test.
+            root.mkdir(parents=True, exist_ok=True)
+            model = root / "lora.safetensors"
+            model.write_bytes(b"weights")
+            return ["deploy", "models", "add", DEPLOYMENT_ID, str(model), "--type", "loras", "--no-wait"]
+        case DeployFixtureKind.MODELS_LS:
+            return ["deploy", "models", "ls", DEPLOYMENT_ID]
+        case DeployFixtureKind.MODELS_RM:
+            return ["deploy", "models", "rm", DEPLOYMENT_ID, "lora.safetensors", "--yes"]
         case unreachable:
             assert_never(unreachable)
 

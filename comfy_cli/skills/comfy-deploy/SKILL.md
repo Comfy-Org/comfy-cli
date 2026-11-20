@@ -54,6 +54,7 @@ show    One deployment's raw control-plane record.
 logs    One deployment's captured ComfyUI log snapshot.
 events  One deployment's status events in server order.
 refs    compute — deployable regions and GPU classes with availability.
+models  add, ls, rm — model files added straight to a deployment, no new release.
 ```
 
 ## The path
@@ -324,6 +325,36 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
   or fail instead.
 - **A cancelled move back to a kept release leaves that release as it was:**
   one you stopped stays stopped and yours, and one on its way out still goes.
+
+## `comfy deploy models`
+
+```shell
+comfy deploy models add <deployment> <file> --type <folder> [--no-wait]
+comfy deploy models ls <deployment>
+comfy deploy models rm <deployment> <name> [--yes]
+```
+
+- **`add` puts one model file on a deployment without a new release.** It
+  hashes the file, uploads it in pieces (a file the workspace already holds
+  under the same name and hashes is not sent again), and waits until the
+  deployment can use it, printing each status; `--no-wait` returns once the
+  bytes are in. `<deployment>` is a name, an id or `<build>/<name>`.
+- **Not on for every workspace yet:** where it is off, `add` exits 1 with
+  `deploy_models_unavailable` before sending the pieces;
+  `comfy assets library upload <file>` puts the file in the workspace library
+  instead. A 409 (the
+  release's model policy, the name taken, the deployment busy, too little
+  storage) is `deploy_conflict` with comfy-deploy's own sentence.
+- **`ls` lists folder, name, size and status** (`adding`, `ready`, `failed`,
+  `removing`). A failed file was not added: remove it and add it again. Why it
+  failed is in comfy-deploy's log, never in the output.
+- **`rm` deletes the file from the deployment's disk.** Jobs that name it fail;
+  one already running may finish. It asks first; `--yes` answers, and refusing
+  without it is `deploy_model_remove_needs_confirm`. Name the file as
+  `<folder>/<name>` or by id where two folders hold the same name.
+- **A job naming a file still being added** is refused by `comfy deploy run`
+  with `deploy_model_not_ready`, one naming a failed file with
+  `deploy_model_failed`; neither is retried.
 
 ## `comfy deploy run`
 

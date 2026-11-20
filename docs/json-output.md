@@ -501,9 +501,10 @@ time. If the callback never arrives, the terminal envelope is an
 ### `upload_plan`, `upload_progress`, `upload_complete`, `upload_storing`
 
 Emitted by `comfy build push` while it uploads model files and packaged custom
-nodes, and by `comfy model upload` and `comfy assets library upload` while they
-upload one model file. They are part of the upload, not the `run` stream, and
-validate against `build_push_event.json`.
+nodes, by `comfy model upload` and `comfy assets library upload` while they
+upload one model file, and by `comfy deploy models add` while it sends one.
+They are part of the upload, not the `run` stream, and validate against
+`build_push_event.json`.
 
 Where they go depends on the mode. Under `--json-stream` they are on stdout,
 ahead of the envelope, like every other event. Under plain `--json` (which is
