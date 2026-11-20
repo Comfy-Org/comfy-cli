@@ -143,6 +143,27 @@ history.
   alone, because one name-keyed slot belongs to the final occurrence and writing
   an earlier one's value there would be a corrupt read rather than a stale one.
 
+- A long partner-node run on a local ComfyUI, signed in with `comfy cloud
+  login`, no longer stops with "Unauthorized: Please login first" after the
+  provider task was created, wherever Comfy Cloud issues partner-node tokens
+  to comfy-cli. `comfy run` against a loopback ComfyUI now gives it a
+  partner-node token in place of the fifteen-minute sign-in token. It lasts
+  about 90 minutes, and ComfyUI 0.43.0 or later renews it during the run.
+  comfy-cli caches one token per sign-in, renews it before a run when it has
+  less than 45 minutes left, and mints a new one only when renewal is refused
+  or cannot help. When Comfy Cloud refuses the mint, the run gets the sign-in
+  token as before, refreshed when possible, and a run longer than that token
+  can still stop. `comfy cloud logout` clears the sign-in, then revokes every
+  partner-node session of it; that also ends token renewal for Cloud jobs
+  submitted with the sign-in, which matters only when their API node runs more
+  than 90 minutes after submit. Its envelope reports
+  `partner_node_revocation`: `sign_in` for every session of the sign-in,
+  `token` for the cached token's own, `failed`, or `null` for an environment
+  without partner-node tokens. A new `comfy cloud login` revokes only the
+  cached token's own session, so Cloud jobs keep renewing, and warns when it
+  cannot. API keys, `COMFY_CLOUD_AUTH_TOKEN`, `comfy deploy run` and a ComfyUI
+  on another host (which gets no partner-node credential, as before) are
+  unchanged.
 - Two `comfy model download` runs from different workspaces aimed at the same
   file now refuse each other. Before, each workspace kept its own download
   claims, so both runs wrote the file. This is the default case on Comfy
