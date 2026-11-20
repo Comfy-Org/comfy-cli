@@ -152,6 +152,17 @@ history.
   cannot. API keys, `COMFY_CLOUD_AUTH_TOKEN`, `comfy deploy run` and a ComfyUI
   on another host (which gets no partner-node credential, as before) are
   unchanged.
+- A local `comfy run` signed in with `comfy cloud login` no longer asks Comfy
+  Cloud for a partner-node token on every run once a mint has failed (Comfy
+  Cloud refused it, was unreachable or did not answer). comfy-cli remembers
+  the failure for that sign-in and environment for 10 minutes. Meanwhile runs
+  make no mint request and get the sign-in token, refreshed unless it is under
+  a minute old. A hanging mint is tried once per 10 minutes, not on every run;
+  only the runs that start while it hangs wait for it. A new
+  `comfy cloud login` or `comfy setup` sign-in, `comfy cloud logout`, a
+  successful mint, and a successful renewal that the session's end does not
+  cut short end the wait. Renewal of a cached partner-node token is
+  unchanged.
 - Two `comfy model download` runs from different workspaces aimed at the same
   file now refuse each other. Before, each workspace kept its own download
   claims, so both runs wrote the file. This is the default case on Comfy
