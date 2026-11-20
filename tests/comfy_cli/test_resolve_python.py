@@ -379,6 +379,27 @@ class TestCreateWorkspaceVenv:
         assert r.returncode == 0
         assert "pip" in r.stdout
 
+    @pytest.mark.parametrize("failure", ["exit", "timeout"])
+    def test_failed_pip_upgrade_keeps_venv_and_warns(self, tmp_path, failure):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        real_run = subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[1:4] == ["-m", "pip", "install"]:
+                if failure == "timeout":
+                    raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+                return subprocess.CompletedProcess(cmd, 1, b"", b"ERROR")
+            return real_run(cmd, *args, **kwargs)
+
+        with (
+            patch("comfy_cli.resolve_python.subprocess.run", side_effect=fake_run),
+            patch("comfy_cli.resolve_python.rprint") as mock_rprint,
+        ):
+            result = create_workspace_venv(str(workspace))
+        assert os.path.isfile(result)
+        assert any("Could not upgrade pip" in str(c) for c in mock_rprint.call_args_list)
+
     def test_created_venv_is_isolated(self, tmp_path):
         workspace = tmp_path / "workspace"
         workspace.mkdir()
