@@ -11,6 +11,7 @@ import io
 import json
 import shlex
 import signal
+import sys
 import threading
 import time
 import urllib.error
@@ -397,6 +398,56 @@ def test_a_404_prints_the_not_on_line_then_the_library_line(tmp_path, monkeypatc
     not_on = result.output.index("Adding models to a deployment is not on for this workspace yet.")
     assert not_on < result.output.index("To upload it to the workspace library instead: comfy assets library upload")
     assert storage.puts == []
+
+
+@pytest.mark.parametrize(
+    ("path", "shown"),
+    [
+        (r"C:\models\lora.safetensors", r"C:\models\lora.safetensors"),
+        (r"C:\My Models\lora.safetensors", r'"C:\My Models\lora.safetensors"'),
+    ],
+)
+def test_on_windows_the_library_hint_quotes_the_path_the_way_cmd_reads_it(monkeypatch, path: str, shown: str) -> None:
+    # Given a Windows shell, where single quotes are part of the file name
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    # When
+    error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
+
+    # Then the path is in double quotes only when it needs them, and never in single quotes
+    assert (
+        error.hint == f"To upload it to the workspace library instead: comfy assets library upload {shown} --type loras"
+    )
+    assert "'" not in error.hint
+
+
+def test_on_windows_the_rm_and_ls_hints_quote_the_way_cmd_reads_them(monkeypatch) -> None:
+    # Given a Windows shell and a file name with a space in it
+    monkeypatch.setattr(sys, "platform", "win32")
+    entry = {**_ENTRY, "filename": "my lora.safetensors", "status": "failed"}
+
+    # When
+    not_added = deploy_models.ModelNotAddedError("dep-1", entry)
+    twice = deploy_models.ModelNotFoundError("dep-1", "my lora.safetensors", [entry, entry])
+
+    # Then
+    assert not_added.hint == 'run `comfy deploy models rm dep-1 "my lora.safetensors"`, then add it again'
+    assert "`comfy deploy models ls dep-1 --json`" in twice.hint
+
+
+def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> None:
+    # Given a POSIX shell
+    monkeypatch.setattr(sys, "platform", "linux")
+    model = Path("/models/my lora.safetensors")
+
+    # When
+    error = deploy_models.ModelsUnavailableError("dep-1", model, "loras")
+
+    # Then
+    assert error.hint == (
+        "To upload it to the workspace library instead: "
+        "comfy assets library upload '/models/my lora.safetensors' --type loras"
+    )
 
 
 @pytest.mark.parametrize("server_code", ["NOT_FOUND", "UPLOAD_NOT_FOUND"])

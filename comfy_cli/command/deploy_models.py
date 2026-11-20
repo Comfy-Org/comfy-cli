@@ -5,6 +5,8 @@ from __future__ import annotations
 import http.client
 import os
 import shlex
+import subprocess
+import sys
 import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -54,6 +56,17 @@ _REMOVE_QUESTION: Final = (
 _KNOWN_NOT_FOUND: Final = frozenset({"NOT_FOUND", "UPLOAD_NOT_FOUND"})
 
 
+def _command(*args: str) -> str:
+    """A suggested ``comfy`` command line, quoted for the user's shell so it runs when pasted.
+
+    CMD and PowerShell keep single quotes as part of the argument, so Windows gets double quotes, and only where
+    an argument needs them.
+    """
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(["comfy", *args])
+    return shlex.join(["comfy", *args])
+
+
 @runtime_checkable
 class DeploymentModelsClient(DeploymentListClient, Protocol):
     def add_deployment_model(self, deployment_id: str, blob_id: str, folder: str, /) -> JsonObject: ...
@@ -67,10 +80,8 @@ class ModelsUnavailableError(DeployResolveError):
     code = "deploy_models_unavailable"
 
     def __init__(self, deployment_id: str, file: Path, folder: str) -> None:
-        self.hint = (
-            "To upload it to the workspace library instead: "
-            f"comfy assets library upload {shlex.quote(str(file))} --type {shlex.quote(folder)}"
-        )
+        upload = _command("assets", "library", "upload", str(file), "--type", folder)
+        self.hint = f"To upload it to the workspace library instead: {upload}"
         self.details = {"deploymentId": deployment_id}
         super().__init__(_NOT_ON)
 
@@ -95,7 +106,7 @@ class ModelNotAddedError(DeployResolveError):
 
     def __init__(self, deployment_id: str, entry: JsonObject) -> None:
         file = required_string(entry, "filename")
-        self.hint = f"run `comfy deploy models rm {deployment_id} {file}`, then add it again"
+        self.hint = f"run `{_command('deploy', 'models', 'rm', deployment_id, file)}`, then add it again"
         self.details = {"deploymentId": deployment_id, "model": _shown(entry)}
         super().__init__(_failed_line(file))
 
@@ -107,12 +118,11 @@ class ModelNotFoundError(DeployResolveError):
         shown: list[JsonValue] = [_shown(entry) for entry in matches]
         self.details = {"deploymentId": deployment_id, "name": name, "matches": shown}
         if matches:
-            self.hint = (
-                f"name it as <folder>/<file>, or by the id `comfy deploy models ls {deployment_id} --json` gives"
-            )
+            listing = _command("deploy", "models", "ls", deployment_id, "--json")
+            self.hint = f"name it as <folder>/<file>, or by the id `{listing}` gives"
             message = f"{name} names {len(matches)} model files of deployment {deployment_id}"
         else:
-            self.hint = f"run `comfy deploy models ls {deployment_id}` to see its model files"
+            self.hint = f"run `{_command('deploy', 'models', 'ls', deployment_id)}` to see its model files"
             message = f"deployment {deployment_id} has no added model file named {name}"
         super().__init__(message)
 
@@ -283,7 +293,7 @@ def add_cmd(
             else:
                 renderer.success(
                     f"Sent {where} to deployment {deployment_id}; it reads {model.get('status')}. "
-                    f"`comfy deploy models ls {deployment_id}` shows when it is ready."
+                    f"`{_command('deploy', 'models', 'ls', deployment_id)}` shows when it is ready."
                 )
         renderer.emit(result, command="deploy models add", changed=True)
 
