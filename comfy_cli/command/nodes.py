@@ -28,7 +28,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import knowledge, tracking
-from comfy_cli.cql.engine import Graph, LoadError
+from comfy_cli.cql.engine import Graph, LoadError, load_error_envelope_fields
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
 
@@ -142,11 +142,12 @@ def _get_graph(
         return graph
     except LoadError as e:
         renderer = get_renderer()
+        hint, details = load_error_envelope_fields(e, "pass --input <path>, or start the server with `comfy launch`")
         renderer.error(
             code="cql_no_graph",
             message=str(e),
-            hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
-            details=e.details,
+            hint=hint,
+            details=details,
         )
         raise typer.Exit(code=1) from e
 
