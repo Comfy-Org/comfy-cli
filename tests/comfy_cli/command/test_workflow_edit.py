@@ -1603,6 +1603,22 @@ class TestApplyBatch:
         assert env["error"]["code"] == "workflow_edit_invalid"
         assert path.read_text() == before, "failed batch must not write a partial graph"
 
+    def test_deferred_op_batch_is_not_persisted_locally(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        before = path.read_text()
+        ops_path = tmp_path / "ops.json"
+        ops_path.write_text(
+            json.dumps(
+                [{"op": "define_subgraph", "subgraph_definition": {"id": "12345678-1234-4123-8123-123456789abc"}}]
+            )
+        )
+
+        env = _run(["apply", str(path), "--ops", str(ops_path)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert path.read_text() == before
+
     def test_typed_batch_failure_keeps_summary_receipt(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _base_workflow())
         before = path.read_text()
@@ -1875,6 +1891,81 @@ class TestForeach:
         env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
         assert env["ok"] is False
         assert "positive" in env["error"]["message"]
+
+    def test_foreach_rejects_deferred_ops_before_writing(self, patched_graph, tmp_path, capsys):
+        rp = tmp_path / "deferred.json"
+        rp.write_text(
+            json.dumps(
+                {
+                    "ops": [
+                        {"op": "define_subgraph", "subgraph_definition": {"id": "12345678-1234-4123-8123-123456789abc"}}
+                    ]
+                }
+            )
+        )
+        params = tmp_path / "sets.json"
+        params.write_text("[{}]")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert not list(out.glob("*.json"))
+
+    def test_foreach_gives_insert_workflow_its_registered_not_batchable_code(self, patched_graph, tmp_path, capsys):
+        """`insert_workflow` is deferred AND standalone-only. The deferred guard
+        must not swallow it into the generic `workflow_edit_invalid`: §1.7 of
+        `docs/op-vocabulary-v1.md` promises the registered
+        `workflow_insert_workflow_not_batchable` code and a hint naming the
+        standalone command, which is what `apply` already returns."""
+        rp = tmp_path / "insert.json"
+        rp.write_text(
+            json.dumps({"ops": [{"op": "insert_workflow", "template": str(tmp_path / "t.json")}]}),
+            encoding="utf-8",
+        )
+        params = tmp_path / "sets.json"
+        params.write_text("[{}]", encoding="utf-8")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert "comfy workflow insert-workflow" in env["error"]["hint"]
+        assert "deferred operation" not in env["error"]["message"]
+        assert not list(out.glob("*.json"))
+
+    def test_foreach_rejects_deferred_op_kind_that_only_appears_after_substitution(
+        self, patched_graph, tmp_path, capsys
+    ):
+        """The op kind itself may be a `${param}`. The up-front deferred check sees
+        only the template, so a param-set that resolves the kind to a deferred op
+        must still be refused as a deferred operation (not fall through to the
+        generic `unknown op` failure), and the earlier, valid set stays reported."""
+        rp = tmp_path / "kind.json"
+        rp.write_text(
+            json.dumps(
+                {
+                    "params": {"kind": {"type": "string"}},
+                    "ops": [
+                        {"op": "${kind}", "class_type": "KSampler", "as": "ks"},
+                    ],
+                }
+            )
+        )
+        params = tmp_path / "sets.jsonl"
+        params.write_text('{"kind":"add_node"}\n{"kind":"define_subgraph"}\n', encoding="utf-8")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert "define_subgraph" in env["error"]["message"]
+        assert "unknown op" not in env["error"]["message"]
+        written = env["error"]["details"]["written"]
+        assert len(written) == 1 and written[0].endswith("_000.json")
 
     def test_foreach_surfaces_partial_writes_on_mid_batch_failure(self, patched_graph, tmp_path, capsys):
         """foreach writes per param-set; a mid-batch failure leaves earlier files
