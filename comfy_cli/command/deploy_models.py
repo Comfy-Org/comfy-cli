@@ -320,30 +320,31 @@ def _withdraw(
         return
     listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
     rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(entry_id, "<id>"))
+    stays = (
+        f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no longer "
+        "lists it, then add it again"
+    )
     if maybe_stored:
         hint = (
             f"{name} stays on the deployment, as the builder may have stored it: if `{listing}` shows it failed, "
             f"or still adding after {int(MODEL_WAIT_SECONDS // 60)} minutes, remove it with `{rm}`, wait until "
             f"`{listing}` no longer lists it, then add it again"
         )
+    elif not isinstance(error, Exception):
+        hint = stays
     else:
-        hint = _removed_hint(client, deployment_id, entry_id, name, listing, rm)
-    if isinstance(error, KeyboardInterrupt):
+        try:
+            client.remove_deployment_model(deployment_id, entry_id)
+        except Exception:
+            hint = stays
+        else:
+            hint = (
+                f"{name} was taken off the deployment again: wait until `{listing}` no longer lists it, then add it "
+                "again"
+            )
+    if not isinstance(error, Exception):
         renderer.warn(hint)
     error.after_send = hint  # type: ignore[attr-defined]
-
-
-def _removed_hint(
-    client: DeploymentModelsClient, deployment_id: str, entry_id: str, name: str, listing: str, rm: str
-) -> str:
-    try:
-        client.remove_deployment_model(deployment_id, entry_id)
-    except Exception:
-        return (
-            f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no "
-            "longer lists it, then add it again"
-        )
-    return f"{name} was taken off the deployment again: wait until `{listing}` no longer lists it, then add it again"
 
 
 def _after_send(error: BaseException, hint: str | None) -> str | None:

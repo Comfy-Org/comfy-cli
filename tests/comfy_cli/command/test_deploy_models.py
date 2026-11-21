@@ -935,20 +935,47 @@ def test_a_join_the_builder_refuses_takes_the_entry_off_the_deployment_again(tmp
     assert "lora.safetensors was taken off the deployment again" in error["hint"]
 
 
-def test_a_send_interrupted_by_ctrl_c_takes_the_entry_off_or_says_how(tmp_path, monkeypatch) -> None:
+def _removal_forbidden(monkeypatch, control: Control) -> None:
+    def forbidding(url, target, *, method="GET", body=None, **kwargs):
+        if method == "DELETE":
+            pytest.fail(f"Ctrl-C sent a removal that can wait on the sign-in lock: DELETE {urlsplit(url).path}")
+        return control(url, target, method=method, body=body, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", forbidding)
+
+
+def test_ctrl_c_during_the_pieces_sends_no_removal_and_names_the_rm_by_id(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control = Control(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
     monkeypatch.setattr(sys, "platform", "linux")
     _dropped_piece(monkeypatch, KeyboardInterrupt())
-    _refused_removal(monkeypatch, control)
+    _removal_forbidden(monkeypatch, control)
 
     result = _invoke("add", "dep-1", str(model), "--type", "loras", pretty=True)
 
     assert result.exit_code == 130, result.output
-    assert f"deploy DELETE {_MODELS}/model-1 500" in log
-    assert "remove it with `comfy deploy models rm dep-1 model-1`" in result.output
+    assert not any(" DELETE " in line for line in log)
+    assert (
+        "lora.safetensors stays on the deployment reading adding: remove it with "
+        "`comfy deploy models rm dep-1 model-1`" in " ".join(result.output.split())
+    )
     assert "builder POST /v1/blobs/blob-1/complete" not in log
+
+
+def test_ctrl_c_during_the_join_sends_no_removal_and_says_the_builder_may_have_stored_it(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _join_raises(monkeypatch, builder, KeyboardInterrupt())
+    _removal_forbidden(monkeypatch, control)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras", pretty=True)
+
+    assert result.exit_code == 130, result.output
+    assert not any(" DELETE " in line for line in log)
+    assert _MAY_BE_STORED in " ".join(result.output.split())
 
 
 def test_a_send_that_fails_before_any_entry_exists_removes_nothing(tmp_path, monkeypatch) -> None:
