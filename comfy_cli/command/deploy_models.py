@@ -253,7 +253,7 @@ def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, 
             if upload.upload_url is not None:
                 blobs.upload_blob(upload.upload_url, file, progress=progress)
             else:
-                blobs.upload_blob_parts(upload.blob_id, upload.parts, file, progress)
+                blobs.send_blob_parts(upload.blob_id, upload.parts, file, progress)
         except BlobFileError as error:
             raise ModelFileError(file, error.error) from error
         except (FileNotFoundError, PermissionError, IsADirectoryError) as error:
@@ -302,28 +302,48 @@ def _wait_ready(
         entry = listed[0]
 
 
+def _refused(error: BaseException) -> bool:
+    return isinstance(error, urllib.error.HTTPError) and 400 <= error.code < 500
+
+
 def _withdraw(
-    client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, error: BaseException, renderer: Renderer
+    client: DeploymentModelsClient,
+    deployment_id: str,
+    entry: JsonObject,
+    error: BaseException,
+    renderer: Renderer,
+    *,
+    maybe_stored: bool = False,
 ) -> None:
     entry_id, name = entry.get("id"), entry.get("filename")
     if not isinstance(entry_id, str) or not isinstance(name, str):
         return
     listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
-    try:
-        client.remove_deployment_model(deployment_id, entry_id)
-    except Exception:
-        rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(entry_id, "<id>"))
+    rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(entry_id, "<id>"))
+    if maybe_stored:
         hint = (
-            f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no "
-            "longer lists it, then add it again"
+            f"{name} stays on the deployment, as the builder may have stored it: if `{listing}` shows it failed, "
+            f"or still adding after {int(MODEL_WAIT_SECONDS // 60)} minutes, remove it with `{rm}`, wait until "
+            f"`{listing}` no longer lists it, then add it again"
         )
     else:
-        hint = (
-            f"{name} was taken off the deployment again: wait until `{listing}` no longer lists it, then add it again"
-        )
+        hint = _removed_hint(client, deployment_id, entry_id, name, listing, rm)
     if isinstance(error, KeyboardInterrupt):
         renderer.warn(hint)
     error.after_send = hint  # type: ignore[attr-defined]
+
+
+def _removed_hint(
+    client: DeploymentModelsClient, deployment_id: str, entry_id: str, name: str, listing: str, rm: str
+) -> str:
+    try:
+        client.remove_deployment_model(deployment_id, entry_id)
+    except Exception:
+        return (
+            f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no "
+            "longer lists it, then add it again"
+        )
+    return f"{name} was taken off the deployment again: wait until `{listing}` no longer lists it, then add it again"
 
 
 def _after_send(error: BaseException, hint: str | None) -> str | None:
@@ -354,6 +374,12 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
         except BaseException as error:
             _withdraw(client, deployment_id, entry, error, renderer)
             raise
+        if not upload.deduplicated:
+            try:
+                blobs.complete_blob(upload.blob_id)
+            except BaseException as error:
+                _withdraw(client, deployment_id, entry, error, renderer, maybe_stored=not _refused(error))
+                raise
     else:
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)

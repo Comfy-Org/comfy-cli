@@ -862,6 +862,79 @@ def test_a_failed_send_whose_removal_fails_names_the_rm_command(tmp_path, monkey
     )
 
 
+def _join_raises(monkeypatch, builder: Builder | None, raised: BaseException) -> None:
+    assert builder is not None
+
+    def joining(url, target, **kwargs):
+        if urlsplit(url).path == "/v1/blobs/blob-1/complete":
+            builder.log.append("builder POST /v1/blobs/blob-1/complete")
+            raise raised
+        return builder(url, target, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", joining)
+
+
+_MAY_BE_STORED = (
+    "lora.safetensors stays on the deployment, as the builder may have stored it: if "
+    "`comfy deploy models ls dep-1` shows it failed, or still adding after 30 minutes, remove it with "
+    "`comfy deploy models rm dep-1 model-1`, wait until `comfy deploy models ls dep-1` no longer lists it, then add "
+    "it again"
+)
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        TimeoutError("timed out"),
+        ConnectionResetError("connection reset"),
+        urllib.error.HTTPError(
+            "https://builder.test/v1/blobs/blob-1/complete", 503, "Unavailable", Message(), io.BytesIO(b"")
+        ),
+    ],
+    ids=["timeout", "reset", "503"],
+)
+def test_a_join_whose_outcome_is_unknown_keeps_the_entry_and_says_how_to_check_it(
+    tmp_path, monkeypatch, raised
+) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _join_raises(monkeypatch, builder, raised)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    assert "builder POST /v1/blobs/blob-1/complete" in log
+    assert control.count("DELETE", f"{_MODELS}/model-1") == 0
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["hint"] == _MAY_BE_STORED
+
+
+def test_a_join_the_builder_refuses_takes_the_entry_off_the_deployment_again(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
+    refusal = json.dumps({"code": "PART_MISSING", "message": "piece 2 of 3 of upload blob-1 is not uploaded"})
+    _join_raises(
+        monkeypatch,
+        builder,
+        urllib.error.HTTPError(
+            "https://builder.test/v1/blobs/blob-1/complete", 409, "Conflict", Message(), io.BytesIO(refusal.encode())
+        ),
+    )
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    assert control.count("DELETE", f"{_MODELS}/model-1") == 1
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert "lora.safetensors was taken off the deployment again" in error["hint"]
+
+
 def test_a_send_interrupted_by_ctrl_c_takes_the_entry_off_or_says_how(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control = Control(log)

@@ -27,7 +27,12 @@ history.
   and a file whose removal starts while it is being added exits 1 with
   `deploy_model_removed` (add it again once `ls` no longer lists it); a send
   that fails or is interrupted after the file was added takes it off the
-  deployment again, or its hint names the `rm` to run where that fails;
+  deployment again only where the upload definitely failed (a piece not sent,
+  the builder refusing the join), or its hint names the `rm` to run where that
+  fails; where the builder's join went unanswered (a timeout, a dropped
+  connection, a 5xx) the builder may have stored the file, so the entry stays
+  and the hint says to remove it by id if `ls` shows it failed, or still
+  adding after 30 minutes;
   where adding models is not on it exits 1 with `deploy_models_unavailable`
   before sending the pieces. A builder that cannot take pieces gets one PUT,
   and the file is added once it ends, so there the whole file is sent before

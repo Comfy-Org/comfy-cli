@@ -412,6 +412,12 @@ class BuilderClient:
     def upload_blob_parts(
         self, blob_id: str, parts: tuple[BlobPart, ...], path: Path, progress: Callable[[int], None] | None = None
     ) -> None:
+        self.send_blob_parts(blob_id, parts, path, progress)
+        self.complete_blob(blob_id)
+
+    def send_blob_parts(
+        self, blob_id: str, parts: tuple[BlobPart, ...], path: Path, progress: Callable[[int], None] | None = None
+    ) -> None:
         links = {part.number: part for part in parts}
         links_lock, progress_lock = threading.Lock(), threading.Lock()
 
@@ -508,7 +514,6 @@ class BuilderClient:
         if failures:
             settle()
             raise failures[0]
-        self.complete_blob(blob_id)
 
     def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:
         """Create a build from a definition. Returns the created build, carrying

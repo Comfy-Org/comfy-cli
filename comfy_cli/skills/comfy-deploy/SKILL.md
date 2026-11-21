@@ -344,9 +344,15 @@ comfy deploy models rm <deployment> <name> [--yes]
   adding, `ls` shows when it is ready), and a file whose removal
   starts while it is being added ends it with `deploy_model_removed` (once
   `ls` no longer lists it, add it again). A send that fails or is
-  interrupted after the file was added takes it off the deployment again;
-  the hint says to wait until `ls` no longer lists it, or, if that removal
-  failed, names the `comfy deploy models rm` to run first.
+  interrupted after the file was added takes it off the deployment again
+  only where the upload definitely failed (a piece not sent, the builder
+  refusing the join); the hint says to wait until `ls` no longer lists it,
+  or, if that removal failed, names the `comfy deploy models rm` to run
+  first. Where the builder's join went unanswered (a timeout, a dropped
+  connection, a 5xx) the builder may have stored the file, so the entry
+  stays: the hint names the `comfy deploy models rm <deployment> <id>` to run
+  if `ls` shows it failed, or still adding after 30 minutes. Do not remove it
+  sooner: another add of the same file may share that entry.
 - **Not on for every workspace yet:** where it is off, `add` exits 1 with
   `deploy_models_unavailable` before sending the pieces (a builder that
   answers one upload link instead sends the whole file before the refusal);
