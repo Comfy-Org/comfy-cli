@@ -343,7 +343,10 @@ comfy deploy models rm <deployment> <name> [--yes]
   not answer, with `deploy_model_wait_timeout` (exit 75; the file may still be
   adding, `ls` shows when it is ready), and a file whose removal
   starts while it is being added ends it with `deploy_model_removed` (once
-  `ls` no longer lists it, add it again).
+  `ls` no longer lists it, add it again). A send that fails or is
+  interrupted after the file was added takes it off the deployment again;
+  the hint says to wait until `ls` no longer lists it, or, if that removal
+  failed, names the `comfy deploy models rm` to run first.
 - **Not on for every workspace yet:** where it is off, `add` exits 1 with
   `deploy_models_unavailable` before sending the pieces (a builder that
   answers one upload link instead sends the whole file before the refusal);

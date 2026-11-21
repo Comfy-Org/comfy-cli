@@ -25,7 +25,9 @@ history.
   for up to 30 minutes: past that, or after a minute of reads the deploy API
   does not answer, it exits 75 with `deploy_model_wait_timeout`,
   and a file whose removal starts while it is being added exits 1 with
-  `deploy_model_removed` (add it again once `ls` no longer lists it);
+  `deploy_model_removed` (add it again once `ls` no longer lists it); a send
+  that fails or is interrupted after the file was added takes it off the
+  deployment again, or its hint names the `rm` to run where that fails;
   where adding models is not on it exits 1 with `deploy_models_unavailable`
   before sending the pieces. A builder that cannot take pieces gets one PUT,
   and the file is added once it ends, so there the whole file is sent before

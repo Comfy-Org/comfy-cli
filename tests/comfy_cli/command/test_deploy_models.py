@@ -715,6 +715,109 @@ def test_a_connection_reset_quoting_a_signed_link_is_a_server_error_without_the_
     assert "sig=" not in result.output
 
 
+def _refused_removal(monkeypatch, control: Control) -> None:
+    def refusing(url, target, *, method="GET", body=None, **kwargs):
+        if method == "DELETE":
+            control.log.append(f"deploy DELETE {urlsplit(url).path} 500")
+            raise urllib.error.HTTPError(url, 500, "Internal Server Error", Message(), io.BytesIO(b"{}"))
+        return control(url, target, method=method, body=body, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", refusing)
+
+
+def _dropped_piece(monkeypatch, raised: BaseException) -> None:
+    def put(url, **_kwargs):
+        raise raised
+
+    monkeypatch.setattr("requests.put", put)
+
+
+def test_a_send_that_fails_takes_the_entry_off_the_deployment_again(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
+    monkeypatch.setattr(sys, "platform", "linux")
+    _dropped_piece(monkeypatch, ConnectionResetError("connection reset"))
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert control.count("DELETE", f"{_MODELS}/model-1") == 1
+    assert error["hint"] == (
+        "lora.safetensors was taken off the deployment again: wait until `comfy deploy models ls dep-1` no longer "
+        "lists it, then add it again"
+    )
+
+
+def test_a_file_error_after_the_add_takes_the_entry_off_and_says_so_instead_of_add_it_again(
+    tmp_path, monkeypatch
+) -> None:
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
+    monkeypatch.setattr(sys, "platform", "linux")
+    _dropped_piece(monkeypatch, builder_api.BlobFileError(model, FileNotFoundError(2, "No such file")))
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_asset_upload_failed"
+    assert control.count("DELETE", f"{_MODELS}/model-1") == 1
+    assert error["hint"].startswith("lora.safetensors was taken off the deployment again: wait until")
+
+
+def test_a_failed_send_whose_removal_fails_names_the_rm_command(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
+    monkeypatch.setattr(sys, "platform", "linux")
+    _dropped_piece(monkeypatch, builder_api.BlobFileError(model, FileNotFoundError(2, "No such file")))
+    _refused_removal(monkeypatch, control)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    assert f"deploy DELETE {_MODELS}/model-1 500" in log
+    assert _envelope(result)["error"]["hint"] == (
+        "lora.safetensors stays on the deployment reading adding: remove it with "
+        "`comfy deploy models rm dep-1 lora.safetensors`, wait until `comfy deploy models ls dep-1` no longer lists "
+        "it, then add it again"
+    )
+
+
+def test_a_send_interrupted_by_ctrl_c_takes_the_entry_off_or_says_how(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
+    monkeypatch.setattr(sys, "platform", "linux")
+    _dropped_piece(monkeypatch, KeyboardInterrupt())
+    _refused_removal(monkeypatch, control)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras", pretty=True)
+
+    assert result.exit_code == 130, result.output
+    assert f"deploy DELETE {_MODELS}/model-1 500" in log
+    assert "remove it with `comfy deploy models rm dep-1 lora.safetensors`" in result.output
+    assert "builder POST /v1/blobs/blob-1/complete" not in log
+
+
+def test_a_send_that_fails_before_any_entry_exists_removes_nothing(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control = Control(log)
+    answer = {"blobId": "blob-1", "deduplicated": False, "uploadUrl": "https://storage.test/whole?sig=a"}
+    model, _ = _install(monkeypatch, tmp_path, control, answer)
+    _dropped_piece(monkeypatch, ConnectionResetError("connection reset"))
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    assert control.count("POST", _MODELS) == 0
+    assert not any(" DELETE " in line for line in log)
+
+
 def test_a_file_that_fails_while_waited_on_exits_without_its_failure_text(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control, storage = Control(log, statuses=("failed",)), Storage(log)

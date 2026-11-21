@@ -302,6 +302,37 @@ def _wait_ready(
         entry = listed[0]
 
 
+def _withdraw(
+    client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, error: BaseException, renderer: Renderer
+) -> None:
+    entry_id, name = entry.get("id"), entry.get("filename")
+    if not isinstance(entry_id, str) or not isinstance(name, str):
+        return
+    listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
+    try:
+        client.remove_deployment_model(deployment_id, entry_id)
+    except Exception:
+        rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(name, "<file>"))
+        hint = (
+            f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no "
+            "longer lists it, then add it again"
+        )
+    else:
+        hint = (
+            f"{name} was taken off the deployment again: wait until `{listing}` no longer lists it, then add it again"
+        )
+    if isinstance(error, KeyboardInterrupt):
+        renderer.warn(hint)
+    error.after_send = hint  # type: ignore[attr-defined]
+
+
+def _after_send(error: BaseException, hint: str | None) -> str | None:
+    after = getattr(error, "after_send", None)
+    if after is None:
+        return hint
+    return after if hint is None else f"{hint}; {after}"
+
+
 def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
     renderer = get_renderer()
     builder, client = _clients()
@@ -318,7 +349,11 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
     item = _Upload("model", file.name, digests.size)
     if upload.upload_url is None:
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
-        _send(blobs, upload, file, item, renderer)
+        try:
+            _send(blobs, upload, file, item, renderer)
+        except BaseException as error:
+            _withdraw(client, deployment_id, entry, error, renderer)
+            raise
     else:
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
@@ -338,13 +373,15 @@ def _reported(renderer: Renderer) -> Iterator[None]:
         raise typer.Exit(code=1) from error
     except (DeployResolveError, DeployAPIError) as error:
         exit_code = getattr(error, "exit_code", 1)
-        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details, exit_code=exit_code)
+        hint = getattr(error, "after_send", None) or error.hint
+        renderer.error(code=error.code, message=str(error), hint=hint, details=error.details, exit_code=exit_code)
         raise typer.Exit(code=exit_code) from error
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))
         raise typer.Exit(code=1) from error
     except BuilderCredentialRefused as error:
-        renderer.error(code="deploy_not_signed_in", message="the builder refused the credential (401)", hint=error.hint)
+        hint = _after_send(error, error.hint)
+        renderer.error(code="deploy_not_signed_in", message="the builder refused the credential (401)", hint=hint)
         raise typer.Exit(code=1) from error
     except (
         BlobPlanError,
@@ -357,9 +394,10 @@ def _reported(renderer: Renderer) -> Iterator[None]:
         KeyError,
     ) as error:
         if isinstance(error, urllib.error.HTTPError) and 400 <= error.code < 500:
-            report_builder_error(renderer, error, hint=_BUILDER_REFUSED)
+            report_builder_error(renderer, error, hint=_after_send(error, _BUILDER_REFUSED))
         else:
-            renderer.error(code="deploy_server_error", message=without_signed_query(error) or type(error).__name__)
+            message = without_signed_query(error) or type(error).__name__
+            renderer.error(code="deploy_server_error", message=message, hint=_after_send(error, None))
         raise typer.Exit(code=1) from error
 
 
