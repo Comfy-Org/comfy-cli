@@ -2100,8 +2100,8 @@ def _schema_widget_pairs(
                     # schema (model renamed/removed server-side, or object_info /
                     # workflow version skew). Its sub-input value slots go
                     # unconsumed, so every following widget reads a shifted slot.
-                    # We can't recover the alignment, but warn so the corruption
-                    # isn't silent.
+                    # We can't recover the alignment, so this is reported so the
+                    # corruption isn't silent.
                     warnings.append(
                         (
                             "Dynamic-combo input %r selector %r matched no option in the current "
@@ -2168,7 +2168,15 @@ def _schema_widget_pairs(
                 pairs, warnings = catalog_pairs, catalog_warnings
                 break
     for warning in warnings:
-        logger.warning(*warning)
+        # ERROR, not WARNING, for the same reason `tracking.py` gives for its
+        # own: the CLI's default LOG_LEVEL is ERROR (see
+        # `comfy_cli.logging.setup_logging`, which `cmdline` runs at import), so
+        # a WARNING here is dropped before it reaches a handler and the caller
+        # never learns the graph it just converted is misaligned. Both of these
+        # mean "the emitted API graph does not match the saved one", which is a
+        # wrong-output condition rather than advice. The envelope has no
+        # warnings field, so stderr is the only channel there is.
+        logger.error(*warning)
     return pairs
 
 
