@@ -2023,6 +2023,39 @@ class TestCaptureUiOnlyNodes:
         assert sorted(n["type"] for n in rebuilt["nodes"]) == ["EmptyLatentImage", "KSampler"]
         assert len(rebuilt["links"]) == 1
 
+    def test_capture_reports_dropped_canvas_groups(self, patched_graph, tmp_path, capsys):
+        """A captured branch that was framed comes back unframed, and says so.
+
+        No frozen op kind creates a canvas group, so the recipe cannot rebuild
+        one — which is exactly the "build one branch, capture it, re-apply per
+        copy" path. The loss used to be silent.
+        """
+        wf = _base_workflow()
+        wf["groups"] = [
+            {"title": "Sampling", "bounding": [0, 0, 400, 300]},
+            {"title": "Latent", "bounding": [0, 320, 400, 200]},
+        ]
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        warns = cap["data"]["warnings"]
+        dropped = [w for w in warns if w["code"] == "group_dropped"]
+        assert len(dropped) == 1, warns
+        assert dropped[0]["count"] == 2
+        assert dropped[0]["titles"] == ["Sampling", "Latent"]
+        # The recipe itself carries no group, and still round-trips.
+        recipe = cap["data"]["recipe_doc"]
+        assert "groups" not in recipe
+        assert not any("group" in str(o.get("op", "")) for o in recipe["ops"])
+        rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
+        assert sorted(n["type"] for n in rebuilt["nodes"]) == ["EmptyLatentImage", "KSampler"]
+        assert not rebuilt.get("groups")
+
+    def test_capture_without_groups_warns_nothing(self, patched_graph, tmp_path, capsys):
+        cap = _run(["capture", str(_write(tmp_path, _base_workflow()))], capsys)
+        assert cap["ok"] is True, cap
+        assert not [w for w in cap["data"].get("warnings", []) if w["code"] == "group_dropped"]
+
     def test_capture_splices_links_through_reroute(self, patched_graph, tmp_path, capsys):
         """EmptyLatentImage → Reroute → KSampler must capture as a direct
         connect — skipping the Reroute must not lose the wire."""

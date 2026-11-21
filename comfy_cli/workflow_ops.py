@@ -3258,7 +3258,9 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
     Each skipped node (and any link that could not be spliced) is reported in
     ``warnings`` — the recipe rebuilds the executable graph, not the canvas
-    decoration.
+    decoration. Canvas groups are dropped for the same reason and reported as
+    ``group_dropped``: no frozen op kind creates a group, so the copies a recipe
+    lays down are unframed.
 
     `lift` maps `(node_id, widget_name) -> param_name`: those widgets become
     `${param_name}` holes (with a `params` header entry defaulting to the current
@@ -3319,6 +3321,31 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
                 raise RecipeError(f"--param target {node_id}.{widget!r}: no saved DynamicGroup value to lift")
 
     warnings: list[dict] = []
+    # Canvas groups are not nodes and no frozen op kind creates one (§1), so a
+    # recipe cannot carry them: every copy `apply_recipe` lays down is unframed.
+    # Unlike a UI-only node (reported above) or a subgraph (RecipeError), that
+    # loss used to be silent — the caller got a clean recipe and found out by
+    # looking at the canvas. Report it so a consumer rebuilding a framed branch
+    # can say the frames will not come with it, or reach for insert_workflow,
+    # which is the only path that authors a group.
+    captured_groups = [g for g in (workflow.get("groups") or []) if isinstance(g, dict)]
+    if captured_groups:
+        titles = [g.get("title") for g in captured_groups if isinstance(g.get("title"), str)]
+        named = ", ".join(repr(t) for t in titles[:3]) if titles else ""
+        warnings.append(
+            {
+                "code": "group_dropped",
+                "count": len(captured_groups),
+                "titles": titles,
+                "message": (
+                    f"capture dropped {len(captured_groups)} canvas group(s)"
+                    + (f" ({named}{', …' if len(titles) > 3 else ''})" if named else "")
+                    + " — no op kind creates a group, so a recipe cannot rebuild one and every copy "
+                    "`apply` lays down will be unframed; insert a whole workflow carrying `groups` "
+                    "instead if the frames matter"
+                ),
+            }
+        )
     for n in ui_nodes:
         warnings.append(
             {
