@@ -304,3 +304,66 @@ def test_a_no_loras_yet_save_does_not_land_on_real_sockets():
     assert "model" not in inputs
     assert "clip" not in inputs
     assert inputs == {"➕ Add Lora": ""}
+
+
+def test_a_mixed_list_with_an_unhashable_type_keeps_the_valid_lora_row():
+    """``_is_absorbable_dict`` admits a list when ANY entry qualifies.
+
+    So ``[{"lora": ...}, {"type": ["bad"], "value": 1}]`` reaches the absorber on
+    the strength of its lora entry, and the list-valued ``type`` then went into a
+    ``name not in link_inputs`` membership test. That raises ``TypeError``, which
+    escapes ``_collect_widget_inputs`` and drops the ENTIRE node -- the valid lora
+    row with it. A malformed name belongs in the warning branch instead.
+    """
+    object_info = dict(_OBJECT_INFO)
+    object_info["Power Lora Loader"] = {
+        "input": {"required": {"model": ["MODEL", {}], "clip": ["CLIP", {}]}},
+        "input_order": {"required": ["model", "clip"]},
+        "output": ["MODEL", "CLIP"],
+        "output_name": ["MODEL", "CLIP"],
+    }
+    wf = {
+        "nodes": [
+            {
+                "id": 9,
+                "type": "Power Lora Loader",
+                "widgets_values": [{"lora": "a.safetensors"}, {"type": ["bad"], "value": 1}],
+                "inputs": [
+                    {"name": "model", "type": "MODEL", "link": None},
+                    {"name": "clip", "type": "CLIP", "link": None},
+                ],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, object_info)
+    # The node survives at all, which is the point.
+    assert "9" in api
+    assert api["9"]["inputs"]["lora_1"] == {"lora": "a.safetensors"}
+
+
+def test_a_schema_less_scalar_only_list_keeps_its_value_positionally():
+    """A bare-scalar list is not a "no rows yet" lora save and must not be absorbed.
+
+    Routing ``[""]`` through the absorber emits ``{"➕ Add Lora": ""}`` and drops
+    the marked widget's value; the positional fallback keeps it under its own
+    widget name. The all-empty-markers route therefore requires at least one
+    empty DICT, not merely the absence of anything else.
+    """
+    wf = {
+        "nodes": [
+            {
+                "id": 11,
+                "type": "UnknownToTheCatalog",
+                "widgets_values": [""],
+                "inputs": [{"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": None}],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, {})
+    assert "11" in api
+    # Kept under its own widget name, not under the absorber's "➕ Add Lora".
+    assert api["11"]["inputs"] == {"text": ""}

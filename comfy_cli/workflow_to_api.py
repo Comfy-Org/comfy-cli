@@ -2526,7 +2526,17 @@ def _collect_widget_inputs(
     # Falling through from there sent ``{}``/``""`` down the positional walk,
     # landing them on real sockets like ``model``/``clip`` instead of being
     # skipped the same way a non-empty absorbable list skips them.
-    only_empty_markers = widget_values and all((isinstance(v, dict) and not v) or v == "" for v in widget_values)
+    # An all-empty-markers save needs at least one empty DICT to be a "no rows
+    # yet" lora save. A list of bare scalars -- e.g. ``[""]`` with no schema --
+    # is not one: routing it to the absorber emits ``{"➕ Add Lora": ""}`` and
+    # drops the marked widget's value, where the positional fallback keeps it
+    # under its own widget name. So require a dict marker, not merely the
+    # absence of anything else.
+    only_empty_markers = (
+        widget_values
+        and any(isinstance(v, dict) and not v for v in widget_values)
+        and all((isinstance(v, dict) and not v) or v == "" for v in widget_values)
+    )
     if not pre_absorb_schema_widgets and (any(_is_absorbable_dict(v) for v in widget_values) or only_empty_markers):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
@@ -2598,7 +2608,15 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                 continue
             if "type" in value:
                 name = value.get("type")
-                if name and name not in link_inputs:
+                # The name must be a STRING before it reaches the membership test
+                # below. ``_is_absorbable_dict`` admits the whole list when ANY
+                # entry qualifies, so a list like
+                # ``[{"lora": "a.safetensors"}, {"type": ["bad"], "value": 1}]``
+                # arrives here on the strength of its lora entry and then hands an
+                # unhashable list to ``in link_inputs`` -- a TypeError that escapes
+                # ``_collect_widget_inputs`` and drops the ENTIRE node, valid lora
+                # row included. A malformed name belongs in the warning branch.
+                if isinstance(name, str) and name and name not in link_inputs:
                     out[name] = value
                 else:
                     logger.warning("Dict-absorb dropped a type-keyed widget value with no usable name: %r", value)
