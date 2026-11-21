@@ -349,7 +349,9 @@ comfy deploy models rm <deployment> <name> [--yes]
   `comfy assets library upload <file> --type <folder>` puts the file in the
   workspace library instead. A 409 (the
   release's model policy, the name taken, the deployment busy, too little
-  storage) is `deploy_conflict` with comfy-deploy's own sentence.
+  storage) is `deploy_conflict` with comfy-deploy's own sentence. The builder
+  refusing the upload itself (an empty file, a size over the limit, a failed
+  join) is `build_builder_error` with the builder's own sentence.
 - **`ls` lists folder, name, size and status** (`adding`, `ready`, `failed`,
   `removing`). A failed file was not added: remove it, wait until `ls` no
   longer lists it, then add it again. Why it failed is in comfy-deploy's log,

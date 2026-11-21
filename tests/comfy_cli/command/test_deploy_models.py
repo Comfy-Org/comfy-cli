@@ -374,6 +374,39 @@ def test_a_builder_refusing_the_credential_says_to_sign_in_again(tmp_path, monke
     assert error["hint"] == "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
 
 
+@pytest.mark.parametrize(
+    ("refused_path", "status", "answer"),
+    [
+        ("/v1/blobs", 400, {"error": "INVALID_REQUEST", "message": "sizeBytes must be at least 1"}),
+        ("/v1/blobs", 413, {"error": "TOO_LARGE", "message": "a model upload is at most 200 GiB"}),
+        ("/v1/blobs/blob-1/complete", 409, {"error": "PARTS_MISSING", "message": "piece 3 has not landed"}),
+    ],
+)
+def test_a_builder_refusal_prints_the_builders_sentence_not_a_network_fault(
+    tmp_path, monkeypatch, refused_path: str, status: int, answer: JsonObject
+) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    def refusing(url, target, *, method="GET", body=None, **kwargs):
+        if (method, urlsplit(url).path) == ("POST", refused_path):
+            raise urllib.error.HTTPError(url, status, "refused", Message(), io.BytesIO(json.dumps(answer).encode()))
+        return builder(url, target, method=method, body=body, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", refusing)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert error["message"] == f"builder call failed ({status}): {answer['error']}: {answer['message']}"
+    assert error["details"]["status"] == status
+    assert "network" not in error["hint"]
+    assert "HTTP Error" not in result.output
+
+
 def test_a_builder_without_pieces_gets_one_put_and_the_add_once_it_ends(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control, storage = Control(log), Storage(log)

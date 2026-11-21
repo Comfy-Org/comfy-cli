@@ -25,6 +25,7 @@ from comfy_cli.builder_api import (
     PartsUpload,
 )
 from comfy_cli.command.build import DEFAULT_BUILDER_URL
+from comfy_cli.command.build import _report_builder_error as report_builder_error
 from comfy_cli.command.build import _without_signed_query as without_signed_query
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue
@@ -57,6 +58,7 @@ _REMOVE_QUESTION: Final = (
     "Remove {file}? It is deleted from this deployment's disk, and jobs that name it will fail. A job already "
     "running may still finish, and a worker that already loaded it may keep using it for a few minutes."
 )
+_BUILDER_REFUSED: Final = "the builder answered and refused it; change what its message names, then run it again"
 _KNOWN_NOT_FOUND: Final = frozenset({"NOT_FOUND", "UPLOAD_NOT_FOUND"})
 MODEL_WAIT_SECONDS: Final = 1800.0
 _clock = time.monotonic
@@ -324,7 +326,10 @@ def _reported(renderer: Renderer) -> Iterator[None]:
         OSError,
         KeyError,
     ) as error:
-        renderer.error(code="deploy_server_error", message=without_signed_query(error) or type(error).__name__)
+        if isinstance(error, urllib.error.HTTPError) and 400 <= error.code < 500:
+            report_builder_error(renderer, error, hint=_BUILDER_REFUSED)
+        else:
+            renderer.error(code="deploy_server_error", message=without_signed_query(error) or type(error).__name__)
         raise typer.Exit(code=1) from error
 
 

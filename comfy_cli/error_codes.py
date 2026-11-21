@@ -1546,7 +1546,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_builder_error",
         "A `comfy build` builder call got an error from the builder API (HTTP error, network failure, or "
-        "an unexpected response shape). `details`/message carry the underlying error.",
+        "an unexpected response shape), or the builder refused the upload of `comfy deploy models add` with a 4xx "
+        "(an empty file, a size over the limit, a failed join). `details`/message carry the underlying error.",
         "check the builder URL and your access; retry, and inspect the message for the specific failure",
     ),
     ErrorCode(

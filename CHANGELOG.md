@@ -28,7 +28,8 @@ history.
   where adding models is not on it exits 1 with `deploy_models_unavailable`
   before sending the pieces. A builder that cannot take pieces gets one PUT,
   and the file is added once it ends, so there the whole file is sent before
-  that refusal. `comfy deploy run` reports a job naming a file still being
+  that refusal. The builder refusing the upload is `build_builder_error` with
+  its own sentence. `comfy deploy run` reports a job naming a file still being
   added as `deploy_model_not_ready` and one naming a failed file as
   `deploy_model_failed`, without retrying. `comfy assets library upload` and
   `comfy model upload` now say first how to add a model to a deployment
