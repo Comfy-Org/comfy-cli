@@ -935,6 +935,48 @@ def test_a_join_the_builder_refuses_takes_the_entry_off_the_deployment_again(tmp
     assert "lora.safetensors was taken off the deployment again" in error["hint"]
 
 
+def _refused_join(monkeypatch, builder: Builder | None) -> None:
+    refusal = json.dumps({"code": "PART_MISSING", "message": "piece 2 of 3 of upload blob-1 is not uploaded"})
+    _join_raises(
+        monkeypatch,
+        builder,
+        urllib.error.HTTPError(
+            "https://builder.test/v1/blobs/blob-1/complete", 409, "Conflict", Message(), io.BytesIO(refusal.encode())
+        ),
+    )
+
+
+def test_a_join_the_builder_refuses_reports_no_finished_upload_in_json(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    _refused_join(monkeypatch, builder)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    events = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+    types = [event["type"] for event in events if event.get("schema") == "event/1"]
+    assert "upload_progress" in types
+    assert "upload_complete" not in types
+    assert _envelope(result)["error"]["code"] == "build_builder_error"
+
+
+def test_a_join_the_builder_refuses_prints_no_uploaded_line(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    _refused_join(monkeypatch, builder)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras", pretty=True)
+
+    assert result.exit_code == 1, result.output
+    shown = " ".join((result.stdout + result.stderr).split())
+    assert "1/1 lora.safetensors" in shown
+    assert "lora.safetensors: uploaded" not in shown
+    assert "builder call failed (409): piece 2 of 3 of upload blob-1 is not uploaded" in shown
+
+
 def _removal_forbidden(monkeypatch, control: Control) -> None:
     def forbidding(url, target, *, method="GET", body=None, **kwargs):
         if method == "DELETE":

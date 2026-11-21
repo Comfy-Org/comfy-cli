@@ -6,7 +6,7 @@ import shlex
 import sys
 import time
 import urllib.error
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -242,7 +242,14 @@ def _added(client: DeploymentModelsClient, deployment_id: str, blob_id: str, fol
         raise
 
 
-def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, renderer: Renderer) -> None:
+def _send(
+    blobs: BuilderClient,
+    upload: PartsUpload,
+    file: Path,
+    item: _Upload,
+    renderer: Renderer,
+    join: Callable[[], None] | None = None,
+) -> None:
     reporter = UploadProgressReporter(renderer)
     reporter.plan([item], already_held=0)
     if upload.deduplicated:
@@ -258,6 +265,8 @@ def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, 
             raise ModelFileError(file, error.error) from error
         except (FileNotFoundError, PermissionError, IsADirectoryError) as error:
             raise ModelFileError(file, error) from error
+        if join is not None:
+            join()
 
 
 def _listing(client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, started: float) -> list[JsonObject]:
@@ -370,17 +379,18 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
     item = _Upload("model", file.name, digests.size)
     if upload.upload_url is None:
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
+        joining = False
+
+        def join() -> None:
+            nonlocal joining
+            joining = True
+            blobs.complete_blob(upload.blob_id)
+
         try:
-            _send(blobs, upload, file, item, renderer)
+            _send(blobs, upload, file, item, renderer, join)
         except BaseException as error:
-            _withdraw(client, deployment_id, entry, error, renderer)
+            _withdraw(client, deployment_id, entry, error, renderer, maybe_stored=joining and not _refused(error))
             raise
-        if not upload.deduplicated:
-            try:
-                blobs.complete_blob(upload.blob_id)
-            except BaseException as error:
-                _withdraw(client, deployment_id, entry, error, renderer, maybe_stored=not _refused(error))
-                raise
     else:
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
