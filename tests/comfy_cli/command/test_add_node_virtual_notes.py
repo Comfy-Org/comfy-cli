@@ -171,15 +171,9 @@ class TestApplySpecsNotes:
             workflow_ops.apply_specs(wf, _graph(), specs)
         assert getattr(ei.value, "spec_index", None) == 1
         assert getattr(ei.value, "applied_count", None) == 0
-        # `apply_specs` mutates the in-memory dict as it goes (the caller discards
-        # the whole batch on failure by never writing it). So the only difference
-        # from the snapshot must be spec #0's VAEDecode: the failing note spec
-        # itself wrote nothing and minted no id.
-        assert [n["type"] for n in wf["nodes"] if n["type"] == "Note"] == []
-        added = [n for n in wf["nodes"] if n["id"] not in {m["id"] for m in snapshot["nodes"]}]
-        assert [n["type"] for n in added] == ["VAEDecode"]
-        assert wf["last_node_id"] == added[0]["id"]
-        assert wf["last_node_id"] != snapshot["last_node_id"]
+        # Producer refusal now rolls back the caller as well as the persisted
+        # file. Even the valid prefix and its high-water mark must be restored.
+        assert wf == snapshot
 
     def test_explicit_null_text_is_rejected_not_coerced_to_empty(self):
         # `"text": null` in a recipe is a malformed spec, not shorthand for an empty
