@@ -267,3 +267,40 @@ def test_a_dropped_record_warns_instead_of_vanishing(caplog):
     with caplog.at_level("WARNING"):
         convert_ui_to_api(wf, _OBJECT_INFO)
     assert any("does not understand" in r.message for r in caplog.records)
+
+
+def test_a_no_loras_yet_save_does_not_land_on_real_sockets():
+    """``[{}, ""]`` -- the legacy "no rows yet" save -- must not misplace values.
+
+    Neither entry names anything ``_is_absorbable_dict`` recognizes, so
+    without also routing an all-empty-markers list through the absorber this
+    fell to the positional walk and the ``{}``/``""`` landed on the node's
+    real ``model``/``clip`` sockets instead of being skipped.
+    """
+    object_info = dict(_OBJECT_INFO)
+    object_info["Power Lora Loader"] = {
+        "input": {"required": {"model": ["MODEL", {}], "clip": ["CLIP", {}]}},
+        "input_order": {"required": ["model", "clip"]},
+        "output": ["MODEL", "CLIP"],
+        "output_name": ["MODEL", "CLIP"],
+    }
+    wf = {
+        "nodes": [
+            {
+                "id": 7,
+                "type": "Power Lora Loader",
+                "widgets_values": [{}, ""],
+                "inputs": [
+                    {"name": "model", "type": "MODEL", "link": None},
+                    {"name": "clip", "type": "CLIP", "link": None},
+                ],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, object_info)
+    inputs = api["7"]["inputs"]
+    assert "model" not in inputs
+    assert "clip" not in inputs
+    assert inputs == {"➕ Add Lora": ""}

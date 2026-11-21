@@ -2521,7 +2521,13 @@ def _collect_widget_inputs(
     # lands under a bogus ``linear`` input while ``curve`` falls back to its
     # schema default (comfy-cli#1171 review, CurveEditor.curve).
     pre_absorb_schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
-    if not pre_absorb_schema_widgets and any(_is_absorbable_dict(v) for v in widget_values):
+    # A legacy "no rows yet" save -- e.g. ``[{}, ""]`` -- carries no entry
+    # ``_is_absorbable_dict`` recognizes, since an empty dict names nothing.
+    # Falling through from there sent ``{}``/``""`` down the positional walk,
+    # landing them on real sockets like ``model``/``clip`` instead of being
+    # skipped the same way a non-empty absorbable list skips them.
+    only_empty_markers = widget_values and all((isinstance(v, dict) and not v) or v == "" for v in widget_values)
+    if not pre_absorb_schema_widgets and (any(_is_absorbable_dict(v) for v in widget_values) or only_empty_markers):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
