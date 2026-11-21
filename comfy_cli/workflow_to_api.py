@@ -2571,8 +2571,17 @@ def _collect_widget_inputs(
 
 
 def _is_absorbable_dict(value: Any) -> bool:
-    """True only for the self-naming dict entries ``_absorb_dict_widget_values`` understands."""
-    return isinstance(value, dict) and bool(value) and ("type" in value or "lora" in value)
+    """True only for the self-naming dict entries ``_absorb_dict_widget_values`` understands.
+
+    ``type``'s value becomes an input NAME, so it must be a non-empty string --
+    an unhashable value (a list or dict) raises ``TypeError`` at the lookup in
+    ``link_inputs`` and loses the whole node; ``None`` or ``""`` would silently
+    name nothing while still discarding the node's other widgets.
+    """
+    if not isinstance(value, dict) or not value:
+        return False
+    type_value = value.get("type")
+    return (isinstance(type_value, str) and bool(type_value)) or "lora" in value
 
 
 def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], link_inputs: dict[str, list]) -> None:

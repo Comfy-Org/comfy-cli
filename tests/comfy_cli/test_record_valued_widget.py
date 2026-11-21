@@ -165,6 +165,28 @@ def test_type_keyed_entries_still_absorb_by_their_type():
     assert api["9"]["inputs"]["model"] == {"type": "model", "value": "sd15.safetensors"}
 
 
+def test_an_unhashable_type_value_does_not_crash_the_node():
+    """A ``type`` key is only a usable name when it is a non-empty string.
+
+    An unhashable value (a list, here) used to reach the ``link_inputs``
+    membership test inside the absorber and raise ``TypeError``, dropping the
+    whole node from the prompt via the per-node exception handler.
+    """
+    wf = {
+        "nodes": [
+            {
+                "id": 9,
+                "type": "Power Lora Loader",
+                "widgets_values": [{"type": ["not", "a", "name"], "value": 1}],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, _OBJECT_INFO)
+    assert "9" in api
+
+
 def test_a_declared_widgets_own_type_keyed_record_is_not_absorbed():
     """A node with a real widget slot must never route through the Lora shortcut.
 
