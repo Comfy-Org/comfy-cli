@@ -610,6 +610,15 @@ def test_a_listing_carries_no_uploaded_flag_by_the_schema() -> None:
         _validate({"deploymentId": "dep-1", "models": [], "uploaded": True})
 
 
+@pytest.mark.parametrize("extra", [{"uploaded": True}, {}])
+def test_a_payload_carrying_both_models_and_model_is_refused_by_the_schema(extra: JsonObject) -> None:
+    _validate({"deploymentId": "dep-1", "models": [_ENTRY]})
+    _validate({"deploymentId": "dep-1", "model": _ENTRY, "uploaded": True})
+    _validate({"deploymentId": "dep-1", "model": _ENTRY})
+    with pytest.raises(jsonschema.ValidationError):
+        _validate({"deploymentId": "dep-1", "models": [], "model": _ENTRY, **extra})
+
+
 @pytest.mark.parametrize("server_code", ["NOT_FOUND", "UPLOAD_NOT_FOUND"])
 def test_a_404_comfy_deploy_names_stays_its_own_error(tmp_path, monkeypatch, server_code: str) -> None:
     log: list[str] = []
