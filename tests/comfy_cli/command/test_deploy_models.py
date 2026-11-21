@@ -8,9 +8,7 @@ import io
 import json
 import os
 import shlex
-import shutil
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -437,73 +435,26 @@ def test_a_404_prints_the_not_on_line_then_the_library_line(tmp_path, monkeypatc
     assert storage.puts == []
 
 
-@pytest.mark.parametrize(
-    ("path", "shown"),
-    [
-        (r"C:\models\lora.safetensors", r"C:\models\lora.safetensors"),
-        (r"C:\My Models\lora.safetensors", r'"C:\My Models\lora.safetensors"'),
-    ],
-)
-def test_on_windows_the_library_hint_quotes_the_path_the_way_cmd_reads_it(monkeypatch, path: str, shown: str) -> None:
-    monkeypatch.setattr(sys, "platform", "win32")
-
-    error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
-
-    assert (
-        error.hint == f"To upload it to the workspace library instead: comfy assets library upload {shown} --type loras"
-    )
-    assert "'" not in error.hint
-
-
-def test_on_windows_the_rm_and_ls_hints_quote_the_way_cmd_reads_them(monkeypatch) -> None:
+def test_on_windows_the_hints_print_placeholders_and_name_the_real_values(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     entry = {**_ENTRY, "filename": "my lora.safetensors", "status": "failed"}
 
+    file = Path(r"C:\My Models\lora.safetensors")
+    library = deploy_models.ModelsUnavailableError("dep-1", file, "loras")
     not_added = deploy_models.ModelNotAddedError("dep-1", entry)
-    twice = deploy_models.ModelNotFoundError("dep-1", "my lora.safetensors", [entry, entry])
+    removed = deploy_models.ModelRemovedError("dep-1", {**_ENTRY, "status": "adding"}, Path("lora.safetensors"), "x")
 
+    assert library.hint == (
+        "To upload it to the workspace library instead: comfy assets library upload <file> --type <folder>, "
+        f"where <file> is {file} and <folder> is loras"
+    )
     assert not_added.hint == (
-        "run `comfy deploy models rm dep-1 model-1`, wait until `comfy deploy models ls dep-1` no longer lists it, "
-        "then add it again"
+        "run `comfy deploy models rm <deployment> <id>`, wait until `comfy deploy models ls <deployment>` no longer "
+        "lists it, then add it again"
     )
-    assert "`comfy --json deploy models ls dep-1`" in twice.hint
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        r"C:\My Models\$(whoami).safetensors",
-        r"C:\models\%USERPROFILE%.safetensors",
-        r"C:\models\lo`ra.safetensors",
-        r'C:\models\lo"ra.safetensors',
-        r"C:\models\lora!.safetensors",
-        "C:\\models\\it\u2019s.safetensors",
-    ],
-)
-def test_on_windows_a_path_a_shell_would_expand_is_a_placeholder_in_the_library_hint(monkeypatch, path: str) -> None:
-    monkeypatch.setattr(sys, "platform", "win32")
-
-    error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
-
-    assert error.hint == (
-        "To upload it to the workspace library instead: comfy assets library upload <file> --type loras, "
-        f"where <file> is {path}"
-    )
-
-
-def test_on_windows_a_server_file_name_a_shell_would_expand_stays_out_of_the_hints(monkeypatch) -> None:
-    monkeypatch.setattr(sys, "platform", "win32")
-    entry = {**_ENTRY, "filename": "lora$env:USERNAME.safetensors", "status": "failed"}
-
-    not_added = deploy_models.ModelNotAddedError("dep-1", entry)
-    missing = deploy_models.ModelNotFoundError("dep-$x", "lora.safetensors", [])
-
-    assert "$env" not in not_added.hint
-    assert not_added.hint.startswith("run `comfy deploy models rm dep-1 model-1`")
-    assert str(not_added).startswith("lora$env:USERNAME.safetensors was not added")
-    assert not_added.details["model"]["filename"] == "lora$env:USERNAME.safetensors"
-    assert missing.hint == "run `comfy deploy models ls <deployment>` to see its model files"
-    assert "deployment dep-$x" in str(missing)
+    assert str(not_added).startswith("my lora.safetensors was not added")
+    assert removed.hint == "add it again: `comfy deploy models add <deployment> <file> --type <folder>`"
+    assert "deployment dep-1" in str(removed)
 
 
 def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> None:
@@ -528,9 +479,8 @@ def test_elsewhere_a_path_with_a_subexpression_is_shown_single_quoted_not_as_a_p
     assert error.hint == f"To upload it to the workspace library instead: {upload}"
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
-def test_a_file_named_like_an_option_is_given_as_a_path_in_the_hints(monkeypatch, platform: str) -> None:
-    monkeypatch.setattr(sys, "platform", platform)
+def test_a_file_named_like_an_option_is_given_as_a_path_in_the_hints(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     file = Path("-draft.safetensors")
     shown = os.path.join(os.curdir, "-draft.safetensors")
 
@@ -560,55 +510,6 @@ def test_a_listing_carries_no_uploaded_flag_by_the_schema() -> None:
     _validate({"deploymentId": "dep-1", "models": []})
     with pytest.raises(jsonschema.ValidationError):
         _validate({"deploymentId": "dep-1", "models": [], "uploaded": True})
-
-
-def _pwsh_reads(command: str, pwsh: str) -> subprocess.CompletedProcess[str]:
-    script = (
-        "function pwned { 'PWNED' }\n"
-        "function comfy { ConvertTo-Json -Compress -InputObject @($args | ForEach-Object { [string]$_ }) }\n"
-        f"{command}\n"
-    )
-    return subprocess.run(
-        [pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=60
-    )
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        r"C:\models\lora.safetensors",
-        r"C:\My Models\lora.safetensors",
-        r"C:\My Models\lora (v2) [best] {x} @home, #1 + co's & more; ~=.safetensors",
-    ],
-)
-def test_powershell_reads_the_windows_library_hint_path_literally(monkeypatch, path: str) -> None:
-    pwsh = shutil.which("pwsh")
-    if pwsh is None:
-        pytest.skip("pwsh is not on PATH")
-    monkeypatch.setattr(sys, "platform", "win32")
-
-    error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
-    command = error.hint.removeprefix("To upload it to the workspace library instead: ")
-    read = _pwsh_reads(command, pwsh)
-
-    assert read.returncode == 0, read.stderr
-    assert json.loads(read.stdout) == ["assets", "library", "upload", path, "--type", "loras"]
-
-
-def test_powershell_runs_nothing_a_windows_hint_path_names(monkeypatch) -> None:
-    pwsh = shutil.which("pwsh")
-    if pwsh is None:
-        pytest.skip("pwsh is not on PATH")
-    monkeypatch.setattr(sys, "platform", "win32")
-    entry = {**_ENTRY, "filename": "$(pwned).safetensors", "status": "failed"}
-
-    library = deploy_models.ModelsUnavailableError("dep-1", Path(r"C:\My Models\$(pwned).safetensors"), "loras")
-    upload = library.hint.removeprefix("To upload it to the workspace library instead: ").split(", where ")[0]
-    rm = deploy_models.ModelNotAddedError("dep-1", entry).hint.split("`")[1]
-
-    for command in (upload, rm):
-        read = _pwsh_reads(command, pwsh)
-        assert "PWNED" not in read.stdout + read.stderr
 
 
 @pytest.mark.parametrize("server_code", ["NOT_FOUND", "UPLOAD_NOT_FOUND"])

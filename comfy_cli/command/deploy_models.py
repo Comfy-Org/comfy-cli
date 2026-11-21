@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import http.client
 import os
-import re
 import shlex
 import sys
 import time
@@ -63,22 +62,10 @@ MODEL_WAIT_SECONDS: Final = 1800.0
 _clock = time.monotonic
 
 
-_WINDOWS_QUOTED: Final = re.compile(r"[\w .:\\/+=,;@()\[\]{}#~'&-]*")
-_WINDOWS_BARE: Final = re.compile(r"[A-Za-z0-9_.:\\/-]+")
-
-
 @dataclass(frozen=True, slots=True)
 class _Given:
     value: str
     placeholder: str
-
-
-def _windows_word(value: str) -> str | None:
-    if _WINDOWS_BARE.fullmatch(value):
-        return value
-    if _WINDOWS_QUOTED.fullmatch(value) and not value.endswith("\\"):
-        return f'"{value}"'
-    return None
 
 
 def _operand(file: Path) -> str:
@@ -86,21 +73,10 @@ def _operand(file: Path) -> str:
     return os.path.join(os.curdir, value) if value.startswith("-") else value
 
 
-def _pastes_literally(value: str) -> bool:
-    return sys.platform != "win32" or _windows_word(value) is not None
-
-
 def _command(*args: str | _Given) -> str:
-    values = [arg.value if isinstance(arg, _Given) else arg for arg in args]
-    if sys.platform != "win32":
-        return shlex.join(["comfy", *values])
-    words = ["comfy"]
-    for arg, value in zip(args, values, strict=True):
-        word = _windows_word(value)
-        if word is None:
-            word = arg.placeholder if isinstance(arg, _Given) else "<argument>"
-        words.append(word)
-    return " ".join(words)
+    if sys.platform == "win32":
+        return " ".join(["comfy", *(arg.placeholder if isinstance(arg, _Given) else arg for arg in args)])
+    return shlex.join(["comfy", *(arg.value if isinstance(arg, _Given) else arg for arg in args)])
 
 
 @runtime_checkable
@@ -119,9 +95,8 @@ class ModelsUnavailableError(DeployResolveError):
         given = (_Given(_operand(file), "<file>"), _Given(folder, "<folder>"))
         upload = _command("assets", "library", "upload", given[0], "--type", given[1])
         self.hint = f"To upload it to the workspace library instead: {upload}"
-        named = [f"{arg.placeholder} is {arg.value}" for arg in given if not _pastes_literally(arg.value)]
-        if named:
-            self.hint += f", where {'; '.join(named)}"
+        if sys.platform == "win32":
+            self.hint += f", where <file> is {file} and <folder> is {folder}"
         self.details = {"deploymentId": deployment_id}
         super().__init__(_NOT_ON)
 
