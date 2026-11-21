@@ -131,6 +131,11 @@ history.
 
 ### Fixed
 
+- The workspace venv that `comfy install` creates (comfy-cli in pipx, uv tool
+  or a PEP 668 system Python) now upgrades its pip. The bundled pip (22.3.1 on
+  Python 3.11) could not install torch from the PyTorch index (`No matching
+  distribution found for flit_core<4,>=3.11`). The upgrade is best effort: if
+  it fails or times out, the venv is kept and a warning is printed.
 - A long partner-node run on a local ComfyUI, signed in with `comfy cloud
   login`, no longer stops with "Unauthorized: Please login first" after the
   provider task was created, wherever Comfy Cloud issues partner-node tokens

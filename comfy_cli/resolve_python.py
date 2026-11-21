@@ -43,6 +43,21 @@ def resolve_workspace_python(workspace_path: str | None = None) -> str:
     return sys.executable
 
 
+def _upgrade_pip(python: str) -> bool:
+    # The pip that venv seeds can be too old for the PyTorch index (flit_core error).
+    try:
+        result = subprocess.run(
+            [python, "-m", "pip", "install", "-q", "-U", "pip"]
+            + ["--no-input", "--disable-pip-version-check", "--retries", "1"],
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return result.returncode == 0
+
+
 def create_workspace_venv(workspace_path: str) -> str:
     venv_dir = os.path.join(workspace_path, ".venv")
     rprint(f"Creating workspace virtual environment at [bold]{venv_dir}[/bold]")
@@ -50,6 +65,8 @@ def create_workspace_venv(workspace_path: str) -> str:
     python = _get_python_binary(venv_dir)
     if not os.path.isfile(python):
         raise RuntimeError(f"Failed to create venv: {python} not found after creation")
+    if not _upgrade_pip(python):
+        rprint("[yellow]Could not upgrade pip in the new venv, continuing with the bundled one.[/yellow]")
     return python
 
 
