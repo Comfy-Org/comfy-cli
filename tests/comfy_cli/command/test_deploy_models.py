@@ -875,10 +875,10 @@ def _join_raises(monkeypatch, builder: Builder | None, raised: BaseException) ->
 
 
 _MAY_BE_STORED = (
-    "lora.safetensors stays on the deployment, as the builder may have stored it: if "
-    "`comfy deploy models ls dep-1` shows it failed, or still adding after 30 minutes, remove it with "
+    "lora.safetensors stays on the deployment, as the builder may have stored it, and it may still be adding: run "
+    "`comfy deploy models ls dep-1` to see when it is ready. If it shows it failed, remove it with "
     "`comfy deploy models rm dep-1 model-1`, wait until `comfy deploy models ls dep-1` no longer lists it, then add "
-    "it again"
+    "it again; the same `comfy deploy models rm dep-1 model-1` cancels it while it is adding"
 )
 
 

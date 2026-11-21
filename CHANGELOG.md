@@ -31,8 +31,9 @@ history.
   the `rm` to run where that fails; Ctrl-C removes nothing, so it stops at once,
   and prints the `comfy deploy models rm <deployment> <id>` to run; where the
   builder's join went unanswered (a timeout, a dropped connection, a 5xx) the
-  builder may have stored the file, so the entry stays and the hint says to
-  remove it by id if `ls` shows it failed, or still adding after 30 minutes;
+  builder may have stored the file, so the entry stays and the hint says it may
+  still be adding and to check it with `ls`: remove it by id only if `ls` shows
+  it failed, or to cancel it, since copying can run well past 30 minutes;
   where adding models is not on it exits 1 with `deploy_models_unavailable`
   before sending the pieces. A builder that cannot take pieces gets one PUT, and
   the file is added once it ends, so there the whole file is sent before that

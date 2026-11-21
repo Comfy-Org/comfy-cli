@@ -350,10 +350,13 @@ comfy deploy models rm <deployment> <name> [--yes]
   models rm` to run first. Ctrl-C removes nothing, so it stops at once; it
   prints the `comfy deploy models rm <deployment> <id>` to run. Where the
   builder's join went unanswered (a timeout, a dropped connection, a 5xx) the
-  builder may have stored the file, so the entry stays: the hint names the
-  `comfy deploy models rm <deployment> <id>` to run if `ls` shows it failed,
-  or still adding after 30 minutes. Do not remove it sooner: another add of
-  the same file may share that entry.
+  builder may have stored the file, so the entry stays and may still be
+  adding: check it with `comfy deploy models ls <deployment>`. Run the
+  `comfy deploy models rm <deployment> <id>` the hint names only if `ls` shows
+  it failed, or if the user chooses to cancel it. Still adding after 30
+  minutes is not a failure: copying to the deployment can take longer, and
+  removing it cancels that work. Another add of the same file may also share
+  that entry.
 - **Not on for every workspace yet:** where it is off, `add` exits 1 with
   `deploy_models_unavailable` before sending the pieces (a builder that
   answers one upload link instead sends the whole file before the refusal);

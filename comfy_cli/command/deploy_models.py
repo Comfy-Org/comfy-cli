@@ -335,9 +335,9 @@ def _withdraw(
     )
     if maybe_stored:
         hint = (
-            f"{name} stays on the deployment, as the builder may have stored it: if `{listing}` shows it failed, "
-            f"or still adding after {int(MODEL_WAIT_SECONDS // 60)} minutes, remove it with `{rm}`, wait until "
-            f"`{listing}` no longer lists it, then add it again"
+            f"{name} stays on the deployment, as the builder may have stored it, and it may still be adding: run "
+            f"`{listing}` to see when it is ready. If it shows it failed, remove it with `{rm}`, wait until "
+            f"`{listing}` no longer lists it, then add it again; the same `{rm}` cancels it while it is adding"
         )
     elif not isinstance(error, Exception):
         hint = stays
