@@ -1666,3 +1666,192 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
     assert "Do not fetch it again" in text
     assert "`spend_consent_required`" in text
     assert "`--allow-spend`" in text
+
+
+def test_target_accepts_the_names_users_actually_type():
+    """`--target claude` and `--target AGENTS.md` are the same two targets as
+    `claude-code` and `agents-md`. Telemetry on released versions shows these
+    spellings arriving and being refused, which ends the install before anything
+    is written."""
+    from comfy_cli.skills.command import _kinds
+
+    assert _kinds(["claude"]) == ["claude-code"]
+    assert _kinds(["AGENTS.md"]) == ["agents-md"]
+    assert _kinds([" Cursor "]) == ["cursor"]
+    # The canonical spellings still mean exactly themselves.
+    assert _kinds(["claude-code", "cursor", "agents-md"]) == ["claude-code", "cursor", "agents-md"]
+
+
+def test_target_does_not_write_one_target_twice_for_two_spellings_of_it():
+    from comfy_cli.skills.command import _kinds
+
+    assert _kinds(["claude", "claude-code"]) == ["claude-code"]
+
+
+def test_a_tool_is_not_aliased_onto_a_file_it_does_not_read():
+    """`codex` and `aider` are the names people type most after `claude`, and
+    neither reads what `agents-md` writes at the default scope: Codex takes its
+    global instructions from ~/.codex/AGENTS.md, and Aider loads a conventions
+    file only when one is passed to it. Resolving them to `agents-md` would
+    report `wrote` and `Done` for an install the named agent never sees, so they
+    are refused with the reason and the thing to do instead."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for name, expected in (
+        ("codex", "~/.codex/AGENTS.md"),
+        ("aider", "--read"),
+        ("agents", "ambiguous"),
+    ):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([name.upper()])  # the refusal is case-insensitive too
+        text = str(refused.value)
+        assert f"no {name} target" in text, text
+        assert expected in text, text
+    # And the alias table does not quietly contain them.
+    from comfy_cli.skills.command import _TARGET_ALIASES
+
+    assert not {"codex", "aider", "agents"} & set(_TARGET_ALIASES)
+
+
+def test_unknown_target_says_which_mistake_it_looks_like():
+    """A swallowed flag, a path and an unknown name are three different user
+    errors; naming the choices answers only the third."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    with pytest.raises(typer.BadParameter) as flag:
+        _kinds(["--help"])
+    assert "looks like another flag" in str(flag.value)
+
+    with pytest.raises(typer.BadParameter) as path:
+        _kinds(["/home/someone/.claude/skills/comfy-deploy/SKILL.md"])
+    assert "goes to --skill" in str(path.value)
+
+    with pytest.raises(typer.BadParameter) as unknown:
+        _kinds(["hermes"])
+    assert "unknown target" in str(unknown.value)
+    assert "agents-md" in str(unknown.value)
+
+
+def test_a_destination_path_is_pointed_at_its_own_target_name():
+    """`--target ~/.cursor/rules` names a destination this command already has a
+    target for, so saying "that is the cursor target" beats sending the user to
+    --skill for a second refusal."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token, kind in (("~/.cursor/rules", "cursor"), ("./.claude", "claude-code"), ("./AGENTS.md", "agents-md")):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert f"--target {kind}" in str(refused.value), str(refused.value)
+
+
+def test_option_values_are_classified_without_touching_the_filesystem(tmp_path, monkeypatch):
+    """The shape check must not probe the filesystem. An `exists()` call makes an
+    unknown name that happens to collide with a file in the working directory
+    read as a path, and it raises OSError -- ENAMETOOLONG on a long value -- out
+    of what should be a BadParameter."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds, _scope
+
+    (tmp_path / "hermes").write_text("not a target")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(typer.BadParameter) as collided:
+        _kinds(["hermes"])
+    assert "unknown target" in str(collided.value)
+
+    for value in ("x" * 4096, ""):
+        with pytest.raises(typer.BadParameter):
+            _kinds([value])
+        with pytest.raises(typer.BadParameter):
+            _scope(value)
+
+
+def test_scope_is_case_insensitive_and_names_the_mistake():
+    import typer
+
+    from comfy_cli.skills.command import _scope
+
+    assert _scope("User") == "user"
+    assert _scope(" project ") == "project"
+
+    with pytest.raises(typer.BadParameter) as flag:
+        _scope("--help")
+    assert "looks like another flag" in str(flag.value)
+
+    with pytest.raises(typer.BadParameter) as path:
+        _scope("/Users/someone/.agents")
+    assert "does not take a destination" in str(path.value)
+
+
+def test_no_refusal_message_names_a_command_that_may_be_the_wrong_one():
+    """`_kinds` is shared with `uninstall` and `_scope` with `uninstall` and
+    `status`, so a message that says `comfy skills install --help` points two
+    thirds of its readers at the wrong command."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds, _scope
+
+    messages = []
+    for call, value in ((_kinds, ["--help"]), (_kinds, ["nope"]), (_scope, "--help"), (_scope, "nope")):
+        with pytest.raises(typer.BadParameter) as refused:
+            call(value)
+        messages.append(str(refused.value))
+    assert not [m for m in messages if "skills install" in m], messages
+
+
+def test_install_help_names_the_three_targets():
+    """The option's help never said what the three targets were, so a user who
+    ran `--help` still had to guess."""
+    result = CliRunner().invoke(app, ["install", "--help"])
+    assert result.exit_code == 0
+    text = _ANSI_RE.sub("", result.output)
+    assert "claude-code" in text
+    assert "cursor" in text
+    assert "agents-md" in text
+
+
+def test_agents_md_install_says_who_still_has_to_be_pointed_at_the_file(tmp_path: Path, monkeypatch):
+    """Claude Code and Cursor find their own files. An AGENTS.md is read only by
+    the agents that look for one, and several have to be told where it is -- so
+    "Done" by itself reports success for an install the named agent never sees.
+    """
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["install", "--scope", "project", "--target", "agents-md"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert "need pointing at" in text, text
+    assert "--read" in text, text
+    assert ".codex/AGENTS.md" in text, text
+
+
+def test_a_claude_code_install_is_not_told_to_go_point_an_agent_at_a_file(tmp_path: Path, monkeypatch):
+    """The pointing line belongs to the agents-md target only. Claude Code finds
+    ~/.claude/skills itself, and telling that user about Aider and Codex is noise
+    on the happy path."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["install", "--scope", "project", "--target", "claude-code"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(_ANSI_RE.sub("", result.output).split())
+    assert "Done." in text, text
+    assert "need pointing at" not in text, text
+
+
+def test_the_command_does_not_promise_a_tool_it_only_half_serves():
+    """The help promised "Claude, Cursor, Aider, and any AGENTS.md-aware tool",
+    and that sentence is where this PR's first, wrong `aider` alias came from.
+    Aider reads a conventions file only when one is passed to it, so naming it
+    beside the two targets that work on their own is the claim that has to go."""
+    from comfy_cli.skills import command as skills_command
+
+    assert "Aider" not in (skills_command.app.info.help or "")
+    assert "Aider" not in (skills_command.__doc__ or "")
+    install_help = _ANSI_RE.sub("", CliRunner().invoke(app, ["install", "--help"]).output)
+    assert "Aider" not in install_help, install_help
