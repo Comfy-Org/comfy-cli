@@ -2111,7 +2111,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_model_wait_timeout",
-        "`comfy deploy models add` waited 30 minutes and the model file still read `adding`. Only the wait ended: "
+        "`comfy deploy models add` waited 30 minutes and the model file still read `adding`, or the deploy control "
+        "plane left its reads unanswered, with an HTTP 5xx or no response, for the whole retry window of about a "
+        "minute, as with `deploy_watch_lost`. Only the wait ended: "
         "the file may still be adding. The exit code is 75, not 1, as with `deploy_watch_lost`, so a script can "
         "tell this from a file that failed. `details.waitedSeconds` is how long it waited and `details.model` the "
         "entry as last read.",

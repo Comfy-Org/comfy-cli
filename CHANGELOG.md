@@ -22,7 +22,8 @@ history.
   model file straight to a deployment with no new release, list those files,
   and remove one. `add` uploads in pieces, 8 at a time, adds the file before
   its bytes land, and waits until it is ready (`--no-wait` returns once sent),
-  for up to 30 minutes: past that it exits 75 with `deploy_model_wait_timeout`,
+  for up to 30 minutes: past that, or after a minute of reads the deploy API
+  does not answer, it exits 75 with `deploy_model_wait_timeout`,
   and a file whose removal starts while it is being added exits 1 with
   `deploy_model_removed` (add it again once `ls` no longer lists it);
   where adding models is not on it exits 1 with `deploy_models_unavailable`

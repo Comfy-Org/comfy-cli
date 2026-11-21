@@ -339,8 +339,9 @@ comfy deploy models rm <deployment> <name> [--yes]
   under the same name and hashes is not sent again), and waits until the
   deployment can use it, printing each status; `--no-wait` returns once the
   bytes are in. `<deployment>` is a name, an id or `<build>/<name>`. The wait
-  gives up after 30 minutes with `deploy_model_wait_timeout` (exit 75; the file
-  may still be adding, `ls` shows when it is ready), and a file whose removal
+  gives up after 30 minutes, or after a minute of reads the deploy API does
+  not answer, with `deploy_model_wait_timeout` (exit 75; the file may still be
+  adding, `ls` shows when it is ready), and a file whose removal
   starts while it is being added ends it with `deploy_model_removed` (once
   `ls` no longer lists it, add it again).
 - **Not on for every workspace yet:** where it is off, `add` exits 1 with

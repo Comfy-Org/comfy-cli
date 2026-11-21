@@ -36,7 +36,14 @@ from comfy_cli.command.deploy_resolve import (
     DeployResolveError,
     deployment_id_for,
 )
-from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS, EXIT_WATCH_LOST, render_spec_error
+from comfy_cli.command.deploy_runtime import (
+    _UNANSWERED_DELAYS,
+    _UNANSWERED_WINDOW,
+    DEPLOY_POLL_SECONDS,
+    EXIT_WATCH_LOST,
+    _unanswered,
+    render_spec_error,
+)
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_types import required_string, server_shape_error
@@ -159,11 +166,18 @@ class ModelWaitTimeoutError(DeployResolveError):
     code = "deploy_model_wait_timeout"
     exit_code = EXIT_WATCH_LOST
 
-    def __init__(self, deployment_id: str, entry: JsonObject, seconds: float) -> None:
+    def __init__(
+        self, deployment_id: str, entry: JsonObject, seconds: float, unanswered: Exception | None = None
+    ) -> None:
         name = required_string(entry, "filename")
         listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
         self.hint = f"run `{listing}` to see when it is ready"
         self.details = {"deploymentId": deployment_id, "model": _shown(entry), "waitedSeconds": seconds}
+        if unanswered is not None:
+            super().__init__(
+                f"the deploy API stopped answering while waiting on {name} ({unanswered}); it may still be adding"
+            )
+            return
         super().__init__(
             f"{name} was still adding after {int(seconds // 60)} minutes of waiting; it may still be adding"
         )
@@ -246,6 +260,22 @@ def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, 
             raise ModelFileError(file, error) from error
 
 
+def _listing(client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, started: float) -> list[JsonObject]:
+    failures, since = 0, 0.0
+    while True:
+        try:
+            return _entries(client.list_deployment_models(deployment_id))
+        except (DeployAPIError, ConnectionError, http.client.HTTPException) as error:
+            if not _unanswered(error):
+                raise
+            if failures == 0:
+                since = _clock()
+            if failures == len(_UNANSWERED_DELAYS) or _clock() - since >= _UNANSWERED_WINDOW:
+                raise ModelWaitTimeoutError(deployment_id, entry, _clock() - started, error) from error
+            _sleep(_UNANSWERED_DELAYS[failures])
+            failures += 1
+
+
 def _wait_ready(
     client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, renderer: Renderer, file: Path, folder: str
 ) -> JsonObject:
@@ -266,7 +296,7 @@ def _wait_ready(
         if _clock() - started >= MODEL_WAIT_SECONDS:
             raise ModelWaitTimeoutError(deployment_id, entry, MODEL_WAIT_SECONDS)
         _sleep(DEPLOY_POLL_SECONDS)
-        listed = [row for row in _entries(client.list_deployment_models(deployment_id)) if row.get("id") == entry_id]
+        listed = [row for row in _listing(client, deployment_id, entry, started) if row.get("id") == entry_id]
         if not listed:
             raise ModelRemovedError(deployment_id, entry, file, folder)
         entry = listed[0]

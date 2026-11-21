@@ -746,6 +746,53 @@ def test_a_file_that_never_settles_ends_the_wait_saying_it_may_still_be_adding(t
     assert control.count("GET", _MODELS) == 900
 
 
+def _unanswered_reads(monkeypatch, control: Control, failing: int) -> list[int]:
+    reads = [0]
+
+    def flaky(url, target, *, method="GET", body=None, **kwargs):
+        if (method, urlsplit(url).path) == ("GET", _MODELS):
+            reads[0] += 1
+            if 1 < reads[0] <= 1 + failing:
+                control.log.append(f"deploy GET {_MODELS} 502")
+                raise urllib.error.HTTPError(url, 502, "Bad Gateway", Message(), io.BytesIO(b"{}"))
+        return control(url, target, method=method, body=body, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", flaky)
+    return reads
+
+
+def test_a_read_the_deploy_api_does_not_answer_is_retried_while_waiting(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log, statuses=("adding", "adding", "ready")), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    _unanswered_reads(monkeypatch, control, failing=2)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 0, result.output
+    assert log.count(f"deploy GET {_MODELS} 502") == 2
+    assert _envelope(result)["data"]["model"]["status"] == "ready"
+
+
+def test_reads_unanswered_for_the_whole_window_end_the_wait_not_the_file(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log, statuses=("adding",)), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
+    _unanswered_reads(monkeypatch, control, failing=1000)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 75, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_model_wait_timeout"
+    assert error["message"].startswith("the deploy API stopped answering while waiting on lora.safetensors (")
+    assert error["message"].endswith("); it may still be adding")
+    assert error["hint"] == "run `comfy deploy models ls dep-1` to see when it is ready"
+    assert error["details"]["model"]["status"] == "adding"
+    assert 1 < log.count(f"deploy GET {_MODELS} 502") < 10
+
+
 def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", _GONE)), Storage(log)
