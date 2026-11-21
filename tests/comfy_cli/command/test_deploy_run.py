@@ -540,7 +540,6 @@ def test_an_oversize_workflow_is_refused_after_its_assets_are_uploaded(
 def test_a_job_naming_an_added_model_that_is_not_ready_is_refused_once_with_the_gateways_sentence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server_code: str, client_code: str, sentence: str
 ) -> None:
-    # Given a gateway that refuses the job: the workflow names a file added to the deployment, not ready
     workflow = write_workflow(tmp_path / "workflow.json")
     sent: list[str] = []
 
@@ -555,10 +554,8 @@ def test_a_job_naming_an_added_model_that_is_not_ready_is_refused_once_with_the_
     monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: None)
     monkeypatch.setattr(deploy_jobs, "request_json", refuse)
 
-    # When
     result = invoke(workflow, "--deployment", "dep-id", "--no-wait")
 
-    # Then it exits with the code, says the gateway's sentence, and sent the job once
     assert result.exit_code == 1
     error = envelope_error(result)
     assert error["code"] == client_code

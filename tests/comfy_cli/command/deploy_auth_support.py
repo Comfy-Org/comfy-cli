@@ -225,7 +225,6 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
         case DeployFixtureKind.REFS_COMPUTE:
             return ["deploy", "refs", "compute"]
         case DeployFixtureKind.MODELS_ADD:
-            # The builder answers that the workspace holds these bytes, so no PUT leaves the test.
             root.mkdir(parents=True, exist_ok=True)
             model = root / "lora.safetensors"
             model.write_bytes(b"weights")

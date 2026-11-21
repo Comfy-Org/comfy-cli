@@ -458,10 +458,8 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
 
 
 def test_deploy_model_removed_says_to_add_again_only_once_ls_no_longer_lists_it() -> None:
-    # Given
     entry = error_codes.get("deploy_model_removed")
 
-    # Then
     assert entry is not None
     assert "`removing`" in entry.meaning
     assert "nothing to remove" not in entry.meaning

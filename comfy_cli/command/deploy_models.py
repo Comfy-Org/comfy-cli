@@ -1,5 +1,3 @@
-"""Model files added straight to a deployment, with no new release: `comfy deploy models add`, `ls` and `rm`."""
-
 from __future__ import annotations
 
 import http.client
@@ -53,36 +51,24 @@ _REMOVE_QUESTION: Final = (
     "Remove {file}? It is deleted from this deployment's disk, and jobs that name it will fail. A job already "
     "running may still finish, and a worker that already loaded it may keep using it for a few minutes."
 )
-# comfy-deploy's own 404 codes on the models route; a 404 with neither is the route not being on.
 _KNOWN_NOT_FOUND: Final = frozenset({"NOT_FOUND", "UPLOAD_NOT_FOUND"})
 MODEL_WAIT_SECONDS: Final = 1800.0
 _clock = time.monotonic
 
 
-# What a Windows hint may print in double quotes, read literally there by both CMD and PowerShell; which of the two
-# the user has is not known. Word characters (letters, digits and _ in any script) and the space; . : \ / - in
-# paths; and + = , ; @ ( ) [ ] { } # ~ ' &, which PowerShell and CMD read as special only outside quotes. Left out on
-# purpose: " ends the quotes in both; $ and ` expand and escape in PowerShell; % expands in CMD, ! too with delayed
-# expansion; PowerShell ends a string on the smart quotes U+2018 to U+201E; control characters and line breaks.
 _WINDOWS_QUOTED: Final = re.compile(r"[\w .:\\/+=,;@()\[\]{}#~'&-]*")
-# What it may print bare: nothing either shell reads specially unquoted.
 _WINDOWS_BARE: Final = re.compile(r"[A-Za-z0-9_.:\\/-]+")
 
 
 @dataclass(frozen=True, slots=True)
 class _Given:
-    """An argument from the user or comfy-deploy, which may hold any character, and the placeholder a Windows hint
-    shows in its place when no quoting of it is literal in both CMD and PowerShell."""
-
     value: str
     placeholder: str
 
 
 def _windows_word(value: str) -> str | None:
-    """``value`` as both Windows shells read it literally when pasted, or None when no form of it is."""
     if _WINDOWS_BARE.fullmatch(value):
         return value
-    # A backslash before the closing quote would escape it in the program's own reading of its arguments.
     if _WINDOWS_QUOTED.fullmatch(value) and not value.endswith("\\"):
         return f'"{value}"'
     return None
@@ -93,12 +79,6 @@ def _pastes_literally(value: str) -> bool:
 
 
 def _command(*args: str | _Given) -> str:
-    """A suggested ``comfy`` command line, quoted so it runs as shown when pasted into the user's shell.
-
-    sh, bash and zsh read a single-quoted argument literally. Windows may be CMD, which keeps single quotes as part
-    of the argument, or PowerShell, which expands ``$(...)`` and ``$var`` inside double quotes, so there an argument
-    is printed bare or in double quotes only when both read it literally, and as its placeholder otherwise.
-    """
     values = [arg.value if isinstance(arg, _Given) else arg for arg in args]
     if sys.platform != "win32":
         return shlex.join(["comfy", *values])
@@ -127,7 +107,6 @@ class ModelsUnavailableError(DeployResolveError):
         given = (_Given(str(file), "<file>"), _Given(folder, "<folder>"))
         upload = _command("assets", "library", "upload", given[0], "--type", given[1])
         self.hint = f"To upload it to the workspace library instead: {upload}"
-        # Neither is in the message or details, so one left out of the command is named after it.
         named = [f"{arg.placeholder} is {arg.value}" for arg in given if not _pastes_literally(arg.value)]
         if named:
             self.hint += f", where {'; '.join(named)}"
@@ -136,8 +115,6 @@ class ModelsUnavailableError(DeployResolveError):
 
 
 class ModelFileError(DeployResolveError):
-    """The model file was removed or became unreadable after it was checked, while hashing or sending it."""
-
     code = "deploy_asset_upload_failed"
 
     def __init__(self, file: Path, error: OSError) -> None:
@@ -220,8 +197,6 @@ class ModelNotFoundError(DeployResolveError):
 
 @dataclass(frozen=True, slots=True)
 class _Upload:
-    """The file as ``UploadProgressReporter`` reads it."""
-
     kind: str
     filename: str
     size_bytes: int
@@ -243,7 +218,6 @@ def _failed_line(file: str) -> str:
 
 
 def _shown(entry: JsonObject) -> JsonObject:
-    """The entry as the CLI shows it: never its failure text, which is for comfy-deploy's log."""
     return {key: value for key, value in entry.items() if key != "failure"}
 
 
@@ -265,7 +239,6 @@ def _added(client: DeploymentModelsClient, deployment_id: str, blob_id: str, fol
 
 def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, renderer: Renderer) -> None:
     reporter = UploadProgressReporter(renderer)
-    # As `comfy build push` reports a file the builder turns out to hold: planned, then complete as held.
     reporter.plan([item], already_held=0)
     if upload.deduplicated:
         reporter.deduplicated(item, 1, 1)
@@ -279,15 +252,12 @@ def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, 
         except BlobFileError as error:
             raise ModelFileError(file, error.error) from error
         except (FileNotFoundError, PermissionError, IsADirectoryError) as error:
-            # The one PUT opening a file removed or locked since it was hashed; a dropped connection is another OSError.
             raise ModelFileError(file, error) from error
 
 
 def _wait_ready(
     client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, renderer: Renderer, file: Path, folder: str
 ) -> JsonObject:
-    """Read the entry until it is ready, saying each status it passes; failed, removed, or
-    ``MODEL_WAIT_SECONDS`` still adding ends the wait."""
     entry_id = required_string(entry, "id")
     said: str | None = None
     started = _clock()
@@ -320,18 +290,15 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
         renderer.info(f"Hashing {file.name}...")
     try:
         digests = file_digests(file)
-    except OSError as error:  # removed or locked since typer checked it; nothing is sent yet
+    except OSError as error:
         raise ModelFileError(file, error) from error
     blake3 = digests.blake3.removeprefix("blake3:")
     upload = blobs.create_blob_parts("model", file.name, digests.sha256, digests.size, blake3=blake3)
     item = _Upload("model", file.name, digests.size)
     if upload.upload_url is None:
-        # Held, or sent in pieces: added before any byte moves, so a refusal sends none.
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
         _send(blobs, upload, file, item, renderer)
     else:
-        # A builder without the pieces routes: comfy-deploy takes a one-PUT upload once it is whole,
-        # so here the whole file is sent before a refusal, `deploy_models_unavailable` included, is known.
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
     if wait:
@@ -362,8 +329,6 @@ def _reported(renderer: Renderer) -> Iterator[None]:
         OSError,
         KeyError,
     ) as error:
-        # A connection dropped or an answer cut short mid-read comes as http.client's or a bare OSError, which
-        # neither client maps. A failed piece PUT quotes its presigned URL, whose query string is the credential.
         renderer.error(code="deploy_server_error", message=without_signed_query(error) or type(error).__name__)
         raise typer.Exit(code=1) from error
 
@@ -435,7 +400,6 @@ def _named(models: list[JsonObject], name: str) -> list[JsonObject]:
 def rm_cmd(
     ctx: typer.Context,
     deployment: DeploymentArgument,
-    # `file`, not `name`: the tracked kwargs redact `file`, and a model's name can be private. NAME on screen.
     file: Annotated[
         str, typer.Argument(metavar="NAME", help="The file's name, <folder>/<name>, or its id.", show_default=False)
     ],

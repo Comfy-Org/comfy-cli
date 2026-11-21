@@ -28,7 +28,6 @@ from comfy_cli.command.model_upload_resume import TlsSetupFailed as _TlsSetupFai
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow, upload).")
-# Said first by both library uploads (this one and `comfy model upload`): a deployment takes its files another way.
 DEPLOYMENT_POINTER = "To add a model to a deployment, use: comfy deploy models add <deployment> <file> --type <folder>"
 
 # A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in

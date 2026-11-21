@@ -481,10 +481,6 @@ def test_deploy_skills_describe_approved_uploads():
 
 
 def test_deploy_skills_say_when_a_refused_model_add_already_sent_the_file():
-    """`deploy_models_unavailable` sends no bytes only for an upload in pieces: a
-    builder that answers one upload link has the whole file sent before the
-    refusal. Each place that says what was sent says so, and the library
-    command it offers instead carries the library's required `--type`."""
     row = next(
         line
         for line in skill_content("comfy-deploy-failures").splitlines()
@@ -1687,10 +1683,6 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
 
 
 def test_deploy_skills_say_a_file_being_removed_while_added_is_added_again_only_once_it_is_gone():
-    """`deploy_model_removed` covers a file that left the listing and one still
-    listed as `removing`; comfy-deploy refuses to add the same name until the
-    removal finishes, so each place that names the code says to wait until `ls`
-    no longer lists it before adding it again."""
     row = next(
         line
         for line in skill_content("comfy-deploy-failures").splitlines()

@@ -8,10 +8,6 @@ URL and never transit the builder.
 
 Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
-  POST /v1/blobs {..., blake3, reuse, parts: true} -> {blobId, deduplicated, parts?: [{partNumber, offsetBytes,
-                                                      sizeBytes, uploadUrl, expiresAt}]}
-  POST /v1/blobs/{id}/parts                       -> {blobId, parts}: fresh links for the pieces not landed
-  POST /v1/blobs/{id}/complete                    -> {blobId, sizeBytes}: the pieces joined into one object
   POST /v1/builds {name, definition}              -> {id, ...}
   POST /v1/snapshots/resolve {snapshot}           -> {definition, report}
   POST /v1/workflows/resolve {workflow}           -> {definition, report, format}
@@ -64,27 +60,14 @@ _WORKFLOW_IMPORT_TIMEOUT = 90.0
 # instead of calling `read`. Only the chunked path does, and only for an empty
 # file, so the size is not a tuning knob.
 _UPLOAD_ITER_BYTES = 1024 * 1024
-# How many pieces of an upload in pieces are sent at once.
 _PARTS_AT_ONCE = 8
-# A piece whose link expires sooner than this gets a fresh link before it starts.
 _LINK_MARGIN = timedelta(minutes=2)
-# What a presigned PUT answers for a link that expired or no longer matches its signature.
 _LINK_REFUSED = frozenset({400, 401, 403})
-# How often the thread waiting on the pieces wakes, so Ctrl-C reaches it on every platform.
 _WAIT_STEP_SECONDS = 0.2
-# How long Ctrl-C waits for the pieces in flight to stop before it is raised anyway. A piece
-# reading its file stops at its next block; one whose bytes are all sent and is waiting on the
-# bucket's answer cannot be stopped from here, and its daemon thread ends with the process.
 _CANCEL_GRACE_SECONDS = 2.0
 
 
 class BlobFileError(Exception):
-    """The file being uploaded could not be opened or read once its upload began; ``__cause__`` is the OSError.
-
-    Not an ``OSError`` itself: raised inside a PUT's body, an ``OSError`` would come
-    back from ``requests`` as a dropped connection rather than as the file's fault.
-    """
-
     def __init__(self, path: Path, error: OSError) -> None:
         self.path = path
         self.error = error
@@ -92,7 +75,7 @@ class BlobFileError(Exception):
 
 
 class _UploadStopped(Exception):
-    """Raised by a piece's read once its upload is stopped, so ``requests`` drops that PUT's connection."""
+    pass
 
 
 class _CountingReader:
@@ -135,13 +118,6 @@ class _CountingReader:
 
 
 class _PieceReader:
-    """One piece of a file as ``requests`` sees it, reporting each block it reads.
-
-    ``len`` is the piece's size, so the PUT carries exactly the Content-Length its
-    link is signed for and streams without chunked transfer; reads stop at the
-    piece's end. No ``fileno``: ``requests`` would size the body from the whole file.
-    """
-
     def __init__(
         self,
         raw: BinaryIO,
@@ -181,8 +157,6 @@ class _PieceReader:
 
 @dataclass(frozen=True, slots=True)
 class BlobPart:
-    """One piece of an upload in pieces: its place from 1, where it starts in the file, its length, its link."""
-
     number: int
     offset: int
     size: int
@@ -192,13 +166,6 @@ class BlobPart:
 
 @dataclass(frozen=True, slots=True)
 class PartsUpload:
-    """The builder's answer to a create asking for pieces.
-
-    ``deduplicated`` is the workspace already holding these exact bytes: nothing
-    to send. Else ``parts`` holds a link per piece, or, from a builder without
-    the pieces routes, ``parts`` is empty and ``upload_url`` is the one link.
-    """
-
     blob_id: str
     deduplicated: bool
     parts: tuple[BlobPart, ...]
@@ -390,13 +357,6 @@ class BuilderClient:
         resp.raise_for_status()
 
     def create_blob_parts(self, kind: str, filename: str, sha256: str, size_bytes: int, *, blake3: str) -> PartsUpload:
-        """Claim a blob for these bytes, to be sent in pieces, or the blob the workspace already holds for them.
-
-        Sends ``reuse``, so bytes held under the same kind, name, size and both
-        hashes come back ``deduplicated`` with nothing to send. ``blake3`` is the
-        bare hex digest. A builder without the pieces routes ignores ``parts``
-        and answers one ``uploadUrl``, which :meth:`upload_blob` sends.
-        """
         body = {
             "kind": kind,
             "filename": filename,
@@ -413,30 +373,15 @@ class BuilderClient:
         return PartsUpload(r["blobId"], False, parts, None if parts else r["uploadUrl"])
 
     def refresh_blob_parts(self, blob_id: str) -> tuple[BlobPart, ...]:
-        """POST /v1/blobs/{id}/parts -> a fresh link for each piece not landed yet; a landed piece gets none."""
         return _blob_parts(self._post(("blobs", blob_id, "parts"), {}))
 
     def complete_blob(self, blob_id: str) -> dict:
-        """POST /v1/blobs/{id}/complete -> join the landed pieces into the upload's one object."""
         return self._post(("blobs", blob_id, "complete"), {})
 
     def upload_blob_parts(
         self, blob_id: str, parts: tuple[BlobPart, ...], path: Path, progress: Callable[[int], None] | None = None
     ) -> None:
-        """PUT every piece of ``path``, in order and ``_PARTS_AT_ONCE`` at a time, then join them.
-
-        A piece whose link is about to expire, or whose PUT is refused as a link
-        no longer good, asks the builder once for fresh links to the pieces not
-        landed. A piece that answer leaves out has landed, as has one whose
-        create-only link answers 412.
-
-        A failed piece stops the others and is raised. Ctrl-C stops every piece
-        still reading the file and is raised within ``_CANCEL_GRACE_SECONDS``. A
-        file that can no longer be opened or read raises :class:`BlobFileError`.
-        """
         links = {part.number: part for part in parts}
-        # One lock for the links, held across a refresh; another for the progress
-        # count, so a refresh never stalls the bytes the other pieces are reading.
         links_lock, progress_lock = threading.Lock(), threading.Lock()
 
         def link(number: int, stale: BlobPart | None = None) -> BlobPart | None:
@@ -486,8 +431,6 @@ class BuilderClient:
                 resp.raise_for_status()
                 return
 
-        # Bare daemon threads, not a ThreadPoolExecutor: its cleanup, and its exit hook, join
-        # every running PUT, so Ctrl-C would wait while the pieces kept going up.
         stop = threading.Event()
         pending: queue.SimpleQueue[int] = queue.SimpleQueue()
         for part in parts:
@@ -503,10 +446,9 @@ class BuilderClient:
                     return
                 try:
                     send(number)
-                except BaseException as error:  # noqa: BLE001 -- raised again on the calling thread
+                except BaseException as error:  # noqa: BLE001
                     with failures_lock:
                         failures.append(error)
-                    # The first failure stops the rest; theirs, after it, are only that stop.
                     stop.set()
                     return
 
@@ -521,8 +463,6 @@ class BuilderClient:
                 while thread.is_alive():
                     thread.join(_WAIT_STEP_SECONDS)
         except BaseException:
-            # Ctrl-C: every piece reading its file stops at its next block, then this is raised,
-            # however long a PUT already sent takes to be answered.
             stop.set()
             deadline = time.monotonic() + _CANCEL_GRACE_SECONDS
             for thread in threads:

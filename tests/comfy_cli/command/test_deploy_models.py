@@ -1,6 +1,3 @@
-"""`comfy deploy models add`, `ls` and `rm`, with comfy-deploy, the builder and the bucket faked at their HTTP
-layers, and the pointer the two library uploads print first."""
-
 from __future__ import annotations
 
 import _thread
@@ -38,7 +35,6 @@ from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.deploy_api import DeployClient
 
 _CONTENT = b"0123456789"
-# The builder's plan for these ten bytes in these tests: pieces of 4, 4 and 2.
 _PLAN = {1: (0, 4), 2: (4, 4), 3: (8, 2)}
 _LATER = "2999-01-01T00:00:00Z"
 _EXPIRED = "2000-01-01T00:00:00Z"
@@ -81,8 +77,6 @@ class _Response:
 
 
 class Storage:
-    """The bucket behind the presigned links. A URL in ``refuse`` answers 403 once, as an expired link does."""
-
     def __init__(self, log: list[str], refuse: set[str] | None = None) -> None:
         self.log = log
         self.refuse = set(refuse or ())
@@ -109,8 +103,6 @@ class Storage:
 
 
 class Builder:
-    """comfy-builder's blob routes; a refresh answers fresh links for the pieces the bucket does not hold yet."""
-
     def __init__(self, log: list[str], answer: JsonObject, storage: Storage) -> None:
         self.log = log
         self.answer = answer
@@ -132,8 +124,6 @@ class Builder:
 
 
 class Control:
-    """comfy-deploy's models routes, and the deployment list a name resolves against."""
-
     def __init__(
         self,
         log: list[str],
@@ -221,19 +211,13 @@ def _in_pieces() -> JsonObject:
     return {"blobId": "blob-1", "deduplicated": False, "parts": _parts(1, 2, 3)}
 
 
-# --- add ------------------------------------------------------------------------
-
-
 def test_add_adds_before_the_pieces_land_then_joins_them_and_waits_until_ready(tmp_path, monkeypatch) -> None:
-    # Given a builder that takes uploads in pieces, and an entry that reads adding, then ready
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", "ready")), Storage(log)
     model, builder = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then the upload asks for pieces and re-use, with both hashes
     assert result.exit_code == 0, result.output
     assert builder is not None
     assert builder.bodies[0] == {
@@ -245,7 +229,6 @@ def test_add_adds_before_the_pieces_land_then_joins_them_and_waits_until_ready(t
         "reuse": True,
         "parts": True,
     }
-    # And the file is added before any piece moves, every piece lands once with its own bytes, then they are joined
     assert control.calls[0] == ("POST", _MODELS, {"blobId": "blob-1", "type": "loras"})
     puts = [index for index, line in enumerate(log) if line.startswith("put ")]
     complete = log.index("builder POST /v1/blobs/blob-1/complete")
@@ -257,7 +240,6 @@ def test_add_adds_before_the_pieces_land_then_joins_them_and_waits_until_ready(t
     }
     assert all(headers == {"x-goog-if-generation-match": "0"} for _, _, headers, _ in storage.puts)
     assert sorted(size for _, _, _, size in storage.puts) == [2, 4, 4]
-    # And it reads the entry until it is ready
     assert control.count("GET", _MODELS) == 2
     assert complete < log.index(f"deploy GET {_MODELS}")
     data = _envelope(result)["data"]
@@ -267,15 +249,12 @@ def test_add_adds_before_the_pieces_land_then_joins_them_and_waits_until_ready(t
 
 
 def test_add_prints_each_status_it_waits_through(tmp_path, monkeypatch) -> None:
-    # Given
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", "ready")), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", pretty=True)
 
-    # Then
     assert result.exit_code == 0, result.output
     assert "lora.safetensors: adding" in result.stdout
     assert "lora.safetensors: ready" in result.stdout
@@ -283,15 +262,12 @@ def test_add_prints_each_status_it_waits_through(tmp_path, monkeypatch) -> None:
 
 
 def test_no_wait_returns_once_the_pieces_are_joined(tmp_path, monkeypatch) -> None:
-    # Given
     log: list[str] = []
     control, storage = Control(log), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
-    # Then
     assert result.exit_code == 0, result.output
     assert "builder POST /v1/blobs/blob-1/complete" in log
     assert control.count("GET", _MODELS) == 0
@@ -299,23 +275,19 @@ def test_no_wait_returns_once_the_pieces_are_joined(tmp_path, monkeypatch) -> No
 
 
 def test_links_about_to_expire_are_swapped_for_fresh_ones_in_one_ask(tmp_path, monkeypatch) -> None:
-    # Given links for pieces 2 and 3 that have run out
     log: list[str] = []
     control, storage = Control(log), Storage(log)
     answer = {"blobId": "blob-1", "deduplicated": False, "parts": [*_parts(1), *_parts(2, 3, expires=_EXPIRED)]}
     model, _ = _install(monkeypatch, tmp_path, control, answer, storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
-    # Then one ask brings fresh links, and the two pieces go up on them, never on the ones that ran out
     assert result.exit_code == 0, result.output
     assert log.count("builder POST /v1/blobs/blob-1/parts") == 1
     bodies = storage.bodies()
     assert bodies["https://storage.test/part-2?sig=fresh"] == b"4567"
     assert bodies["https://storage.test/part-3?sig=fresh"] == b"89"
     assert not {"https://storage.test/part-2?sig=a", "https://storage.test/part-3?sig=a"} & set(bodies)
-    # Piece 1 goes on whichever link it held when it started; the refresh may have come first.
     assert {(urlsplit(url).path, body) for url, body in bodies.items()} == {
         ("/part-1", b"0123"),
         ("/part-2", b"4567"),
@@ -325,15 +297,12 @@ def test_links_about_to_expire_are_swapped_for_fresh_ones_in_one_ask(tmp_path, m
 
 
 def test_a_refused_link_is_sent_again_once_on_a_fresh_one(tmp_path, monkeypatch) -> None:
-    # Given the bucket refusing piece 2's first link, as it refuses an expired one
     log: list[str] = []
     control, storage = Control(log), Storage(log, refuse={"https://storage.test/part-2?sig=a"})
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
-    # Then
     assert result.exit_code == 0, result.output
     sent = [url for url, _, _, _ in storage.puts if "part-2" in url]
     assert sent == ["https://storage.test/part-2?sig=a", "https://storage.test/part-2?sig=fresh"]
@@ -343,16 +312,13 @@ def test_a_refused_link_is_sent_again_once_on_a_fresh_one(tmp_path, monkeypatch)
 
 
 def test_a_builder_without_pieces_gets_one_put_and_the_add_once_it_ends(tmp_path, monkeypatch) -> None:
-    # Given a builder that ignores `parts` and answers one link
     log: list[str] = []
     control, storage = Control(log), Storage(log)
     answer = {"blobId": "blob-1", "deduplicated": False, "uploadUrl": "https://storage.test/whole?sig=a"}
     model, _ = _install(monkeypatch, tmp_path, control, answer, storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
-    # Then
     assert result.exit_code == 0, result.output
     assert storage.bodies() == {"https://storage.test/whole?sig=a": _CONTENT}
     assert log.index("put https://storage.test/whole?sig=a") < log.index(f"deploy POST {_MODELS}")
@@ -360,15 +326,12 @@ def test_a_builder_without_pieces_gets_one_put_and_the_add_once_it_ends(tmp_path
 
 
 def test_bytes_the_workspace_already_holds_are_not_sent_again(tmp_path, monkeypatch) -> None:
-    # Given
     log: list[str] = []
     control, storage = Control(log), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, {"blobId": "blob-1", "deduplicated": True}, storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
-    # Then
     assert result.exit_code == 0, result.output
     assert storage.puts == []
     assert control.calls[0] == ("POST", _MODELS, {"blobId": "blob-1", "type": "loras"})
@@ -377,15 +340,12 @@ def test_bytes_the_workspace_already_holds_are_not_sent_again(tmp_path, monkeypa
 
 
 def test_a_404_says_adding_is_not_on_and_sends_no_bytes(tmp_path, monkeypatch) -> None:
-    # Given a comfy-deploy where the route is off: its 404 is an unknown route's, with no code
     log: list[str] = []
     control, storage = Control(log, refusal=(404, {"message": "Not Found"})), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_models_unavailable"
@@ -399,15 +359,12 @@ def test_a_404_says_adding_is_not_on_and_sends_no_bytes(tmp_path, monkeypatch) -
 
 
 def test_a_404_prints_the_not_on_line_then_the_library_line(tmp_path, monkeypatch) -> None:
-    # Given
     log: list[str] = []
     control, storage = Control(log, refusal=(404, {"message": "Not Found"})), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", pretty=True)
 
-    # Then
     assert result.exit_code == 1
     not_on = result.output.index("Adding models to a deployment is not on for this workspace yet.")
     assert not_on < result.output.index("To upload it to the workspace library instead: comfy assets library upload")
@@ -422,13 +379,10 @@ def test_a_404_prints_the_not_on_line_then_the_library_line(tmp_path, monkeypatc
     ],
 )
 def test_on_windows_the_library_hint_quotes_the_path_the_way_cmd_reads_it(monkeypatch, path: str, shown: str) -> None:
-    # Given a Windows shell, where single quotes are part of the file name
     monkeypatch.setattr(sys, "platform", "win32")
 
-    # When
     error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
 
-    # Then the path is in double quotes only when it needs them, and never in single quotes
     assert (
         error.hint == f"To upload it to the workspace library instead: comfy assets library upload {shown} --type loras"
     )
@@ -436,15 +390,12 @@ def test_on_windows_the_library_hint_quotes_the_path_the_way_cmd_reads_it(monkey
 
 
 def test_on_windows_the_rm_and_ls_hints_quote_the_way_cmd_reads_them(monkeypatch) -> None:
-    # Given a Windows shell and a file name with a space in it
     monkeypatch.setattr(sys, "platform", "win32")
     entry = {**_ENTRY, "filename": "my lora.safetensors", "status": "failed"}
 
-    # When
     not_added = deploy_models.ModelNotAddedError("dep-1", entry)
     twice = deploy_models.ModelNotFoundError("dep-1", "my lora.safetensors", [entry, entry])
 
-    # Then
     assert not_added.hint == 'run `comfy deploy models rm dep-1 "my lora.safetensors"`, then add it again'
     assert "`comfy deploy models ls dep-1 --json`" in twice.hint
 
@@ -461,13 +412,10 @@ def test_on_windows_the_rm_and_ls_hints_quote_the_way_cmd_reads_them(monkeypatch
     ],
 )
 def test_on_windows_a_path_a_shell_would_expand_is_a_placeholder_in_the_library_hint(monkeypatch, path: str) -> None:
-    # Given a Windows shell, which may be CMD or PowerShell, and a path one of them would expand or end a quote on
     monkeypatch.setattr(sys, "platform", "win32")
 
-    # When
     error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
 
-    # Then the command shows where the path goes, and the path itself is named after it, outside the command
     assert error.hint == (
         "To upload it to the workspace library instead: comfy assets library upload <file> --type loras, "
         f"where <file> is {path}"
@@ -475,15 +423,12 @@ def test_on_windows_a_path_a_shell_would_expand_is_a_placeholder_in_the_library_
 
 
 def test_on_windows_a_server_file_name_a_shell_would_expand_is_a_placeholder_in_the_rm_hint(monkeypatch) -> None:
-    # Given a Windows shell and a file name, from comfy-deploy, holding a PowerShell variable
     monkeypatch.setattr(sys, "platform", "win32")
     entry = {**_ENTRY, "filename": "lora$env:USERNAME.safetensors", "status": "failed"}
 
-    # When
     not_added = deploy_models.ModelNotAddedError("dep-1", entry)
     missing = deploy_models.ModelNotFoundError("dep-$x", "lora.safetensors", [])
 
-    # Then the commands hold placeholders, and the message and details still name the values
     assert not_added.hint == "run `comfy deploy models rm dep-1 <file>`, then add it again"
     assert str(not_added).startswith("lora$env:USERNAME.safetensors was not added")
     assert not_added.details["model"]["filename"] == "lora$env:USERNAME.safetensors"
@@ -492,14 +437,11 @@ def test_on_windows_a_server_file_name_a_shell_would_expand_is_a_placeholder_in_
 
 
 def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> None:
-    # Given a POSIX shell
     monkeypatch.setattr(sys, "platform", "linux")
     model = Path("/models/my lora.safetensors")
 
-    # When
     error = deploy_models.ModelsUnavailableError("dep-1", model, "loras")
 
-    # Then
     assert error.hint == (
         "To upload it to the workspace library instead: "
         "comfy assets library upload '/models/my lora.safetensors' --type loras"
@@ -507,20 +449,16 @@ def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> No
 
 
 def test_elsewhere_a_path_with_a_subexpression_is_shown_single_quoted_not_as_a_placeholder(monkeypatch) -> None:
-    # Given a POSIX shell, where single quotes keep every character literal
     monkeypatch.setattr(sys, "platform", "linux")
     model = Path("/models/$(whoami) `id` %HOME%.safetensors")
 
-    # When
     error = deploy_models.ModelsUnavailableError("dep-1", model, "loras")
 
-    # Then
     upload = shlex.join(["comfy", "assets", "library", "upload", str(model), "--type", "loras"])
     assert error.hint == f"To upload it to the workspace library instead: {upload}"
 
 
 def _pwsh_reads(command: str, pwsh: str) -> subprocess.CompletedProcess[str]:
-    """``command`` pasted into PowerShell, with ``comfy`` a function printing the arguments it got as JSON."""
     script = (
         "function pwned { 'PWNED' }\n"
         "function comfy { ConvertTo-Json -Compress -InputObject @($args | ForEach-Object { [string]$_ }) }\n"
@@ -540,36 +478,30 @@ def _pwsh_reads(command: str, pwsh: str) -> subprocess.CompletedProcess[str]:
     ],
 )
 def test_powershell_reads_the_windows_library_hint_path_literally(monkeypatch, path: str) -> None:
-    # Given PowerShell's own parser
     pwsh = shutil.which("pwsh")
     if pwsh is None:
         pytest.skip("pwsh is not on PATH")
     monkeypatch.setattr(sys, "platform", "win32")
 
-    # When the suggested command is pasted into it
     error = deploy_models.ModelsUnavailableError("dep-1", Path(path), "loras")
     command = error.hint.removeprefix("To upload it to the workspace library instead: ")
     read = _pwsh_reads(command, pwsh)
 
-    # Then comfy gets the path as it is
     assert read.returncode == 0, read.stderr
     assert json.loads(read.stdout) == ["assets", "library", "upload", path, "--type", "loras"]
 
 
 def test_powershell_runs_nothing_a_windows_hint_path_names(monkeypatch) -> None:
-    # Given PowerShell's own parser and a path holding a subexpression
     pwsh = shutil.which("pwsh")
     if pwsh is None:
         pytest.skip("pwsh is not on PATH")
     monkeypatch.setattr(sys, "platform", "win32")
     entry = {**_ENTRY, "filename": "$(pwned).safetensors", "status": "failed"}
 
-    # When the suggested commands are pasted into it
     library = deploy_models.ModelsUnavailableError("dep-1", Path(r"C:\My Models\$(pwned).safetensors"), "loras")
     upload = library.hint.removeprefix("To upload it to the workspace library instead: ").split(", where ")[0]
     rm = deploy_models.ModelNotAddedError("dep-1", entry).hint.split("`")[1]
 
-    # Then the subexpression never runs
     for command in (upload, rm):
         read = _pwsh_reads(command, pwsh)
         assert "PWNED" not in read.stdout + read.stderr
@@ -577,16 +509,13 @@ def test_powershell_runs_nothing_a_windows_hint_path_names(monkeypatch) -> None:
 
 @pytest.mark.parametrize("server_code", ["NOT_FOUND", "UPLOAD_NOT_FOUND"])
 def test_a_404_comfy_deploy_names_stays_its_own_error(tmp_path, monkeypatch, server_code: str) -> None:
-    # Given
     log: list[str] = []
     refusal = (404, {"error": server_code, "message": "No model upload with that id is in this workspace."})
     control, storage = Control(log, refusal=refusal), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_not_found"
@@ -595,17 +524,14 @@ def test_a_404_comfy_deploy_names_stays_its_own_error(tmp_path, monkeypatch, ser
 
 
 def test_a_409_prints_comfy_deploys_sentence_and_sends_no_bytes(tmp_path, monkeypatch) -> None:
-    # Given
     log: list[str] = []
     sentence = "The release's models and the added files need more storage than this deployment can be given."
     control = Control(log, refusal=(409, {"error": "MODEL_STORAGE_EXCEEDED", "message": sentence}))
     storage = Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_conflict"
@@ -615,16 +541,13 @@ def test_a_409_prints_comfy_deploys_sentence_and_sends_no_bytes(tmp_path, monkey
 
 
 def test_a_builder_without_pieces_sends_the_whole_file_before_adding_is_refused(tmp_path, monkeypatch) -> None:
-    # Given a builder that answers one link, and a comfy-deploy where adding models is off
     log: list[str] = []
     control, storage = Control(log, refusal=(404, {"message": "Not Found"})), Storage(log)
     answer = {"blobId": "blob-1", "deduplicated": False, "uploadUrl": "https://storage.test/whole?sig=a"}
     model, _ = _install(monkeypatch, tmp_path, control, answer, storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then the refusal is the same, but only after the whole file went up, which the docs now say
     assert result.exit_code == 1
     assert _envelope(result)["error"]["code"] == "deploy_models_unavailable"
     assert storage.bodies() == {"https://storage.test/whole?sig=a": _CONTENT}
@@ -632,7 +555,6 @@ def test_a_builder_without_pieces_sends_the_whole_file_before_adding_is_refused(
 
 
 def test_a_file_removed_after_the_check_is_a_file_error_not_a_crash(tmp_path, monkeypatch) -> None:
-    # Given a file that is gone by the time it is hashed
     log: list[str] = []
     control, storage = Control(log), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
@@ -644,10 +566,8 @@ def test_a_file_removed_after_the_check_is_a_file_error_not_a_crash(tmp_path, mo
 
     monkeypatch.setattr(deploy_models, "file_digests", removed_first)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_asset_upload_failed"
@@ -657,7 +577,6 @@ def test_a_file_removed_after_the_check_is_a_file_error_not_a_crash(tmp_path, mo
 
 
 def test_a_file_removed_between_pieces_is_a_file_error_and_is_not_joined(tmp_path, monkeypatch) -> None:
-    # Given pieces sent one at a time, and a file that is gone once the first piece lands
     log: list[str] = []
     control = Control(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
@@ -671,10 +590,8 @@ def test_a_file_removed_between_pieces_is_a_file_error_and_is_not_joined(tmp_pat
     monkeypatch.setattr("requests.put", put_then_remove)
     monkeypatch.setattr(builder_api, "_PARTS_AT_ONCE", 1)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_asset_upload_failed"
@@ -684,14 +601,12 @@ def test_a_file_removed_between_pieces_is_a_file_error_and_is_not_joined(tmp_pat
 
 
 def test_a_piece_whose_file_read_fails_is_a_file_error_not_a_dropped_connection() -> None:
-    # Given a piece reader over a file that fails to read
     class Broken(io.BytesIO):
         def read(self, *_args) -> bytes:
             raise PermissionError(13, "Permission denied")
 
     reader = builder_api._PieceReader(Broken(), 4, None, threading.Event(), Path("lora.safetensors"))
 
-    # When / Then: not an OSError, so requests passes it through instead of calling it a dropped connection
     with pytest.raises(builder_api.BlobFileError) as raised:
         reader.read(4)
     assert not isinstance(raised.value, OSError)
@@ -703,7 +618,6 @@ def test_a_piece_whose_file_read_fails_is_a_file_error_not_a_dropped_connection(
     [http.client.RemoteDisconnected("Remote end closed connection without response"), http.client.IncompleteRead(b"")],
 )
 def test_a_control_plane_answer_cut_short_is_a_server_error_not_a_crash(tmp_path, monkeypatch, dropped) -> None:
-    # Given a comfy-deploy whose answer to the add is cut short while it is read
     log: list[str] = []
     control, storage = Control(log), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
@@ -715,10 +629,8 @@ def test_a_control_plane_answer_cut_short_is_a_server_error_not_a_crash(tmp_path
 
     monkeypatch.setattr("comfy_cli.deploy_api.request_json", cut_short)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_server_error"
@@ -729,7 +641,6 @@ def test_a_control_plane_answer_cut_short_is_a_server_error_not_a_crash(tmp_path
 def test_a_connection_reset_quoting_a_signed_link_is_a_server_error_without_the_signature(
     tmp_path, monkeypatch
 ) -> None:
-    # Given the bucket's connection reset with a message that quotes the presigned link
     log: list[str] = []
     control = Control(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
@@ -739,10 +650,8 @@ def test_a_connection_reset_quoting_a_signed_link_is_a_server_error_without_the_
 
     monkeypatch.setattr("requests.put", reset)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_server_error"
@@ -751,15 +660,12 @@ def test_a_connection_reset_quoting_a_signed_link_is_a_server_error_without_the_
 
 
 def test_a_file_that_fails_while_waited_on_exits_without_its_failure_text(tmp_path, monkeypatch) -> None:
-    # Given
     log: list[str] = []
     control, storage = Control(log, statuses=("failed",)), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_failed"
@@ -768,15 +674,12 @@ def test_a_file_that_fails_while_waited_on_exits_without_its_failure_text(tmp_pa
 
 
 def test_a_file_that_never_settles_ends_the_wait_saying_it_may_still_be_adding(tmp_path, monkeypatch) -> None:
-    # Given a file that reads adding on every poll
     log: list[str] = []
     control, storage = Control(log, statuses=("adding",)), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 75, result.output
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_wait_timeout"
@@ -788,15 +691,12 @@ def test_a_file_that_never_settles_ends_the_wait_saying_it_may_still_be_adding(t
 
 
 def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(tmp_path, monkeypatch) -> None:
-    # Given a file that leaves the listing while it is being added
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", _GONE)), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1, result.output
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_removed"
@@ -809,15 +709,12 @@ def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(t
 def test_a_file_whose_removal_starts_while_waited_on_says_to_wait_until_it_is_gone_before_adding_again(
     tmp_path, monkeypatch
 ) -> None:
-    # Given a file that reads removing while it is being added, still listed until cleanup drops it
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", "removing")), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
-    # Then
     assert result.exit_code == 1, result.output
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_removed"
@@ -829,8 +726,6 @@ def test_a_file_whose_removal_starts_while_waited_on_says_to_wait_until_it_is_go
     assert error["details"]["model"]["status"] == "removing"
     assert " rm " not in error["hint"]
 
-
-# --- ls ---------------------------------------------------------------------------
 
 _LISTED: list[JsonObject] = [
     {**_ENTRY, "status": "ready"},
@@ -846,13 +741,10 @@ _LISTED: list[JsonObject] = [
 
 
 def test_ls_prints_folder_name_size_and_status_and_says_what_to_do_with_a_failed_file(tmp_path, monkeypatch) -> None:
-    # Given
     _install(monkeypatch, tmp_path, Control([], models=_LISTED))
 
-    # When
     result = _invoke("ls", "dep-1", pretty=True)
 
-    # Then
     assert result.exit_code == 0, result.output
     assert "loras  lora.safetensors  10 B  ready" in result.stdout
     assert "checkpoints  base.safetensors  2.0 KB  failed" in result.stdout
@@ -861,13 +753,10 @@ def test_ls_prints_folder_name_size_and_status_and_says_what_to_do_with_a_failed
 
 
 def test_ls_json_lists_the_entries_without_their_failure_text(tmp_path, monkeypatch) -> None:
-    # Given
     _install(monkeypatch, tmp_path, Control([], models=_LISTED))
 
-    # When
     result = _invoke("ls", "dep-1")
 
-    # Then
     assert result.exit_code == 0, result.output
     envelope = _envelope(result)
     assert envelope["command"] == "deploy models ls"
@@ -879,20 +768,14 @@ def test_ls_json_lists_the_entries_without_their_failure_text(tmp_path, monkeypa
 
 
 def test_a_deployment_is_named_the_way_other_deploy_commands_name_it(tmp_path, monkeypatch) -> None:
-    # Given deployment dep-1, named production, of Build "example"
     control = Control([], models=[])
     _install(monkeypatch, tmp_path, control)
 
-    # When
     result = _invoke("ls", "example/production")
 
-    # Then
     assert result.exit_code == 0, result.output
     assert _envelope(result)["data"]["deploymentId"] == "dep-1"
     assert control.count("GET", _MODELS) == 1
-
-
-# --- rm ---------------------------------------------------------------------------
 
 
 def _promptable(monkeypatch, answer: bool, asked: list[str]) -> None:
@@ -902,59 +785,47 @@ def _promptable(monkeypatch, answer: bool, asked: list[str]) -> None:
 
 
 def test_rm_asks_once_with_the_remove_text_and_deletes_once(tmp_path, monkeypatch) -> None:
-    # Given
     control, asked = Control([], models=_LISTED), []
     _install(monkeypatch, tmp_path, control)
     _promptable(monkeypatch, True, asked)
 
-    # When
     result = _invoke("rm", "dep-1", "lora.safetensors", pretty=True)
 
-    # Then
     assert result.exit_code == 0, result.output
     assert asked == [_REMOVE_TEXT]
     assert control.count("DELETE", f"{_MODELS}/model-1") == 1
 
 
 def test_rm_declined_deletes_nothing(tmp_path, monkeypatch) -> None:
-    # Given
     control, asked = Control([], models=_LISTED), []
     _install(monkeypatch, tmp_path, control)
     _promptable(monkeypatch, False, asked)
 
-    # When
     result = _invoke("rm", "dep-1", "lora.safetensors", pretty=True)
 
-    # Then
     assert result.exit_code == 0, result.output
     assert len(asked) == 1
     assert control.count("DELETE", f"{_MODELS}/model-1") == 0
 
 
 def test_rm_yes_skips_the_question_prints_the_text_and_deletes_once(tmp_path, monkeypatch) -> None:
-    # Given
     control = Control([], models=_LISTED)
     _install(monkeypatch, tmp_path, control)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: pytest.fail("asked despite --yes"))
 
-    # When
     result = _invoke("rm", "dep-1", "lora.safetensors", "--yes", pretty=True)
 
-    # Then
     assert result.exit_code == 0, result.output
     assert _REMOVE_TEXT in " ".join(result.stdout.split())
     assert control.count("DELETE", f"{_MODELS}/model-1") == 1
 
 
 def test_rm_json_payload_names_the_entry_it_removes(tmp_path, monkeypatch) -> None:
-    # Given
     control = Control([], models=_LISTED)
     _install(monkeypatch, tmp_path, control)
 
-    # When
     result = _invoke("rm", "dep-1", "loras/lora.safetensors", "--yes")
 
-    # Then
     assert result.exit_code == 0, result.output
     data = _envelope(result)["data"]
     assert data == {"deploymentId": "dep-1", "model": {**_ENTRY, "status": "removing"}}
@@ -962,14 +833,11 @@ def test_rm_json_payload_names_the_entry_it_removes(tmp_path, monkeypatch) -> No
 
 
 def test_rm_without_yes_where_nothing_can_answer_is_refused(tmp_path, monkeypatch) -> None:
-    # Given
     control = Control([], models=_LISTED)
     _install(monkeypatch, tmp_path, control)
 
-    # When
     result = _invoke("rm", "dep-1", "lora.safetensors")
 
-    # Then
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_remove_needs_confirm"
@@ -978,29 +846,23 @@ def test_rm_without_yes_where_nothing_can_answer_is_refused(tmp_path, monkeypatc
 
 
 def test_rm_of_a_file_the_deployment_does_not_hold_is_refused(tmp_path, monkeypatch) -> None:
-    # Given
     control = Control([], models=_LISTED)
     _install(monkeypatch, tmp_path, control)
 
-    # When
     result = _invoke("rm", "dep-1", "other.safetensors", "--yes")
 
-    # Then
     assert result.exit_code == 1
     assert _envelope(result)["error"]["code"] == "deploy_model_not_found"
     assert control.count("DELETE", f"{_MODELS}/model-1") == 0
 
 
 def test_rm_of_a_name_in_two_folders_hints_with_the_deployment(tmp_path, monkeypatch) -> None:
-    # Given the same file name in two folders
     twice = [{**_ENTRY, "status": "ready"}, {**_ENTRY, "id": "model-2", "type": "checkpoints", "status": "ready"}]
     control = Control([], models=twice)
     _install(monkeypatch, tmp_path, control)
 
-    # When
     result = _invoke("rm", "dep-1", "lora.safetensors", "--yes")
 
-    # Then the hint is a command that runs as written
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_not_found"
@@ -1009,7 +871,6 @@ def test_rm_of_a_name_in_two_folders_hints_with_the_deployment(tmp_path, monkeyp
 
 
 def test_the_model_names_given_to_the_models_commands_are_not_tracked(tmp_path, monkeypatch) -> None:
-    # Given analytics recording every event, and a private model file name
     events: list[tuple[str, JsonObject]] = []
     monkeypatch.setattr(
         "comfy_cli.tracking.track_event", lambda name, properties=None, **_kw: events.append((name, properties or {}))
@@ -1018,11 +879,9 @@ def test_the_model_names_given_to_the_models_commands_are_not_tracked(tmp_path, 
     _install(monkeypatch, tmp_path, control)
     _promptable(monkeypatch, False, asked)
 
-    # When the removal is declined, and the file is listed
     removed = _invoke("rm", "dep-1", "client-secret.safetensors", pretty=True)
     listed = _invoke("ls", "dep-1")
 
-    # Then the name never leaves the machine, while the positional syntax still works
     assert removed.exit_code == 0, removed.output
     assert listed.exit_code == 0, listed.output
     assert len(asked) == 1
@@ -1033,7 +892,6 @@ def test_the_model_names_given_to_the_models_commands_are_not_tracked(tmp_path, 
 
 
 def test_the_file_given_to_models_add_is_not_tracked(tmp_path, monkeypatch) -> None:
-    # Given analytics recording every event
     events: list[tuple[str, JsonObject]] = []
     monkeypatch.setattr(
         "comfy_cli.tracking.track_event", lambda name, properties=None, **_kw: events.append((name, properties or {}))
@@ -1042,16 +900,11 @@ def test_the_file_given_to_models_add_is_not_tracked(tmp_path, monkeypatch) -> N
     control, storage = Control(log), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
 
-    # When
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
-    # Then
     assert result.exit_code == 0, result.output
     assert dict(events)["deploy:add_cmd"] == {"deployment": "dep-1", "folder": "loras", "wait": False}
     assert str(tmp_path) not in json.dumps(events)
-
-
-# --- stopping an upload in pieces -------------------------------------------------------
 
 
 def _parts_upload() -> PartsUpload:
@@ -1060,7 +913,6 @@ def _parts_upload() -> PartsUpload:
 
 @pytest.fixture
 def default_sigint():
-    """Ctrl-C as Python's default handler raises it, whatever an earlier test installed."""
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         yield
@@ -1069,7 +921,6 @@ def default_sigint():
 
 
 def test_ctrl_c_stops_the_pieces_still_reading_the_file(tmp_path, monkeypatch, default_sigint) -> None:
-    # Given pieces that keep reading their file until something stops them, and Ctrl-C once they started
     log: list[str] = []
     monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, _in_pieces(), Storage(log)))
     model = tmp_path / "lora.safetensors"
@@ -1094,12 +945,10 @@ def test_ctrl_c_stops_the_pieces_still_reading_the_file(tmp_path, monkeypatch, d
     monkeypatch.setattr("requests.put", slow_put)
     upload = _parts_upload()
 
-    # When
     began = time.monotonic()
     with pytest.raises(KeyboardInterrupt):
         BuilderClient("https://builder.test", "tok").upload_blob_parts(upload.blob_id, upload.parts, model)
 
-    # Then every piece that began stopped reading, well before it would have finished, and nothing was joined
     assert time.monotonic() - began < 4
     assert begun
     assert sorted(stopped) == sorted(begun)
@@ -1109,7 +958,6 @@ def test_ctrl_c_stops_the_pieces_still_reading_the_file(tmp_path, monkeypatch, d
 def test_ctrl_c_is_raised_without_waiting_on_a_piece_waiting_for_its_answer(
     tmp_path, monkeypatch, default_sigint
 ) -> None:
-    # Given a piece whose bytes are all sent and whose answer never comes, and Ctrl-C then
     log: list[str] = []
     monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, _in_pieces(), Storage(log)))
     monkeypatch.setattr(builder_api, "_CANCEL_GRACE_SECONDS", 0.2, raising=False)
@@ -1128,7 +976,6 @@ def test_ctrl_c_is_raised_without_waiting_on_a_piece_waiting_for_its_answer(
     monkeypatch.setattr("requests.put", hung_put)
     upload = _parts_upload()
 
-    # When
     began = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -1137,17 +984,12 @@ def test_ctrl_c_is_raised_without_waiting_on_a_piece_waiting_for_its_answer(
     finally:
         answer.set()
 
-    # Then it is raised within the grace, and the stuck PUT's thread cannot hold the process open at exit
     assert waited < 5
     assert threads[0].daemon
 
 
-# --- the library uploads ---------------------------------------------------------------
-
-
 @pytest.mark.parametrize("command", [["assets", "library", "upload"], ["model", "upload"]])
 def test_the_library_uploads_point_at_deploy_models_first_and_still_upload(tmp_path, monkeypatch, command) -> None:
-    # Given
     uploads: list[tuple[tuple, dict]] = []
     monkeypatch.setattr(
         "comfy_cli.command.assets_library.run_upload", lambda *args, **kwargs: uploads.append((args, kwargs))
@@ -1155,11 +997,9 @@ def test_the_library_uploads_point_at_deploy_models_first_and_still_upload(tmp_p
     model = tmp_path / "lora.safetensors"
     model.write_bytes(_CONTENT)
 
-    # When
     args = ["--no-json", *command, str(model), "--type", "loras"]
     result = CliRunner().invoke(app, args, env={"COLUMNS": "400", "NO_COLOR": "1"})
 
-    # Then
     assert result.exit_code == 0, result.output
     assert DEPLOYMENT_POINTER == (
         "To add a model to a deployment, use: comfy deploy models add <deployment> <file> --type <folder>"
