@@ -131,6 +131,18 @@ history.
 
 ### Fixed
 
+- A `comfy workflow set-widget` edit keeps the frontend's name-keyed
+  `widgets_values_named` register coherent, not just on DynamicGroup nodes.
+  Editing any ordinary node published the new value positionally and left the
+  pre-edit value in that register, so a consumer restoring values by name
+  reverted the write — the frontend writes the register on every save and
+  prefers it when restoring. This implements Amendment A23 of the multiplayer
+  schema, which already specified the behaviour: update only a register that is
+  already a name-keyed object and already carries the name, and only when the
+  addressed widget is that name's final occurrence. A duplicated name is left
+  alone, because one name-keyed slot belongs to the final occurrence and writing
+  an earlier one's value there would be a corrupt read rather than a stale one.
+
 - Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
   `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
   the ComfyUI canvas as a workflow. The run sends the canvas graph as

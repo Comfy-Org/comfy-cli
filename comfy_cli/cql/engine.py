@@ -5911,6 +5911,50 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     return _UNRESOLVED
 
 
+def _update_named_widget_value(node: dict, order: list[str], input_name: str, value: Any) -> None:
+    """Keep the frontend's name-keyed ``widgets_values_named`` register coherent.
+
+    Implements **Amendment A23** (``comfy-multi-player``
+    ``docs/multiplayer-schema.md``, 2026-10-02), which this package was not
+    maintaining outside DynamicGroup nodes: a ``set-widget`` published the new
+    value positionally while leaving the PRE-OP value in the name register, so a
+    consumer restoring by name reverted the write on reload. The frontend writes
+    that register on every save and prefers it when restoring, so the register
+    going stale is a real divergence, not a cosmetic one.
+
+    A23's three gates, in its own order, and the reasoning is its own:
+
+    1. The register must already be stored as a **name-keyed object**. A foreign
+       producer's array is left alone rather than reshaped.
+    2. It must already **carry this name**. "A register that does not hold the
+       name is not stale for it, and inventing an entry would publish a value the
+       producer deliberately omitted."
+    3. The addressed pair must be the name's **final occurrence**, evaluated
+       against the layout AFTER the write. A serializer writing in widget order
+       leaves the final same-named widget's value in the register, so one slot
+       cannot hold two values. An earlier occurrence must leave it untouched:
+       writing there "replaces the final occurrence's value with an earlier
+       one's — a corrupt read rather than a stale one."
+
+    This package addresses a widget by name and writes its FIRST occurrence
+    (``order.index``), so gate 3 reduces to "the name occurs exactly once". A
+    duplicated name means the write did not land on the final occurrence, and the
+    register is correctly left as it is rather than updated or dropped.
+
+    Finality is false whenever the layout cannot be resolved — an empty or absent
+    order — matching A23: "a node whose layout this package cannot resolve has no
+    projected position to be final at."
+    """
+    stored = node.get("widgets_values_named")
+    if not isinstance(stored, dict):
+        return
+    if input_name not in stored:
+        return
+    if not order or order.count(input_name) != 1:
+        return
+    stored[input_name] = value
+
+
 def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, extend: bool) -> list[dict]:
     """Write ``value`` into ``node``'s ``widgets_values`` slot for ``input_name``.
 
@@ -6123,8 +6167,10 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         node["widgets_values"] = {**raw_values, input_name: value}
     else:
         node["widgets_values"] = widgets
-    if has_group and "widgets_values_named" in node:
-        node["widgets_values_named"][input_name] = value
+    # Not gated on ``has_group``: the frontend writes this register for every
+    # node, so a plain node's edit left it holding the value the edit replaced.
+    # ``order`` is the post-write layout, which is what A23's finality gate wants.
+    _update_named_widget_value(node, order, input_name, value)
     return warnings
 
 
