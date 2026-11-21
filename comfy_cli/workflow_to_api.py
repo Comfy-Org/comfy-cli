@@ -2594,6 +2594,8 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                 name = value.get("type")
                 if name and name not in link_inputs:
                     out[name] = value
+                else:
+                    logger.warning("Dict-absorb dropped a type-keyed widget value with no usable name: %r", value)
             elif "lora" in value:
                 lora_counter += 1
                 name = f"lora_{lora_counter}"
@@ -2601,9 +2603,16 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                     continue
                 clean = {k: v for k, v in value.items() if k != "strengthTwo" or v is not None}
                 out[name] = clean
+            else:
+                # Routing is all-or-nothing: one absorbable entry sends the whole
+                # list here, so a record this function does not understand is
+                # otherwise discarded with nothing to show for it.
+                logger.warning("Dict-absorb dropped a widget value it does not understand: %r", value)
         elif isinstance(value, str) and value == "":
             # Frontend's "Add Lora" button serializes as an empty string trailer.
             out.setdefault("➕ Add Lora", value)
+        else:
+            logger.warning("Dict-absorb dropped a scalar widget value: %r", value)
 
 
 def _saved_widget_names(

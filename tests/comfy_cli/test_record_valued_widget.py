@@ -244,3 +244,26 @@ def test_a_lora_entry_mixed_with_a_record_still_takes_the_lora_path():
     }
     api = convert_ui_to_api(wf, _OBJECT_INFO)
     assert "lora_1" in api["11"]["inputs"]
+
+
+def test_a_dropped_record_warns_instead_of_vanishing(caplog):
+    """The substitution in the mixed case above must be visible somewhere.
+
+    Routing is all-or-nothing, so the unrelated record in that case is
+    discarded with no sign anything happened. A warning is the minimum signal
+    that a value was dropped rather than converted.
+    """
+    wf = {
+        "nodes": [
+            {
+                "id": 11,
+                "type": "Power Lora Loader",
+                "widgets_values": [{"on": True, "lora": "a.safetensors"}, {"x": 1, "y": 2}],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    with caplog.at_level("WARNING"):
+        convert_ui_to_api(wf, _OBJECT_INFO)
+    assert any("does not understand" in r.message for r in caplog.records)
