@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from comfy_cli.command.generate import poll
+from comfy_cli.command.generate import client, poll
 
 
 def _resp(body):
@@ -200,3 +200,29 @@ def test_existing_bfl_poller_still_works(no_sleep, monkeypatch):
     result = poll.get_poller("bfl")({"polling_url": "https://x"}, api_key="k")
     assert result.status == "succeeded"
     assert "https://cdn/b.png" in result.image_urls
+
+
+def test_poll_bfl_refuses_plain_http_polling_url():
+    """client.get attaches the API key to every poll; the polling_url comes
+    verbatim from the partner's response. Plain http must not carry it."""
+    with pytest.raises(client.ApiError) as exc_info:
+        poll.poll_bfl({"polling_url": "http://evil.example/poll"}, api_key="key", timeout=1.0)
+    assert "non-https" in str(exc_info.value)
+
+
+def test_poll_bfl_refuses_uppercase_scheme_polling_url():
+    """HTTPS:// is legal per RFC 3986 s3.1; scheme case must not matter
+    (assert_safe_url normalises via urlsplit, a startswith check would not)."""
+    with pytest.raises(client.ApiError) as exc_info:
+        poll.poll_bfl({"polling_url": "HTTP://evil.example/poll"}, api_key="key", timeout=1.0)
+    assert "non-https" in str(exc_info.value)
+
+
+def test_poll_bfl_allows_loopback_polling_url():
+    """A local partner stub on 127.0.0.1 keeps working: assert_safe_url
+    refuses plaintext HTTP only for non-loopback hosts, so a loopback URL
+    gets past the scheme guard and fails on the unreachable stub with a
+    connection error instead of the scheme refusal."""
+    with pytest.raises(Exception) as exc_info:
+        poll.poll_bfl({"polling_url": "http://127.0.0.1:9/poll"}, api_key="key", timeout=0.5)
+    assert "non-https" not in str(exc_info.value)
