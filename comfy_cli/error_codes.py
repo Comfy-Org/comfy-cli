@@ -2094,9 +2094,24 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_model_failed",
         "A model file added straight to a deployment was not added: `comfy deploy run` was refused because the "
-        "workflow names it (`message` is the gateway's sentence), or `comfy deploy models add` saw it fail, or "
-        "removed, while waiting. Why it failed is in comfy-deploy's log, never in the output.",
+        "workflow names it (`message` is the gateway's sentence), or `comfy deploy models add` saw it fail while "
+        "waiting. Why it failed is in comfy-deploy's log, never in the output.",
         "remove it with `comfy deploy models rm <deployment> <file>` and add it again",
+    ),
+    ErrorCode(
+        "deploy_model_removed",
+        "`comfy deploy models add` was waiting on a model file that was removed from the deployment while it was "
+        "being added: it left the listing, or reads `removing`. It is no longer on the deployment, so there is "
+        "nothing to remove. `details.model` is the entry as last read.",
+        "add it again with `comfy deploy models add <deployment> <file> --type <folder>`",
+    ),
+    ErrorCode(
+        "deploy_model_wait_timeout",
+        "`comfy deploy models add` waited 30 minutes and the model file still read `adding`. Only the wait ended: "
+        "the file may still be adding. The exit code is 75, not 1, as with `deploy_watch_lost`, so a script can "
+        "tell this from a file that failed. `details.waitedSeconds` is how long it waited and `details.model` the "
+        "entry as last read.",
+        "run `comfy deploy models ls <deployment>` to see when it is ready",
     ),
     ErrorCode(
         "deploy_models_unavailable",

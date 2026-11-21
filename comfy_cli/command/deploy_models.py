@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import sys
+import time
 import urllib.error
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -30,7 +31,7 @@ from comfy_cli.command.deploy_resolve import (
     DeployResolveError,
     deployment_id_for,
 )
-from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS, render_spec_error
+from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS, EXIT_WATCH_LOST, render_spec_error
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_types import required_string, server_shape_error
@@ -54,6 +55,8 @@ _REMOVE_QUESTION: Final = (
 )
 # comfy-deploy's own 404 codes on the models route; a 404 with neither is the route not being on.
 _KNOWN_NOT_FOUND: Final = frozenset({"NOT_FOUND", "UPLOAD_NOT_FOUND"})
+MODEL_WAIT_SECONDS: Final = 1800.0
+_clock = time.monotonic
 
 
 # What a Windows hint may print in double quotes, read literally there by both CMD and PowerShell; which of the two
@@ -158,6 +161,39 @@ class ModelNotAddedError(DeployResolveError):
         super().__init__(_failed_line(file))
 
 
+class ModelRemovedError(DeployResolveError):
+    code = "deploy_model_removed"
+
+    def __init__(self, deployment_id: str, entry: JsonObject, file: Path, folder: str) -> None:
+        name = required_string(entry, "filename")
+        add = _command(
+            "deploy",
+            "models",
+            "add",
+            _Given(deployment_id, "<deployment>"),
+            _Given(str(file), "<file>"),
+            "--type",
+            _Given(folder, "<folder>"),
+        )
+        self.hint = f"add it again: `{add}`"
+        self.details = {"deploymentId": deployment_id, "model": _shown(entry)}
+        super().__init__(f"{name} is no longer on deployment {deployment_id}; it was removed while being added")
+
+
+class ModelWaitTimeoutError(DeployResolveError):
+    code = "deploy_model_wait_timeout"
+    exit_code = EXIT_WATCH_LOST
+
+    def __init__(self, deployment_id: str, entry: JsonObject, seconds: float) -> None:
+        name = required_string(entry, "filename")
+        listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
+        self.hint = f"run `{listing}` to see when it is ready"
+        self.details = {"deploymentId": deployment_id, "model": _shown(entry), "waitedSeconds": seconds}
+        super().__init__(
+            f"{name} was still adding after {int(seconds // 60)} minutes of waiting; it may still be adding"
+        )
+
+
 class ModelNotFoundError(DeployResolveError):
     code = "deploy_model_not_found"
 
@@ -241,11 +277,13 @@ def _send(blobs: BuilderClient, upload: PartsUpload, file: Path, item: _Upload, 
 
 
 def _wait_ready(
-    client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, renderer: Renderer
+    client: DeploymentModelsClient, deployment_id: str, entry: JsonObject, renderer: Renderer, file: Path, folder: str
 ) -> JsonObject:
-    """Read the entry until it is ready, saying each status it passes; failed, or removed, ends the wait."""
+    """Read the entry until it is ready, saying each status it passes; failed, removed, or
+    ``MODEL_WAIT_SECONDS`` still adding ends the wait."""
     entry_id = required_string(entry, "id")
     said: str | None = None
+    started = _clock()
     while True:
         status = required_string(entry, "status")
         if status != said and renderer.is_pretty():
@@ -253,11 +291,17 @@ def _wait_ready(
         said = status
         if status == "ready":
             return entry
+        if status == "removing":
+            raise ModelRemovedError(deployment_id, entry, file, folder)
         if status != "adding":
             raise ModelNotAddedError(deployment_id, entry)
+        if _clock() - started >= MODEL_WAIT_SECONDS:
+            raise ModelWaitTimeoutError(deployment_id, entry, MODEL_WAIT_SECONDS)
         _sleep(DEPLOY_POLL_SECONDS)
         listed = [row for row in _entries(client.list_deployment_models(deployment_id)) if row.get("id") == entry_id]
-        entry = listed[0] if listed else {**entry, "status": "removing"}
+        if not listed:
+            raise ModelRemovedError(deployment_id, entry, file, folder)
+        entry = listed[0]
 
 
 def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
@@ -284,7 +328,7 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
     if wait:
-        entry = _wait_ready(client, deployment_id, entry, renderer)
+        entry = _wait_ready(client, deployment_id, entry, renderer, file, folder)
     return {"deploymentId": deployment_id, "model": _shown(entry), "uploaded": not upload.deduplicated}
 
 
@@ -296,8 +340,9 @@ def _reported(renderer: Renderer) -> Iterator[None]:
         render_spec_error(renderer, error)
         raise typer.Exit(code=1) from error
     except (DeployResolveError, DeployAPIError) as error:
-        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
-        raise typer.Exit(code=1) from error
+        exit_code = getattr(error, "exit_code", 1)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details, exit_code=exit_code)
+        raise typer.Exit(code=exit_code) from error
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))
         raise typer.Exit(code=1) from error

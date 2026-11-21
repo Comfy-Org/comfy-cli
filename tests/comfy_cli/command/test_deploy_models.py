@@ -50,6 +50,8 @@ _ENTRY: JsonObject = {
     "sizeBytes": 10,
 }
 _MODELS = "/v1/deployments/dep-1/models"
+_GONE = "gone"
+_DAY = 86400.0
 _REMOVE_TEXT = (
     "Remove lora.safetensors? It is deleted from this deployment's disk, and jobs that name it will fail. A job "
     "already running may still finish, and a worker that already loaded it may keep using it for a few minutes."
@@ -159,7 +161,9 @@ class Control:
         if (method, path) == ("GET", _MODELS):
             if self.models is not None:
                 return 200, {"models": copy.deepcopy(self.models)}
-            status = self.statuses.pop(0)
+            status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+            if status == _GONE:
+                return 200, {"models": []}
             failure = {"failure": "copy to volume vol-9 failed: quota"} if status == "failed" else {}
             return 200, {"models": [{**_ENTRY, "status": status, **failure}]}
         if (method, path) == ("DELETE", f"{_MODELS}/model-1"):
@@ -179,7 +183,15 @@ def _install(
     clients = (FakeBuilder(), DeployClient("https://control.test", "tok"))
     monkeypatch.setattr(deploy_models, "_command_clients", lambda: clients)
     monkeypatch.setattr(deploy_models, "_blob_client", lambda: BuilderClient("https://builder.test", "tok"))
-    monkeypatch.setattr(deploy_models, "_sleep", lambda _seconds: None)
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+        if now[0] > _DAY:
+            pytest.fail("still waiting after a day of polls")
+
+    monkeypatch.setattr(deploy_models, "_sleep", sleep)
+    monkeypatch.setattr(deploy_models, "_clock", lambda: now[0], raising=False)
     builder = None
     if answer is not None:
         builder = Builder(control.log, answer, storage or Storage(control.log))
@@ -753,6 +765,45 @@ def test_a_file_that_fails_while_waited_on_exits_without_its_failure_text(tmp_pa
     assert error["code"] == "deploy_model_failed"
     assert error["message"] == "lora.safetensors was not added to this deployment. Remove it and add it again."
     assert "quota" not in result.output
+
+
+def test_a_file_that_never_settles_ends_the_wait_saying_it_may_still_be_adding(tmp_path, monkeypatch) -> None:
+    # Given a file that reads adding on every poll
+    log: list[str] = []
+    control, storage = Control(log, statuses=("adding",)), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 75, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_model_wait_timeout"
+    assert error["message"] == "lora.safetensors was still adding after 30 minutes of waiting; it may still be adding"
+    assert error["hint"] == "run `comfy deploy models ls dep-1` to see when it is ready"
+    assert error["details"]["waitedSeconds"] == 1800.0
+    assert error["details"]["model"]["status"] == "adding"
+    assert control.count("GET", _MODELS) == 900
+
+
+def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(tmp_path, monkeypatch) -> None:
+    # Given a file that leaves the listing while it is being added
+    log: list[str] = []
+    control, storage = Control(log, statuses=("adding", _GONE)), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_model_removed"
+    assert error["message"] == "lora.safetensors is no longer on deployment dep-1; it was removed while being added"
+    add = shlex.join(["comfy", "deploy", "models", "add", "dep-1", str(model), "--type", "loras"])
+    assert error["hint"] == f"add it again: `{add}`"
+    assert " rm " not in error["hint"]
 
 
 # --- ls ---------------------------------------------------------------------------

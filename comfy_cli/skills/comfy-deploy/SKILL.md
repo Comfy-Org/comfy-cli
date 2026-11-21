@@ -338,7 +338,10 @@ comfy deploy models rm <deployment> <name> [--yes]
   hashes the file, uploads it in pieces (a file the workspace already holds
   under the same name and hashes is not sent again), and waits until the
   deployment can use it, printing each status; `--no-wait` returns once the
-  bytes are in. `<deployment>` is a name, an id or `<build>/<name>`.
+  bytes are in. `<deployment>` is a name, an id or `<build>/<name>`. The wait
+  gives up after 30 minutes with `deploy_model_wait_timeout` (exit 75; the file
+  may still be adding, `ls` shows when it is ready), and a file removed while
+  it was being added ends it with `deploy_model_removed` (add it again).
 - **Not on for every workspace yet:** where it is off, `add` exits 1 with
   `deploy_models_unavailable` before sending the pieces (a builder that
   answers one upload link instead sends the whole file before the refusal);
