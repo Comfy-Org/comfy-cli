@@ -168,6 +168,13 @@ history.
   the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
   downloads before upgrading, since an older version keeps its claims per
   workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- `comfy download` with no `--out-dir` now resolves the output directory the
+  way it has always documented: the governing `project/1` root's `outputs/`,
+  else the `default_project_dir` config key's `outputs/`, else `./outputs`.
+  The option's default was the literal `./outputs`, which is truthy, so that
+  resolution was unreachable from the command and a download run from a
+  subdirectory of a project wrote to `<cwd>/outputs` instead of the project
+  root's. Passing `--out-dir`/`-o` is unchanged.
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
