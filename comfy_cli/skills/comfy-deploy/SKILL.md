@@ -351,8 +351,9 @@ comfy deploy models rm <deployment> <name> [--yes]
   release's model policy, the name taken, the deployment busy, too little
   storage) is `deploy_conflict` with comfy-deploy's own sentence.
 - **`ls` lists folder, name, size and status** (`adding`, `ready`, `failed`,
-  `removing`). A failed file was not added: remove it and add it again. Why it
-  failed is in comfy-deploy's log, never in the output.
+  `removing`). A failed file was not added: remove it, wait until `ls` no
+  longer lists it, then add it again. Why it failed is in comfy-deploy's log,
+  never in the output.
 - **`rm` deletes the file from the deployment's disk.** Jobs that name it fail;
   one already running may finish. It asks first; `--yes` answers, and refusing
   without it is `deploy_model_remove_needs_confirm`. Name the file as

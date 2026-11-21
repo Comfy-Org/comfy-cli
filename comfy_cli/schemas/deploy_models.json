@@ -2,11 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/deploy_models.json",
   "title": "comfy deploy models add / ls / rm --json data payload",
-  "description": "`ls` carries `models`, every file added straight to the deployment, oldest first. `add` and `rm` carry `model`, the entry they made or are removing; `add` also says whether it sent bytes. An entry never carries comfy-deploy's failure text: a failed file reads `status: failed`, and the fix is to remove it and add it again.",
+  "description": "`ls` carries `models`, every file added straight to the deployment, oldest first. `add` and `rm` carry `model`, the entry they made or are removing; `add` also says whether it sent bytes. An entry never carries comfy-deploy's failure text: a failed file reads `status: failed`, and the fix is to remove it, wait until `ls` no longer lists it, then add it again.",
   "type": "object",
   "required": ["deploymentId"],
   "additionalProperties": false,
-  "oneOf": [{"required": ["models"]}, {"required": ["model"]}],
+  "oneOf": [{"required": ["models"], "not": {"required": ["uploaded"]}}, {"required": ["model"]}],
   "$defs": {
     "entry": {
       "type": "object",

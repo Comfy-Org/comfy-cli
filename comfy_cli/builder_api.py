@@ -20,6 +20,7 @@ Field names match services/comfy-builder/openapi.yaml exactly:
 
 from __future__ import annotations
 
+import errno
 import queue
 import threading
 import time
@@ -72,6 +73,10 @@ class BlobFileError(Exception):
         self.path = path
         self.error = error
         super().__init__(f"{path} cannot be read ({error.strerror or error})")
+
+
+class BlobPlanError(Exception):
+    pass
 
 
 class _UploadStopped(Exception):
@@ -146,6 +151,8 @@ class _PieceReader:
             if self._path is None:
                 raise
             raise BlobFileError(self._path, error) from error
+        if wanted > 0 and not block and self._path is not None:
+            raise BlobFileError(self._path, OSError(errno.EIO, "it is shorter than when it was hashed"))
         self._left -= len(block)
         if block and self._progress is not None:
             self._progress(len(block))
@@ -153,6 +160,23 @@ class _PieceReader:
 
     def __iter__(self) -> Iterator[bytes]:
         return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
+class _PartProgress:
+    def __init__(self, report: Callable[[int], None]) -> None:
+        self._report = report
+        self._reported = 0
+        self._read = 0
+
+    def attempt(self) -> Callable[[int], None]:
+        self._read = 0
+        return self._advance
+
+    def _advance(self, n: int) -> None:
+        self._read += n
+        if self._read > self._reported:
+            self._report(self._read - self._reported)
+            self._reported = self._read
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,13 +200,20 @@ def _blob_parts(answer: dict) -> tuple[BlobPart, ...]:
     from comfy_cli.utils import parse_rfc3339
 
     parts: list[BlobPart] = []
-    for raw in answer.get("parts") or []:
-        try:
-            expires_at = parse_rfc3339(str(raw["expiresAt"]))
-        except (KeyError, ValueError):
-            expires_at = None
-        size = int(raw["sizeBytes"])
-        parts.append(BlobPart(int(raw["partNumber"]), int(raw["offsetBytes"]), size, str(raw["uploadUrl"]), expires_at))
+    try:
+        for raw in answer.get("parts") or []:
+            try:
+                expires_at = parse_rfc3339(str(raw["expiresAt"]))
+            except (KeyError, ValueError):
+                expires_at = None
+            number, offset, size = int(raw["partNumber"]), int(raw["offsetBytes"]), int(raw["sizeBytes"])
+            if not isinstance(raw["uploadUrl"], str) or min(number, offset, size) < 0:
+                raise ValueError
+            parts.append(BlobPart(number, offset, size, raw["uploadUrl"], expires_at))
+    except (KeyError, TypeError, ValueError):
+        raise BlobPlanError(
+            "the builder answered an upload in pieces with a piece missing its number, offset, size or link"
+        ) from None
     return tuple(sorted(parts, key=lambda part: part.number))
 
 
@@ -400,6 +431,7 @@ class BuilderClient:
 
         def send(number: int) -> None:
             part = link(number)
+            sent = _PartProgress(counted)
             for attempt in range(2):
                 if part is None or stop.is_set():
                     return
@@ -414,7 +446,7 @@ class BuilderClient:
                         raise BlobFileError(path, error) from error
                     resp = requests.put(
                         part.url,
-                        data=_PieceReader(f, part.size, counted, stop, path),
+                        data=_PieceReader(f, part.size, sent.attempt(), stop, path),
                         headers={"x-goog-if-generation-match": "0"},
                         timeout=_UPLOAD_TIMEOUT,
                         allow_redirects=False,
@@ -456,20 +488,25 @@ class BuilderClient:
             threading.Thread(target=work, daemon=True, name=f"comfy-upload-part-{index}")
             for index in range(min(_PARTS_AT_ONCE, len(parts)))
         ]
-        try:
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                while thread.is_alive():
-                    thread.join(_WAIT_STEP_SECONDS)
-        except BaseException:
+
+        def settle() -> None:
             stop.set()
             deadline = time.monotonic() + _CANCEL_GRACE_SECONDS
             for thread in threads:
                 if thread.is_alive():
                     thread.join(max(0.0, deadline - time.monotonic()))
+
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                while thread.is_alive() and not failures:
+                    thread.join(_WAIT_STEP_SECONDS)
+        except BaseException:
+            settle()
             raise
         if failures:
+            settle()
             raise failures[0]
         self.complete_blob(blob_id)
 

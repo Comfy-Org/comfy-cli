@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import shlex
 import shutil
 import signal
@@ -15,7 +16,7 @@ import threading
 import time
 import urllib.error
 from email.message import Message
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 import jsonschema
@@ -311,6 +312,70 @@ def test_a_refused_link_is_sent_again_once_on_a_fresh_one(tmp_path, monkeypatch)
     assert "builder POST /v1/blobs/blob-1/complete" in log
 
 
+def test_a_piece_sent_again_on_a_fresh_link_is_counted_once_in_the_progress(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    storage = Storage(log, refuse={"https://storage.test/part-2?sig=a"})
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, _in_pieces(), storage))
+    monkeypatch.setattr("requests.put", storage)
+    model = tmp_path / "lora.safetensors"
+    model.write_bytes(_CONTENT)
+    counted: list[int] = []
+    upload = _parts_upload()
+
+    BuilderClient("https://builder.test", "tok").upload_blob_parts(upload.blob_id, upload.parts, model, counted.append)
+
+    assert len([url for url, _, _, _ in storage.puts if "part-2" in url]) == 2
+    assert sum(counted) == len(_CONTENT)
+
+
+def test_an_add_answer_with_no_entry_is_a_server_error_even_without_waiting(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(DeployClient, "add_deployment_model", lambda self, *_args: {})
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
+
+    assert result.exit_code == 1, result.output
+    assert _envelope(result)["error"]["code"] == "deploy_server_error"
+
+
+@pytest.mark.parametrize("size", [None, "four"])
+def test_a_piece_plan_with_a_bad_size_is_a_server_error_without_its_links(tmp_path, monkeypatch, size) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    answer = _in_pieces()
+    answer["parts"][1]["sizeBytes"] = size
+    model, _ = _install(monkeypatch, tmp_path, control, answer, storage)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert "sig=" not in json.dumps(error)
+    assert storage.puts == []
+    assert control.count("POST", _MODELS) == 0
+
+
+def test_a_builder_refusing_the_credential_says_to_sign_in_again(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control = Control(log)
+    model, _ = _install(monkeypatch, tmp_path, control)
+
+    def refused(url, _target, **_kwargs):
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", Message(), io.BytesIO(b"{}"))
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", refused)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_not_signed_in"
+    assert error["hint"] == "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
+
+
 def test_a_builder_without_pieces_gets_one_put_and_the_add_once_it_ends(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control, storage = Control(log), Storage(log)
@@ -343,6 +408,7 @@ def test_a_404_says_adding_is_not_on_and_sends_no_bytes(tmp_path, monkeypatch) -
     log: list[str] = []
     control, storage = Control(log, refusal=(404, {"message": "Not Found"})), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
 
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
@@ -396,8 +462,11 @@ def test_on_windows_the_rm_and_ls_hints_quote_the_way_cmd_reads_them(monkeypatch
     not_added = deploy_models.ModelNotAddedError("dep-1", entry)
     twice = deploy_models.ModelNotFoundError("dep-1", "my lora.safetensors", [entry, entry])
 
-    assert not_added.hint == 'run `comfy deploy models rm dep-1 "my lora.safetensors"`, then add it again'
-    assert "`comfy deploy models ls dep-1 --json`" in twice.hint
+    assert not_added.hint == (
+        "run `comfy deploy models rm dep-1 model-1`, wait until `comfy deploy models ls dep-1` no longer lists it, "
+        "then add it again"
+    )
+    assert "`comfy --json deploy models ls dep-1`" in twice.hint
 
 
 @pytest.mark.parametrize(
@@ -422,14 +491,15 @@ def test_on_windows_a_path_a_shell_would_expand_is_a_placeholder_in_the_library_
     )
 
 
-def test_on_windows_a_server_file_name_a_shell_would_expand_is_a_placeholder_in_the_rm_hint(monkeypatch) -> None:
+def test_on_windows_a_server_file_name_a_shell_would_expand_stays_out_of_the_hints(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     entry = {**_ENTRY, "filename": "lora$env:USERNAME.safetensors", "status": "failed"}
 
     not_added = deploy_models.ModelNotAddedError("dep-1", entry)
     missing = deploy_models.ModelNotFoundError("dep-$x", "lora.safetensors", [])
 
-    assert not_added.hint == "run `comfy deploy models rm dep-1 <file>`, then add it again"
+    assert "$env" not in not_added.hint
+    assert not_added.hint.startswith("run `comfy deploy models rm dep-1 model-1`")
     assert str(not_added).startswith("lora$env:USERNAME.safetensors was not added")
     assert not_added.details["model"]["filename"] == "lora$env:USERNAME.safetensors"
     assert missing.hint == "run `comfy deploy models ls <deployment>` to see its model files"
@@ -438,7 +508,7 @@ def test_on_windows_a_server_file_name_a_shell_would_expand_is_a_placeholder_in_
 
 def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    model = Path("/models/my lora.safetensors")
+    model = PurePosixPath("/models/my lora.safetensors")
 
     error = deploy_models.ModelsUnavailableError("dep-1", model, "loras")
 
@@ -450,12 +520,46 @@ def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> No
 
 def test_elsewhere_a_path_with_a_subexpression_is_shown_single_quoted_not_as_a_placeholder(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    model = Path("/models/$(whoami) `id` %HOME%.safetensors")
+    model = PurePosixPath("/models/$(whoami) `id` %HOME%.safetensors")
 
     error = deploy_models.ModelsUnavailableError("dep-1", model, "loras")
 
     upload = shlex.join(["comfy", "assets", "library", "upload", str(model), "--type", "loras"])
     assert error.hint == f"To upload it to the workspace library instead: {upload}"
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_a_file_named_like_an_option_is_given_as_a_path_in_the_hints(monkeypatch, platform: str) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    file = Path("-draft.safetensors")
+    shown = os.path.join(os.curdir, "-draft.safetensors")
+
+    unavailable = deploy_models.ModelsUnavailableError("dep-1", file, "loras")
+    removed = deploy_models.ModelRemovedError("dep-1", {**_ENTRY, "status": "adding"}, file, "loras")
+
+    assert f"comfy assets library upload {shown} --type loras" in unavailable.hint
+    assert f"comfy deploy models add dep-1 {shown} --type loras" in removed.hint
+    assert " -draft" not in unavailable.hint + removed.hint
+
+
+def test_a_file_named_like_an_option_in_the_add_hint_parses_as_the_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.chdir(tmp_path)
+    Path("-draft.safetensors").write_bytes(_CONTENT)
+    removed = deploy_models.ModelRemovedError("dep-1", {**_ENTRY, "status": "adding"}, Path("-draft.safetensors"), "x")
+    seen: list[Path] = []
+    monkeypatch.setattr(deploy_models, "add", lambda file, *_args, **_kwargs: seen.append(file) or {})
+
+    words = shlex.split(removed.hint.split("`")[1])
+    result = CliRunner().invoke(app, ["--json", *words[1:], "--no-wait"])
+
+    assert seen == [Path("./-draft.safetensors")], result.output
+
+
+def test_a_listing_carries_no_uploaded_flag_by_the_schema() -> None:
+    _validate({"deploymentId": "dep-1", "models": []})
+    with pytest.raises(jsonschema.ValidationError):
+        _validate({"deploymentId": "dep-1", "models": [], "uploaded": True})
 
 
 def _pwsh_reads(command: str, pwsh: str) -> subprocess.CompletedProcess[str]:
@@ -581,14 +685,16 @@ def test_a_file_removed_between_pieces_is_a_file_error_and_is_not_joined(tmp_pat
     control = Control(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces())
     storage = Storage(log)
-
-    def put_then_remove(url, **kwargs):
-        answer = storage(url, **kwargs)
-        model.unlink(missing_ok=True)
-        return answer
-
-    monkeypatch.setattr("requests.put", put_then_remove)
+    monkeypatch.setattr("requests.put", storage)
     monkeypatch.setattr(builder_api, "_PARTS_AT_ONCE", 1)
+    real_open = Path.open
+
+    def removed_once_a_piece_landed(path: Path, *args, **kwargs):
+        if storage.landed and path == model:
+            model.unlink(missing_ok=True)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", removed_once_a_piece_landed)
 
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
@@ -611,6 +717,22 @@ def test_a_piece_whose_file_read_fails_is_a_file_error_not_a_dropped_connection(
         reader.read(4)
     assert not isinstance(raised.value, OSError)
     assert isinstance(raised.value.error, PermissionError)
+
+
+def test_a_piece_whose_file_ends_before_the_piece_does_is_a_file_error() -> None:
+    reader = builder_api._PieceReader(io.BytesIO(b"01"), 4, None, threading.Event(), Path("lora.safetensors"))
+
+    assert reader.read(0) == b""
+    assert reader.read(4) == b"01"
+    with pytest.raises(builder_api.BlobFileError):
+        reader.read(4)
+
+
+def test_a_piece_that_reads_to_its_end_then_ends_normally() -> None:
+    reader = builder_api._PieceReader(io.BytesIO(b"0123"), 4, None, threading.Event(), Path("lora.safetensors"))
+
+    assert reader.read(4) == b"0123"
+    assert reader.read(4) == b""
 
 
 @pytest.mark.parametrize(
@@ -694,6 +816,7 @@ def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(t
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", _GONE)), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
 
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
@@ -712,6 +835,7 @@ def test_a_file_whose_removal_starts_while_waited_on_says_to_wait_until_it_is_go
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", "removing")), Storage(log)
     model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    monkeypatch.setattr(sys, "platform", "linux")
 
     result = _invoke("add", "dep-1", str(model), "--type", "loras")
 
@@ -866,8 +990,38 @@ def test_rm_of_a_name_in_two_folders_hints_with_the_deployment(tmp_path, monkeyp
     assert result.exit_code == 1
     error = _envelope(result)["error"]
     assert error["code"] == "deploy_model_not_found"
-    assert "`comfy deploy models ls dep-1 --json`" in error["hint"]
+    assert "`comfy --json deploy models ls dep-1`" in error["hint"]
     assert control.count("DELETE", f"{_MODELS}/model-1") == 0
+
+
+def test_the_command_the_two_folders_hint_gives_runs_and_lists_their_ids(tmp_path, monkeypatch) -> None:
+    twice = [{**_ENTRY, "status": "ready"}, {**_ENTRY, "id": "model-2", "type": "checkpoints", "status": "ready"}]
+    control = Control([], models=twice)
+    _install(monkeypatch, tmp_path, control)
+    monkeypatch.setattr(sys, "platform", "linux")
+    hint = _envelope(_invoke("rm", "dep-1", "lora.safetensors", "--yes"))["error"]["hint"]
+
+    words = shlex.split(hint.split("`")[1])
+    result = CliRunner().invoke(app, words[1:], env={"COLUMNS": "400", "NO_COLOR": "1"})
+
+    assert result.exit_code == 0, result.output
+    assert [entry["id"] for entry in _envelope(result)["data"]["models"]] == ["model-1", "model-2"]
+
+
+def test_the_failed_file_hint_removes_it_by_id_where_two_folders_hold_its_name(tmp_path, monkeypatch) -> None:
+    failed = {**_ENTRY, "status": "failed"}
+    twice = [{**_ENTRY, "id": "model-2", "type": "checkpoints", "status": "ready"}, failed]
+    control = Control([], models=twice)
+    _install(monkeypatch, tmp_path, control)
+    monkeypatch.setattr(sys, "platform", "linux")
+    hint = deploy_models.ModelNotAddedError("dep-1", failed).hint
+
+    words = shlex.split(hint.split("`")[1])
+    result = CliRunner().invoke(app, ["--json", *words[1:], "--yes"], env={"COLUMNS": "400", "NO_COLOR": "1"})
+
+    assert result.exit_code == 0, result.output
+    assert _envelope(result)["data"]["model"]["id"] == "model-1"
+    assert "no longer lists it, then add it again" in hint
 
 
 def test_the_model_names_given_to_the_models_commands_are_not_tracked(tmp_path, monkeypatch) -> None:
@@ -986,6 +1140,38 @@ def test_ctrl_c_is_raised_without_waiting_on_a_piece_waiting_for_its_answer(
 
     assert waited < 5
     assert threads[0].daemon
+
+
+def test_a_failed_piece_is_raised_without_waiting_on_a_piece_waiting_for_its_answer(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, _in_pieces(), Storage(log)))
+    monkeypatch.setattr(builder_api, "_CANCEL_GRACE_SECONDS", 0.2, raising=False)
+    model = tmp_path / "lora.safetensors"
+    model.write_bytes(_CONTENT)
+    answer, hung = threading.Event(), threading.Event()
+
+    def put(url, data=None, **_kwargs):
+        b"".join(iter(lambda: data.read(3), b""))
+        if "part-1" in url:
+            hung.wait(5)
+            return _Response(500)
+        hung.set()
+        answer.wait(10)
+        return _Response(200)
+
+    monkeypatch.setattr("requests.put", put)
+    upload = _parts_upload()
+
+    began = time.monotonic()
+    try:
+        with pytest.raises(requests.HTTPError):
+            BuilderClient("https://builder.test", "tok").upload_blob_parts(upload.blob_id, upload.parts, model)
+        waited = time.monotonic() - began
+    finally:
+        answer.set()
+
+    assert waited < 5
+    assert "builder POST /v1/blobs/blob-1/complete" not in log
 
 
 @pytest.mark.parametrize("command", [["assets", "library", "upload"], ["model", "upload"]])

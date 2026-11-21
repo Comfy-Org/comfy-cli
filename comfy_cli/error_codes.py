@@ -2096,7 +2096,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A model file added straight to a deployment was not added: `comfy deploy run` was refused because the "
         "workflow names it (`message` is the gateway's sentence), or `comfy deploy models add` saw it fail while "
         "waiting. Why it failed is in comfy-deploy's log, never in the output.",
-        "remove it with `comfy deploy models rm <deployment> <file>` and add it again",
+        "remove it with `comfy deploy models rm <deployment> <file>`, wait until `comfy deploy models ls "
+        "<deployment>` no longer lists it, then add it again",
     ),
     ErrorCode(
         "deploy_model_removed",

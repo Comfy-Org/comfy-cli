@@ -17,7 +17,14 @@ import requests
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.builder_api import BlobFileError, BuilderAuthError, BuilderClient, PartsUpload
+from comfy_cli.builder_api import (
+    BlobFileError,
+    BlobPlanError,
+    BuilderAuthError,
+    BuilderClient,
+    BuilderCredentialRefused,
+    PartsUpload,
+)
 from comfy_cli.command.build import DEFAULT_BUILDER_URL
 from comfy_cli.command.build import _without_signed_query as without_signed_query
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
@@ -74,6 +81,11 @@ def _windows_word(value: str) -> str | None:
     return None
 
 
+def _operand(file: Path) -> str:
+    value = str(file)
+    return os.path.join(os.curdir, value) if value.startswith("-") else value
+
+
 def _pastes_literally(value: str) -> bool:
     return sys.platform != "win32" or _windows_word(value) is not None
 
@@ -104,7 +116,7 @@ class ModelsUnavailableError(DeployResolveError):
     code = "deploy_models_unavailable"
 
     def __init__(self, deployment_id: str, file: Path, folder: str) -> None:
-        given = (_Given(str(file), "<file>"), _Given(folder, "<folder>"))
+        given = (_Given(_operand(file), "<file>"), _Given(folder, "<folder>"))
         upload = _command("assets", "library", "upload", given[0], "--type", given[1])
         self.hint = f"To upload it to the workspace library instead: {upload}"
         named = [f"{arg.placeholder} is {arg.value}" for arg in given if not _pastes_literally(arg.value)]
@@ -132,8 +144,10 @@ class ModelNotAddedError(DeployResolveError):
 
     def __init__(self, deployment_id: str, entry: JsonObject) -> None:
         file = required_string(entry, "filename")
-        rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(file, "<file>"))
-        self.hint = f"run `{rm}`, then add it again"
+        deployment = _Given(deployment_id, "<deployment>")
+        rm = _command("deploy", "models", "rm", deployment, _Given(required_string(entry, "id"), "<id>"))
+        listing = _command("deploy", "models", "ls", deployment)
+        self.hint = f"run `{rm}`, wait until `{listing}` no longer lists it, then add it again"
         self.details = {"deploymentId": deployment_id, "model": _shown(entry)}
         super().__init__(_failed_line(file))
 
@@ -148,7 +162,7 @@ class ModelRemovedError(DeployResolveError):
             "models",
             "add",
             _Given(deployment_id, "<deployment>"),
-            _Given(str(file), "<file>"),
+            _Given(_operand(file), "<file>"),
             "--type",
             _Given(folder, "<folder>"),
         )
@@ -185,7 +199,7 @@ class ModelNotFoundError(DeployResolveError):
         shown: list[JsonValue] = [_shown(entry) for entry in matches]
         self.details = {"deploymentId": deployment_id, "name": name, "matches": shown}
         if matches:
-            listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"), "--json")
+            listing = _command("--json", "deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
             self.hint = f"name it as <folder>/<file>, or by the id `{listing}` gives"
             message = f"{name} names {len(matches)} model files of deployment {deployment_id}"
         else:
@@ -301,6 +315,8 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
     else:
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
+    required_string(entry, "id")
+    required_string(entry, "status")
     if wait:
         entry = _wait_ready(client, deployment_id, entry, renderer, file, folder)
     return {"deploymentId": deployment_id, "model": _shown(entry), "uploaded": not upload.deduplicated}
@@ -320,7 +336,11 @@ def _reported(renderer: Renderer) -> Iterator[None]:
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))
         raise typer.Exit(code=1) from error
+    except BuilderCredentialRefused as error:
+        renderer.error(code="deploy_not_signed_in", message="the builder refused the credential (401)", hint=error.hint)
+        raise typer.Exit(code=1) from error
     except (
+        BlobPlanError,
         ResponseTooLarge,
         TimeoutError,
         urllib.error.URLError,
