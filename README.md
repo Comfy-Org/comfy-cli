@@ -19,7 +19,7 @@ workflows, and call hosted partner image models, all from your terminal.
 ## Features
 
 - 🚀 One-command ComfyUI install and launch
-- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Reve, Gemini/nano-banana, Kling, Luma, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
+- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Reve, Gemini/nano-banana, Kling, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
 - 🔧 Custom node management — install, update, snapshot, bisect
 - 📦 Fast dependency resolution with `uv` (`--fast-deps`, `--uv-compile`)
 - 🗄️ Model downloads from CivitAI, Hugging Face, and direct URLs
@@ -513,7 +513,7 @@ local ComfyUI or workflow JSON required. It hits the same hosted partner nodes
 you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls. Image
 models (Flux, Ideogram, DALL·E, Recraft, Runway, Reve, xAI Grok, Google
 Gemini Flash Image aka **nano-banana**, …) and video models (Kling,
-Luma, Runway Gen-3, Pika, Vidu, Moonvalley, Hailuo, Grok video, ByteDance
+Runway Gen-3, Pika, Vidu, Hailuo, Grok video, ByteDance
 **Seedance**) are all covered; video jobs run async and the CLI polls until
 the result is ready.
 
@@ -553,9 +553,9 @@ with `comfy generate resume <model> <job_id>`. Examples:
 comfy generate kling --prompt "a paper boat drifting on a river at dusk" \
     --duration 5 --download boat.mp4
 
-comfy generate luma --prompt "..." --aspect_ratio 16:9 --async
+comfy generate vidu --prompt "..." --async
 # → prints job id; resume with:
-comfy generate resume luma <job_id> --download out.mp4
+comfy generate resume vidu <job_id> --download out.mp4
 ```
 
 **Gemini Flash Image (nano-banana)** — text-to-image and image edits in one

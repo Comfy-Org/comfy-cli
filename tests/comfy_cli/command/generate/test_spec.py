@@ -1,6 +1,7 @@
 """Tests for the openapi registry — verify the curated image allowlist resolves
 against the vendored spec and classifies each endpoint correctly."""
 
+import re
 from unittest import mock
 
 import pytest
@@ -601,6 +602,77 @@ def test_find_property_descends_top_level_composition():
     nested = {"anyOf": [{"oneOf": [{"properties": {"model": {"enum": ["m2"]}}}]}]}
     assert spec._find_property(nested, "model") == {"enum": ["m2"]}
     assert spec._find_property({"allOf": [{"type": "object"}]}, "model") is None
+
+
+# ── dead aliases — retired on /proxy, removed from the alias table ──
+
+
+@pytest.mark.parametrize("dead", ["kling-extend", "luma", "luma-i2v", "moonvalley-t2v", "moonvalley-i2v"])
+def test_retired_aliases_removed(dead):
+    """The five aliases dead on /proxy are gone from both tables, and typing
+    one yields the normal unknown-model error — not a silent skip."""
+    assert dead not in spec._ALIASES
+    endpoint_ids = {eid for eid, _cat, _poll in spec._ENDPOINT_ALLOWLIST}
+    assert spec.resolve_alias(dead) not in endpoint_ids
+    with pytest.raises(spec.SpecError) as excinfo:
+        spec.get_endpoint(dead)
+    assert "Unknown model" in str(excinfo.value)
+
+
+# ── _ROUTER_IDS — the alias → Router v2 id table ──
+
+
+def test_router_ids_exhaustive_over_aliases():
+    """Every alias has a Router-id row and vice versa (40 rows after the
+    dead-alias removal)."""
+    assert set(spec._ROUTER_IDS) == set(spec._ALIASES)
+    assert len(spec._ROUTER_IDS) == 40
+
+
+def test_router_ids_match_router_segment_pattern():
+    """Every non-None id matches Router's segment pattern, with `{model}`
+    allowed in the model segment of a family id."""
+    pattern = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9{}]+([._-][a-z0-9{}]+)*$")
+    for alias, entry in spec._ROUTER_IDS.items():
+        if entry is None:
+            continue
+        template, _default = entry
+        assert pattern.match(template), f"{alias}: {template!r} fails the Router segment pattern"
+
+
+def test_router_id_resolves_families_and_proxy_only():
+    assert spec.router_id("recraft") == "recraft/recraftv3"
+    assert spec.router_id("recraft", "recraftv4_pro") == "recraft/recraftv4_pro"
+    assert spec.router_id("vidu") is None
+    # i2v shares the base alias's id — Router selects image2video from the payload.
+    assert spec.router_id("kling-i2v") == spec.router_id("kling")
+    # A plain (non-family) id pins one model: naming that model resolves to it,
+    # any other model has no Router id rather than being swapped for the pinned one.
+    assert spec.router_id("runway-i2v") == "runway/gen4_turbo"
+    assert spec.router_id("runway-i2v", "gen4_turbo") == "runway/gen4_turbo"
+    assert spec.router_id("runway-i2v", "gen3a_turbo") is None
+    assert spec.router_id("grok", "grok-imagine-image-pro") is None
+    assert spec.router_id("flux-pro", "anything") is None
+    # An alias not in the table is treated as proxy-only.
+    assert spec.router_id("not-an-alias") is None
+
+
+@pytest.mark.parametrize("bad", ["", "../x", "a/b", "x?y", "x#y", "has space", "Upper", "trailing-", "recraftv3\n"])
+def test_router_id_rejects_malformed_family_model(bad):
+    """A model choice that is not a valid Router segment never yields an id."""
+    assert spec.router_id("recraft", bad) is None
+
+
+def test_router_id_defaults_resolve_to_valid_ids():
+    """Every row resolves, with no model given, to an id matching the Router
+    segment pattern — the template test alone cannot catch a bad default."""
+    pattern = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$")
+    for alias, entry in spec._ROUTER_IDS.items():
+        if entry is None:
+            continue
+        resolved = spec.router_id(alias)
+        assert resolved is not None, f"{alias}: family row has no default"
+        assert pattern.match(resolved), f"{alias}: {resolved!r} fails the Router segment pattern"
 
 
 # ── allowlist / alias drift against the bundled spec ──────────────────────
