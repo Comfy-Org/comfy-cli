@@ -85,6 +85,7 @@ class TestWriteConfig:
             mgr = _ConfigManagerCls.__new__(_ConfigManagerCls)
             mgr.config = configparser.ConfigParser()
             mgr.background = None
+            mgr._removed_keys = set()  # __new__ skips __init__; write_config commits removals
             mgr.write_config()
         assert (config_dir / "config.ini").exists()
 
@@ -189,3 +190,144 @@ class TestRemoveBackground:
         # the key already gone; it must not raise.
         config_mgr.clear_background_process()
         assert config_mgr.background is None
+
+
+class TestConcurrentWrites:
+    # NOTE: _make_config_manager exits its get_config_path patch when it
+    # returns; every set() below must run while the patch is active, or it
+    # writes to the real user config instead of tmp_path.
+    def test_set_merges_with_a_write_from_another_process(self, tmp_path):
+        """Two comfy processes hold their own in-memory snapshot. Whoever
+        wrote last used to erase the other's keys — the recorded pid of a
+        live background server was the costly loss (comfy stop then finds
+        nothing). set() now merges into the on-disk state under the lock."""
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            first = _ConfigManagerCls()
+            first.set("first", "1")
+
+            # The other process: its own snapshot, written after ours loaded.
+            second = _ConfigManagerCls()
+            second.set("second", "2")
+
+            first.set("third", "3")
+
+            final = _ConfigManagerCls()
+
+        assert final.get("first") == "1"
+        assert final.get("second") == "2"
+        assert final.get("third") == "3"
+
+    def test_set_writes_whole_file_and_no_tmp_debris(self, tmp_path):
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            mgr = _ConfigManagerCls()
+            mgr.set("some_key", "some_value")
+
+            # os.replace swapped a whole file in: the ini is complete, and no
+            # .config-*.tmp survived the rename.
+            content = (config_dir / "config.ini").read_text()
+            assert "some_key = some_value" in content
+            leftovers = [p.name for p in config_dir.iterdir() if p.name.startswith(".config-")]
+            assert leftovers == []
+
+
+class TestStateAdoption:
+    def test_adopted_foreign_keys_survive_a_later_write_config(self, tmp_path):
+        """After set() merges foreign state into the file, this instance's
+        later write_config() must not delete it (CodeRabbit round 2)."""
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            first = _ConfigManagerCls()
+            first.set("mine", "1")
+
+            other = _ConfigManagerCls()
+            other.set("theirs", "2")
+
+            # a direct in-memory mutation + write_config, the launch.py pattern
+            first.config["DEFAULT"]["pending"] = "3"
+            first.write_config()
+
+            final = _ConfigManagerCls()
+        assert final.get("theirs") == "2", "foreign key survived"
+        assert final.get("pending") == "3", "pending in-memory mutation survived"
+        assert final.get("mine") == "1"
+
+    def test_removal_markers_do_not_outlive_the_write_that_committed_them(self, tmp_path):
+        """A stale-pid auto-clear at load() must not erase a LIVE pid another
+        process recorded afterwards.
+
+        Process A loads with a stale background record on disk: load()
+        auto-clears it (which writes, committing the removal) and marks
+        CONFIG_KEY_BACKGROUND as removed. Process B records a live pid.
+        Process A then writes something unrelated — with a marker that
+        outlived its write, the adoption guard skipped B's live record and
+        A's write erased it from disk, orphaning the running server
+        (`comfy stop` then finds nothing)."""
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        (config_dir / "config.ini").write_text(
+            f"[DEFAULT]\n{constants.CONFIG_KEY_BACKGROUND} = ('localhost', 8188, 99999)\n"
+        )
+
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=False),
+        ):
+            a = _ConfigManagerCls()
+        assert a.get(constants.CONFIG_KEY_BACKGROUND) is None, "stale record auto-cleared"
+
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            b = _ConfigManagerCls()
+            b.set(constants.CONFIG_KEY_BACKGROUND, "('localhost', 8188, 4242)")
+
+        with patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)):
+            a.set("enable_tracking", "False")
+
+        parser = configparser.ConfigParser()
+        parser.read(config_dir / "config.ini")
+        assert parser["DEFAULT"][constants.CONFIG_KEY_BACKGROUND] == "('localhost', 8188, 4242)", (
+            "B's live background pid must survive A's unrelated write"
+        )
+
+    def test_section_adoption_does_not_copy_default_keys_into_sections(self, tmp_path):
+        """items() mixes the [DEFAULT] section into every concrete section, so
+        a DEFAULT key removed from this instance's own in-memory DEFAULT must
+        not leak into the adopted concrete sections as a real option."""
+        config_dir = tmp_path / "comfy-cli"
+        config_dir.mkdir()
+        (config_dir / "config.ini").write_text("[DEFAULT]\nshared = default-value\n\n[other]\nown = own-value\n")
+
+        with (
+            patch.object(_ConfigManagerCls, "get_config_path", return_value=str(config_dir)),
+            patch("comfy_cli.config_manager.is_running", return_value=True),
+        ):
+            mgr = _ConfigManagerCls()
+            # drop the default from this snapshot only, the launch.py pattern
+            mgr.config["DEFAULT"].pop("shared")
+            mgr.write_config()
+
+        parser = configparser.ConfigParser()
+        parser.read(config_dir / "config.ini")
+        assert parser.has_section("other")
+        assert parser["other"]["own"] == "own-value"
+        # parser["other"] mixes in [DEFAULT], so check the written [other]
+        # block itself: the default must not have leaked into it as a real
+        # option (a naive adoption loop would put it there permanently)
+        other_block = (config_dir / "config.ini").read_text().split("[other]")[1]
+        assert "shared" not in other_block, "DEFAULT leaked into the section"
