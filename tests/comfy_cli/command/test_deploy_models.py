@@ -806,6 +806,30 @@ def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(t
     assert " rm " not in error["hint"]
 
 
+def test_a_file_whose_removal_starts_while_waited_on_says_to_wait_until_it_is_gone_before_adding_again(
+    tmp_path, monkeypatch
+) -> None:
+    # Given a file that reads removing while it is being added, still listed until cleanup drops it
+    log: list[str] = []
+    control, storage = Control(log, statuses=("adding", "removing")), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    # When
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    # Then
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_model_removed"
+    assert error["message"] == (
+        "lora.safetensors is being removed from deployment dep-1; its removal was started while it was being added"
+    )
+    add = shlex.join(["comfy", "deploy", "models", "add", "dep-1", str(model), "--type", "loras"])
+    assert error["hint"] == f"wait until `comfy deploy models ls dep-1` no longer lists it, then add it again: `{add}`"
+    assert error["details"]["model"]["status"] == "removing"
+    assert " rm " not in error["hint"]
+
+
 # --- ls ---------------------------------------------------------------------------
 
 _LISTED: list[JsonObject] = [

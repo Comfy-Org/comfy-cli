@@ -23,7 +23,8 @@ history.
   and remove one. `add` uploads in pieces, 8 at a time, adds the file before
   its bytes land, and waits until it is ready (`--no-wait` returns once sent),
   for up to 30 minutes: past that it exits 75 with `deploy_model_wait_timeout`,
-  and a file removed while being added exits 1 with `deploy_model_removed`;
+  and a file whose removal starts while it is being added exits 1 with
+  `deploy_model_removed` (add it again once `ls` no longer lists it);
   where adding models is not on it exits 1 with `deploy_models_unavailable`
   before sending the pieces. A builder that cannot take pieces gets one PUT,
   and the file is added once it ends, so there the whole file is sent before

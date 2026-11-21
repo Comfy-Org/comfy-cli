@@ -2100,10 +2100,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_model_removed",
-        "`comfy deploy models add` was waiting on a model file that was removed from the deployment while it was "
-        "being added: it left the listing, or reads `removing`. It is no longer on the deployment, so there is "
-        "nothing to remove. `details.model` is the entry as last read.",
-        "add it again with `comfy deploy models add <deployment> <file> --type <folder>`",
+        "`comfy deploy models add` was waiting on a model file whose removal from the deployment was started while "
+        "it was being added. Either it left the listing and is no longer on the deployment, or it still reads "
+        "`removing` and comfy-deploy refuses to add the same name until the removal finishes. `details.model` is "
+        "the entry as last read; `details.model.status` is `removing` for the second.",
+        "wait until `comfy deploy models ls <deployment>` no longer lists it, then add it again with "
+        "`comfy deploy models add <deployment> <file> --type <folder>`; there is nothing to remove",
     ),
     ErrorCode(
         "deploy_model_wait_timeout",

@@ -1684,3 +1684,18 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
     assert "Do not fetch it again" in text
     assert "`spend_consent_required`" in text
     assert "`--allow-spend`" in text
+
+
+def test_deploy_skills_say_a_file_being_removed_while_added_is_added_again_only_once_it_is_gone():
+    """`deploy_model_removed` covers a file that left the listing and one still
+    listed as `removing`; comfy-deploy refuses to add the same name until the
+    removal finishes, so each place that names the code says to wait until `ls`
+    no longer lists it before adding it again."""
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_model_removed` |")
+    )
+    assert "`comfy deploy models ls <deployment>` no longer lists it" in row
+    deploy = " ".join(skill_content("comfy-deploy").split())
+    assert "`deploy_model_removed` (once `ls` no longer lists it, add it again)" in deploy

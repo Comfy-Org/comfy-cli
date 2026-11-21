@@ -175,9 +175,16 @@ class ModelRemovedError(DeployResolveError):
             "--type",
             _Given(folder, "<folder>"),
         )
-        self.hint = f"add it again: `{add}`"
         self.details = {"deploymentId": deployment_id, "model": _shown(entry)}
-        super().__init__(f"{name} is no longer on deployment {deployment_id}; it was removed while being added")
+        if required_string(entry, "status") != "removing":
+            self.hint = f"add it again: `{add}`"
+            super().__init__(f"{name} is no longer on deployment {deployment_id}; it was removed while being added")
+            return
+        listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
+        self.hint = f"wait until `{listing}` no longer lists it, then add it again: `{add}`"
+        super().__init__(
+            f"{name} is being removed from deployment {deployment_id}; its removal was started while it was being added"
+        )
 
 
 class ModelWaitTimeoutError(DeployResolveError):
