@@ -143,6 +143,14 @@ history.
   alone, because one name-keyed slot belongs to the final occurrence and writing
   an earlier one's value there would be a corrupt read rather than a stale one.
 
+- Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
+  `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
+  the ComfyUI canvas as a workflow. The run sends the canvas graph as
+  `extra_data.extra_pnginfo.workflow`, the same as the editor's Queue button,
+  so save nodes (SaveImage, VHS Video Combine and others) write `workflow`
+  next to `prompt`. Before, the files carried only `prompt` and dropped in as a
+  plain image or video. Applies to local and `--where cloud` runs; API-format
+  inputs are unchanged.
 - A long partner-node run on a local ComfyUI, signed in with `comfy cloud
   login`, no longer stops with "Unauthorized: Please login first" after the
   provider task was created, wherever Comfy Cloud issues partner-node tokens
