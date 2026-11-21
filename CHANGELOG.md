@@ -99,6 +99,14 @@ history.
 
 ### Fixed
 
+- Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
+  `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
+  the ComfyUI canvas as a workflow. The run sends the canvas graph as
+  `extra_data.extra_pnginfo.workflow`, the same as the editor's Queue button,
+  so save nodes (SaveImage, VHS Video Combine and others) write `workflow`
+  next to `prompt`. Before, the files carried only `prompt` and dropped in as a
+  plain image or video. Applies to local and `--where cloud` runs; API-format
+  inputs are unchanged.
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
