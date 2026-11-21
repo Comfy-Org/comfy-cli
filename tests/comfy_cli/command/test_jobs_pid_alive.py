@@ -10,8 +10,10 @@ it was asked to inspect.
 
 from __future__ import annotations
 
+import gc
 import subprocess
 import sys
+import time
 
 import psutil
 import pytest
@@ -49,13 +51,29 @@ def test_live_child_is_alive_and_survives_the_probe():
 
 
 def test_dead_child_is_not_alive():
-    """A terminated *and reaped* child reads as dead."""
+    """A terminated *and reaped* child reads as dead.
+
+    On Windows the pid stays allocated while any handle to the exited
+    process is open — including the one the Popen object itself holds —
+    so psutil can still report the pid as existing for a moment after
+    wait() returns (the flake on windows-latest). Drop the handle first,
+    then give the probe a bounded window instead of a single immediate
+    assertion: a momentary pid-exists report is kernel pid cleanup, not
+    a live process."""
     p = subprocess.Popen(_SLEEPER)
+    pid = p.pid
     p.terminate()
     # Reap before probing: on POSIX an unreaped zombie still exists as a pid.
     p.wait()
+    del p  # release the handle that keeps the pid allocated on Windows
+    gc.collect()
 
-    assert _is_pid_alive(p.pid) is False
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if _is_pid_alive(pid) is False:
+            return
+        time.sleep(0.05)
+    assert _is_pid_alive(pid) is False
 
 
 def test_non_positive_pids_are_rejected():
