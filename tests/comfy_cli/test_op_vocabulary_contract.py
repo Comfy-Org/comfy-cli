@@ -13,6 +13,7 @@ tests pin it two ways so neither the doc nor the code can drift silently:
 
 from __future__ import annotations
 
+import copy
 import re
 import uuid
 from pathlib import Path
@@ -118,6 +119,15 @@ def _object_info() -> dict[str, Any]:
             "output_name": [],
             "category": "test",
             "display_name": "Tiny Sink",
+            "python_module": "nodes",
+        },
+        "TinyNoise": {
+            "input": {"required": {"noise_seed": ["INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}]}},
+            "input_order": {"required": ["noise_seed"]},
+            "output": ["NOISE"],
+            "output_name": ["NOISE"],
+            "category": "sampling",
+            "display_name": "Tiny Noise",
             "python_module": "nodes",
         },
     }
@@ -251,3 +261,48 @@ def test_clear_rejected_in_batch_with_registered_hint():
 
 def test_load_image_output_is_not_treated_as_a_ui_only_node():
     assert "LoadImageOutput" not in workflow_ops.UI_ONLY_NODE_TYPES
+
+
+# ---------------------------------------------------------------------------
+# 8. amendment v1.15: a digit string on an INT widget is minted as the number
+# ---------------------------------------------------------------------------
+
+
+def test_int_digit_string_is_minted_as_the_number_with_a_recorded_rewrite():
+    """Doc section 24: the minted ``value`` is the int, the rewrite is a
+    ``normalized_value`` warning with the same keys as the §1.3 rewrites, and
+    replaying an op that still carries the string writes the same int."""
+    g = _graph()
+    wf: dict[str, Any] = {"nodes": [], "links": []}
+    wf, add_op = workflow_ops.add_node(wf, g, "TinyNoise")
+    node_id = add_op["node_id"]
+    base = copy.deepcopy(wf)
+
+    wf, op = workflow_ops.set_widget(wf, g, node_id, "noise_seed", "424242")
+    assert op["value"] == 424242 and type(op["value"]) is int
+    assert op["warnings"] == [
+        {
+            "code": "normalized_value",
+            "field": "noise_seed",
+            "message": "noise_seed is an INT widget; wrote '424242' as the number 424242",
+            "from": "424242",
+            "to": 424242,
+        }
+    ]
+
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), dict(op, value="424242"), g)
+    for doc in (wf, replayed):
+        node = next(n for n in doc["nodes"] if n["id"] == node_id)
+        # A seed-named INT gets its implicit control companion (section 12.4).
+        assert node["widgets_values"][0] == 424242 and type(node["widgets_values"][0]) is int
+
+
+@pytest.mark.parametrize("value", ["high", "1.5", "+5"])
+def test_int_non_digit_string_is_still_rejected_at_mint_and_replay(value):
+    g = _graph()
+    wf, add_op = workflow_ops.add_node({"nodes": [], "links": []}, g, "TinyNoise")
+    with pytest.raises(ValueError, match=r"noise_seed: expected INT, got str"):
+        workflow_ops.set_widget(copy.deepcopy(wf), g, add_op["node_id"], "noise_seed", value)
+    _, good = workflow_ops.set_widget(copy.deepcopy(wf), g, add_op["node_id"], "noise_seed", 1)
+    with pytest.raises(ValueError, match=r"noise_seed: expected INT, got str"):
+        workflow_ops.apply_op(copy.deepcopy(wf), dict(good, value=value), g)
