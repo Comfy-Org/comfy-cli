@@ -76,9 +76,11 @@ class _Response:
 
 
 class Storage:
-    def __init__(self, log: list[str], refuse: set[str] | None = None) -> None:
+    def __init__(self, log: list[str], refuse: set[str] | None = None, answers: dict[str, int] | None = None) -> None:
         self.log = log
         self.refuse = set(refuse or ())
+        self.answers = dict(answers or {})
+        self.redirects: list[bool] = []
         self.puts: list[tuple[str, bytes, dict, int | None]] = []
         self.landed: set[int] = set()
         self._lock = threading.Lock()
@@ -89,6 +91,9 @@ class Storage:
         with self._lock:
             self.log.append(f"put {url}")
             self.puts.append((url, body, dict(headers or {}), size))
+            self.redirects.append(allow_redirects)
+            if url in self.answers:
+                return _Response(self.answers[url])
             if url in self.refuse:
                 self.refuse.discard(url)
                 return _Response(403)
@@ -324,6 +329,66 @@ def test_a_piece_sent_again_on_a_fresh_link_is_counted_once_in_the_progress(tmp_
 
     assert len([url for url, _, _, _ in storage.puts if "part-2" in url]) == 2
     assert sum(counted) == len(_CONTENT)
+
+
+def _pieces_against(monkeypatch, tmp_path: Path, storage: Storage, answer: JsonObject) -> tuple:
+    log = storage.log
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", Builder(log, answer, storage))
+    monkeypatch.setattr("requests.put", storage)
+    model = tmp_path / "lora.safetensors"
+    model.write_bytes(_CONTENT)
+    plan = builder_api._blob_parts(answer)
+    return log, lambda: BuilderClient("https://builder.test", "tok").upload_blob_parts("blob-1", plan, model)
+
+
+def test_a_piece_storage_already_holds_counts_as_landed(tmp_path, monkeypatch) -> None:
+    storage = Storage([], answers={"https://storage.test/part-2?sig=a": 412})
+    log, upload = _pieces_against(monkeypatch, tmp_path, storage, _in_pieces())
+
+    upload()
+
+    assert [url for url, _, _, _ in storage.puts if "part-2" in url] == ["https://storage.test/part-2?sig=a"]
+    assert "builder POST /v1/blobs/blob-1/parts" not in log
+    assert "builder POST /v1/blobs/blob-1/complete" in log
+
+
+def test_a_piece_put_answered_with_a_redirect_is_refused_not_followed(tmp_path, monkeypatch) -> None:
+    storage = Storage([], answers={"https://storage.test/part-2?sig=a": 307})
+    log, upload = _pieces_against(monkeypatch, tmp_path, storage, _in_pieces())
+
+    with pytest.raises(requests.HTTPError, match="redirected \\(307\\); refusing to follow"):
+        upload()
+
+    assert storage.redirects and not any(storage.redirects)
+    assert "builder POST /v1/blobs/blob-1/complete" not in log
+
+
+def test_the_first_failed_piece_stops_the_pieces_still_queued(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(builder_api, "_PARTS_AT_ONCE", 1)
+    storage = Storage([], answers={"https://storage.test/part-1?sig=a": 500})
+    log, upload = _pieces_against(monkeypatch, tmp_path, storage, _in_pieces())
+
+    with pytest.raises(requests.HTTPError, match="500"):
+        upload()
+
+    assert [url for url, _, _, _ in storage.puts] == ["https://storage.test/part-1?sig=a"]
+    assert "builder POST /v1/blobs/blob-1/complete" not in log
+
+
+def test_a_refresh_that_leaves_out_a_landed_piece_drops_its_old_link(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(builder_api, "_PARTS_AT_ONCE", 1)
+    storage = Storage([])
+    storage.landed.add(3)
+    answer = {"blobId": "blob-1", "deduplicated": False, "parts": [*_parts(1), *_parts(2, 3, expires=_EXPIRED)]}
+    log, upload = _pieces_against(monkeypatch, tmp_path, storage, answer)
+
+    upload()
+
+    assert sorted(url for url, _, _, _ in storage.puts) == [
+        "https://storage.test/part-1?sig=a",
+        "https://storage.test/part-2?sig=fresh",
+    ]
+    assert "builder POST /v1/blobs/blob-1/complete" in log
 
 
 def test_an_add_answer_with_no_entry_is_a_server_error_even_without_waiting(tmp_path, monkeypatch) -> None:
