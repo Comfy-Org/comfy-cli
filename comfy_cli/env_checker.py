@@ -108,8 +108,12 @@ def check_comfy_server_running(port=8188, host="localhost", timeout: float = 5.0
     # actually probing the server, not for every CLI invocation.
     import requests
 
+    from comfy_cli.http import USAGE_SOURCE_HEADERS
+
     try:
-        response = requests.get(f"http://{_bracket_host(host)}:{port}/history", timeout=timeout)
+        response = requests.get(
+            f"http://{_bracket_host(host)}:{port}/history", headers=USAGE_SOURCE_HEADERS, timeout=timeout
+        )
         return response.status_code == 200
     except requests.exceptions.RequestException:
         return False
