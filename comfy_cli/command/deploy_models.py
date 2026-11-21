@@ -88,6 +88,12 @@ def _command(*args: str | _Given) -> str:
     return shlex.join(["comfy", *(arg.value if isinstance(arg, _Given) else arg for arg in args)])
 
 
+def _where(*given: _Given) -> str:
+    if sys.platform != "win32":
+        return ""
+    return ", where " + " and ".join(f"{arg.placeholder} is {arg.value}" for arg in given)
+
+
 @runtime_checkable
 class DeploymentModelsClient(DeploymentListClient, Protocol):
     def add_deployment_model(self, deployment_id: str, blob_id: str, folder: str, /) -> JsonObject: ...
@@ -103,9 +109,9 @@ class ModelsUnavailableError(DeployResolveError):
     def __init__(self, deployment_id: str, file: Path, folder: str) -> None:
         given = (_Given(_operand(file), "<file>"), _Given(folder, "<folder>"))
         upload = _command("assets", "library", "upload", given[0], "--type", given[1])
-        self.hint = f"To upload it to the workspace library instead: {upload}"
-        if sys.platform == "win32":
-            self.hint += f", where <file> is {file} and <folder> is {folder}"
+        self.hint = (
+            f"To upload it to the workspace library instead: {upload}{_where(_Given(str(file), '<file>'), given[1])}"
+        )
         self.details = {"deploymentId": deployment_id}
         super().__init__(_NOT_ON)
 
@@ -327,17 +333,19 @@ def _withdraw(
     entry_id, name = entry.get("id"), entry.get("filename")
     if not isinstance(entry_id, str) or not isinstance(name, str):
         return
-    listing = _command("deploy", "models", "ls", _Given(deployment_id, "<deployment>"))
-    rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(entry_id, "<id>"))
+    deployment, entry_given = _Given(deployment_id, "<deployment>"), _Given(entry_id, "<id>")
+    listing = _command("deploy", "models", "ls", deployment)
+    rm = _command("deploy", "models", "rm", deployment, entry_given)
     stays = (
         f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no longer "
-        "lists it, then add it again"
+        f"lists it, then add it again{_where(deployment, entry_given)}"
     )
     if maybe_stored:
         hint = (
             f"{name} stays on the deployment, as the builder may have stored it, and it may still be adding: run "
             f"`{listing}` to see when it is ready. If it shows it failed, remove it with `{rm}`, wait until "
             f"`{listing}` no longer lists it, then add it again; the same `{rm}` cancels it while it is adding"
+            f"{_where(deployment, entry_given)}"
         )
     elif not isinstance(error, Exception):
         hint = stays
@@ -349,7 +357,7 @@ def _withdraw(
         else:
             hint = (
                 f"{name} was taken off the deployment again: wait until `{listing}` no longer lists it, then add it "
-                "again"
+                f"again{_where(deployment)}"
             )
     if not isinstance(error, Exception):
         renderer.warn(hint)

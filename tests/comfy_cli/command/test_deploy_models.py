@@ -555,6 +555,51 @@ def test_on_windows_the_hints_print_placeholders_and_name_the_real_values(monkey
     assert "deployment dep-1" in str(removed)
 
 
+class _Withdrawing:
+    def __init__(self, removal: BaseException | None = None) -> None:
+        self.removal = removal
+        self.removed: list[tuple[str, str]] = []
+        self.warned: list[str] = []
+
+    def remove_deployment_model(self, deployment_id: str, model_id: str) -> JsonObject:
+        self.removed.append((deployment_id, model_id))
+        if self.removal is not None:
+            raise self.removal
+        return {}
+
+    def warn(self, message: str, *, hint: str | None = None) -> None:
+        self.warned.append(message)
+
+
+@pytest.mark.parametrize(
+    ("raised", "maybe_stored", "removal", "named"),
+    [
+        (KeyboardInterrupt(), False, None, "<deployment> is dep-9 and <id> is model-1"),
+        (ConnectionResetError("reset"), True, None, "<deployment> is dep-9 and <id> is model-1"),
+        (
+            ConnectionResetError("reset"),
+            False,
+            ConnectionResetError("reset"),
+            "<deployment> is dep-9 and <id> is model-1",
+        ),
+        (ConnectionResetError("reset"), False, None, "<deployment> is dep-9"),
+    ],
+    ids=["ctrl-c", "join-unknown", "removal-failed", "taken-off"],
+)
+def test_on_windows_the_withdraw_hints_name_the_values_their_placeholders_stand_for(
+    monkeypatch, raised, maybe_stored, removal, named
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    side = _Withdrawing(removal)
+
+    deploy_models._withdraw(side, "dep-9", _ENTRY, raised, side, maybe_stored=maybe_stored)  # type: ignore[arg-type]
+
+    hint = raised.after_send  # type: ignore[attr-defined]
+    assert "comfy deploy models ls <deployment>" in hint
+    assert hint.endswith(f", where {named}")
+    assert side.warned == ([hint] if isinstance(raised, KeyboardInterrupt) else [])
+
+
 def test_elsewhere_the_library_hint_keeps_posix_shell_quoting(monkeypatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     model = PurePosixPath("/models/my lora.safetensors")
