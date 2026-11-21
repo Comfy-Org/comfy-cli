@@ -1486,3 +1486,41 @@ class TestSignInTokenPerOutput:
 
         assert sent == ["test-api-key"] * 4
         assert stored.refreshing_reads == []
+
+
+class TestAuthForUrl:
+    HDRS = {"Authorization": "Bearer cloud-token"}
+
+    def test_same_origin_keeps_credentials(self):
+        url = "https://fe-pr-12159.testenvs.comfy.org/api/view?filename=out.png"
+        base = "https://fe-pr-12159.testenvs.comfy.org"
+        assert transfer._auth_for_url(url, self.HDRS, base) == self.HDRS
+
+    def test_foreign_origin_gets_the_fetch_not_the_token(self):
+        url = "http://collector.example/x.png"
+        base = "https://api.comfy.org"
+        assert transfer._auth_for_url(url, self.HDRS, base) == {}
+
+    def test_scheme_downgrade_strips_credentials(self):
+        url = "http://api.comfy.org/x.png"
+        base = "https://api.comfy.org"
+        assert transfer._auth_for_url(url, self.HDRS, base) == {}
+
+    def test_no_credentials_is_a_no_op(self):
+        url = "http://127.0.0.1:8188/view?filename=out.png"
+        assert transfer._auth_for_url(url, {}, "http://127.0.0.1:8188") == {}
+
+
+class TestAuthForUrlPorts:
+    HDRS = {"Authorization": "Bearer cloud-token"}
+
+    def test_explicit_default_port_matches_implicit(self):
+        url = "https://api.comfy.org:443/api/view?filename=out.png"
+        assert transfer._auth_for_url(url, self.HDRS, "https://api.comfy.org") == self.HDRS
+
+    def test_non_default_port_strips_credentials(self):
+        url = "https://api.comfy.org:8443/api/view?filename=out.png"
+        assert transfer._auth_for_url(url, self.HDRS, "https://api.comfy.org") == {}
+
+    def test_malformed_port_never_gets_credentials(self):
+        assert transfer._auth_for_url("https://host:bad/x", self.HDRS, "https://host") == {}
