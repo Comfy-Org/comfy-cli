@@ -1175,6 +1175,28 @@ def test_reads_unanswered_for_the_whole_window_end_the_wait_not_the_file(tmp_pat
     assert 1 < log.count(f"deploy GET {_MODELS} 502") < 10
 
 
+def test_a_model_list_answered_without_its_models_fails_at_once_as_a_server_error(tmp_path, monkeypatch) -> None:
+    log: list[str] = []
+    control, storage = Control(log, statuses=("adding",)), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+
+    def no_models(url, target, *, method="GET", body=None, **kwargs):
+        if (method, urlsplit(url).path) == ("GET", _MODELS):
+            control.log.append(f"deploy GET {_MODELS}")
+            return 200, {"items": []}
+        return control(url, target, method=method, body=body, **kwargs)
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", no_models)
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["details"]["field"] == "models"
+    assert log.count(f"deploy GET {_MODELS}") == 1
+
+
 def test_a_file_removed_while_waited_on_says_so_and_hints_only_to_add_it_again(tmp_path, monkeypatch) -> None:
     log: list[str] = []
     control, storage = Control(log, statuses=("adding", _GONE)), Storage(log)

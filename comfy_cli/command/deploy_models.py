@@ -282,7 +282,7 @@ def _listing(client: DeploymentModelsClient, deployment_id: str, entry: JsonObje
     failures, since = 0, 0.0
     while True:
         try:
-            return _entries(client.list_deployment_models(deployment_id))
+            answer = client.list_deployment_models(deployment_id)
         except (DeployAPIError, ConnectionError, http.client.HTTPException) as error:
             if not _unanswered(error):
                 raise
@@ -292,6 +292,8 @@ def _listing(client: DeploymentModelsClient, deployment_id: str, entry: JsonObje
                 raise ModelWaitTimeoutError(deployment_id, entry, _clock() - started, error) from error
             _sleep(_UNANSWERED_DELAYS[failures])
             failures += 1
+            continue
+        return _entries(answer)
 
 
 def _wait_ready(
