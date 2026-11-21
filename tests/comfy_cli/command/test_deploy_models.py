@@ -403,6 +403,24 @@ def test_an_add_answer_with_no_entry_is_a_server_error_even_without_waiting(tmp_
     assert _envelope(result)["error"]["code"] == "deploy_server_error"
 
 
+@pytest.mark.parametrize("missing", ["id", "status"])
+def test_an_add_answer_missing_its_id_or_status_fails_before_any_piece_is_sent(tmp_path, monkeypatch, missing) -> None:
+    log: list[str] = []
+    control, storage = Control(log), Storage(log)
+    model, _ = _install(monkeypatch, tmp_path, control, _in_pieces(), storage)
+    answer = {key: value for key, value in _ENTRY.items() if key != missing}
+    monkeypatch.setattr(DeployClient, "add_deployment_model", lambda self, *_args: dict(answer))
+
+    result = _invoke("add", "dep-1", str(model), "--type", "loras")
+
+    assert result.exit_code == 1, result.output
+    error = _envelope(result)["error"]
+    assert error["code"] == "deploy_server_error"
+    assert error["details"]["field"] == missing
+    assert storage.puts == []
+    assert "builder POST /v1/blobs/blob-1/complete" not in log
+
+
 @pytest.mark.parametrize("size", [None, "four"])
 def test_a_piece_plan_with_a_bad_size_is_a_server_error_without_its_links(tmp_path, monkeypatch, size) -> None:
     log: list[str] = []

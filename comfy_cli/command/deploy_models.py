@@ -241,11 +241,14 @@ def _entries(answer: JsonObject) -> list[JsonObject]:
 
 def _added(client: DeploymentModelsClient, deployment_id: str, blob_id: str, folder: str, file: Path) -> JsonObject:
     try:
-        return client.add_deployment_model(deployment_id, blob_id, folder)
+        entry = client.add_deployment_model(deployment_id, blob_id, folder)
     except DeployAPIError as error:
         if error.status == 404 and error.details.get("server_code") not in _KNOWN_NOT_FOUND:
             raise ModelsUnavailableError(deployment_id, file, folder) from error
         raise
+    required_string(entry, "id")
+    required_string(entry, "status")
+    return entry
 
 
 def _send(
@@ -402,8 +405,6 @@ def add(file: Path, deployment: str, folder: str, *, wait: bool) -> JsonObject:
     else:
         _send(blobs, upload, file, item, renderer)
         entry = _added(client, deployment_id, upload.blob_id, folder, file)
-    required_string(entry, "id")
-    required_string(entry, "status")
     if wait:
         entry = _wait_ready(client, deployment_id, entry, renderer, file, folder)
     return {"deploymentId": deployment_id, "model": _shown(entry), "uploaded": not upload.deduplicated}
