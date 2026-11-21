@@ -312,7 +312,7 @@ def _withdraw(
     try:
         client.remove_deployment_model(deployment_id, entry_id)
     except Exception:
-        rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(name, "<file>"))
+        rm = _command("deploy", "models", "rm", _Given(deployment_id, "<deployment>"), _Given(entry_id, "<id>"))
         hint = (
             f"{name} stays on the deployment reading adding: remove it with `{rm}`, wait until `{listing}` no "
             "longer lists it, then add it again"

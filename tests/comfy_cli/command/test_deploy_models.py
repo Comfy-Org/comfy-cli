@@ -857,7 +857,7 @@ def test_a_failed_send_whose_removal_fails_names_the_rm_command(tmp_path, monkey
     assert f"deploy DELETE {_MODELS}/model-1 500" in log
     assert _envelope(result)["error"]["hint"] == (
         "lora.safetensors stays on the deployment reading adding: remove it with "
-        "`comfy deploy models rm dep-1 lora.safetensors`, wait until `comfy deploy models ls dep-1` no longer lists "
+        "`comfy deploy models rm dep-1 model-1`, wait until `comfy deploy models ls dep-1` no longer lists "
         "it, then add it again"
     )
 
@@ -874,7 +874,7 @@ def test_a_send_interrupted_by_ctrl_c_takes_the_entry_off_or_says_how(tmp_path, 
 
     assert result.exit_code == 130, result.output
     assert f"deploy DELETE {_MODELS}/model-1 500" in log
-    assert "remove it with `comfy deploy models rm dep-1 lora.safetensors`" in result.output
+    assert "remove it with `comfy deploy models rm dep-1 model-1`" in result.output
     assert "builder POST /v1/blobs/blob-1/complete" not in log
 
 
