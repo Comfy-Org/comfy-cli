@@ -165,6 +165,41 @@ def test_type_keyed_entries_still_absorb_by_their_type():
     assert api["9"]["inputs"]["model"] == {"type": "model", "value": "sd15.safetensors"}
 
 
+def test_a_declared_widgets_own_type_keyed_record_is_not_absorbed():
+    """A node with a real widget slot must never route through the Lora shortcut.
+
+    ``CurveEditor.curve`` serializes its own value as a record that happens to
+    carry a ``type`` key (``{"type": "linear", "points": [...]}``), the same
+    shape ``_absorb_dict_widget_values`` uses for a self-naming Power Lora
+    entry. Before this guard, the drawn curve landed under a bogus ``linear``
+    input and ``curve`` itself fell back to its schema default -- replacing the
+    user's curve with the identity curve while reporting nothing.
+    """
+    object_info = dict(_OBJECT_INFO)
+    object_info["CurveEditor"] = {
+        "input": {
+            "required": {
+                "curve": [
+                    "CURVE",
+                    {"default": {"type": "linear", "points": [[0, 0], [1, 1]]}, "socketless": True},
+                ]
+            }
+        },
+        "input_order": {"required": ["curve"]},
+        "output": [],
+        "output_name": [],
+    }
+    drawn_curve = {"type": "linear", "points": [[0, 0], [0.5, 0.8], [1, 1]]}
+    wf = {
+        "nodes": [{"id": 5, "type": "CurveEditor", "widgets_values": [drawn_curve]}],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, object_info)
+    assert api["5"]["inputs"]["curve"] == drawn_curve
+    assert "linear" not in api["5"]["inputs"]
+
+
 def test_a_lora_entry_mixed_with_a_record_still_takes_the_lora_path():
     """Deliberate, and stated: one absorbable entry still routes the whole node.
 

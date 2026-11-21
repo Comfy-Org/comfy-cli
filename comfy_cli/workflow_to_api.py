@@ -2513,7 +2513,15 @@ def _collect_widget_inputs(
     if not isinstance(widget_values, list):
         return {}
 
-    if any(_is_absorbable_dict(v) for v in widget_values):
+    # The Lora-stack shortcut below is for nodes with NO declared widget slots
+    # of their own (the dynamic Power Lora Loader row list). A node that DOES
+    # declare a widget absorbs its own dict-shaped value through the ordinary
+    # schema walk below instead -- otherwise a drawn curve's own ``{"type":
+    # "linear", "points": [...]}`` gets read as a self-naming Lora entry and
+    # lands under a bogus ``linear`` input while ``curve`` falls back to its
+    # schema default (comfy-cli#1171 review, CurveEditor.curve).
+    pre_absorb_schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
+    if not pre_absorb_schema_widgets and any(_is_absorbable_dict(v) for v in widget_values):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
