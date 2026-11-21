@@ -48,7 +48,7 @@ def _upgrade_pip(python: str) -> bool:
     try:
         result = subprocess.run(
             [python, "-m", "pip", "install", "-q", "-U", "pip"]
-            + ["--no-input", "--disable-pip-version-check", "--timeout", "5", "--retries", "1"],
+            + ["--no-input", "--disable-pip-version-check", "--retries", "1"],
             capture_output=True,
             timeout=60,
             check=False,
