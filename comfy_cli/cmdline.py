@@ -1535,9 +1535,10 @@ def install(
     if resolved_path is not None:
         comfy_path = resolved_path
 
-    if checker.python_version.major < 3 or checker.python_version.minor < 9:
+    if (checker.python_version.major, checker.python_version.minor) < (3, 9):
         rprint("[bold red]Python version 3.9 or higher is required to run ComfyUI.[/bold red]")
         rprint(f"You are currently using Python version {env_checker.format_python_version(checker.python_version)}.")
+        raise typer.Exit(code=1)
     platform = utils.get_os()
 
     if pr and (version not in {None, "nightly"} or commit):
