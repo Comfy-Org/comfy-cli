@@ -444,8 +444,8 @@ def execute(
             extra_data = {cred[0]: cred[1]}
 
     # Send the canvas graph with the run, as the editor's Queue button does, so
-    # save nodes write `workflow` into the file and it drags back as a workflow
-    # (PM-2637). Merged only after the credential gate above, which reads an
+    # save nodes write `workflow` into the file and it drags back as a workflow.
+    # Merged only after the credential gate above, which reads an
     # empty `extra_data` as "no explicit key".
     pnginfo = ui_workflow_extra_data(raw_workflow) if is_ui else None
     if pnginfo:
@@ -1272,7 +1272,7 @@ def execute_cloud(
     cloud_object_info: dict | None = None
 
     # Captured before the conversion below replaces `raw_workflow` with the API
-    # graph: the canvas graph rides the submit as extra_pnginfo (PM-2637).
+    # graph: the canvas graph rides the submit as extra_pnginfo.
     submit_extra_data = ui_workflow_extra_data(raw_workflow) if is_ui else None
 
     if is_ui:

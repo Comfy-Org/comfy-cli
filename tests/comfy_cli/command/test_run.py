@@ -273,7 +273,7 @@ class TestWorkflowExecutionAuth:
 
     def test_queue_sends_extra_pnginfo_in_the_body(self, workflow):
         """The canvas graph handed in as ``extra_data`` reaches the ``/prompt``
-        body under ``extra_pnginfo.workflow`` (PM-2637)."""
+        body under ``extra_pnginfo.workflow``."""
         canvas = {"nodes": [{"id": 1}], "links": []}
         ex = self._make_exec(workflow, extra_data={"extra_pnginfo": {"workflow": canvas}})
         with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
@@ -2558,7 +2558,7 @@ class TestExecuteUiWorkflow:
             assert MockExec.call_args.kwargs["extra_data"]["api_key_comfy_org"] == "sk-test"
 
     def test_ui_workflow_run_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file):
-        """PM-2637: the editor's Queue button sends the canvas graph as
+        """The editor's Queue button sends the canvas graph as
         ``extra_data.extra_pnginfo.workflow``; save nodes write it into the
         output file, which is what lets the file drag back as a workflow. A UI
         run from the CLI (how the Comfy agent submits) must send the same."""
@@ -2752,7 +2752,7 @@ class TestExecuteCloudAutoConvert:
         assert submitted_args[0] == self.CONVERTED
 
     def test_ui_workflow_submit_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file, fake_target):
-        """PM-2637, cloud path: the API graph is what runs, and the UI graph it
+        """Cloud path: the API graph is what runs, and the UI graph it
         came from rides ``extra_data.extra_pnginfo.workflow`` like an editor run."""
         from comfy_cli.comfy_client import SubmitResult
         from comfy_cli.command.run import execute_cloud
