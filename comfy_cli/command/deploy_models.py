@@ -451,7 +451,7 @@ def _reported(renderer: Renderer) -> Iterator[None]:
 
 @app.command("add", help="Upload a model file and add it to a deployment, with no new release.")
 @tracking.track_command("deploy")
-def add_cmd(
+def models_add_cmd(
     deployment: DeploymentArgument,
     file: Annotated[
         Path, typer.Argument(exists=True, dir_okay=False, readable=True, help="The model file.", show_default=False)
@@ -482,7 +482,7 @@ def add_cmd(
 
 @app.command("ls", help="List the model files added to a deployment: folder, name, size and status.")
 @tracking.track_command("deploy")
-def ls_cmd(deployment: DeploymentArgument) -> None:
+def models_ls_cmd(deployment: DeploymentArgument) -> None:
     renderer = get_renderer()
     with _reported(renderer):
         builder, client = _clients()
@@ -513,7 +513,7 @@ def _named(models: list[JsonObject], name: str) -> list[JsonObject]:
 
 @app.command("rm", help="Remove a model file added to a deployment, deleting it from the deployment's disk.")
 @tracking.track_command("deploy")
-def rm_cmd(
+def models_rm_cmd(
     ctx: typer.Context,
     deployment: DeploymentArgument,
     file: Annotated[

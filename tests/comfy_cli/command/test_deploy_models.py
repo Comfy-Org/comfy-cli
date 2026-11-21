@@ -1425,8 +1425,10 @@ def test_the_model_names_given_to_the_models_commands_are_not_tracked(tmp_path, 
     assert listed.exit_code == 0, listed.output
     assert len(asked) == 1
     started = dict(events)
-    assert started["deploy:rm_cmd"]["file"] == "<redacted>"
-    assert started["deploy:ls_cmd"] == {"deployment": "dep-1"}
+    assert started["deploy:models_rm_cmd"]["file"] == "<redacted>"
+    assert started["deploy:models_ls_cmd"] == {"deployment": "dep-1"}
+    assert "deploy:ls_cmd" not in started
+    assert "deploy:rm_cmd" not in started
     assert "client-secret" not in json.dumps(events)
 
 
@@ -1442,7 +1444,8 @@ def test_the_file_given_to_models_add_is_not_tracked(tmp_path, monkeypatch) -> N
     result = _invoke("add", "dep-1", str(model), "--type", "loras", "--no-wait")
 
     assert result.exit_code == 0, result.output
-    assert dict(events)["deploy:add_cmd"] == {"deployment": "dep-1", "folder": "loras", "wait": False}
+    assert dict(events)["deploy:models_add_cmd"] == {"deployment": "dep-1", "folder": "loras", "wait": False}
+    assert "deploy:add_cmd" not in dict(events)
     assert str(tmp_path) not in json.dumps(events)
 
 
