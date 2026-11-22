@@ -129,6 +129,12 @@ history.
   (`exact: true` for deployments, no `truncated` for releases), and the note
   saying it can read low is left out. `note` is empty when nothing is left to say.
 
+### Removed
+
+- `comfy generate` drops the `moonvalley-t2v` and `moonvalley-i2v` aliases and
+  the Moonvalley poller. Moonvalley shut down, and Comfy Cloud removed the
+  `/proxy/moonvalley/*` routes they called.
+
 ### Fixed
 
 - Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +

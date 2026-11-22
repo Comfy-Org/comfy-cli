@@ -136,18 +136,6 @@ def test_xai_video_polls_request_id(no_sleep, monkeypatch):
     assert captured["url"] == "/proxy/xai/v1/videos/req-1"
 
 
-def test_moonvalley_polls_prompts(no_sleep, monkeypatch):
-    captured = {}
-
-    def fake_get(url, **kw):
-        captured["url"] = url
-        return _resp({"id": "p-1", "status": "completed", "output_url": "https://cdn/m.mp4"})
-
-    monkeypatch.setattr("comfy_cli.command.generate.client.get", fake_get)
-    poll.get_poller("moonvalley")({"id": "p-1"}, api_key="k")
-    assert captured["url"] == "/proxy/moonvalley/prompts/p-1"
-
-
 def test_missing_id_raises(monkeypatch):
     monkeypatch.setattr("comfy_cli.command.generate.client.get", lambda *a, **kw: _resp({}))
     with pytest.raises(Exception, match="missing id"):
@@ -161,7 +149,7 @@ def test_kling_without_create_path_raises():
 
 def test_build_synthetic_initial_for_each_partner():
     """Sanity-check the resume helper for every registered partner."""
-    for name in ("kling", "luma", "minimax", "runway", "moonvalley", "pika", "vidu", "xai_video"):
+    for name in ("kling", "luma", "minimax", "runway", "pika", "vidu", "xai_video"):
         body = poll.build_synthetic_initial(name, "abc")
         assert poll.extract_job_id(name, body) == "abc", name
 

@@ -797,3 +797,13 @@ def test_find_property_shares_the_object_memo_across_union_branches(monkeypatch)
     monkeypatch.setattr(spec, "_schema_may_be_object", counted)
     assert spec._find_property(schema, "model") is None
     assert calls < 100
+
+
+@pytest.mark.parametrize("dead", ["moonvalley-t2v", "moonvalley-i2v"])
+def test_moonvalley_aliases_removed(dead):
+    assert dead not in spec._ALIASES
+    endpoint_ids = {eid for eid, _cat, _poll in spec._ENDPOINT_ALLOWLIST}
+    assert spec.resolve_alias(dead) not in endpoint_ids
+    with pytest.raises(spec.SpecError) as excinfo:
+        spec.get_endpoint(dead)
+    assert "Unknown model" in str(excinfo.value)

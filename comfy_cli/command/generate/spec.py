@@ -148,9 +148,6 @@ _ALIASES: dict[str, str] = {
     "hailuo": "minimax/video_generation",
     # Video — Runway Gen-3
     "runway-i2v": "runway/image_to_video",
-    # Video — Moonvalley
-    "moonvalley-t2v": "moonvalley/prompts/text-to-video",
-    "moonvalley-i2v": "moonvalley/prompts/image-to-video",
     # Video — Pika
     "pika": "pika/generate/2.2/t2v",
     "pika-i2v": "pika/generate/2.2/i2v",
@@ -253,9 +250,6 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     ("minimax/video_generation", "text-to-video", "minimax"),
     # Video — Runway
     ("runway/image_to_video", "image-to-video", "runway"),
-    # Video — Moonvalley
-    ("moonvalley/prompts/text-to-video", "text-to-video", "moonvalley"),
-    ("moonvalley/prompts/image-to-video", "image-to-video", "moonvalley"),
     # Video — Pika
     ("pika/generate/2.2/t2v", "text-to-video", "pika"),
     ("pika/generate/2.2/i2v", "image-to-video", "pika"),
