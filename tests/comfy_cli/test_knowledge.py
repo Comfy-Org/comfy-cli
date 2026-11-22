@@ -1764,6 +1764,7 @@ class TestNamedModelDisambiguation:
             "Qwen 2.1K",
             "Qwen 2.1İ",
             "Qwen\u0301 2.1",
+            "Qw\u200den 2.1",
             "Qwеn 2.1",  # Cyrillic e
         ],
     )
@@ -1784,6 +1785,7 @@ class TestNamedModelDisambiguation:
             "Qwen Image 2.1K",
             "Qwen Image 2.1İ",
             "Qwen\u0301 Image 2.1",
+            "Qw\u200den Image 2.1",
             "Qwеn Image 2.1",
         ],
     )
@@ -1898,6 +1900,18 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, mid) == mid
         assert knowledge.model_candidates(b, "Qwen 2.1") == []
 
+    @pytest.mark.parametrize("separator", ["\u00a0", "–", "—", "“", "™", "®"])
+    def test_unicode_separators_and_symbols_remain_suggestible(self, separator):
+        b = knowledge._index(
+            {"models": {"qwen-image-2-1": {"aliases": [f"Qwen Image 2.1 {separator} Master"]}}},
+            None,
+            source="env",
+            stale=False,
+            path="fixture",
+            mtime=0,
+        )
+        assert knowledge.model_candidates(b, f"Qwen{separator} 2.1") == ["qwen-image-2-1"]
+
     def test_future_image_vl_and_text_models_remain_an_explicit_choice(self, monkeypatch, capsys):
         # Synthetic future catalog: no preference for Image, VL, or text.
         ids = ["qwen-image-2-1", "qwen-vl-2-1", "qwen-text-2-1"]
@@ -1917,15 +1931,12 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, "Qwen 2.1") is None
         assert knowledge.model_candidates(b, "Qwen VL 2.1") == ["qwen-vl-2-1"]
 
-    def test_candidates_exclude_ids_that_do_not_resolve_to_themselves(self):
-        # Ids that differ only by case share one lowercase lookup key, so the
-        # second id is unreachable by `resolve <id>`; suggesting it would send
-        # the caller to retry an id that resolves to a different model.
+    def test_candidate_aliases_follow_trimmed_final_resolution(self):
         b = knowledge._index(
             {
                 "models": {
-                    "Acme-2-1": {"id": "Acme-2-1"},
-                    "acme-2-1": {"id": "acme-2-1", "aliases": ["Acme Turbo 2.1"]},
+                    "acme-pro-2-1": {},
+                    "acme-lite-2-1": {"aliases": [" acme-pro-2-1"]},
                 }
             },
             None,
@@ -1934,8 +1945,8 @@ class TestNamedModelDisambiguation:
             path="fixture",
             mtime=0.0,
         )
-        assert knowledge.resolve_id(b, "acme-2-1") == "Acme-2-1"
-        assert knowledge.model_candidates(b, "Acme 2.1") == ["Acme-2-1"]
+        assert knowledge.resolve_id(b, " acme-pro-2-1") == "acme-pro-2-1"
+        assert knowledge.model_candidates(b, "Acme Pro 2.1") == ["acme-pro-2-1"]
 
     def test_candidates_skip_aliases_that_target_a_missing_row(self):
         b = knowledge._index(

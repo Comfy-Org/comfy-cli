@@ -515,10 +515,13 @@ history.
   which model is intended before retrying `comfy knowledge resolve <exact-id>`.
   A single candidate is still only a suggestion: nothing is auto-resolved,
   downloaded or run. Substituted family words, different versions and names
-  with non-ASCII characters get no candidates. Exact canonical ids resolve
-  before case-folded aliases; case-distinct canonical ids require exact
-  spelling instead of arbitrarily choosing one. Other alias resolution,
-  `close_matches` and the hint for a name with no candidates are unchanged.
+  with non-ASCII letters, numbers, combining marks or controls get no
+  candidates; Unicode punctuation, symbols and separators remain valid
+  boundaries. Exact canonical ids resolve before case-folded aliases;
+  case-distinct canonical ids require exact spelling instead of arbitrarily
+  choosing one. Their ambiguous folded spelling is omitted from alias-based
+  `close_matches` and alias counts because it has no single owner. Other alias
+  resolution and the no-candidate hint are unchanged.
 
 ### Changed
 

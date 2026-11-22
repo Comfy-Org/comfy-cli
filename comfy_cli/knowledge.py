@@ -21,6 +21,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
@@ -352,10 +353,12 @@ def resolve(bundle: Bundle, query: str) -> dict | None:
 
 
 def _candidate_tokens(value: str) -> list[str]:
-    # Suggestions support ASCII names only. Never discard a Unicode qualifier,
-    # combining mark or digit, or normalize it into another family/version.
-    if not value.isascii():
-        return []
+    # Token text stays ASCII: discarding a Unicode letter, number, mark, or
+    # control could turn a different spelling into a misleading suggestion.
+    # Unicode punctuation, symbols, and separators are safe token boundaries.
+    for char in value:
+        if not char.isascii() and unicodedata.category(char)[0] not in {"P", "S", "Z"}:
+            return []
     return re.findall(r"[a-z]+|[0-9]+", value.lower())
 
 
@@ -375,10 +378,6 @@ def model_candidates(bundle: Bundle, query: str) -> list[str]:
     candidates: set[str] = set()
     for alias, model_id in bundle.candidate_aliases.items():
         if model_id not in bundle.models:
-            continue
-        # A case-only twin of another id loses the shared lowercase key, so
-        # `resolve <id>` would land on the other model; never suggest it.
-        if resolve_id(bundle, model_id) != model_id:
             continue
         words = _candidate_tokens(alias)
         if not words or words[0] != parts[0] or [word for word in words if word.isdigit()] != numbers:
@@ -792,12 +791,13 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     normalized_aliases = _normalized_map(aliases, ids=models)
 
     def indexed_target(alias: str) -> str | None:
-        if alias in models:
-            return alias
-        model_id = aliases.get(alias.lower())
+        raw = alias.strip()
+        if raw in models:
+            return raw
+        model_id = aliases.get(raw.lower())
         if model_id is None:
-            model_id = normalized_aliases.get(_normalize(alias))
-        return model_id
+            model_id = normalized_aliases.get(_normalize(raw))
+        return model_id if model_id in models else None
 
     candidate_aliases: dict[str, str] = {}
     for alias, mid in candidate_sources:
