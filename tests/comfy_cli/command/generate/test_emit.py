@@ -500,19 +500,21 @@ def test_build_workflow_single_element_list_unwraps():
     assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
 
 
-def test_build_workflow_two_images_chains_imagebatch():
+def test_build_workflow_two_images_fold_into_one_batch_images_node():
     wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg"]})
     loaders = {i: n for i, n in wf.items() if n["class_type"] == "LoadImage"}
-    batches = {i: n for i, n in wf.items() if n["class_type"] == "ImageBatch"}
+    batches = {i: n for i, n in wf.items() if n["class_type"] == "BatchImagesNode"}
     assert len(loaders) == 2 and len(batches) == 1
+    assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
     ((batch_id, batch),) = batches.items()
-    assert {batch["inputs"]["image1"][0], batch["inputs"]["image2"][0]} == set(loaders)
+    assert batch["inputs"] == {"images.image0": ["2", 0], "images.image1": ["3", 0]}
+    assert [loaders[i]["inputs"]["image"].rsplit("/", 1)[-1] for i in ("2", "3")] == ["a.jpg", "b.jpg"]
     assert wf["1"]["inputs"]["images"] == [batch_id, 0]
 
 
-def test_build_workflow_three_images_chains_two_batches():
+def test_build_workflow_three_images_use_one_node_with_three_slots():
     wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg", "c.jpg"]})
-    batches = [i for i, n in wf.items() if n["class_type"] == "ImageBatch"]
-    assert len(batches) == 2
-    # terminal batch feeds the partner node
-    assert wf["1"]["inputs"]["images"][0] in batches
+    batches = [i for i, n in wf.items() if n["class_type"] == "BatchImagesNode"]
+    assert len(batches) == 1
+    assert sorted(wf[batches[0]]["inputs"]) == ["images.image0", "images.image1", "images.image2"]
+    assert wf["1"]["inputs"]["images"] == [batches[0], 0]

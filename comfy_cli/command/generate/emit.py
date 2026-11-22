@@ -309,13 +309,6 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
 }
 
 
-# Core scaffolding `build_workflow` mints itself, exempt on the same grounds a
-# NodeSpec entry can be: the class is chosen here, not guessed. ImageBatch has
-# carried DEPRECATED since ComfyUI v0.35.0 — BatchImagesNode replaces it, but
-# folding the chain over changes emitted output, so that is its own change.
-_CORE_DEPRECATED_OK = frozenset({"ImageBatch"})
-
-
 def supported_models() -> list[str]:
     """Aliases that ``--emit-workflow`` knows how to render as a node."""
     return sorted(MODEL_NODE_MAP)
@@ -421,20 +414,21 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
                 "inputs": {"image": path},
             }
             loader_ids.append(loader_id)
-        # One file wires straight in; several fold through chained core
-        # ImageBatch nodes (2-input, always present) so the partner still
-        # receives a single IMAGE stream.
-        upstream, upstream_out = loader_ids[0], 0
-        for lid in loader_ids[1:]:
-            batch_id = str(next_id)
-            next_id += 1
-            workflow[batch_id] = {
-                "class_type": "ImageBatch",
-                "_meta": {"title": "batch reference images"},
-                "inputs": {"image1": [upstream, upstream_out], "image2": [lid, 0]},
-            }
-            upstream, upstream_out = batch_id, 0
-        node_inputs[node_key] = [upstream, upstream_out]
+        # One file wires straight in; several fold through ONE core
+        # BatchImagesNode, one autogrow slot per file in order, so the partner
+        # still receives a single IMAGE stream. Not ImageBatch: ComfyUI has
+        # flagged that 2-input class DEPRECATED since v0.35.0.
+        if len(loader_ids) == 1:
+            node_inputs[node_key] = [loader_ids[0], 0]
+            continue
+        batch_id = str(next_id)
+        next_id += 1
+        workflow[batch_id] = {
+            "class_type": "BatchImagesNode",
+            "_meta": {"title": "batch reference images"},
+            "inputs": {f"images.image{i}": [lid, 0] for i, lid in enumerate(loader_ids)},
+        }
+        node_inputs[node_key] = [batch_id, 0]
 
     # Scalar params → node inputs, honoring the explicit param_map.
     for flag, node_key in ns.param_map.items():
@@ -561,7 +555,7 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any, model: str) -> lis
     del graph  # structural mapping today; see docstring
     node_ids = {str(k) for k in api_wf}
     _alias, ns = _resolve_model(model)
-    deprecated_ok = ({ns.node_class} if ns.deprecated_ok else set()) | _CORE_DEPRECATED_OK
+    deprecated_ok = {ns.node_class} if ns.deprecated_ok else set()
 
     def alias(nid: Any) -> str:
         return f"gen{nid}"
