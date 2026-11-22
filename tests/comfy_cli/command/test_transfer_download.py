@@ -1464,6 +1464,25 @@ class TestSignInTokenPerOutput:
         assert sent == ["Bearer t0", "Bearer t1", "Bearer t2", "Bearer t3"]
         assert stored.refreshing_reads == [False, False, False]
 
+    def test_each_output_after_the_first_keeps_the_usage_source_header(self, monkeypatch, tmp_path):
+        stored = self._StoredSignIn(self._BASE, "t0")
+        sources: list[str | None] = []
+
+        def fake_open(req, timeout=None):
+            sources.append(req.get_header("Comfy-usage-source"))
+            return _FakeResp()
+
+        monkeypatch.setattr("comfy_cli.credentials.get_session", stored)
+        _write_state(self._target("t0"))
+        set_renderer(Renderer(mode=OutputMode.JSON, command="download"))
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=self._target("t0")),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=fake_open),
+        ):
+            transfer.execute_download(PROMPT_ID, out_dir=str(tmp_path / "out"))
+
+        assert sources == ["comfy-cli"] * 4
+
     def test_an_injected_token_is_sent_unchanged_beside_a_stored_sign_in(self, monkeypatch, tmp_path):
         stored = self._StoredSignIn(self._BASE, "stored-sign-in")
 

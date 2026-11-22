@@ -966,7 +966,7 @@ def execute_download(
 
     for idx, url in enumerate(output_urls):
         if idx and sign_in is not None:
-            auth_hdrs = _auth_headers(replace(target, auth_token=sign_in.current()))
+            auth_hdrs = {**USAGE_SOURCE_HEADERS, **_auth_headers(replace(target, auth_token=sign_in.current()))}
         entry = _download_one_url(
             url,
             idx,
