@@ -3272,7 +3272,10 @@ def _recorded_targets_warnings(prompt_id: str, record: Any) -> list[dict] | None
         return unchecked_warnings
     from comfy_cli.command.run import _targeted_run_warnings
 
-    return _targeted_run_warnings(record, targets, dict.fromkeys(run_graph), bool(job.output_node_ids_checked))
+    graph_outputs = _recorded_id_list(job.graph_output_node_ids) if job.graph_output_node_ids is not None else None
+    return _targeted_run_warnings(
+        record, targets, dict.fromkeys(run_graph), bool(job.output_node_ids_checked), graph_outputs
+    )
 
 
 def _print_snapshot_warnings(renderer, snap: dict) -> None:

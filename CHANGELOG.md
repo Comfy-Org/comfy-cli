@@ -25,6 +25,14 @@ history.
   the delivery consumers against its own 1-second budget, and the queued
   `command_finished` event went with them.
 
+- A cloud `comfy run --output-node-ids` (and `comfy jobs watch` / `jobs status`
+  on such a job) no longer warns `partial_execution_targets_ignored` when the
+  only output outside the targets is a cached preview from an intermediate
+  node such as Crop Image or Painter, which ComfyUI can replay at the end of a
+  run. Only output nodes outside the targets count. The submitted graph's
+  output nodes are kept on the job record, since `jobs watch` has no node
+  catalog; older records and runs without the catalog keep the old check.
+
 ### Changed
 
 - **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
