@@ -47,15 +47,23 @@ def test_an_unchanged_file_is_hashed_once_across_separate_commands(model: Path, 
     "replacement",
     [pytest.param(b"CHANGED-AND-LONGER", id="different size"), pytest.param(b"OTHER", id="identical size")],
 )
-def test_edited_content_is_hashed_again(model: Path, tmp_path: Path, replacement: bytes) -> None:
+def test_edited_content_with_changed_metadata_is_hashed_again(model: Path, tmp_path: Path, replacement: bytes) -> None:
     # Given
     digest = _CountingDigest()
     memo = tmp_path / "digests.json"
     cache = ModelDigestCache(digest, memo)
     cache(model)
+    before = model.stat()
 
     # When
     model.write_bytes(replacement)
+    # A fast rewrite can share the filesystem's timestamp tick. Exercise the
+    # two cache-key invalidations explicitly: size alone, or mtime alone.
+    # Same-size content with unchanged metadata is a separate cache limitation.
+    mtime = before.st_mtime_ns + 1_000_000_000 if len(replacement) == before.st_size else before.st_mtime_ns
+    os.utime(model, ns=(before.st_atime_ns, mtime))
+    after = model.stat()
+    assert (after.st_mtime_ns, after.st_size) != (before.st_mtime_ns, before.st_size)
     reread = ModelDigestCache(digest, memo)(model)
 
     # Then
