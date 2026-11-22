@@ -133,6 +133,29 @@ def test_plain_node_edit_updates_a_usable_named_sidecar():
     assert edited["nodes"][0]["widgets_values_named"] == {"value": 2}
 
 
+def test_group_node_edit_does_not_invent_a_missing_named_entry():
+    """Amendment A23 gate 2 applies uniformly, including to DynamicGroup nodes.
+
+    Before this PR, a group node's register was updated with
+    ``node["widgets_values_named"][input_name] = value``, which inserts the key
+    if absent. That insertion contradicted A23 gate 2 ("a register that does not
+    hold the name is not stale for it, and inventing an entry would publish a
+    value the producer deliberately omitted") just as much for a group node's
+    own plain widgets as for an ordinary node's. ``_update_named_widget_value``
+    is not gated on ``has_group``, so this is now uniform rather than a
+    group-node carve-out.
+    """
+    case = FIXTURE["cases"]["populated"]
+    workflow = copy.deepcopy(case["workflow"])
+    del workflow["nodes"][0]["widgets_values_named"]["after"]
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "after", "changed")
+
+    assert edited["nodes"][0]["widgets_values"][-1] == "changed"
+    assert "after" not in edited["nodes"][0]["widgets_values_named"]
+
+
 @pytest.mark.parametrize("shape", ["array", "object", "explicit_form"])
 @pytest.mark.parametrize(
     ("type_id", "param_type", "supplied", "expected"),
