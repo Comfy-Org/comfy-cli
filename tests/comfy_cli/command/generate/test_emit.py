@@ -518,3 +518,20 @@ def test_build_workflow_three_images_use_one_node_with_three_slots():
     assert len(batches) == 1
     assert sorted(wf[batches[0]]["inputs"]) == ["images.image0", "images.image1", "images.image2"]
     assert wf["1"]["inputs"]["images"] == [batches[0], 0]
+
+
+def test_build_workflow_refuses_an_empty_image_list():
+    # `--image '[]'` parses as an empty list. It used to crash on loader_ids[0];
+    # a BatchImagesNode with no slots would break the group's min of 1.
+    with pytest.raises(emit.EmitError, match="--image"):
+        emit.build_workflow("nano-banana", {"prompt": "p", "image": []})
+
+
+def test_build_workflow_refuses_more_images_than_batch_images_node_takes():
+    # BatchImagesNode's autogrow group allows at most 50 slots.
+    paths = [f"{i}.png" for i in range(emit._BATCH_IMAGES_MAX + 1)]
+    with pytest.raises(emit.EmitError, match="at most 50"):
+        emit.build_workflow("nano-banana", {"prompt": "p", "image": paths})
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": paths[:-1]})
+    (batch,) = [n for n in wf.values() if n["class_type"] == "BatchImagesNode"]
+    assert len(batch["inputs"]) == 50

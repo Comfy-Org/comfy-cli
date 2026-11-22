@@ -309,6 +309,11 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
 }
 
 
+# BatchImagesNode's autogrow group: template "image", prefix "image", max 50
+# (ComfyUI comfy_extras/nodes_post_processing.py, and cloud's object_info).
+_BATCH_IMAGES_MAX = 50
+
+
 def supported_models() -> list[str]:
     """Aliases that ``--emit-workflow`` knows how to render as a node."""
     return sorted(MODEL_NODE_MAP)
@@ -404,6 +409,13 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         if raw is None:
             continue
         paths = [str(Path(p).expanduser()) for p in (raw if isinstance(raw, list | tuple) else [raw])]
+        if not paths:
+            raise EmitError(f"--emit-workflow for {model!r} got an empty list for --{flag}; pass at least one file.")
+        if len(paths) > _BATCH_IMAGES_MAX:
+            raise EmitError(
+                f"--emit-workflow for {model!r} takes at most {_BATCH_IMAGES_MAX} files for --{flag} "
+                f"(the BatchImagesNode limit); got {len(paths)}."
+            )
         loader_ids: list[str] = []
         for path in paths:
             loader_id = str(next_id)
