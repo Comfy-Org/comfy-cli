@@ -131,6 +131,11 @@ history.
 
 ### Fixed
 
+- `comfy generate --emit-workflow` / `--emit-ops` with two or more `--image`
+  files no longer builds a chain of the deprecated `ImageBatch` node. The
+  images now go into one `BatchImagesNode` (one slot per image, in `--image`
+  order), so the emitted graph has no node marked deprecated in ComfyUI. N
+  images now give one batch node instead of N-1.
 - Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
   `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
   the ComfyUI canvas as a workflow. The run sends the canvas graph as
