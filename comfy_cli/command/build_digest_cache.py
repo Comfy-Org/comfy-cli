@@ -55,11 +55,11 @@ class ModelDigestCache:
     """A ``ModelDigest`` that reads a file only when its identity stamp moved.
 
     A hit requires the resolved path, ``st_mtime_ns`` **and** ``st_size`` to all
-    still match what was hashed; anything else — including an edit that happens
-    to preserve the size — misses and reads the file again. That asymmetry is
-    the whole design: a miss costs one hash, while a wrong hit would leave a
-    stale ``sha256`` in the spec, keep the ``blobId`` minted for the old bytes,
-    and publish a release built from content nobody uploaded.
+    still match what was hashed. A same-size replacement that also preserves or
+    restores the mtime is therefore a known stamp collision and can return the
+    cached digest; callers that replace files while retaining metadata must
+    invalidate the memo or move the mtime. All observable stamp changes miss and
+    read the file again.
 
     Each miss is persisted as it happens rather than at the end of the command,
     for the same reason `push` checkpoints its blob ids: work already paid for

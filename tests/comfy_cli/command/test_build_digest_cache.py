@@ -87,6 +87,25 @@ def test_a_moved_mtime_alone_is_enough_to_hash_again(model: Path, tmp_path: Path
     assert digest.reads == [model, model]
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="the documented identity stamp cannot detect a same-size rewrite whose mtime is restored",
+)
+def test_same_size_same_mtime_rewrite_is_hashed_again(model: Path, tmp_path: Path) -> None:
+    """Keep the known stamp collision executable instead of masking it with an mtime bump."""
+    digest = _CountingDigest()
+    memo = tmp_path / "digests.json"
+    ModelDigestCache(digest, memo)(model)
+    before = model.stat()
+
+    model.write_bytes(b"OTHER")
+    os.utime(model, ns=(before.st_atime_ns, before.st_mtime_ns))
+    reread = ModelDigestCache(digest, memo)(model)
+
+    assert reread == hashlib.sha256(b"OTHER").hexdigest()
+    assert digest.reads == [model, model]
+
+
 def test_a_corrupt_memo_falls_back_to_hashing(model: Path, tmp_path: Path) -> None:
     # Given
     digest = _CountingDigest()

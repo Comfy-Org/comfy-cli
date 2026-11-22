@@ -3572,20 +3572,93 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
     return resolve_ref(node_part, aliases), slot
 
 
-def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -> None:
+def _admission_write_applied(workflow: dict, op: dict) -> bool:
+    """Whether ``op`` won its LWW register and therefore changed this document."""
+    stamps = workflow.get("_widget_stamps")
+    if not isinstance(stamps, dict):
+        return False
+    actual = stamps.get(json.dumps(_write_target(op), default=str))
+    return actual == _stamp_key(op)
+
+
+def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | None, str]:
+    """Return the concrete catalog node/widget whose structure ``op`` changes.
+
+    A promoted write is stored on its subgraph host, but structural ownership
+    still comes from the interior widget backing that promoted input.
+    """
+    target = _write_target(op)
+    widget = target[2]
+    if op.get("path"):
+        return _navigate_subgraph_path(workflow, op["path"]), widget
+    node = _find_by_str(workflow, str(op["node_id"]))
+    if graph is None or node is None or not op.get("promoted"):
+        return node, widget
+
+    from comfy_cli.cql import promoted as _promoted
+
+    definitions = _promoted.defs_by_id(workflow)
+    instance_path = [str(s) for s in op["promoted"].get("instance_path") or [str(op["node_id"])]]
+    try:
+        instance = _navigate_subgraph_path(workflow, instance_path)
+        definition = definitions.get(str(instance.get("type", "")))
+        promoted = _promoted.find_promoted(definition, definitions, op["widget"]) if definition else None
+        source = _promoted.deepest_source(definition, promoted, definitions) if promoted else None
+        if source is not None:
+            source_path, source_widget = source
+            return _navigate_subgraph_path(workflow, [*instance_path, *source_path]), source_widget
+    except ValueError:
+        # A schema-less PrimitiveNode also carries positional ``promoted``
+        # metadata, but has no subgraph definition to resolve through.
+        pass
+    return node, widget
+
+
+def _admission_combo_children(m) -> dict[str, set[str]]:
+    """Collect structural children from every dynamic-combo option schema.
+
+    Equal dotted selector names can occur in separate outer variants. Their
+    descendants are unioned instead of letting the first flattened occurrence
+    hide the others.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    combos: dict[str, set[str]] = {}
+
+    def visit(port, depth: int) -> None:
+        """Union this selector occurrence into its dotted-name ownership entry."""
+        if depth >= _engine._MAX_DYNAMIC_COMBO_DEPTH or not port.dynamic_options or not port.is_dynamic_combo:
+            return
+        children = combos.setdefault(port.name, set())
+        for option in port.dynamic_options:
+            for child in _engine._dynamic_combo_option_ports(option, port.name):
+                if child.is_link:
+                    continue
+                children.add(child.name)
+                visit(child, depth + 1)
+
+    for port in m.inputs:
+        visit(port, 0)
+    return combos
+
+
+def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, None]) -> None:
     """Refuse producer batches that destroy an earlier child register.
 
     This is admission only; raw-op replay and consumer hidden values are unchanged.
     Minted ops supply canonical targets and normalized old/new values.
     """
+    if not _admission_write_applied(workflow, op):
+        return
     target = _write_target(op)
-    widget = target[2]
-    if op.get("path"):
-        node = _navigate_subgraph_path(workflow, op["path"])
-    else:
-        node = _find_by_str(workflow, str(op["node_id"]))
+    node, widget = _admission_schema_target(workflow, graph, op)
+    display_widget = op.get("inner_widget", op["widget"])
+    if graph is None:
+        written.setdefault((*target[:2], widget, None, display_widget), None)
+        return
     class_type = node.get("type", "") if node else ""
-    combos = graph.dynamic_combo_options(class_type)
+    m = graph.node(class_type)
+    combos = _admission_combo_children(m) if m is not None else {}
     destroyed: set[str] = set()
     seen: set[str] = set()
     if widget in combos and op.get("old") != op["value"]:
@@ -3597,12 +3670,10 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -
             if owner in seen:
                 continue
             seen.add(owner)
-            for option in combos[owner]["options"].values():
-                for child in option["widgets"]:
-                    destroyed.add(child)
-                    if child in combos:
-                        pending.append(child)
-    m = graph.node(class_type)
+            for child in combos[owner]:
+                destroyed.add(child)
+                if child in combos:
+                    pending.append(child)
     marker_owner = None
     if widget == "control_after_generate" and m is not None:
         from comfy_cli.cql import engine as _engine
@@ -3628,11 +3699,10 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: set[tuple]) -
         child_destroyed = earlier[3] in seen if earlier[2] == "control_after_generate" else earlier[2] in destroyed
         if child_destroyed or removed_row:
             raise ValueError(
-                f"destructive structural rebuild of {widget!r} would erase earlier batch write "
-                f"to {earlier[2]!r} on {target[1]}; put the selector/count before child writes "
-                "or split the edits into separate batches"
+                f"destructive structural rebuild of {display_widget!r} would erase earlier batch write "
+                f"to {earlier[4]!r} on {target[1]}; put the selector/count before child writes"
             )
-    written.add((*target, marker_owner))
+    written.setdefault((*target[:2], widget, marker_owner, display_widget), None)
 
 
 def apply_specs(
@@ -3721,7 +3791,7 @@ def _apply_specs_impl(
     ops: list[dict] = []
     replaced: dict[tuple, bool] = {}
     input_targets: set[str] = set()
-    widget_writes: set[tuple] = set()
+    widget_writes: dict[tuple, None] = {}
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:

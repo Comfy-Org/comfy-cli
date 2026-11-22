@@ -5,7 +5,7 @@ import copy
 import pytest
 
 from comfy_cli import workflow_ops as ops
-from comfy_cli.cql.engine import Graph
+from comfy_cli.cql.engine import DynamicGroupBindingError, Graph
 
 
 def graph():
@@ -24,6 +24,7 @@ def graph():
                                         "inputs": {
                                             "required": {
                                                 "mode": [["balanced", "quality"], {}],
+                                                "quality": ["STRING", {"default": "low"}],
                                             }
                                         },
                                     },
@@ -223,6 +224,7 @@ def test_child_then_selector_refuses_atomically(alias):
     ]
     with pytest.raises(ValueError, match="destructive.*rebuild") as caught:
         ops.apply_specs(wf, g, specs)
+    assert "separate batches" not in str(caught.value)
     assert caught.value.spec_index == len(prefix) + 1
     assert caught.value.spec_op == "set_widget"
     assert caught.value.applied_count == 0
@@ -241,6 +243,45 @@ def test_group_only_refuses_removed_written_rows(count, refuse):
         assert wf == before
     else:
         ops.apply_specs(wf, g, specs)
+
+
+def test_group_marker_uses_its_saved_row_field_name_for_shrink_admission():
+    marker = ["INT", {"default": 1, "control_after_generate": True}]
+    g = Graph.from_object_info(
+        {
+            "Gen": {
+                "input": {
+                    "required": {
+                        "rows": [
+                            "COMFY_DYNAMICGROUP_V3",
+                            {"min": 0, "max": 2, "template": {"required": {"seed": marker}}},
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    wf, added = ops.add_node({"nodes": [], "links": []}, g, "Gen")
+    nid = added["node_id"]
+    wf, _ = ops.set_widget(wf, g, nid, "rows", 1)
+    before = copy.deepcopy(wf)
+
+    with pytest.raises(ValueError, match=r"erase earlier batch write to 'rows\.0\.seed\.0'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [write(nid, "rows.0.seed.0", "randomize"), write(nid, "rows", 0)],
+        )
+
+    assert wf == before
+
+
+def test_count_then_group_child_passes():
+    g, wf, nid = fresh()
+
+    ops.apply_specs(wf, g, [write(nid, "rows", 1), write(nid, "rows.0.weight", 0.5)])
+
+    assert 0.5 in wf["nodes"][0]["widgets_values"]
 
 
 def test_noop_selector_scalar_prefix_and_selector_then_child_pass():
@@ -312,6 +353,203 @@ def test_nested_schema_owners(rebuild):
             [write(nid, "model.nested.text", "saved"), write(nid, rebuild, "base" if rebuild == "model" else "b")],
         )
     assert wf == before
+
+
+@pytest.mark.parametrize("rebuild", ["model", "model.choice"])
+def test_same_named_nested_selectors_keep_each_variants_ownership(rebuild):
+    def nested(child):
+        return [
+            "COMFY_DYNAMICCOMBO_V3",
+            {
+                "options": [
+                    {"key": "shown", "inputs": {"required": {child: ["STRING", {"default": ""}]}}},
+                    {"key": "hidden", "inputs": {"required": {}}},
+                ]
+            },
+        ]
+
+    g = Graph.from_object_info(
+        {
+            "Gen": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": "first", "inputs": {"required": {"choice": nested("first_child")}}},
+                                    {"key": "second", "inputs": {"required": {"choice": nested("second_child")}}},
+                                ]
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    wf, added = ops.add_node({"nodes": [], "links": []}, g, "Gen")
+    nid = added["node_id"]
+    wf, _ = ops.set_widget(wf, g, nid, "model", "second")
+    before = copy.deepcopy(wf)
+    rebuild_value = "first" if rebuild == "model" else "hidden"
+
+    with pytest.raises(ValueError, match=r"erase earlier batch write to 'model\.choice\.second_child'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [write(nid, "model.choice.second_child", "saved"), write(nid, rebuild, rebuild_value)],
+        )
+
+    assert wf == before
+
+
+def test_dynamic_group_inside_combo_remains_an_explicitly_unsupported_schema():
+    g = Graph.from_object_info(
+        {
+            "Gen": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": "base", "inputs": {"required": {}}},
+                                    {
+                                        "key": "rows",
+                                        "inputs": {
+                                            "required": {
+                                                "items": [
+                                                    "COMFY_DYNAMICGROUP_V3",
+                                                    {
+                                                        "min": 0,
+                                                        "max": 2,
+                                                        "template": {
+                                                            "required": {"weight": ["FLOAT", {"default": 1.0}]}
+                                                        },
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                    },
+                                ]
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    )
+
+    with pytest.raises(DynamicGroupBindingError, match="does not support DynamicGroup inside DynamicCombo"):
+        ops.add_node({"nodes": [], "links": []}, g, "Gen")
+
+
+def promoted_fresh():
+    g, interior, nid = fresh()
+    inner = interior["nodes"][0]
+    inner["inputs"] = [
+        {"name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "model"}, "link": 1},
+        {"name": "model.mode", "type": "COMBO", "widget": {"name": "model.mode"}, "link": 2},
+    ]
+    definition = {
+        "id": "definition",
+        "name": "Group",
+        "inputs": [
+            {"id": "selector", "name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "linkIds": [1]},
+            {"id": "child", "name": "model.mode", "type": "COMBO", "linkIds": [2]},
+        ],
+        "outputs": [],
+        "nodes": [inner],
+        "links": [
+            {
+                "id": 1,
+                "origin_id": -10,
+                "origin_slot": 0,
+                "target_id": nid,
+                "target_slot": 0,
+                "type": "COMFY_DYNAMICCOMBO_V3",
+            },
+            {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": nid, "target_slot": 1, "type": "COMBO"},
+        ],
+    }
+    host = {
+        "id": 9,
+        "type": "definition",
+        "inputs": [
+            {"name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "model"}, "link": None},
+            {"name": "model.mode", "type": "COMBO", "widget": {"name": "model.mode"}, "link": None},
+        ],
+        "outputs": [],
+        "properties": {},
+        "widgets_values": ["max", "balanced"],
+    }
+    return g, {"nodes": [host], "links": [], "definitions": {"subgraphs": [definition]}}, host["id"]
+
+
+def test_promoted_child_then_promoted_selector_refuses_atomically():
+    g, wf, nid = promoted_fresh()
+    before = copy.deepcopy(wf)
+
+    with pytest.raises(ValueError, match=r"erase earlier batch write to 'model\.mode'"):
+        ops.apply_specs(wf, g, [write(nid, "model.mode", "quality"), write(nid, "model", "base")])
+
+    assert wf == before
+
+
+def test_graphless_legacy_primitive_batch_still_applies():
+    wf = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "PrimitiveNode",
+                "inputs": [],
+                "outputs": [{"name": "STRING", "type": "STRING", "links": [], "widget": {"name": "value"}}],
+                "widgets_values": ["old"],
+            }
+        ],
+        "links": [],
+    }
+
+    result, stream, _ = ops.apply_specs(wf, None, [write(1, "value", "new")])
+
+    assert result["nodes"][0]["widgets_values"] == ["new"]
+    assert stream[0]["value"] == "new"
+
+
+@pytest.mark.parametrize("stale", ["child", "selector"])
+def test_stale_lww_writes_do_not_create_false_structural_conflicts(stale):
+    g, wf, nid = fresh()
+    stale_widget = "model.mode" if stale == "child" else "model"
+    stale_value = "balanced" if stale == "child" else "max"
+    wf, _ = ops.set_widget(wf, g, nid, stale_widget, stale_value, actor="peer", base_version=10)
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [write(nid, "model.mode", "quality"), write(nid, "model", "base")],
+        base_version=5,
+    )
+
+    assert len(stream) == 2
+    node = result["nodes"][0]
+    selector = ops._widget_index(g, "Gen", "model", node["widgets_values"], node_id=nid, node=node)
+    assert node["widgets_values"][selector] == ("base" if stale == "child" else "max")
+
+
+def test_diagnostic_names_the_earliest_conflicting_write(monkeypatch):
+    monkeypatch.setattr(ops, "mint_id", lambda: 1)
+    g, wf, nid = fresh()
+
+    with pytest.raises(ValueError, match=r"erase earlier batch write to 'model\.mode'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [
+                write(nid, "model.mode", "quality"),
+                write(nid, "model.quality", "high"),
+                write(nid, "model", "base"),
+            ],
+        )
 
 
 def test_interior_identity_and_unrelated_instance():
