@@ -38,6 +38,23 @@ every mint creates a server-side session.
   token again, and is sent, if the mint fails, under the same 15-minute rule.
   No mint is made while the store cannot be written: the token would be lost,
   and every run would mint another.
+- A failed mint is not tried again for 10 minutes. Every failure counts: any
+  HTTP error (a 403 or 503 refusal, a 401 `oauth_grant_ended`, a 404, a 429,
+  another 5xx), a network failure, a timeout, or a token comfy-cli cannot use.
+  The list is closed: `_post` turns every HTTP error, network failure and
+  unreadable answer into a `PartnerTokenError`, and every `PartnerTokenError`
+  from a mint is remembered. Its time is kept in the cached record, under the
+  same key and beside any cached token. Until 10 minutes have passed, runs of
+  that sign-in make no mint and get the sign-in token, as below. Renewal of a
+  cached token goes on as before, and a renewal stopped at the session's end
+  is still sent while it outlives a fresh sign-in token; a refused renewal
+  drops the token and keeps the failure. A successful mint drops the failure.
+  So do a successful renewal that the session's end does not cut short, and
+  everything that drops the cached record: a new login, the `comfy setup`
+  sign-in, logout, and `set-base-url` clearing a stale sign-in. A renewal cut
+  short at the session's end is not cached, so it keeps the failure, and so
+  does a refresh. A failure time in the future (the clock was set back) is
+  ignored. The mint keeps its 15-second timeout.
 - When no partner-node token can be sent (none is minted, a 429 leaves an
   expiring one, or anything fails), the run gets the sign-in token, refreshed
   first unless it is under a minute old. A sign-in that cannot refresh sends
@@ -85,6 +102,22 @@ every mint creates a server-side session.
   partner-node token; `main` already sent the broader sign-in token there, and
   the partner-node token reaches only partner routes.
 - Minting per run. Each mint writes a server-side session row.
+- Remembering only Comfy Cloud's refusals (403, 503). A refusal repeats on
+  every run, but so does a hanging mint during an outage, which costs every run
+  its 15 seconds. A mint that timed out, or answered a token comfy-cli cannot
+  use, may also have created a session. Remembering every failure keeps each
+  of these to one attempt per 10 minutes. A transient failure costs at most 10
+  minutes of runs with the sign-in token, which every run got before
+  partner-node tokens.
+- A shorter mint timeout. Some prod mints take 5 to 10 seconds and still
+  succeed. A shorter timeout would abandon those mints, leave their sessions
+  behind and hold off minting for 10 minutes. With the failure remembered, a
+  hanging mint is tried once per 10 minutes; only the runs that start while it
+  hangs wait for it.
+- Skipping the sign-in refresh while a failure is remembered. The plain path
+  refreshes only in a token's last minute, so a run could start with little
+  more than a minute of token, and a partner node that outlives it stops after
+  the provider task was created.
 
 ## Consequences
 
@@ -98,6 +131,13 @@ every mint creates a server-side session.
   warns; it does not keep the replaced sign-in's credentials to retry, since
   holding them is a larger security trade-off.
 - A process can wait on the secrets lock while another one mints or renews.
+- After a failed mint, comfy-cli mints nothing for 10 minutes even when Comfy
+  Cloud starts allowing it (an ingest upgraded to Cloud `v0.564.0` or later,
+  or the kill switch turned off). `v0.564.0` is the first Cloud release with
+  cloud#19672, tagged at its merge commit `512168a`; an ingest below it
+  answers comfy-cli's mint with 403 `oauth_token_mint_refused`.
+  `/api/system_stats` names an ingest's release; prod's answered `v0.567.0` on
+  2026-11-21. A new login asks at once.
 
 ### Known limits
 
@@ -114,11 +154,14 @@ every mint creates a server-side session.
 ## Validation
 
 `tests/comfy_cli/cloud/test_partner_token.py` covers the cache key, reuse,
-renewal, the refusals, logout, and the credentials that stay unchanged.
+renewal, the refusals, the 10-minute hold after a failed mint, logout, and the
+credentials that stay unchanged.
 
 ## Revisit triggers
 
 - Comfy Cloud changes the partner-node token lifetime or the renew limit (30
   per hour per session).
+- Comfy Cloud answers a refused mint with a `Retry-After`, or the mint's
+  latency moves close to its 15-second timeout.
 - comfy-cli needs a partner-node token for an environment without a known
   comfy-api, or for `comfy deploy run`.

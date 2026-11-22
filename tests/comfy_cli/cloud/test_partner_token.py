@@ -148,6 +148,11 @@ def _refusal(status: int, code: str | None = None) -> partner_token.PartnerToken
     return partner_token.PartnerTokenError(status, code)
 
 
+def _age_failed_mint(seconds: float) -> None:
+    record = auth_store.get_partner_node_token()
+    auth_store.save_partner_node_token(dict(record, mint_failed_at=time.time() - seconds))
+
+
 class TestMintAndReuse:
     def test_a_signed_in_local_run_sends_a_minted_partner_node_token(self, server, refreshes):
         access = _sign_in()
@@ -334,7 +339,9 @@ class TestRenewal:
         server.renew.append(_refusal(403))
         server.mint.append(_refusal(403, "oauth_token_mint_refused"))
         assert _local_run() == ("auth_token_comfy_org", refreshes[-1])
-        assert auth_store.get_partner_node_token() == {"login": partner_token.login_key(auth_store.get_cloud_session())}
+        record = auth_store.get_partner_node_token()
+        assert record["login"] == partner_token.login_key(auth_store.get_cloud_session())
+        assert sorted(record) == ["login", "mint_failed_at"]
 
     def test_a_dropped_token_still_has_logout_revoke_the_sign_ins_sessions(self, server, refreshes, capsys):
         _sign_in(left=300)
@@ -401,6 +408,7 @@ class TestRenewal:
         server.mint.append(_refusal(503, "partner_node_token_disabled"))
         assert _local_run() == ("auth_token_comfy_org", refreshes[-1])
         assert auth_store.get_partner_node_token()["token"] == held
+        _age_failed_mint(partner_token.RETRY_MINT_AFTER_S)
         server.renew.append({"token": _partner(left=810, lifetime=810)})
         minted = _partner(sid="sid-new")
         server.mint.append({"token": minted})
@@ -489,7 +497,7 @@ class TestFallback:
         assert _local_run() == ("auth_token_comfy_org", refreshes[-1])
         assert len(refreshes) == 1
         assert auth_store.get_cloud_session().access_token == refreshes[-1]
-        assert auth_store.get_partner_node_token() is None
+        assert "token" not in auth_store.get_partner_node_token()
 
     def test_a_sign_in_token_under_a_minute_old_is_not_refreshed_again(self, server, refreshes):
         access = _sign_in(left=890)
@@ -567,6 +575,188 @@ class TestFallback:
             holder.join()
         assert server.calls == []
         assert access
+
+
+_FAILED_MINTS = [
+    (403, "oauth_token_mint_refused"),
+    (403, "insufficient_scope"),
+    (401, "oauth_grant_ended"),
+    (404, None),
+    (429, "rate_limited"),
+    (503, "partner_node_token_disabled"),
+    (500, None),
+    (0, "TimeoutError"),
+    (0, "URLError"),
+    (200, "unusable_token"),
+]
+
+
+class TestFailedMintHold:
+    MINT = f"{STAGING}/api/auth/token"
+
+    def _mints(self, server) -> int:
+        return server.paths().count(self.MINT)
+
+    @pytest.mark.parametrize(("status", "code"), _FAILED_MINTS)
+    def test_a_failed_mint_is_not_asked_again_by_later_runs(self, server, refreshes, status, code):
+        _sign_in(left=600)
+        server.mint.append(_refusal(status, code))
+        first = _local_run()
+        assert _local_run() == first == ("auth_token_comfy_org", refreshes[-1])
+        assert _local_run() == first
+        assert server.paths() == [self.MINT]
+        assert len(refreshes) == 1
+
+    def test_runs_in_the_hold_still_get_a_refreshed_sign_in_token(self, server, refreshes):
+        _sign_in(left=600)
+        server.mint.append(_refusal(403, "insufficient_scope"))
+        _local_run()
+        _sign_in(left=600, keep=True)
+        assert _local_run() == ("auth_token_comfy_org", refreshes[-1])
+        assert len(refreshes) == 2
+        assert self._mints(server) == 1
+
+    @pytest.mark.parametrize(
+        ("age", "mints"),
+        [(0, 1), (9 * 60 + 50, 1), (10 * 60, 2)],
+    )
+    def test_the_mint_is_asked_again_after_ten_minutes(self, server, refreshes, age, mints):
+        _sign_in()
+        server.mint.append(_refusal(403, "oauth_token_mint_refused"))
+        _local_run()
+        _age_failed_mint(age)
+        _local_run()
+        assert self._mints(server) == mints
+
+    def test_a_mint_after_the_hold_is_cached_and_clears_it(self, server, refreshes):
+        _sign_in()
+        server.mint.append(_refusal(503, "partner_node_token_disabled"))
+        _local_run()
+        _age_failed_mint(partner_token.RETRY_MINT_AFTER_S)
+        minted = _partner(sid="sid-new")
+        server.mint.append({"token": minted})
+        assert _local_run() == ("auth_token_comfy_org", minted)
+        assert sorted(auth_store.get_partner_node_token()) == ["login", "token"]
+        assert _local_run() == ("auth_token_comfy_org", minted)
+        assert self._mints(server) == 2
+
+    def test_a_failure_of_the_next_mint_starts_a_new_hold(self, server, refreshes):
+        _sign_in()
+        server.mint.append(_refusal(403, "oauth_token_mint_refused"))
+        _local_run()
+        _age_failed_mint(partner_token.RETRY_MINT_AFTER_S)
+        server.mint.append(_refusal(403, "oauth_token_mint_refused"))
+        _local_run()
+        _local_run()
+        assert self._mints(server) == 2
+
+    def test_a_refreshed_sign_in_keeps_the_hold(self, server, refreshes):
+        _sign_in()
+        server.mint.append(_refusal(403, "insufficient_scope"))
+        _local_run()
+        credentials.get_session(refresh=True, force=True)
+        _local_run()
+        assert self._mints(server) == 1
+
+    def test_a_new_sign_in_is_asked_for_again(self, server, refreshes):
+        _sign_in()
+        server.mint.append(_refusal(403, "insufficient_scope"))
+        _local_run()
+        _sign_in()
+        _field, token = _local_run()
+        assert partner_token._parse(token) is not None
+        assert self._mints(server) == 2
+
+    @pytest.mark.parametrize(
+        "changed",
+        [{"user": "user-2"}, {"workspace": "ws-2"}, {"family": "fam-2"}, {"base_url": "https://cloud.comfy.org"}],
+        ids=["another-account", "another-workspace", "another-sign-in", "another-environment"],
+    )
+    def test_a_hold_for_another_sign_in_does_not_apply(self, server, changed):
+        _sign_in()
+        key = dict(partner_token.login_key(auth_store.get_cloud_session()), **changed)
+        auth_store.save_partner_node_token({"login": key, "mint_failed_at": time.time()})
+        _field, token = _local_run()
+        assert partner_token._parse(token) is not None
+        assert self._mints(server) == 1
+
+    @pytest.mark.parametrize("failed_at", ["recent", True, None, -1, 10**12, "future"])
+    def test_a_malformed_or_future_failure_time_is_ignored(self, server, failed_at):
+        _sign_in()
+        if failed_at == "future":
+            failed_at = time.time() + 60
+        key = partner_token.login_key(auth_store.get_cloud_session())
+        auth_store.save_partner_node_token({"login": key, "mint_failed_at": failed_at})
+        _field, token = _local_run()
+        assert partner_token._parse(token) is not None
+        assert self._mints(server) == 1
+
+    def test_the_hold_keeps_the_cached_token_and_still_renews_it(self, server, refreshes):
+        _sign_in(left=600)
+        held = _partner(left=60)
+        _cache(held)
+        server.renew.append(_refusal(502))
+        server.mint.append(_refusal(503, "partner_node_token_disabled"))
+        _local_run()
+        assert auth_store.get_partner_node_token()["token"] == held
+        renewed = _partner()
+        server.renew.append({"token": renewed})
+        assert _local_run() == ("auth_token_comfy_org", renewed)
+        assert self._mints(server) == 1
+        assert server.paths().count(f"{STAGING_API}/auth/partner-node/renew") == 2
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_a_refused_renewal_in_the_hold_drops_the_token_and_mints_nothing(self, server, refreshes, status):
+        _sign_in(left=600)
+        _cache(_partner(left=60))
+        server.renew.append(_refusal(502))
+        server.mint.append(_refusal(503, "partner_node_token_disabled"))
+        _local_run()
+        server.renew.append(_refusal(status, "partner_node_session_revoked"))
+        assert _local_run() == ("auth_token_comfy_org", refreshes[-1])
+        assert self._mints(server) == 1
+        assert sorted(auth_store.get_partner_node_token()) == ["login", "mint_failed_at"]
+
+    def test_a_capped_renewal_is_sent_in_the_hold(self, server):
+        _sign_in()
+        _cache(_partner(left=600))
+        server.renew.append({"token": _partner(left=1200, lifetime=1200)})
+        server.mint.append(_refusal(503, "partner_node_token_disabled"))
+        _local_run()
+        capped = _partner(left=1100, lifetime=1100)
+        server.renew.append({"token": capped})
+        assert _local_run() == ("auth_token_comfy_org", capped)
+        assert self._mints(server) == 1
+
+    def test_a_capped_renewal_inside_a_sign_in_tokens_life_is_not_sent_in_the_hold(self, server, refreshes):
+        _sign_in(left=600)
+        _cache(_partner(left=600))
+        server.renew.append({"token": _partner(left=1200, lifetime=1200)})
+        server.mint.append(_refusal(503, "partner_node_token_disabled"))
+        _local_run()
+        server.renew.append({"token": _partner(left=840, lifetime=840)})
+        assert _local_run() == ("auth_token_comfy_org", refreshes[-1])
+        assert self._mints(server) == 1
+
+    def test_concurrent_runs_after_a_failed_mint_ask_once(self, server, refreshes):
+        _sign_in()
+        server.delay = 0.2
+        server.mint.append(_refusal(403, "oauth_token_mint_refused"))
+        outcomes: list = [None] * 4
+
+        def worker(index: int) -> None:
+            try:
+                outcomes[index] = _local_run()
+            except BaseException as error:  # noqa: BLE001 — reported by the assertion below
+                outcomes[index] = error
+
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        assert all(isinstance(outcome, tuple) and outcome[0] == "auth_token_comfy_org" for outcome in outcomes)
+        assert self._mints(server) == 1
 
 
 class TestUnchangedCredentials:
@@ -699,6 +889,16 @@ class TestLogout:
         assert server.calls[-1] == (f"{STAGING}/api/auth/token/revoke", access, None)
         assert auth_store.get_partner_node_token() is None
         assert auth_store.get_cloud_session() is None
+
+    def test_logout_drops_a_failed_mint_hold(self, server, refreshes, capsys):
+        _sign_in()
+        server.mint.append(_refusal(403, "insufficient_scope"))
+        _local_run()
+        self._logout(capsys)
+        assert auth_store.get_partner_node_token() is None
+        _sign_in()
+        _field, token = _local_run()
+        assert partner_token._parse(token) is not None
 
     def test_an_expired_sign_in_is_refreshed_so_the_revoke_reaches_every_session(self, server, refreshes, capsys):
         _sign_in(left=-60)
@@ -920,6 +1120,22 @@ class TestReplacedSignIn:
         else:
             self._set_base_url(capsys)
         assert server.calls == []
+
+    @pytest.mark.parametrize("flow", ["login", "setup", "set-base-url"])
+    def test_a_replaced_sign_in_drops_its_failed_mint_hold(self, server, refreshes, monkeypatch, capsys, flow):
+        _sign_in(left=600)
+        server.mint.append(_refusal(403, "insufficient_scope"))
+        _local_run()
+        assert "mint_failed_at" in auth_store.get_partner_node_token()
+        if flow == "login":
+            self._login(monkeypatch, capsys)
+        elif flow == "setup":
+            self._setup(monkeypatch, capsys)
+        else:
+            _sign_in(left=-60, keep=True)
+            self._set_base_url(capsys)
+        assert auth_store.get_partner_node_token() is None
+        assert server.paths() == [f"{STAGING}/api/auth/token"]
 
     def test_a_dropped_token_marker_makes_no_request(self, server, monkeypatch, capsys):
         _sign_in()
