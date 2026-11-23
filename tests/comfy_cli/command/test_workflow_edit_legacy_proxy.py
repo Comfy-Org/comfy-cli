@@ -115,6 +115,28 @@ def test_set_widget_does_not_claim_a_repair_marker_for_an_unrepairable_plan(grap
     assert "repair" not in op["promoted"]
 
 
+def test_old_value_reads_the_legacy_slot_when_proxy_order_outruns_declaration_order(graph):
+    """``old`` used to be read with ``effective_value``, which indexes the
+    host ``widgets_values`` by the DECLARATION-order ``pi.value_index``. While
+    legacy tuples are still pending, the array is laid out in ``proxyWidgets``
+    order instead — and when the two orders differ, that read lands on a
+    different widget's slot. Swap the first two legacy entries (``text`` and
+    ``width``) so the array is proxy-ordered (``[640, None]``) while the
+    definition still declares ``text`` before ``width``: a write to ``width``
+    must report ``640``, not whatever ``text``'s slot (or the interior
+    default) holds.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941919
+    """
+    wf = _load(FLUX)
+    inst = _node(wf, 56)
+    proxies = inst["properties"]["proxyWidgets"]
+    proxies[0], proxies[1] = proxies[1], proxies[0]  # now: width, text, height, ...
+    inst["widgets_values"] = [640, None]  # proxy-position 0 (width) = 640, 1 (text) = hole
+    wf, op = workflow_ops.set_widget(wf, graph, 56, "width", 800)
+    assert op["old"] == 640
+    assert _node(wf, 56)["widgets_values"][1] == 800  # width is sg.inputs[1] (declaration order)
+
+
 @pytest.mark.parametrize("order", list(permutations(["text", "width", "seed"])))
 @pytest.mark.parametrize("reload_between_writes", [False, True])
 def test_mixed_legacy_and_declared_writes_preserve_values(graph, order, reload_between_writes):

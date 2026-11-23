@@ -1736,6 +1736,24 @@ def _set_widget_impl(
             # Materializing declared-order values while legacy tuples remain
             # makes a later migration reinterpret them in proxy order.
             plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs)
+            # While this widget's own legacy tuple is still pending (an
+            # ``alreadyLinked`` entry: the definition already declares the
+            # input, but the instance's ``widgets_values`` is still laid out
+            # in proxyWidgets order because nothing has flushed it yet), a
+            # declaration-order read (``effective_value`` -> ``host_value``
+            # indexing by ``pi.value_index``) can land on a different widget's
+            # slot than the legacy array actually holds. Read the previous
+            # value from the plan's own record of that legacy slot instead —
+            # it was read positionally by the ORIGINAL proxyWidgets order —
+            # falling back to the interior source when that slot is a hole.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941919
+            pending_link = next((e for e in plan if e.plan == _promoted.PLAN_ALREADY_LINKED and e.name == widget), None)
+            if pending_link is not None:
+                old = pending_link.host_value
+                if old is _promoted.UNSET:
+                    old = _promoted.source_value(workflow, sg, pi, graph, defs)
+            else:
+                old = _promoted.effective_value(workflow, instance, widget, graph)
             # Fork + flush only when something would actually CHANGE: a plan
             # of only ``alreadyLinked``/``quarantine`` entries leaves the
             # definition exactly as ``flush_proxy_migration`` found it, so
@@ -1744,7 +1762,6 @@ def _set_widget_impl(
             # permanently stops sharing definition edits with its siblings
             # over an op that would not have written anything structural.
             # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
-            old = _promoted.effective_value(workflow, instance, widget, graph)
             if any(e.repairable for e in plan):
                 promoted_meta["repair"] = {
                     "ids": _promoted.plan_repair_ids(list(target.segments), plan),
