@@ -179,6 +179,73 @@ def test_duplicate_control_marker_uses_the_first_slots_actual_owner(unrelated_fi
         assert wf == before
 
 
+def same_named_independent_and_combo_child_fresh(*, selected="base"):
+    model = [
+        "COMFY_DYNAMICCOMBO_V3",
+        {
+            "options": [
+                {"key": "base", "inputs": {"required": {}}},
+                {"key": "simple", "inputs": {"required": {}}},
+                {
+                    "key": "advanced",
+                    "inputs": {"required": {"mode": [["balanced", "quality"], {}]}},
+                },
+            ]
+        },
+    ]
+    g = Graph.from_object_info(
+        {
+            "Gen": {
+                "input": {
+                    "required": {
+                        "model": model,
+                        "model.mode": ["STRING", {"default": "independent"}],
+                    }
+                },
+                "input_order": {"required": ["model", "model.mode"]},
+            }
+        }
+    )
+    wf, added = ops.add_node({"nodes": [], "links": []}, g, "Gen")
+    if selected != "base":
+        wf, _ = ops.set_widget(wf, g, added["node_id"], "model", selected)
+    return g, wf, added["node_id"]
+
+
+def test_independent_same_named_widget_survives_unrelated_combo_rebuild():
+    g, wf, nid = same_named_independent_and_combo_child_fresh()
+    node = wf["nodes"][0]
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [write(nid, "model.mode", "saved"), write(nid, "model", "simple")],
+    )
+
+    assert result is wf
+    assert result["nodes"][0] is node
+    assert [op["widget"] for op in stream] == ["model.mode", "model"]
+    assert node["widgets_values"] == ["simple", "saved"]
+
+
+def test_actual_same_named_combo_child_still_refuses_atomically():
+    g, wf, nid = same_named_independent_and_combo_child_fresh(selected="advanced")
+    before = copy.deepcopy(wf)
+    node = wf["nodes"][0]
+    widgets = node["widgets_values"]
+
+    with pytest.raises(ValueError, match=r"erase earlier batch write to 'model\.mode'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [write(nid, "model.mode", "quality"), write(nid, "model", "base")],
+        )
+
+    assert wf == before
+    assert wf["nodes"][0] is node
+    assert node["widgets_values"] is widgets
+
+
 def test_failure_restores_modified_then_detached_node():
     g, wf, nid = fresh()
     before = copy.deepcopy(wf)
@@ -488,6 +555,39 @@ def promoted_fresh(*, renamed=False):
     return g, {"nodes": [host], "links": [], "definitions": {"subgraphs": [definition]}}, host["id"]
 
 
+def nested_promoted_fresh(*, sibling=False):
+    g, inner_workflow, _ = promoted_fresh(renamed=True)
+    inner_definition = inner_workflow["definitions"]["subgraphs"][0]
+    inner_instance = inner_workflow["nodes"][0]
+    instances = [inner_instance]
+    if sibling:
+        sibling_instance = copy.deepcopy(inner_instance)
+        sibling_instance["id"] = 10
+        instances.append(sibling_instance)
+    outer_definition = {
+        "id": "outer",
+        "name": "Outer",
+        "inputs": [],
+        "outputs": [],
+        "nodes": instances,
+        "links": [],
+    }
+    host = {
+        "id": 8,
+        "type": "outer",
+        "inputs": [],
+        "outputs": [],
+        "properties": {},
+        "widgets_values": [],
+    }
+    workflow = {
+        "nodes": [host],
+        "links": [],
+        "definitions": {"subgraphs": [inner_definition, outer_definition]},
+    }
+    return g, workflow, inner_instance["id"], inner_definition["nodes"][0]["id"]
+
+
 def distinct_promoted_owners_fresh():
     g, interior, first_nid = fresh()
     interior, second_added = ops.add_node(interior, g, "Gen")
@@ -683,6 +783,51 @@ def test_nested_promoted_and_explicit_addresses_share_the_deepest_owner():
         )
 
     assert wf == before
+
+
+def test_nested_promoted_instance_path_and_explicit_address_share_owner():
+    g, wf, instance_id, interior_id = nested_promoted_fresh()
+    before = copy.deepcopy(wf)
+    definitions = wf["definitions"]
+    outer_nodes = definitions["subgraphs"][1]["nodes"]
+    instance = outer_nodes[0]
+    widgets = instance["widgets_values"]
+
+    with pytest.raises(ValueError, match="write to 'child_alias'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [
+                write(f"8/{instance_id}", "child_alias", "quality"),
+                write(f"8/{instance_id}/{interior_id}", "model", "base"),
+            ],
+        )
+
+    assert wf == before
+    assert wf["definitions"] is definitions
+    assert definitions["subgraphs"][1]["nodes"] is outer_nodes
+    assert outer_nodes[0] is instance
+    assert instance["widgets_values"] is widgets
+
+
+def test_nested_promoted_write_does_not_conflict_with_sibling_instance():
+    g, wf, instance_id, interior_id = nested_promoted_fresh(sibling=True)
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [
+            write(f"8/{instance_id}", "child_alias", "quality"),
+            write(f"8/10/{interior_id}", "model", "base"),
+        ],
+    )
+
+    instances = result["definitions"]["subgraphs"][1]["nodes"]
+    assert [op["node_id"] for op in stream] == [f"8/{instance_id}", "8/10"]
+    assert [instance["widgets_values"] for instance in instances] == [
+        ["max", "quality"],
+        ["base", "balanced"],
+    ]
 
 
 def test_graphless_legacy_primitive_batch_still_applies():

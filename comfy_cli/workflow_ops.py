@@ -3594,28 +3594,28 @@ def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | No
     if op.get("path"):
         owner = tuple(str(segment) for segment in op["path"])
         return _navigate_subgraph_path(workflow, op["path"]), widget, owner
+    if graph is not None and op.get("promoted"):
+        from comfy_cli.cql import promoted as _promoted
+
+        definitions = _promoted.defs_by_id(workflow)
+        instance_path = [str(s) for s in op["promoted"].get("instance_path") or [str(op["node_id"])]]
+        try:
+            instance = _navigate_subgraph_path(workflow, instance_path)
+            definition = definitions.get(str(instance.get("type", "")))
+            promoted = _promoted.find_promoted(definition, definitions, op["widget"]) if definition else None
+            source = _promoted.deepest_source(definition, promoted, definitions) if promoted else None
+            if source is not None:
+                source_path, source_widget = source
+                owner_path = [*instance_path, *source_path]
+                return _navigate_subgraph_path(workflow, owner_path), source_widget, tuple(owner_path)
+        except ValueError:
+            # A schema-less PrimitiveNode also carries positional ``promoted``
+            # metadata, but has no subgraph definition to resolve through.
+            pass
+        node = _find_by_str(workflow, str(op["node_id"]))
+        return node, widget, tuple(instance_path)
     node = _find_by_str(workflow, str(op["node_id"]))
-    if graph is None or node is None or not op.get("promoted"):
-        return node, widget, (str(target[1]),)
-
-    from comfy_cli.cql import promoted as _promoted
-
-    definitions = _promoted.defs_by_id(workflow)
-    instance_path = [str(s) for s in op["promoted"].get("instance_path") or [str(op["node_id"])]]
-    try:
-        instance = _navigate_subgraph_path(workflow, instance_path)
-        definition = definitions.get(str(instance.get("type", "")))
-        promoted = _promoted.find_promoted(definition, definitions, op["widget"]) if definition else None
-        source = _promoted.deepest_source(definition, promoted, definitions) if promoted else None
-        if source is not None:
-            source_path, source_widget = source
-            owner_path = [*instance_path, *source_path]
-            return _navigate_subgraph_path(workflow, owner_path), source_widget, tuple(owner_path)
-    except ValueError:
-        # A schema-less PrimitiveNode also carries positional ``promoted``
-        # metadata, but has no subgraph definition to resolve through.
-        pass
-    return node, widget, tuple(instance_path)
+    return node, widget, (str(target[1]),)
 
 
 def _admission_combo_children(m) -> dict[str, set[str]]:
@@ -3663,11 +3663,11 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, N
     class_type = node.get("type", "") if node else ""
     m = graph.node(class_type)
     combos = _admission_combo_children(m) if m is not None else {}
-    destroyed: set[str] = set()
     seen: set[str] = set()
     if widget in combos and op.get("old") != op["value"]:
-        # Follow declared ownership, including nested selectors, rather than
-        # treating every dotted scalar as a structural child.
+        # Follow selector ownership, including nested selectors. Whether a
+        # prior write belongs to this span comes from its resolved saved slot,
+        # not from every same-named child any historical option declares.
         pending = [widget]
         while pending:
             selector = pending.pop()
@@ -3675,22 +3675,26 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, N
                 continue
             seen.add(selector)
             for child in combos[selector]:
-                destroyed.add(child)
                 if child in combos:
                     pending.append(child)
-    marker_owner = None
-    if widget == "control_after_generate" and m is not None:
+    slot_owner = None
+    if m is not None and node is not None:
         from comfy_cli.cql import engine as _engine
 
-        # This writable marker name may occur several times. Like the native
-        # writer, resolve its FIRST saved slot, whose owner may be unrelated
-        # to another same-named marker under a dynamic combo.
-        entries = _engine._expand_widget_entries(
-            m,
-            node.get("widgets_values") or [],
-            saved_widget_names=_engine.saved_widget_order(node, graph, class_type),
-        )
-        marker_owner = next((entry.owner for entry in entries if entry.name == widget), None)
+        # Like the native writer, resolve the FIRST actual saved slot. This
+        # distinguishes an independent dotted widget from a same-named child
+        # declared only by another combo option, and also preserves repeated
+        # control-marker ownership.
+        try:
+            saved_names = _engine.saved_widget_order(node, graph, class_type)
+        except (SavedWidgetLayoutError, DynamicGroupBindingError):
+            # A promoted source can carry only the markers needed to describe
+            # its host wiring. They are not a complete positional save layout;
+            # the production promoted writer already resolved the source, so
+            # retain its ordinary catalog-layout fallback here.
+            saved_names = None
+        entries = _engine._expand_widget_entries(m, node.get("widgets_values") or [], saved_widget_names=saved_names)
+        slot_owner = next((entry.owner for entry in entries if entry.name == widget), None)
     group = next((p for p in m.inputs if p.name == widget and p.is_dynamic_group), None) if m else None
     for earlier in written:
         if earlier[0] != structural_owner:
@@ -3700,13 +3704,13 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, N
             row, dot, field = earlier[1][len(widget) + 1 :].partition(".")
             if dot and row.isdecimal() and int(row) >= op["value"]:
                 removed_row = any(p.name == earlier[1] for p in _dynamic_group_widgets(group, f"{widget}.{row}"))
-        child_destroyed = earlier[2] in seen if earlier[1] == "control_after_generate" else earlier[1] in destroyed
+        child_destroyed = earlier[2] in seen
         if child_destroyed or removed_row:
             raise ValueError(
                 f"destructive structural rebuild of {display_widget!r} would erase earlier batch write "
                 f"to {earlier[3]!r} on {target[1]}; put the selector/count before child writes"
             )
-    written.setdefault((structural_owner, widget, marker_owner, display_widget), None)
+    written.setdefault((structural_owner, widget, slot_owner, display_widget), None)
 
 
 def apply_specs(
