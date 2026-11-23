@@ -444,8 +444,10 @@ def test_dynamic_group_inside_combo_remains_an_explicitly_unsupported_schema():
         ops.add_node({"nodes": [], "links": []}, g, "Gen")
 
 
-def promoted_fresh():
+def promoted_fresh(*, renamed=False):
     g, interior, nid = fresh()
+    selector_name = "selector_alias" if renamed else "model"
+    child_name = "child_alias" if renamed else "model.mode"
     inner = interior["nodes"][0]
     inner["inputs"] = [
         {"name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "model"}, "link": 1},
@@ -455,8 +457,8 @@ def promoted_fresh():
         "id": "definition",
         "name": "Group",
         "inputs": [
-            {"id": "selector", "name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "linkIds": [1]},
-            {"id": "child", "name": "model.mode", "type": "COMBO", "linkIds": [2]},
+            {"id": "selector", "name": selector_name, "type": "COMFY_DYNAMICCOMBO_V3", "linkIds": [1]},
+            {"id": "child", "name": child_name, "type": "COMBO", "linkIds": [2]},
         ],
         "outputs": [],
         "nodes": [inner],
@@ -476,12 +478,69 @@ def promoted_fresh():
         "id": 9,
         "type": "definition",
         "inputs": [
-            {"name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "model"}, "link": None},
-            {"name": "model.mode", "type": "COMBO", "widget": {"name": "model.mode"}, "link": None},
+            {"name": selector_name, "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": selector_name}, "link": None},
+            {"name": child_name, "type": "COMBO", "widget": {"name": child_name}, "link": None},
         ],
         "outputs": [],
         "properties": {},
         "widgets_values": ["max", "balanced"],
+    }
+    return g, {"nodes": [host], "links": [], "definitions": {"subgraphs": [definition]}}, host["id"]
+
+
+def distinct_promoted_owners_fresh():
+    g, interior, first_nid = fresh()
+    interior, second_added = ops.add_node(interior, g, "Gen")
+    second_nid = second_added["node_id"]
+    interior, _ = ops.set_widget(interior, g, second_nid, "model", "max")
+    first, second = interior["nodes"]
+    first["inputs"] = [
+        {"name": "model.mode", "type": "COMBO", "widget": {"name": "model.mode"}, "link": 1},
+    ]
+    second["inputs"] = [
+        {"name": "model", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "model"}, "link": 2},
+    ]
+    definition = {
+        "id": "definition",
+        "name": "Group",
+        "inputs": [
+            {"id": "first", "name": "first_child", "type": "COMBO", "linkIds": [1]},
+            {
+                "id": "second",
+                "name": "second_selector",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "linkIds": [2],
+            },
+        ],
+        "outputs": [],
+        "nodes": [first, second],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": first_nid, "target_slot": 1, "type": "COMBO"},
+            {
+                "id": 2,
+                "origin_id": -10,
+                "origin_slot": 1,
+                "target_id": second_nid,
+                "target_slot": 0,
+                "type": "COMFY_DYNAMICCOMBO_V3",
+            },
+        ],
+    }
+    host = {
+        "id": 9,
+        "type": "definition",
+        "inputs": [
+            {"name": "first_child", "type": "COMBO", "widget": {"name": "first_child"}, "link": None},
+            {
+                "name": "second_selector",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {"name": "second_selector"},
+                "link": None,
+            },
+        ],
+        "outputs": [],
+        "properties": {},
+        "widgets_values": ["balanced", "max"],
     }
     return g, {"nodes": [host], "links": [], "definitions": {"subgraphs": [definition]}}, host["id"]
 
@@ -492,6 +551,136 @@ def test_promoted_child_then_promoted_selector_refuses_atomically():
 
     with pytest.raises(ValueError, match=r"erase earlier batch write to 'model\.mode'"):
         ops.apply_specs(wf, g, [write(nid, "model.mode", "quality"), write(nid, "model", "base")])
+
+    assert wf == before
+
+
+def test_distinct_promoted_interior_owners_under_one_host_succeed():
+    g, wf, nid = distinct_promoted_owners_fresh()
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [write(nid, "first_child", "quality"), write(nid, "second_selector", "base")],
+    )
+
+    assert result is wf
+    assert [op["widget"] for op in stream] == ["first_child", "second_selector"]
+    assert wf["nodes"][0]["widgets_values"] == ["quality", "base"]
+
+
+def test_same_promoted_schema_names_on_different_instances_succeed():
+    g, wf, _ = promoted_fresh()
+    second = copy.deepcopy(wf["nodes"][0])
+    second["id"] = 10
+    wf["nodes"].append(second)
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [write(9, "model.mode", "quality"), write(10, "model", "base")],
+    )
+
+    assert result is wf
+    assert len(stream) == 2
+    assert [node["widgets_values"] for node in wf["nodes"]] == [["max", "quality"], ["base", "balanced"]]
+
+
+@pytest.mark.parametrize(
+    "child_address,selector_address,child_name,selector_name",
+    [
+        ("promoted", "promoted", "child_alias", "selector_alias"),
+        ("promoted", "explicit", "child_alias", "model"),
+        ("explicit", "promoted", "model.mode", "selector_alias"),
+        ("explicit", "explicit", "model.mode", "model"),
+    ],
+)
+def test_same_interior_owner_refuses_promoted_and_explicit_aliases(
+    child_address, selector_address, child_name, selector_name
+):
+    g, wf, nid = promoted_fresh(renamed=True)
+    inner_id = wf["definitions"]["subgraphs"][0]["nodes"][0]["id"]
+    explicit = f"{nid}/{inner_id}"
+    before = copy.deepcopy(wf)
+    child_node = nid if child_address == "promoted" else explicit
+    selector_node = nid if selector_address == "promoted" else explicit
+
+    with pytest.raises(ValueError) as caught:
+        ops.apply_specs(
+            wf,
+            g,
+            [write(child_node, child_name, "quality"), write(selector_node, selector_name, "base")],
+        )
+
+    assert "rebuild of 'selector_alias'" in str(caught.value)
+    assert "write to 'child_alias'" in str(caught.value)
+    assert wf == before
+
+
+def test_nested_promoted_and_explicit_addresses_share_the_deepest_owner():
+    g, inner_workflow, _ = promoted_fresh(renamed=True)
+    inner_definition = inner_workflow["definitions"]["subgraphs"][0]
+    inner_instance = inner_workflow["nodes"][0]
+    inner_instance["inputs"][0]["link"] = 11
+    inner_instance["inputs"][1]["link"] = 12
+    outer_definition = {
+        "id": "outer",
+        "name": "Outer",
+        "inputs": [
+            {"id": "outer-selector", "name": "nested_selector", "type": "COMFY_DYNAMICCOMBO_V3", "linkIds": [11]},
+            {"id": "outer-child", "name": "nested_child", "type": "COMBO", "linkIds": [12]},
+        ],
+        "outputs": [],
+        "nodes": [inner_instance],
+        "links": [
+            {
+                "id": 11,
+                "origin_id": -10,
+                "origin_slot": 0,
+                "target_id": inner_instance["id"],
+                "target_slot": 0,
+                "type": "COMFY_DYNAMICCOMBO_V3",
+            },
+            {
+                "id": 12,
+                "origin_id": -10,
+                "origin_slot": 1,
+                "target_id": inner_instance["id"],
+                "target_slot": 1,
+                "type": "COMBO",
+            },
+        ],
+    }
+    host = {
+        "id": 8,
+        "type": "outer",
+        "inputs": [
+            {
+                "name": "nested_selector",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {"name": "nested_selector"},
+                "link": None,
+            },
+            {"name": "nested_child", "type": "COMBO", "widget": {"name": "nested_child"}, "link": None},
+        ],
+        "outputs": [],
+        "properties": {},
+        "widgets_values": ["max", "balanced"],
+    }
+    wf = {
+        "nodes": [host],
+        "links": [],
+        "definitions": {"subgraphs": [inner_definition, outer_definition]},
+    }
+    interior_id = inner_definition["nodes"][0]["id"]
+    before = copy.deepcopy(wf)
+
+    with pytest.raises(ValueError, match="write to 'nested_child'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [write(8, "nested_child", "quality"), write(f"8/{inner_instance['id']}/{interior_id}", "model", "base")],
+        )
 
     assert wf == before
 
