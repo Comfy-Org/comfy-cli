@@ -567,3 +567,95 @@ def test_hf_move_failure_emits_an_envelope_not_a_traceback(tmp_path):
 
     env = _assert_error_envelope(result, "download_failed")
     assert "could not save it as" in env["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Hugging Face page URL — the failure that used to be a SUCCESS.
+#
+# The other cases in this file are failures that exited 0 with no envelope. This
+# one is worse: `comfy model download --url https://huggingface.co/<org>/<repo>
+# --filename x.safetensors` reported "Done in 0.6s" and wrote 276,289 bytes of
+# model-card HTML to `models/checkpoints/x.safetensors`. Hugging Face answers a
+# repo page `200 text/html` and nothing on this path reads content, so the
+# transfer genuinely succeeded — at writing a web page where a model belongs.
+# `comfy models search` then lists it as installed (filenames only), and the
+# defect surfaces much later as an opaque parse error inside ComfyUI.
+#
+# These tests pin the refusal, and pin that it happens BEFORE any transfer.
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_hf_repo_url_refuses_instead_of_downloading_the_page(tmp_path):
+    download = Mock()
+    result = _invoke(
+        [
+            "--url",
+            "https://huggingface.co/black-forest-labs/FLUX.1-dev",
+            "--relative-path",
+            "models/checkpoints",
+            "--filename",
+            "flux1-dev.safetensors",
+        ],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    env = _assert_error_envelope(result, "hf_not_a_file")
+    assert env["error"]["details"]["url"] == "https://huggingface.co/black-forest-labs/FLUX.1-dev"
+    # The hint has to carry the form that works, or the refusal just moves the
+    # user's confusion rather than ending it.
+    assert "/resolve/" in env["error"]["hint"]
+    # The whole point: nothing was fetched and nothing was written.
+    download.assert_not_called()
+    assert not (tmp_path / "models" / "checkpoints" / "flux1-dev.safetensors").exists()
+
+
+def test_hf_tree_url_refuses(tmp_path):
+    result = _invoke(
+        ["--url", "https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main", "--filename", "x.safetensors"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": Mock()},
+    )
+    _assert_error_envelope(result, "hf_not_a_file")
+
+
+def test_hf_resolve_url_still_downloads(tmp_path):
+    """The refusal must not touch the form that names a file.
+
+    Guards the direction that would be a regression rather than a fix: a
+    `/resolve/` link is how every working Hugging Face download is spelled,
+    including the ones the `local-mcp-dl-*` eval cases read out of a template's
+    notes.
+    """
+    download = Mock()
+    result = _invoke(
+        [
+            "--url",
+            "https://huggingface.co/org/repo/resolve/main/repo-name.safetensors",
+            "--relative-path",
+            "models/checkpoints",
+            "--filename",
+            "mine.safetensors",
+        ],
+        check_huggingface_url={"return_value": (True, "org/repo", "repo-name.safetensors", None, "main")},
+        check_unauthorized={"return_value": False},
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, _stdout() + "\n" + result.output
+    assert "hf_not_a_file" not in _stdout()
+    download.assert_called_once()
+
+
+def test_non_hf_unknown_source_still_downloads(tmp_path):
+    """A plain file URL on any other host is a supported source and stays one."""
+    download = Mock()
+    result = _invoke(
+        ["--url", "https://example.com/sd-v1-4.ckpt", "--filename", "sd-v1-4.ckpt"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, result.output
+    download.assert_called_once()

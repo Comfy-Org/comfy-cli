@@ -408,6 +408,37 @@ def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str |
     return True, repo_id, filename, folder_name, branch_name
 
 
+def is_huggingface_page_url(url: str) -> bool:
+    """True when *url* is on Hugging Face but does NOT address a single file.
+
+    :func:`check_huggingface_url` accepts only the two forms that name one file:
+    ``/<org>/<repo>/resolve/<branch>/<path>`` and the ``/blob/`` variant. Every
+    other Hugging Face URL is a web PAGE — a bare repo (``/<org>/<repo>``), a
+    ``/tree/<branch>`` file browser, a dataset or space landing page, a
+    discussion. Those are what a person copies out of the address bar, and the
+    bare repo form is the one most often pasted.
+
+    This exists because Hugging Face answers every one of them ``200
+    text/html``. Left to the ``else`` branch below ("source is unknown, treat it
+    as a direct file URL") the transfer therefore SUCCEEDS: a model card's HTML
+    lands at the destination under the caller's ``--filename``, the command
+    reports ``Done``, and ``comfy models search`` — which reads filenames and
+    never content — lists it as installed. The defect only surfaces much later,
+    as an opaque parse error inside ComfyUI, far from its cause. A refusal that
+    names the ``/resolve/`` form is worth more than a success that is a lie.
+
+    Host matching is deliberately the same pair ``check_huggingface_url``
+    accepts, so this covers exactly the hosts the recognizer covers and no URL
+    can be a page here while being a file there.
+    """
+    parsed_url = urlparse(url)
+
+    if parsed_url.netloc != "huggingface.co" and parsed_url.netloc != "huggingface.com":
+        return False
+
+    return not check_huggingface_url(url)[0]
+
+
 def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
     """
     Returns:
@@ -648,6 +679,26 @@ def download(
             model_path = ui.prompt_input("Enter model type path (e.g. loras, checkpoints, ...)", default="")
             basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
             relative_path = _default_destination(model_path, basemodel)
+    elif is_huggingface_page_url(url):
+        # A Hugging Face PAGE, not a file. This has to refuse BEFORE the generic
+        # branch below, because that branch's "treat it as a direct file URL" is
+        # exactly what makes this dangerous rather than merely wrong: Hugging
+        # Face returns 200 text/html for a repo page, so the download succeeds
+        # and writes the HTML where a model belongs. See is_huggingface_page_url.
+        raise _download_failure(
+            code="hf_not_a_file",
+            message=(
+                "That Hugging Face URL points at a page, not at a model file, so there is "
+                "nothing to download from it. Hugging Face answers a repo or `tree` URL with "
+                "the web page itself, which would be saved as the model."
+            ),
+            hint=(
+                "open the file on Hugging Face and use its download link — "
+                "`https://huggingface.co/<org>/<repo>/resolve/<branch>/<file>` "
+                "(a `/blob/` link works too)"
+            ),
+            details={"url": _scrub_url(url)},
+        )
     else:
         # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
         # source: the download proceeds via download_file() below. This is a note,

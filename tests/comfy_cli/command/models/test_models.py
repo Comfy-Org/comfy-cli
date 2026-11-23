@@ -4,7 +4,14 @@ from unittest.mock import Mock, patch
 import typer.testing
 
 from comfy_cli import constants
-from comfy_cli.command.models.models import _format_elapsed, app, check_civitai_url, check_huggingface_url, list_models
+from comfy_cli.command.models.models import (
+    _format_elapsed,
+    app,
+    check_civitai_url,
+    check_huggingface_url,
+    is_huggingface_page_url,
+    list_models,
+)
 
 
 def _make_model_tree(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -324,6 +331,74 @@ def test_invalid_huggingface_url():
 def test_invalid_huggingface_url_structure():
     url = "https://huggingface.co/CompVis/stable-diffusion-v1-4/main/sd-v1-4.ckpt"
     assert check_huggingface_url(url) == (False, None, None, None, None)
+
+
+# --------------------------------------------------------------------------- #
+# is_huggingface_page_url — a Hugging Face PAGE is not a download source.
+#
+# Hugging Face answers every page URL `200 text/html`, so before this split the
+# "source is unknown, treat it as a direct file URL" branch *succeeded* on them:
+# 276 KB of model-card HTML written to `models/checkpoints/<--filename>`, "Done",
+# and `comfy models search` listing it as installed because it reads filenames
+# and never content.
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_huggingface_repo_url_is_a_page():
+    """The form a person copies out of the address bar, and the most pasted one."""
+    assert is_huggingface_page_url("https://huggingface.co/black-forest-labs/FLUX.1-dev") is True
+
+
+def test_huggingface_tree_url_is_a_page():
+    assert is_huggingface_page_url("https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main") is True
+
+
+def test_huggingface_dataset_url_is_a_page():
+    assert is_huggingface_page_url("https://huggingface.co/datasets/foo/bar") is True
+
+
+def test_huggingface_org_url_is_a_page():
+    assert is_huggingface_page_url("https://huggingface.co/stabilityai") is True
+
+
+def test_huggingface_com_page_is_a_page():
+    """Host parity with `check_huggingface_url`, which accepts both spellings."""
+    assert is_huggingface_page_url("https://huggingface.com/black-forest-labs/FLUX.1-dev") is True
+
+
+def test_huggingface_resolve_url_is_not_a_page():
+    """A `/resolve/` link names one file, so it keeps the working path."""
+    url = "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
+    assert is_huggingface_page_url(url) is False
+    assert check_huggingface_url(url)[0] is True
+
+
+def test_huggingface_blob_url_is_not_a_page():
+    url = "https://huggingface.co/stabilityai/stable-audio-open-1.0/blob/main/model.safetensors"
+    assert is_huggingface_page_url(url) is False
+    assert check_huggingface_url(url)[0] is True
+
+
+def test_non_huggingface_host_is_never_a_page():
+    """Only Hugging Face is claimed here: every other host keeps the plain
+    direct-file-URL path, which is a supported source."""
+    assert is_huggingface_page_url("https://example.com/sd-v1-4.ckpt") is False
+    assert is_huggingface_page_url("https://civitai.com/models/43331") is False
+    assert is_huggingface_page_url("https://nothuggingface.co/org/repo") is False
+
+
+def test_huggingface_page_and_file_recognizers_cannot_both_claim_a_url():
+    """The split is total and exclusive over the hosts it covers — otherwise a URL
+    could be refused as a page while resolving as a file, or neither."""
+    urls = [
+        "https://huggingface.co/black-forest-labs/FLUX.1-dev",
+        "https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main",
+        "https://huggingface.co/datasets/foo/bar",
+        "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/x.safetensors",
+        "https://huggingface.com/stabilityai/sdxl-turbo/blob/main/x.safetensors",
+    ]
+    for url in urls:
+        assert is_huggingface_page_url(url) is not check_huggingface_url(url)[0], url
 
 
 def test_huggingface_url_with_com_domain():
