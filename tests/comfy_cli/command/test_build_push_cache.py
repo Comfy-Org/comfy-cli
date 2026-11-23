@@ -167,10 +167,8 @@ def test_unchanged_node_reuses_blob_then_changed_node_reuploads(
     assert (node["localDigest"], node["localSizeBytes"]) == (package.sha256, package.size_bytes)
 
 
-def test_a_no_op_re_push_does_not_re_read_the_model(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drift detection re-hashes every local model on every push, which is what
-    keeps a stale blobId from being published. The memo is what stops that from
-    meaning every push re-reads every byte a workspace holds."""
+def test_a_no_op_re_push_rehashes_but_does_not_upload_again(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fresh bytes establish identity; matching content still reuses its blob."""
     # Given
     write_spec(workspace, models=[local_model()], nodes=[])
     reads: list[Path] = []
@@ -190,7 +188,7 @@ def test_a_no_op_re_push_does_not_re_read_the_model(workspace: Path, monkeypatch
 
     # Then
     assert [first.exit_code, second.exit_code] == [0, 0], second.stderr
-    assert reads == [workspace / "models" / "checkpoints" / "base.safetensors"]
+    assert reads == [workspace / "models" / "checkpoints" / "base.safetensors"] * 2
     assert len(client.blobs) == 1
     model = _entries(_definition(reloaded(workspace)), "models")[0]
     assert model["sha256"] == hashlib.sha256(b"MODEL").hexdigest()
