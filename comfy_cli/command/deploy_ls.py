@@ -10,7 +10,7 @@ from typing import Protocol, runtime_checkable
 import typer
 
 from comfy_cli.builder_api import BuilderAuthError
-from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
+from comfy_cli.command.build_paths import BuildPaths, BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue, read_build_spec
 from comfy_cli.command.deploy_resolve import BuildNotPushedError, DeployResolveError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
@@ -65,6 +65,23 @@ def _editor_column(deployment: JsonObject) -> str:
     return "" if editor is None else f"  editor {'on' if editor else 'off'}"
 
 
+def _build_paths_or_workspace(path: str | None) -> BuildPaths | None:
+    """The Build's paths, or None to list the workspace.
+
+    A bare `deploy ls` with no spec in the current directory lists the
+    workspace, as `--workspace` does. A PATH the caller named still has to hold
+    a spec, so a typo is not read as "every Build". The note goes to stderr in
+    every mode, so a piped listing holds only the rows."""
+    try:
+        return resolve_build_paths(path)
+    except BuildSpecNotFoundError:
+        if path:
+            raise
+        note = "No build spec here, so this lists every Build's deployments (as --workspace)."
+        get_renderer().stderr_console().print(note)
+        return None
+
+
 def run_ls(request: ListRequest) -> None:
     renderer = get_renderer()
     try:
@@ -75,12 +92,15 @@ def run_ls(request: ListRequest) -> None:
         # The Build's own releases, each with its version where it has one;
         # under `--workspace` rows span Builds, so each keeps only its release id.
         versions: dict[str, int | None] | None = None
-        if not request.workspace:
-            paths = resolve_build_paths(request.path)
+        # What was listed, in the payload: the fallback note is on stderr only.
+        scope: JsonObject = {"scope": "workspace"}
+        paths = None if request.workspace else _build_paths_or_workspace(request.path)
+        if paths is not None:
             spec = read_build_spec(paths.spec_file)
             build_id = spec.get("id")
             if not isinstance(build_id, str) or not build_id:
                 raise BuildNotPushedError
+            scope = {"scope": "build", "buildId": build_id}
             versions = {
                 required_string(release, "id"): _version_of(release) for release in builder.list_releases(build_id)
             }
@@ -119,7 +139,7 @@ def run_ls(request: ListRequest) -> None:
                     f"{_editor_column(deployment)}{marker}"
                 )
         payload_rows: list[JsonValue] = [*deployments]
-        renderer.emit({"deployments": payload_rows}, command="deploy ls", changed=False)
+        renderer.emit({"deployments": payload_rows, **scope}, command="deploy ls", changed=False)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)
         raise typer.Exit(code=1) from error

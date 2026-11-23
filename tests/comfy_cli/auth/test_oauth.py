@@ -78,6 +78,45 @@ def test_build_authorize_url_includes_every_required_param():
 # Callback server — happy path + bad state + error param
 # ---------------------------------------------------------------------------
 
+_PRE_SECRETS_AGENT_SCOPES = (
+    "comfy-cloud:workflows:read comfy-cloud:workflows:write comfy-cloud:jobs:read comfy-cloud:jobs:write "
+    "comfy-cloud:files:read comfy-cloud:files:write comfy-cloud:assets:read comfy-cloud:assets:write "
+    "comfy-cloud:hub:read comfy-cloud:hub:write comfy-cloud:user:read comfy-cloud:settings:read "
+    "comfy-cloud:settings:write comfy-cloud:billing:read"
+)
+
+
+def test_default_scopes_append_secrets_and_agent_write():
+    """The secrets/agent mutations are gated on these two scopes; they are
+    appended so the existing prefix of the joined string never reorders."""
+    from comfy_cli.cloud import _DEFAULT_SCOPES
+
+    assert " ".join(_DEFAULT_SCOPES) == (
+        _PRE_SECRETS_AGENT_SCOPES + " comfy-cloud:secrets:write comfy-cloud:agent:write"
+    )
+
+
+def test_login_authorize_url_requests_default_scopes(monkeypatch: pytest.MonkeyPatch):
+    """With no env/config override, the authorize URL asks for the full default list."""
+    from types import SimpleNamespace
+
+    from comfy_cli import cloud, config_manager
+
+    monkeypatch.delenv("COMFY_CLOUD_SCOPES", raising=False)
+    monkeypatch.setattr(config_manager, "ConfigManager", lambda: SimpleNamespace(get=lambda key: None))
+    url = oauth._build_authorize_url(
+        base_url="https://testcloud.comfy.org",
+        client_id="comfy-cli",
+        redirect_uri="http://127.0.0.1:51234/callback",
+        scopes=cloud.get_scopes(),
+        state="STATE",
+        challenge="C" * 43,
+        resource="https://testcloud.comfy.org/api",
+    )
+    scope = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["scope"][0].split()
+    assert "comfy-cloud:secrets:write" in scope
+    assert "comfy-cloud:agent:write" in scope
+
 
 def _drive_callback(*, expected_state: str, query: str) -> oauth._CallbackCapture:
     capture = oauth._CallbackCapture()
@@ -524,6 +563,17 @@ class TestEnsureFreshSession:
         assert result.is_expired() is False
         assert saved["access_token"] == "NEW"
 
+    def test_refresh_does_not_send_scope(self, monkeypatch):
+        """A refresh cannot widen a grant (RFC 6749 §6), so asking for the
+        current default list on refresh would only risk an invalid_scope."""
+        seen: dict = {}
+        monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired())
+        monkeypatch.setattr(auth_store, "save_cloud_session", lambda **kw: None)
+        monkeypatch.setattr(oauth, "_post_form", lambda url, body, **_kw: seen.update(body) or {"access_token": "NEW"})
+        oauth.ensure_fresh_session()
+        assert seen["grant_type"] == "refresh_token"
+        assert "scope" not in seen
+
     def test_no_refresh_token_returns_stale_without_calling_refresh(self, monkeypatch):
         called = []
         monkeypatch.setattr(auth_store, "get_cloud_session", lambda: self._expired(refresh=None))
@@ -703,7 +753,8 @@ class TestConcurrentRefresh:
 
     # (b) Double-check: if a peer already rotated the token between our pre-lock
     # read and the post-lock re-read, we adopt it and do NOT refresh again.
-    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch):
+    @pytest.mark.parametrize("peer_expiry", [None, 1, 4102444800], ids=["unknown-expiry", "expired", "known-unexpired"])
+    def test_double_check_skips_refresh_when_peer_already_rotated(self, persisted, monkeypatch, peer_expiry):
         self._persist_expired(refresh_token="RT0")
 
         # Simulate a peer that rotated RT0 → RT1 while we waited for the lock:
@@ -716,7 +767,7 @@ class TestConcurrentRefresh:
             access_token="PEER_NEW",
             refresh_token="RT1",
             token_type="Bearer",
-            expires_at=int(time.time()) + 3600,
+            expires_at=peer_expiry,
             saved_at="2026-01-01T00:00:02+00:00",
         )
         reads = [self._stale(), fresh_peer]
@@ -726,6 +777,65 @@ class TestConcurrentRefresh:
         result = oauth.ensure_fresh_session()
         assert result.refresh_token == "RT1"
         assert result.access_token == "PEER_NEW"
+
+    def test_a_rejected_older_token_does_not_adopt_an_already_expired_peer_token(self, persisted, monkeypatch):
+        from comfy_cli.credentials import refreshed_access_token
+
+        self._persist_expired()
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **_: self._token_set(access="NEW", refresh="RT1"))
+
+        assert refreshed_access_token("BEFORE_OLD") == "NEW"
+        assert auth_store.get_cloud_session().refresh_token == "RT1"
+
+    @pytest.mark.parametrize(
+        ("peer_access", "peer_expiry"),
+        [("PEER_UNUSABLE", None), ("PEER_UNUSABLE", 1), ("REJECTED_OLDER", 4102444800)],
+        ids=["unknown-expiry", "expired", "same-rejected-token"],
+    )
+    @pytest.mark.parametrize("peer_timing", ["already-stored", "after-first-read"])
+    def test_a_peer_token_that_cannot_be_retried_uses_its_available_refresh(
+        self, persisted, monkeypatch, peer_timing, peer_access, peer_expiry
+    ):
+        from comfy_cli.credentials import refreshed_access_token
+
+        def save(access, refresh, expiry):
+            return auth_store.save_cloud_session(
+                base_url="https://c",
+                resource="https://c/api",
+                client_id="cid",
+                scope="s",
+                access_token=access,
+                refresh_token=refresh,
+                token_type="Bearer",
+                expires_at=expiry,
+            )
+
+        save("REJECTED_OLDER", "RT0", 4102444800)
+        if peer_timing == "already-stored":
+            save(peer_access, "RT1", peer_expiry)
+        else:
+            real_read = auth_store.get_cloud_session
+
+            def read_then_peer_rotates():
+                session = real_read()
+                if session.refresh_token == "RT0":
+                    save(peer_access, "RT1", peer_expiry)
+                return session
+
+            monkeypatch.setattr(auth_store, "get_cloud_session", read_then_peer_rotates)
+        refreshes = []
+
+        def refresh(**kwargs):
+            refreshes.append(kwargs["refresh_token"])
+            return self._token_set(access="NEW", refresh="RT2")
+
+        monkeypatch.setattr(oauth, "refresh_tokens", refresh)
+
+        assert refreshed_access_token("REJECTED_OLDER") == "NEW"
+        stored = auth_store.get_cloud_session()
+        assert stored.access_token == "NEW"
+        assert stored.refresh_token == "RT2"
+        assert refreshes == ["RT1"]
 
     def _stale(self) -> auth_store.CloudSession:
         return auth_store.CloudSession(

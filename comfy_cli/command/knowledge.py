@@ -358,7 +358,7 @@ def _check_picks_locally(picks: list[dict[str, Any]]) -> str:
     return "ok"
 
 
-@app.command("pick", help="Ranked model picks for a capability; omit it to list every capability.")
+@app.command("pick", help="Ranked model picks or unranked discovery routes; omit it to list every capability.")
 @tracking.track_command("knowledge")
 def pick_cmd(
     capability: Annotated[
@@ -395,6 +395,7 @@ def pick_cmd(
         if "fits" in p:
             entry["fits"] = p["fits"]
         picks.append(entry)
+    discovery = knowledge.discovery_entries(cap)
     payload = {
         "capability": capability_id,
         "zero_hit": False,
@@ -405,21 +406,47 @@ def pick_cmd(
         "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
+    if discovery:
+        payload["discovery"] = discovery
+    if failure_policy := knowledge.discovery_failure_policy(cap):
+        payload["failure_policy"] = failure_policy
     if check_local:
         payload["local_check"] = _check_picks_locally(picks)
+        if discovery and payload["local_check"] == "ok":
+            payload["local_check"] = "discovery_not_checked"
     if renderer.is_pretty():
         from rich.table import Table
 
-        columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
-        if check_local:
-            columns += ("unavailable_reason", "local_check")
-        tbl = Table(show_header=True, header_style="bold")
-        for col in columns:
-            tbl.add_column(col)
-        for p in picks:
-            cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
-            tbl.add_row(*(sanitize_markup("" if cells.get(c) is None else cells[c]) for c in columns))
-        renderer.console().print(tbl)
+        if picks:
+            columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
+            if check_local:
+                columns += ("unavailable_reason", "local_check")
+            tbl = Table(show_header=True, header_style="bold")
+            for col in columns:
+                tbl.add_column(col)
+            for p in picks:
+                cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
+                tbl.add_row(*(sanitize_markup("" if cells.get(c) is None else cells[c]) for c in columns))
+            renderer.console().print(tbl)
+        if discovery:
+            tbl = Table(show_header=True, header_style="bold", title="Unranked discovery routes")
+            for col in ("route", "templates", "nodes", "description"):
+                tbl.add_column(col)
+            for route in discovery:
+                cells = {
+                    **route,
+                    "templates": ", ".join(route.get("templates") or []),
+                    "nodes": ", ".join(node["id"] for node in route.get("nodes") or []),
+                }
+                tbl.add_row(
+                    *(
+                        sanitize_markup("" if cells.get(col) is None else cells[col])
+                        for col in ("route", "templates", "nodes", "description")
+                    )
+                )
+            renderer.console().print(tbl)
+        if failure_policy := payload.get("failure_policy"):
+            rprint(f"[bold]Authored failure policy:[/bold] {sanitize_markup(failure_policy)}")
         if check_local and payload["local_check"] != "ok":
             rprint(f"[yellow]local check did not finish:[/yellow] {payload['local_check']}")
     renderer.emit(payload, command="knowledge pick")

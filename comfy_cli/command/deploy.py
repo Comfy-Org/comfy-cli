@@ -128,6 +128,14 @@ def run_cmd(
         list[Path] | None,
         typer.Option("--asset-root", help="Extra directory workflow inputs may name files inside. Repeatable."),
     ] = None,
+    allow_upload: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--allow-upload",
+            help="Upload a missing local file only if its hash is this one (a `--no-upload` refusal's "
+            "`details.missing[].hash`). Repeatable. Any other missing file fails with deploy_asset_missing.",
+        ),
+    ] = None,
 ) -> None:
     _deploy_run.run_deploy(
         ctx,
@@ -140,6 +148,7 @@ def run_cmd(
             timeout,
             no_upload,
             tuple(asset_root or ()),
+            frozenset(allow_upload) if allow_upload else None,
         ),
     )
 

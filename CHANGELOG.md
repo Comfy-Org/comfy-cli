@@ -17,6 +17,478 @@ history.
 
 ### Added
 
+- `comfy extension list`, `comfy extension disable <folder>` and
+  `comfy extension enable <folder>` turn a custom node pack's frontend code off
+  or on through the running local ComfyUI's `Comfy.Extension.DisabledPacks`
+  setting, which needs ComfyUI_frontend 1.59 or later (the frontend checks it
+  before importing a folder's scripts; the command warns when ComfyUI pins an
+  older frontend). No restart: the change applies on the next page reload. Other
+  switched-off folders are kept (the setting is re-read just before the
+  write), an unknown folder is refused, and a malformed setting is reported
+  instead of overwritten. `--user` picks the user under `--multi-user`.
+- `comfy node show agent-created` (and `simple-show agent-created`) lists the
+  custom node packs the local Comfy agent says it created, read from the
+  `.comfy-agent-install` record in each pack: enabled, switched off with a
+  `.disabled` suffix, or moved to `custom_nodes/.disabled` by ComfyUI-Manager.
+  The record's signature cannot be checked by comfy-cli, so the output (and
+  `data.verified` in `--json`) says the packs are unverified.
+- `comfy node validate` runs an advisory hygiene check on packs the local
+  Comfy agent writes (an install record or an `agent.` extension name), or on
+  any pack with `--agent-pack`. It reports what Settings > Extensions cannot
+  turn off: code at module top level and CSS aimed at the whole page, plus an
+  extension name with no `agent.` prefix or provenance. Findings never fail
+  validation.
+- `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
+  finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
+  `data.warnings` reports `partial_execution` for a target that returned
+  nothing and `partial_execution_targets_ignored` when the server also ran
+  nodes outside the targets. An async targeted run records its targets on the
+  job state file, and its `queued` envelope carries a `data.note` naming the
+  watch command.
+- `comfy templates ls --local-only` drops partner-API templates from the
+  index (a name starting with `api_`, or an API tag) with no network
+  beyond the index. `--runnable` implies `--local-only`, then checks
+  each remaining template against the local install and annotates every
+  row with a verdict and `missing_count`. A single template's fetch or
+  parse failure becomes `verdict: "unknown"` with a warning and does not
+  abort the list. A workflow body with no `nodes` list is `unknown`, not
+  `runnable`. A model folder whose listing fails with an HTTP error other
+  than 404 is reported missing with a warning. When the local server's
+  object_info is unavailable, a run-level warning says verdicts rely on
+  the index heuristic alone. The JSON payload adds `local_only_dropped`.
+  An oversized folder listing is `model_listing_too_large`.
+- `comfy models search`, `list-folders`, `list-folder` and `show` take
+  `--host`/`--port` the same way `comfy upload` does, so they can point
+  at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
+  rejected against an effective cloud target with `host_flag_cloud`, and
+  a bad host or port yields `host_port_invalid` instead of a traceback.
+  With no flags, behavior is unchanged.
+- `comfy workflow slots` rows for a subgraph's promoted widgets carry
+  `source_address`, the interior node and widget the row stands for
+  (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
+  The key is optional: a row omits it when its interior widget does not
+  resolve, when its value comes from an interior PrimitiveNode, or when the
+  input is a plain legacy `proxyWidgets` fallback (a legacy entry that will be
+  repaired into a linked input does carry it).
+  The row's `address` is unchanged and stays the one to edit.
+- `comfy build init`, `update` and `validate` carry `data.warnings[]` as
+  `{code, message}` under `--json`. `build_comfy_version_missing` means the
+  spec has no `baseComfyVersion`; `build_snapshot_empty` means a
+  `--from-snapshot` import carries no custom nodes or models. Its message says
+  whether the snapshot lists none (likely older than the install) or counts
+  the listed packs left out by cause: disabled, or the importer's own advisory
+  line for each cause its report gives, with no cause guessed where the report
+  gives none. On stderr those advisory lines appear only inside this warning,
+  so each pack is named once (also warned in pretty output); `--json` still
+  carries them under `advisories` as well.
+- `comfy build release create` refuses a spec with no `baseComfyVersion` with
+  `build_comfy_version_missing` when the Build it names has none either, before
+  the cut, and the hint names `comfy build update --comfy-version <ref>`. With
+  `--id` the spec is not read.
+- `comfy build validate --remote` asks a model's own `sourceUri` for its hash
+  when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
+  HEAD that does not follow redirects). Only an https link with no user or
+  password before its host, written out or percent-encoded (`TOKEN%40host`),
+  is asked, so a credential in the link never goes out without TLS or to a
+  proxy. The lookup reads
+  `declared_ok` or `declared_mismatch`, with the link's hash in
+  `sourceSha256`. Each HEAD, from connect to its last header, may take 5
+  seconds and all of them 15 seconds
+  together; a link past that budget, or one that states no hash or does not
+  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0015
+  records that `validate --remote` now contacts the model hosts.
+
+### Changed
+
+- The Run on Cloud skill asks before submitting one paid test job, including
+  validation and preflight runs. Declining still saves the prepared workflow
+  and returns its Cloud link with execution marked unverified. Upload, build,
+  and deployment approvals remain separate from job consent.
+- **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
+  `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
+  `where_invalid` envelope and a non-zero exit. Before, `comfy --json
+  nodes show --where bogus` printed a traceback with nothing on stdout,
+  and `comfy --json jobs ls --where bogus` printed a successful local
+  listing for a target the caller never named.
+- **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
+  following poll) now emits `cloud_unauthorized` instead of
+  `cloud_http_error`. The message says the login predates a permission
+  change and `comfy cloud login` fixes it, and the envelope carries
+  `details.reason` and `details.required_scope`. `comfy cloud login` now
+  also requests the `comfy-cloud:secrets:write` and
+  `comfy-cloud:agent:write` default OAuth scopes, so a new login can
+  call the Cloud secrets and agent APIs. A refresh does not widen an
+  existing grant; a session minted before this change needs a re-login
+  for those scopes.
+- The `comfy-run-on-cloud` skill makes a custom build from the person's whole
+  install (Path A of `comfy-build`), not from the workflow alone
+  (`--from-workflow`). Its custom build step is short and uploads nothing
+  before one yes to the plan.
+- `comfy build quota` uses the release and active-deployment counts the builder
+  and comfy-deploy send with their limits, when they do: such a count is exact
+  (`exact: true` for deployments, no `truncated` for releases), and the note
+  saying it can read low is left out. `note` is empty when nothing is left to say.
+
+### Fixed
+
+- `comfy generate --emit-workflow` / `--emit-ops` with two or more `--image`
+  files no longer builds a chain of the deprecated `ImageBatch` node. The
+  images now go into one `BatchImagesNode` (one slot per image, in `--image`
+  order), so the emitted graph has no node marked deprecated in ComfyUI. N
+  images now give one batch node instead of N-1.
+- Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
+  `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
+  the ComfyUI canvas as a workflow. The run sends the canvas graph as
+  `extra_data.extra_pnginfo.workflow`, the same as the editor's Queue button,
+  so save nodes (SaveImage, VHS Video Combine and others) write `workflow`
+  next to `prompt`. Before, the files carried only `prompt` and dropped in as a
+  plain image or video. Applies to local and `--where cloud` runs; API-format
+  inputs are unchanged.
+- A long partner-node run on a local ComfyUI, signed in with `comfy cloud
+  login`, no longer stops with "Unauthorized: Please login first" after the
+  provider task was created, wherever Comfy Cloud issues partner-node tokens
+  to comfy-cli. `comfy run` against a loopback ComfyUI now gives it a
+  partner-node token in place of the fifteen-minute sign-in token. It lasts
+  about 90 minutes, and ComfyUI 0.43.0 or later renews it during the run.
+  comfy-cli caches one token per sign-in, renews it before a run when it has
+  less than 45 minutes left, and mints a new one only when renewal is refused
+  or cannot help. When Comfy Cloud refuses the mint, the run gets the sign-in
+  token as before, refreshed when possible, and a run longer than that token
+  can still stop. `comfy cloud logout` clears the sign-in, then revokes every
+  partner-node session of it; that also ends token renewal for Cloud jobs
+  submitted with the sign-in, which matters only when their API node runs more
+  than 90 minutes after submit. Its envelope reports
+  `partner_node_revocation`: `sign_in` for every session of the sign-in,
+  `token` for the cached token's own, `failed`, or `null` for an environment
+  without partner-node tokens. A new `comfy cloud login` revokes only the
+  cached token's own session, so Cloud jobs keep renewing, and warns when it
+  cannot. API keys, `COMFY_CLOUD_AUTH_TOKEN`, `comfy deploy run` and a ComfyUI
+  on another host (which gets no partner-node credential, as before) are
+  unchanged.
+- A local `comfy run` signed in with `comfy cloud login` no longer asks Comfy
+  Cloud for a partner-node token on every run once a mint has failed (Comfy
+  Cloud refused it, was unreachable or did not answer). comfy-cli remembers
+  the failure for that sign-in and environment for 10 minutes. Meanwhile runs
+  make no mint request and get the sign-in token, refreshed unless it is under
+  a minute old. A hanging mint is tried once per 10 minutes, not on every run;
+  only the runs that start while it hangs wait for it. A new
+  `comfy cloud login` or `comfy setup` sign-in, `comfy cloud logout`, a
+  successful mint, and a successful renewal that the session's end does not
+  cut short end the wait. Renewal of a cached partner-node token is
+  unchanged.
+- Two `comfy model download` runs from different workspaces aimed at the same
+  file now refuse each other. Before, each workspace kept its own download
+  claims, so both runs wrote the file. This is the default case on Comfy
+  Desktop, where every install saves into one shared model library. Claims
+  now live in `download-claims/` in comfy-cli's config directory, or inside
+  the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
+  downloads before upgrading, since an older version keeps its claims per
+  workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- A failed `comfy run` or `comfy jobs watch` no longer prints the failing
+  node's inputs, which can hold an API key: `comfy run` drops them from its
+  error dump and `execution_error` stream event, and `jobs watch` from its
+  envelope when ComfyUI's live error event has no traceback.
+- `comfy knowledge resolve` no longer suggests, in `candidate_ids`, a model id
+  that differs from another id only by letter case. Such an id resolves to the
+  other model, so retrying it would pick the wrong one.
+- The `comfy-build`, `comfy-build-pins`, `comfy-build-authoring` and
+  `comfy-build-failures` skills say an ordinary version pin in
+  `pipDependencies` adds no package, where they said any line never does. They
+  name the two kinds of line the builder installs on their own: a wheel by its
+  `https://` address, and an exact, unmarked `nvidia-vfx` pin.
+- A snapshot import's advisories name a pending or disowned Registry pack
+  once: the `unresolvedNodes` line leaves out the packs `registryPending` and
+  `notInRegistry` already name. A pending pack's line says to import again once
+  the Comfy Registry finishes publishing it, where it said the build would wait
+  or fail on it; the importer leaves that pack out of the spec.
+- `comfy build update --comfy-version <ref>` on a spec with no install beside
+  it (imported from a workflow or a snapshot) sets the version without a rescan
+  (`source: "spec"`). A rescan that cannot run names that command and
+  `update --from-workflow` in its hint, and every `update` envelope, errors
+  included, says `command: "build update"`.
+- A bare `comfy deploy ls` with no spec in the current folder lists the
+  workspace, as `--workspace` does, instead of failing with
+  `build_spec_not_found`. A PATH that holds no spec still fails. Under `--json`
+  the payload says what was listed: `scope: "build"` with the `buildId`, or
+  `scope: "workspace"`.
+- A `build_spec_invalid` for a `localPath` that does not resolve keeps its
+  advice to fix the named field, then says which folder `localPath` was read
+  under and names `--models-dir` and `--custom-nodes-dir`. A spec written apart
+  from its install (`init -o`) needs the folder for each kind of entry it lists
+  on `validate` and `push`.
+- `comfy build status` on a spec that was never pushed reports the local half
+  and `remote.state: "not_pushed"` instead of asking for `--id` or offering a
+  Build picker. It needs no sign-in then, since it reads nothing from the
+  builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
+  when no Build is named, so it stays a string wherever it appears.
+
+## [1.26.0] - 2026-11-11
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.26.0) · 29 commits since v1.25.0.
+
+### Added
+
+- `comfy build quota` shows the releases and active deployments the workspace
+  holds against its limits. A limit that cannot be read, or whose body lacks
+  the service's shape, is `null` with `limitKnown: false`, and the counts still
+  print. The release count covers only the Builds the caller can see, and past
+  100 Builds only the first 100 (`truncated`, said beside the count). The
+  active-deployment count comes from the deploy list, which can miss a slot
+  held by a stopped deployment's queued replacement, so it is marked
+  `exact: false` and printed as "at least". Deployments are read the way the
+  deploy commands read them; when `--builder-url` or `COMFY_BUILDER_URL`
+  points the builder elsewhere, or `COMFY_BUILDER_TOKEN` signs the builder
+  reads with another credential, `note` says so.
+
+- A release cut refused at the release limit (`build_release_limit`) lists, under
+  `--json`, each visible Build in `details.builds`: its release count, its
+  newest release, and how many deployments use it (`deployments` and `inUse`).
+  No page request of those reads starts after 10 seconds, and
+  `details.buildsTruncated` marks a list cut short. The Builds are read before
+  the deployments. The Build list stays, and only each Build's `deployments`
+  and `inUse` are left out, in three cases: the deployment read fails or is
+  still running at 10 seconds; `COMFY_BUILDER_TOKEN` signs the builder reads
+  with another credential than the deploy commands'; or the builder URL
+  (`--builder-url` or `COMFY_BUILDER_URL`) is on another host than the deploy
+  URL. A `comfy deploy up`
+  create, restart or move refused at the active-deployment limit
+  (`deploy_quota_exceeded`) lists the deployments holding a slot in
+  `details.activeDeployments`, whenever the refusal names that limit, and says
+  `comfy deploy stop` frees one; a refusal over the per-deployment worker limit
+  lists none. When the extra reads fail, both envelopes are as before.
+
+- The `comfy-run-on-cloud` agent skill, installed with the other bundled
+  skills and read with `comfy skills show comfy-run-on-cloud`. It takes one
+  workflow from a running local ComfyUI (read through the server's
+  `/api/userdata`, so no folder path is needed) to Comfy Cloud: it checks the
+  workflow with `comfy workflow check --where cloud --models-dir` (the
+  install's model folders, so a local model that differs from Cloud's copy
+  blocks), then runs it on Comfy Cloud as is, on an existing build in the workspace, with a lossless node swap
+  made on a copy, with a lossy swap the person agreed to, or on a custom build.
+  A model the check cannot prove the same runs on Cloud's copy and is named in
+  the report. Every local file upload is asked by name, models go through
+  `comfy model upload` after a dry run, a deployment run holds its automatic
+  uploads with `--no-upload` and then uploads only the approved files with
+  `--allow-upload`, and the agent runs
+  one real job before it saves with `comfy workflow save --where cloud` and
+  hands back the save's link (or says there is none for a record-only save).
+  `comfy_cli/skills/comfy-run-on-cloud/PROMPT-TEMPLATE.md` is the prompt local
+  ComfyUI's Copy prompt button gives the agent. `comfy-build` points a
+  single-workflow request at the new skill, `comfy-build-failures` says a
+  missing import needs a way to install it before another cut, and
+  `comfy-deploy` and `comfy-deploy-failures` read a deployment with
+  `deploy show` outside a Build folder, since `deploy status` needs one.
+  Builds on #1008.
+
+- `comfy deploy run --allow-upload <hash>` (repeatable) uploads a local file
+  the deployment lacks only if its hash is listed; any other file fails with
+  `deploy_asset_missing` and is not sent. A file Cloud already holds is reused
+  by hash with no copy. A file it must upload is copied once to a private
+  temporary file, checked against the approved hash and sent from that copy,
+  so a file rewritten in between cannot send bytes nobody approved. A temp
+  folder without room for the whole file is refused before any byte is
+  copied, with `deploy_asset_upload_failed`. That file is not uploaded;
+  approved files before it may already be, and a retry reuses them. The
+  `--allow-upload` refusal, and the one from
+  `--no-upload`, now lists every such file in `details.missing[]` (absolute
+  `local_path`, `bytes`, `hash`) rather than stopping at the first, so a person
+  can approve the exact files the scanner picked. When two asset folders hold
+  files of the same name, this shows which one it picked.
+
+- `comfy workflow check <file> --where cloud` says whether Comfy Cloud runs a
+  workflow with no custom build. Signed in, it reads Cloud's node list and your
+  uploaded models, and answers `covered`, `covered_with_remaps` (a model sits in
+  another folder on Cloud), `covered_needs_check` (a model is not proven the
+  same file) or `needs_build`, with each blocking node type or model, its models
+  folder and any local copy. `--models-dir` hashes local copies against Cloud's;
+  `--apply-remaps --out <file>` writes a remapped copy and leaves the original
+  alone.
+
+- `comfy workflow save` on Comfy Cloud, when the workspace's
+  `cli_cloud_save_enabled` flag is on, writes an editor-format workflow into a
+  new folder in the Cloud Workflows sidebar (`<name>`, then `<name> (2)` and so
+  on; it never replaces a file or adds to an existing workflow) and prints a
+  link that opens the folder, on Comfy Cloud itself or on the build
+  `--deployment <id>` names. The output keeps `workflow_id` and
+  `latest_version`. An API-format workflow keeps the record-only save.
+  `comfy workflow delete` still deletes only the record; with the flag on it
+  warns (`sidebar_file_kept`) when the workflow's sidebar file stays, naming
+  the file to remove in Comfy Cloud. A file counts as the workflow's only when
+  no other live workflow has its name and it matches the workflow's latest
+  version, so a same-named file of another workflow is never named. With the
+  flag off, or when Cloud's
+  features cannot be read, save and delete are unchanged.
+
+- `comfy knowledge pick` includes authored discovery-only routes in a separate
+  `discovery` list, marks every route `ranking: "unranked"`, and carries the
+  capability's `failure_policy` without promoting or reordering ranked picks.
+  `--check-local` reports `discovery_not_checked` when ranked-pick checks pass
+  but discovery routes are present.
+
+- `comfy model upload <file> --type <folder> --where cloud` uploads one local
+  model file into your Comfy Cloud model library, so a workflow run on Comfy
+  Cloud can load it, e.g. `comfy model upload my_style.safetensors --type loras
+  --where cloud`. Run it with `--dry-run` first: it checks the file, the folder
+  and the library, uploads nothing, and prints the file's sha256. Check that
+  sha256 with `shasum -a 256` before you approve. The real upload asks before it
+  starts. An agent (or any `--json` caller the CLI takes for one) must pass
+  `--yes`, or it gets `model_upload_needs_confirm` and nothing is sent.
+  `--expected-sha256 <sha>` uploads nothing unless the file still has the bytes
+  the dry run reported. `--workspace <id>` uploads nothing unless this sign-in
+  uploads into that workspace (`asset_upload_wrong_workspace`). The `--json`
+  output (the `model_upload` schema) carries `loader_path`, the value a
+  workflow's loader node takes to load the file on Comfy Cloud. It is Comfy
+  Cloud's own value from its record of the model, and null when Comfy Cloud
+  gives none or when a dry run would upload. Builds on #1008.
+
+- `comfy model upload` and `comfy assets library upload` upload only the file
+  named, and succeed only once Comfy Cloud's hash of the stored file equals the
+  local file's. Before anything is sent they look the name up in that folder of
+  the workspace's model library: every member's models, the ones a run on Comfy
+  Cloud loads, and no public ones.
+  The same bytes under that name are reported as `already_present` and not sent
+  again (for `comfy assets library upload`, only when they are the only model of
+  that name). `comfy model upload` refuses other bytes under that name
+  (`asset_upload_invalid`, `details.reason` `name_in_use`), because a second
+  file would change what that name loads for every workflow in the workspace.
+  `comfy assets library upload` still uploads them, as a new version of the
+  name, so a script that replaces a model that way keeps working. The upload sends only bytes
+  that were hashed: each 1 MiB block is checked against its hash before any of
+  it is sent. A file that changed after it was hashed stops the upload before
+  the changed bytes are sent, and is never completed (`asset_upload_failed`,
+  `file_changed`). A stored
+  hash that differs, or that Comfy Cloud does not report, ends as
+  `asset_upload_unverified`. `comfy assets library upload` gains `--dry-run`,
+  and its `--json` output gains `loader_path`, `sha256`, `workspace_id`,
+  `uploaded`, `already_present` and `dry_run`.
+
+### Changed
+
+- `comfy workflow save --where cloud` prints a link that opens only the saved
+  workflow (`?workflowId=<workflow id>`) when Cloud's `/api/features` has
+  `private_saved_file_links_enabled` on. The workflow id is the one record
+  Cloud made from the saved file. With the setting off, or when that record
+  is missing, not unique, or the search for it fails, the link opens the
+  folder as before. The receipt adds `url_opens` (`workflow` or `folder`) and
+  `folder_link_reason`.
+
+- Release watches poll through `stopping` and report `build_stopped` (exit 1) when a release stops. Log following reads the final lines after `stopped` and exits successfully.
+
+- `comfy deploy status` explains beside its sampled counts that they may lag after workers scale down. The deploy-failure guidance also clarifies that sampled counts cannot establish whether a worker or job is running now.
+
+- Both `comfy assets library upload` and `comfy model upload` request resumable
+  model uploads up to 25 GB. Dropped connections retry from storage's held
+  bytes. Running the command again continues a saved upload for the same file,
+  account, workspace and folder while its session remains valid. Sessions expire
+  no later than seven days after creation; the server can expire them earlier.
+  A paused upload reports whether its session was saved for a later run. Older
+  servers keep the single-PUT upload. A server with resumable uploads turned off
+  refuses the resumable start (403 `FEATURE_DISABLED`); the upload then starts
+  once more as a single PUT, as the editor does, and a refusal of that start
+  (such as `FILE_TOO_LARGE` over 2 GiB) is shown as before.
+  File approval, block checks and the final stored-hash
+  check still apply. The final storage check no longer stops after fifteen
+  minutes. The retired `asset_upload_timeout` error code stays discoverable
+  for compatibility with older versions. The task id is reported before the
+  storage wait. Refused resumable sessions are discarded and restarted once;
+  certificate verification and invalid CA-bundle failures stop immediately
+  without transport exception text.
+  HTTP timeouts and transient TLS interruptions query the held bytes and retry.
+  A closed progress pipe or stream does not stop task polling or the final
+  stored-hash check, including when Rich converts the pipe failure to an exit.
+  Legacy single-PUT storage addresses
+  retain HTTP compatibility. Certificate verification and invalid CA-bundle
+  errors on that path also stop immediately with fixed TLS guidance.
+  Both paths recognize certificate failures wrapped by an HTTPS proxy while
+  retaining retries for temporary proxy failures.
+
+- `comfy assets library upload` and `comfy model upload` tell Comfy Cloud
+  which client sent an upload and whether its transfer resumed from bytes
+  storage already held. When a transfer stops for good (it gives up, pauses or
+  is canceled), the command sends Comfy Cloud one report with a fixed reason,
+  the size and the folder, if the server asks for such reports. Any stopped
+  upload (one that gives up, pauses, restarts as a fresh upload or gets Ctrl+C)
+  can take up to 3 seconds longer to exit while that report goes out to a slow
+  Comfy Cloud. A second Ctrl+C ends that wait within a tenth of a second.
+  `DO_NOT_TRACK` or `COMFY_NO_TELEMETRY` turns all of it off.
+
+- `comfy build push` shares the upload progress reporter. A broken pipe or
+  closed progress stream now mutes its progress instead of ending the push.
+
+- Commands that load a node catalog but read only a few classes (`workflow
+  print`, `workflow validate`, `workflow slots`, `nodes show`) no longer parse
+  every class in it: a class is parsed when first looked up, and the type
+  indexes that discovery commands (`nodes upstream`, `downstream`, `path`,
+  `types`, `ls`) read are built on first use. Output is unchanged.
+
+### Fixed
+
+- `comfy templates ls --model` (and `templates get --where model=`) find a template asked for by base model plus variant. The gallery lists the base model in `models` ("Seedream 5.0", "Krea 2") and names the variant only in the title, tags or template name, so `--model "Seedream 5.0 Lite"`, `--model "krea 2 turbo"` and `--model "Qwen Image ControlNet"` found nothing. A template now also matches when the first word is a word of one of its model names and every other word is a whole word of that model name, the title, the tags or the template name; a number outside the model name counts only in the title. A query that matched before matches the same templates.
+- Search matches names however their separators are written. `comfy models search --text` on Cloud now finds `minimax_h3_ref2va_….safetensors` for `MiniMax H3` and `wan2.2_t2v_….safetensors` for `wan 2.2`: every word must appear, with `- _ . space` ignored, the rule local search already used. Before, Cloud sent the whole query as one substring and a multi-word name found nothing. `comfy templates ls` (and `templates get --where`) match `--model`, `--name` and `--provider` the same way, so `--model "Wan 2.2"` finds the gallery's `Wan2.2`, and `comfy nodes search` finds `LTX 2.5` nodes for `LTX-2.5`. On Cloud a word the filename splits (`sdxl` for `sd_xl_base_1.0.safetensors`) is found too: when the server's narrowed answer has no match, search scans without the server filter. A scan stops after 10,000 assets, and `total_is_lower_bound` is then true.
+
+- `comfy build push --dry-run` now runs the push's registry-pin check, so a pin the builder cannot place fails the dry run with the push's own `build_registry_pin_missing` error instead of passing it. A version the registry has Flagged was the common case: the dry run passed, and the push was refused only after the plan had been disclosed. The check asks the builder's snapshot importer to place each public pack, a read that writes nothing, and the dry run still uploads and saves nothing. The `--json` payload of a push and a dry run carries `public_pins_checked`, the number of public pins the builder placed (0 when the spec has none and the builder was not asked), so a script can tell a checked pin set from a spec with nothing to check. A spec that pins a public pack now needs sign-in for its dry run (`build_not_signed_in` otherwise); a spec whose packs are all local still sends no request. Push and dry run also refuse when the registry did not answer for a pack (the importer's `unverifiedPins`), instead of treating the unchecked pin as resolved; refuse with `build_spec_invalid`, before sending anything, a `repository` that is not a public GitHub address (`https://github.com/<org>/<repo>`, `git@github.com:<org>/<repo>.git` or `ssh://git@github.com/<org>/<repo>`), so one that carries a user name or token, does not parse, or names another host never leaves the machine; and report a builder response that times out or drops mid-body as `build_builder_error` instead of an internal error.
+
+- Parallel build and deploy requests rejected on an old access token now adopt a peer's refreshed token under the shared refresh lock instead of rotating it again. Each rejected request retries at most once. If session recovery still fails while a refreshable sign-in remains stored, the watch reports that the remote work may continue instead of telling you to sign in again. `comfy build release create --watch`, `comfy deploy up`, `promote`, `rollback` and `comfy deploy status --watch` now end with the new code `watch_auth_lost` and exit code 75, as `deploy_watch_lost` does. Its hint names the command that reads the release or deployment again. A 401 before anything was accepted, on a workspace API key, or when no refreshable sign-in remains still reports `build_not_signed_in` or `deploy_not_signed_in`.
+
+- `comfy update` no longer dies with a `FileNotFoundError` traceback when the
+  configured workspace directory does not exist (never installed, or deleted).
+  It now fails with a `not_in_workspace` error that points at `comfy install`,
+  including when `--recent` cannot resolve a workspace, keeping the resolver's
+  exit status.
+
+- `comfy update cli` works for a `uv tool install` of comfy-cli. Those envs ship
+  without pip, so the old `python -m pip install -U` always failed; it now runs
+  `uv tool upgrade comfy-cli`, and any installer failure is reported as an
+  `update_cli_failed` error rather than a traceback. The upgrade targets the
+  running installation's tool directory even when `UV_TOOL_DIR` is absent or
+  selects a different directory in the current shell; when `uv` is not on PATH,
+  the hint names that directory too. The installer still runs without a time
+  limit, since stopping it partway can leave comfy-cli half-replaced. An exact uv version pin
+  is preserved and reported with manual reinstall guidance. Installer diagnostics
+  stay on stderr in JSON/NDJSON modes, which end with one success or error envelope.
+
+- Desktop discovery reads both modern and legacy registries and keeps each registry's shared model roots with its own installs. The selected Desktop install is a registry-derived candidate (the only usable install, or the most recently launched); it is not matched to a running server.
+
+- `comfy which` and `comfy env` report Desktop's split code, data and model roots without changing launch/install selection. On Linux, shared model roots are read from `settings.json` under `XDG_CONFIG_HOME`, where Desktop keeps it. A nonexistent selected workspace still exits 0 but reports `exists: false` and a `workspace_not_found` warning; discovery reports malformed or unreadable Desktop configuration, and Desktop paths that cannot be checked (permission denied, a symlink loop, no home directory), as `desktop_config_unreadable` warnings and marks inferred data roots as unverified. Both codes appear only in `data.warnings[]`; they are not error codes and `comfy discover` does not list them under `data.error_codes`.
+
+- `comfy node deps` reports malformed installed package versions as `unknown`
+  consistently across supported `packaging` versions. One metadata probe
+  preserves raw installed versions with or without pip. Every `===` clause
+  compares raw strings case-insensitively, including in mixed constraints;
+  ordinary clauses still require valid versions and use semantic comparison.
+
+- UI→API conversion expands a `COMFY_DYNAMICCOMBO_V3` selector's sub-inputs in
+  the order the workflow was SAVED with, when the saved graph records one,
+  instead of the option's current order. An option that has since gained a
+  sub-input shifted every later slot by one, and once the alignment was off the
+  `control_after_generate` marker was consumed as a real value too — a
+  Seedance 2.0 graph converted with `model.auto_upscale` holding the seed and
+  `seed` holding `"randomize"`. `validate` catches the seed type but not the
+  boolean, so fixing only the seed still submitted the wrong graph. A sub-input
+  the save never carried now takes no slot, and a save that names one the
+  option no longer declares falls back to the current expansion untouched.
+
+- UI→API conversion no longer synthesizes an input for an optional widget the
+  saved node never carried. `graphToPrompt()` serializes the widgets a node
+  actually has, so padding one from its schema default attached inputs the
+  frontend does not send: `CreateVideo` saved with a single `fps` widget came
+  out carrying `bit_depth`, `color_space` and `codec`, and
+  `ModelSamplingAuraFlow`, `CFGNorm` and `SimpleMath+` behaved the same way.
+  The evidence is the node's own `inputs[]` widget-marker list rather than the
+  length of `widgets_values`, so a truncated save whose later widgets ran past
+  the end still gets their defaults. Required inputs, socketless widgets, and
+  optional non-widget sockets are never dropped, and neither is anything on a
+  node whose markers omit a widget the save itself filled — the shape a legacy
+  frontend wrote when it marked only the widgets converted to a socket. A dict
+  widget declared as one input but marked per leaf (`regions.face_oval`) counts
+  as marked, so its default survives too.
+
+## [1.25.0] - 2026-11-03
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.25.0) · 17 commits since v1.24.0.
+
+### Added
+
 - `comfy assets library upload <file> --type <folder>` puts a `.safetensors`
   model file of up to 2 GB into your Comfy Cloud workspace's model library,
   e.g. `comfy assets library upload my_style.safetensors --type loras`. The
@@ -34,6 +506,7 @@ history.
   `asset_upload_refused`; new codes `asset_upload_invalid`,
   `asset_upload_failed` and `asset_upload_timeout` cover the other ways it
   can end.
+
 - `comfy knowledge resolve` suggests canonical model ids for an incomplete
   family/version name such as `Qwen 2.1`. The command still fails with
   `knowledge_unknown_model` and exit 1, but `error.details.candidate_ids` lists
@@ -42,10 +515,13 @@ history.
   which model is intended before retrying `comfy knowledge resolve <exact-id>`.
   A single candidate is still only a suggestion: nothing is auto-resolved,
   downloaded or run. Substituted family words, different versions and names
-  with non-ASCII characters get no candidates. Exact canonical ids resolve
-  before case-folded aliases; case-distinct canonical ids require exact
-  spelling instead of arbitrarily choosing one. Other alias resolution,
-  `close_matches` and the hint for a name with no candidates are unchanged.
+  with non-ASCII letters, numbers, combining marks or controls get no
+  candidates; Unicode punctuation, symbols and separators remain valid
+  boundaries. Exact canonical ids resolve before case-folded aliases;
+  case-distinct canonical ids require exact spelling instead of arbitrarily
+  choosing one. Their ambiguous folded spelling is omitted from alias-based
+  `close_matches` and alias counts because it has no single owner. Other alias
+  resolution and the no-candidate hint are unchanged.
 
 ### Changed
 
@@ -64,6 +540,7 @@ history.
 - `comfy assets library ls` reports a 401 or 403 as `cloud_unauthorized` even
   when the server drops the connection partway through its error body, instead
   of crashing with `IncompleteRead`.
+
 - A typed `comfy model download` with no `--relative-path` now saves into the
   folder the running local ComfyUI scans for that model type, and says where.
   On Comfy Desktop that is the shared library, not the install's `models/`.
@@ -1253,7 +1730,9 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...HEAD
+[1.26.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.25.0...v1.26.0
+[1.25.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...v1.25.0
 [1.24.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...v1.24.0
 [1.23.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...v1.22.0

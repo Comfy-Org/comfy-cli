@@ -839,7 +839,7 @@ def source_value(
         return UNSET
     stack = _stack | {id(sg)}
     defs = defs if defs is not None else defs_by_id(workflow)
-    inner = next((n for n in sg.get("nodes") or [] if str(n.get("id")) == pi.source_node), None)
+    inner = _inner_node(sg, pi.source_node)
     if inner is None:
         return UNSET
     if pi.nested:
@@ -958,7 +958,7 @@ def deepest_source(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> tuple[
         path.append(current.source_node)
         if not current.nested:
             return path, str(current.source_widget)
-        inner = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == current.source_node), None)
+        inner = _inner_node(current_sg, current.source_node)
         inner_def = defs.get(str(inner.get("type", ""))) if inner is not None else None
         if inner_def is None or current.source_input is None:
             return None
@@ -1130,7 +1130,7 @@ def resolve_write(
                 )
             if link is not None:
                 origin = link.get("origin_id")
-                origin_node = next((n for n in parent_def.get("nodes") or [] if str(n.get("id")) == str(origin)), None)
+                origin_node = _inner_node(parent_def, origin)
                 raise ValueError(
                     f"{given} is fed by interior node {'/'.join(segments[:-1])}/{origin} "
                     f"({origin_node.get('type') if origin_node else '?'}) — that link supplies the value, so a widget "
@@ -1380,7 +1380,7 @@ class LegacyEntry:
         validation/source-port lookup a linked promotion gets applies."""
         if self.plan == PLAN_PRIMITIVE:
             tid, slot = self.targets[0]
-            target = next((n for n in sg.get("nodes") or [] if str(n.get("id")) == tid), None)
+            target = _inner_node(sg, tid)
             entry = (target.get("inputs") or [])[slot] if target is not None else None
             marker = entry.get("widget") if isinstance(entry, dict) else None
             widget = marker.get("name") if isinstance(marker, dict) and marker.get("name") else entry.get("name")
@@ -2186,10 +2186,8 @@ def flush_proxy_migration(
     return report
 
 
-def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
-    """Every concrete ``(interior node path, widget)`` a promoted input feeds —
-    all of its boundary links, through nested instances. A repaired primitive
-    fan-out has several; :func:`deepest_source` reports only the first."""
+def boundary_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
+    """Every ``(interior node path, input)`` the input's boundary links reach, sockets included."""
     cache = getattr(defs, "promotion_boundaries", None)
     cache_key = (id(sg), pi.index)
     raw_inputs = sg.get("inputs")
@@ -2368,15 +2366,18 @@ def _boundary_targets(
                     )
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
+            # Unmarked sockets count too: the frontend inlines into any input the link reaches (resolveInput).
             marker = entry.get("widget")
-            if marker:
-                _spend_traversal_budget(
-                    _output_budget,
-                    1,
-                    "promoted widget boundary traversal exceeded its safe limit",
-                )
-                widget = marker.get("name") if isinstance(marker, dict) else None
-                out.append(([tid], str(widget or entry.get("name"))))
+            widget = marker.get("name") if isinstance(marker, dict) else None
+            name = widget or entry.get("name")
+            if name is None:
+                continue
+            _spend_traversal_budget(
+                _output_budget,
+                1,
+                "promoted widget boundary traversal exceeded its safe limit",
+            )
+            out.append(([tid], str(name)))
     _memo[memo_key] = out
     frozen_dependencies = frozenset(dependencies)
     _dependency_memo[memo_key] = frozen_dependencies

@@ -8,14 +8,13 @@ computed status per requirement.
 
 ``--registry <node-id>`` extends the same diff to a pack that is **not yet
 installed**: the registry's published dependency list for that pack's latest
-version, diffed against the very same ``pip list`` map, so conflict risk can be
+version, diffed against the same installed-version map, so conflict risk can be
 assessed *before* installing anything.
 
 Read-only by construction: it never installs anything and never shells out to
-``cm-cli``. The only subprocess it runs is a single ``<workspace python> -m pip
-list --format=json`` for the whole report (not once per pack), plus one
-``importlib.metadata`` listing in the same interpreter when that interpreter has
-no pip (a ``uv venv`` ships without it). The only network
+``cm-cli``. The only subprocess it runs is one guarded ``importlib.metadata``
+listing in the workspace interpreter for the whole report (not once per pack).
+It reads raw metadata versions whether or not pip is installed. The only network
 call is the registry's side-effect-free ``GET /nodes/{id}``, made solely for
 ``--registry`` ids — never ``install_node``, whose endpoint records an
 installation and fires an analytics event server-side on every call.
@@ -31,9 +30,9 @@ Statuses:
   bare VCS/URL line, or anything else :class:`packaging.requirements.Requirement`
   rejects. Kept in the report rather than dropped silently;
 - ``unknown``     — the comparison could not be made: either the installed-
-  packages probe failed (``pip list`` and its ``importlib.metadata`` fallback;
-  accompanied by an ``installed_versions_unavailable`` warning on the report)
-  or the installed dist records a version that isn't PEP 440.
+  packages metadata probe failed (accompanied by an ``installed_versions_unavailable`` warning on the report)
+  or the installed dist records a version that isn't PEP 440 and the requirement
+  includes an operator other than literal ``===`` equality.
 
 Known caveat: pyproject dependencies are read through the shared registry
 parser (:func:`comfy_cli.command.pack_scan.read_pyproject`), which drops the
@@ -102,24 +101,29 @@ MAX_REGISTRY_ERROR_CHARS = 300
 # ---------------------------------------------------------------------------
 
 
-# Fallback probe for an interpreter without pip (a ``uv venv`` has none): the
-# same ``[{"name", "version"}]`` shape as ``pip list --format=json``, read with
-# the stdlib inside that interpreter.
+# Read raw Name/Version metadata with the workspace interpreter's stdlib.
+# `pip list` normalizes valid versions, losing spellings needed by `===`.
+# The JSON shape stays [{"name", "version"}], with no pip dependency.
 #
-# - Before anything that could be shadowed is imported, every ``sys.path`` entry
-#   naming the caller's directory is dropped (the ``-c`` ``''`` entry and e.g.
-#   ``PYTHONPATH=.``), so a stray ``json.py`` or ``*.dist-info`` there can't leak
-#   in. ``sys`` is built in and ``os`` is already loaded at startup, so neither
-#   import reads the path.
+# - The probe runs from the caller's directory, so a relative interpreter path
+#   and relative ``PYTHONPATH`` entries keep the meaning they had there. The
+#   caller's directory itself never reaches ``sys.path``: ``_probe_env`` drops
+#   every ``PYTHONPATH`` entry naming it (``.``, an empty entry, its absolute
+#   path or a symlink to it), and the script's first line drops the ``-c``
+#   ``''`` entry, before anything that could be shadowed is imported. So a
+#   stray ``json.py``, ``sitecustomize.py`` or ``*.dist-info`` where the command
+#   was run can't leak in. ``sys`` is built in, so importing it reads no path.
+# - Absolute entries an installation put on ``sys.path`` stay, even when one is
+#   the caller's directory: a legacy editable install lists its source folder in
+#   ``easy-install.pth``, and running from that folder must still find it.
 # - A dist whose metadata can't be read is skipped, as ``pip list`` skips it,
 #   rather than failing the whole listing.
 # - ``~``-prefixed dist-info dirs (pip's leftovers from an interrupted
 #   uninstall) are skipped, and the first copy of a name in ``sys.path`` order
 #   wins, as it does for ``import``.
 _METADATA_LIST_SCRIPT = """\
-import os, sys
-cwd = os.path.realpath(os.getcwd())
-sys.path[:] = [p for p in sys.path if p and os.path.realpath(p) != cwd]
+import sys
+sys.path[:] = [p for p in sys.path if p]
 import json, re
 from importlib import metadata
 seen, rows = set(), []
@@ -139,8 +143,38 @@ print(json.dumps(rows))
 """
 
 
-def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None, bool]:
-    """Run one installed-packages probe; return ``(versions, error, exited_nonzero)``."""
+def _names_caller_directory(entry: str) -> bool:
+    """True when a ``PYTHONPATH`` entry is the current directory.
+
+    Python reads an empty entry as the current directory. ``samefile`` sees
+    through relative spellings, symlinks and case; an entry that can't be
+    stat'ed names nothing and is kept, as Python keeps it.
+    """
+    if not entry:
+        return True
+    try:
+        return os.path.samefile(entry, os.curdir)
+    except OSError:
+        return False
+
+
+def _probe_env() -> dict[str, str]:
+    """The caller's environment, minus ``PYTHONPATH`` entries naming the caller's directory."""
+    env = dict(os.environ)
+    entries = env.pop("PYTHONPATH", "").split(os.pathsep)
+    kept = [entry for entry in entries if not _names_caller_directory(entry)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    return env
+
+
+def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, str | None]:
+    """Run one installed-packages probe; return ``(versions, error)``.
+
+    The probe inherits the caller's directory and environment, except that
+    ``PYTHONPATH`` entries naming that directory are left out (see
+    ``_probe_env``).
+    """
     from packaging.utils import canonicalize_name
 
     try:
@@ -150,19 +184,20 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
             text=True,
             timeout=PIP_LIST_TIMEOUT_SECONDS,
             check=True,
+            env=_probe_env(),
         )
     except subprocess.CalledProcessError as e:
         detail = (e.stderr or "").strip().splitlines()
-        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else ""), True
+        return None, f"{label} exited {e.returncode}" + (f": {detail[-1]}" if detail else "")
     except (subprocess.SubprocessError, OSError) as e:
-        return None, f"could not run {label}: {e}", False
+        return None, f"could not run {label}: {e}"
 
     try:
         rows = json.loads(proc.stdout)
     except ValueError as e:
-        return None, f"could not parse {label} output: {e}", False
+        return None, f"could not parse {label} output: {e}"
     if not isinstance(rows, list):
-        return None, f"{label} did not return a list", False
+        return None, f"{label} did not return a list"
 
     versions: dict[str, str] = {}
     for row in rows:
@@ -171,27 +206,19 @@ def _list_installed(cmd: list[str], label: str) -> tuple[dict[str, str] | None, 
         name, version = row.get("name"), row.get("version")
         if isinstance(name, str) and name:
             versions[canonicalize_name(name)] = str(version) if version is not None else ""
-    return versions, None, False
+    return versions, None
 
 
 def pip_list(python: str) -> tuple[dict[str, str] | None, str | None]:
-    """Return ``(canonical_name -> version, error)`` for the workspace venv.
+    """Return ``(canonical_name -> raw metadata version, error)`` for the venv.
 
-    Runs ``<python> -m pip list --format=json`` once for the whole report. If
-    that exits non-zero — typically ``No module named pip`` in a uv-created
-    venv — the same interpreter is asked once more via ``importlib.metadata``.
-    A timeout or an interpreter that can't be started is not retried: the
-    fallback would hit the same wall and only double the wait. On failure the
-    map is ``None`` with a human-readable reason — a report that can't see the
-    venv is still a useful report.
+    The legacy helper name is retained, but pip is never invoked: its display
+    output normalizes valid versions. One guarded ``importlib.metadata`` probe
+    preserves raw values and works in pip-less venvs too. A failed or timed-out
+    probe is not retried; the map is ``None`` with a human-readable reason so
+    the report can retain requirements with unknown installed versions.
     """
-    versions, pip_error, exited_nonzero = _list_installed([python, "-m", "pip", "list", "--format=json"], "`pip list`")
-    if versions is not None or not exited_nonzero:
-        return versions, pip_error
-    versions, metadata_error, _ = _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
-    if versions is not None:
-        return versions, None
-    return None, f"{pip_error}; {metadata_error}"
+    return _list_installed([python, "-c", _METADATA_LIST_SCRIPT], "`importlib.metadata`")
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +253,22 @@ def _pyproject_lines(path: Path) -> list[str]:
         return []
     deps = getattr(cfg.project, "dependencies", None) or []
     return [d.strip() for d in deps if isinstance(d, str) and d.strip()]
+
+
+# One ``===`` clause and its literal. The literal stops at whitespace, ``,``,
+# ``;`` or ``)``, as packaging splits and parses it.
+_ARBITRARY_EQUALITY_RE = re.compile(r"===\s*([^\s,;)]*)")
+
+
+def _arbitrary_equality_literals(raw: str) -> list[str]:
+    """Return every ``===`` literal in a requirement line, as written.
+
+    ``SpecifierSet`` keeps only one of two clauses whose versions normalize
+    alike: ``foo===v1.0,===1.0`` holds just ``===v1.0``. Each literal is its
+    own exact-text test, so they are read from the line itself. The marker
+    after ``;`` is left out, since a marker can use ``===`` too.
+    """
+    return _ARBITRARY_EQUALITY_RE.findall(raw.split(";", 1)[0])
 
 
 def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, Any]:
@@ -273,10 +316,17 @@ def _classify(raw: str, installed_versions: dict[str, str] | None) -> dict[str, 
         # A bare name is satisfied by any installed version.
         row["status"] = "satisfied"
     else:
-        from packaging.version import InvalidVersion
+        from packaging.version import InvalidVersion, Version
 
+        semantic = [spec for spec in req.specifier if spec.operator != "==="]
+        literals = _arbitrary_equality_literals(raw)
         try:
-            contains = req.specifier.contains(installed, prereleases=True)
+            # Validate before any clause can short-circuit a mixed constraint.
+            if semantic:
+                Version(installed)
+            contains = all(installed.lower() == literal.lower() for literal in literals) and all(
+                spec.contains(installed, prereleases=True) for spec in semantic
+            )
         except InvalidVersion:
             # A dist whose recorded version isn't PEP 440 (rare, but a broken
             # `.dist-info` will do it) can't be compared. Say so rather than
@@ -500,7 +550,7 @@ def _registry_report(
         row["warning"] = message
         warnings.append({"code": "registry_partial_dependency_metadata", "message": message})
 
-    # Same per-requirement diff, against the same single ``pip list`` map.
+    # Same per-requirement diff, against the same single installed-version map.
     rows: dict[str, dict[str, Any]] = {}
     for line in declared:
         if line not in rows:
@@ -557,14 +607,14 @@ def build_report(
     workspace = Path(comfy_path)
     python = python or resolve_workspace_python(comfy_path)
 
-    installed_versions, pip_error = pip_list(python)
+    installed_versions, probe_error = pip_list(python)
     if installed_versions is None:
         warnings.append(
             {
                 "code": "installed_versions_unavailable",
                 "message": (
                     f"could not read installed packages from {python}"
-                    + (f" ({pip_error})" if pip_error else "")
+                    + (f" ({probe_error})" if probe_error else "")
                     + " — every parseable requirement is reported with status 'unknown'"
                 ),
             }

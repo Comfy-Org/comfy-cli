@@ -880,6 +880,139 @@ class TestSearch:
         assert env["error"]["details"]["body"] == '{"detail": "bad tag"}'
 
 
+# Cloud asset names as the catalog actually spells them: separators sit wherever
+# the uploader put them, and the display name a user types ("MiniMax H3") never
+# appears verbatim in the filename.
+_CLOUD_CATALOG = [
+    "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+    "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "minimax_music3_dit_fp16.safetensors",
+    "sd_xl_base_1.0.safetensors",
+    "wan2.2_t2v_lightx2v.safetensors",
+    "flux1-dev.safetensors",
+]
+
+
+def _patch_asset_server(monkeypatch: pytest.MonkeyPatch, names: list[str]):
+    """Serve /api/assets the way the real server filters it.
+
+    ``name_contains`` is ONE case-insensitive substring over the whole name
+    (ingest's ``NameContainsFold``), paged by ``limit``/``offset`` with
+    ``has_more``. Returns the parsed query of every request made.
+    """
+    queries: list[dict[str, list[str]]] = []
+
+    def _fake(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        queries.append(query)
+        needle = (query.get("name_contains") or [""])[0].lower()
+        limit = int((query.get("limit") or ["20"])[0])
+        offset = int((query.get("offset") or ["0"])[0])
+        hits = [n for n in names if needle in n.lower()]
+        page = hits[offset : offset + limit]
+        body = {
+            "assets": [{"name": n, "tags": ["models", "diffusion_models"]} for n in page],
+            "total": len(hits),
+            "has_more": offset + len(page) < len(hits),
+        }
+        return _fake_resp(json.dumps(body).encode())
+
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
+    return queries
+
+
+class TestCloudSearchTokens:
+    """Cloud `--text` matches the way local does: every word, separators ignored."""
+
+    def test_display_name_with_a_space_finds_the_underscored_file(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "MiniMax H3", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert sorted(r["name"] for r in env["data"]["rows"]) == [
+            "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        ]
+        assert env["data"]["total"] == 2
+
+    def test_version_written_with_a_space_matches_the_joined_spelling(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "wan 2.2", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["wan2.2_t2v_lightx2v.safetensors"]
+
+    def test_every_word_must_match(self, cloud_target, monkeypatch, capsys):
+        """`minimax h3` must not return `minimax_music3` just because it shares the first word."""
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "minimax h3", "--where", "cloud"], capsys)
+        assert "minimax_music3_dit_fp16.safetensors" not in [r["name"] for r in env["data"]["rows"]]
+
+    def test_pages_past_rows_the_words_reject_to_fill_the_limit(self, cloud_target, monkeypatch, capsys):
+        """The server filters on one word, so its first page can be all rejects."""
+        names = [f"minimax_music3_variant{i}.safetensors" for i in range(30)] + [
+            "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+        ]
+        _patch_asset_server(monkeypatch, names)
+        env = _run(["search", "--text", "minimax h3", "--limit", "5", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["minimax_h3_ref2va_pruned_int8_convrot.safetensors"]
+
+    def test_single_word_query_is_sent_to_the_server_unchanged(self, cloud_target, monkeypatch, capsys):
+        queries = _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "flux", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["flux1-dev.safetensors"]
+        assert queries[0]["name_contains"] == ["flux"]
+        assert len(queries) == 1
+
+    def test_one_page_answers_ask_for_the_exact_total(self, cloud_target, monkeypatch, capsys):
+        """A one-page answer reports the server's `total` as exact, so it asks for the uncapped count."""
+        queries = _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        _run(["search", "--where", "cloud"], capsys)
+        _run(["search", "--text", "flux", "--where", "cloud"], capsys)
+        assert [q["capped_total"] for q in queries] == [["false"], ["false"]]
+
+    def test_a_scan_does_not_ask_for_the_exact_total(self, cloud_target, monkeypatch, capsys):
+        """A scan counts its own matches, so it leaves the server's total capped."""
+        queries = _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        _run(["search", "--text", "sdxl base", "--where", "cloud"], capsys)
+        assert queries and all("capped_total" not in q for q in queries)
+
+    def test_a_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
+        """`sdxl base` must find `sd_xl_base_1.0`, as local search does, though the server only knows `sd_xl`."""
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "sdxl base", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+        assert env["data"]["total"] == 1
+
+    def test_a_single_word_the_filename_splits_still_finds_it(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "sdxl", "--where", "cloud"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+
+    def test_a_query_nothing_matches_is_still_empty(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "hunyuan 3d", "--where", "cloud"], capsys)
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+        assert env["data"]["total_is_lower_bound"] is False
+
+    def test_a_scan_stopped_by_the_page_cap_says_its_total_is_a_lower_bound(self, cloud_target, monkeypatch, capsys):
+        import comfy_cli.command.models.search as search_mod
+
+        monkeypatch.setattr(search_mod, "_CLOUD_TOKEN_SCAN_PAGE", 2)
+        monkeypatch.setattr(search_mod, "_CLOUD_TOKEN_SCAN_MAX_PAGES", 2)
+        names = [f"minimax_h3_v{i}.safetensors" for i in range(10)]
+        _patch_asset_server(monkeypatch, names)
+        env = _run(["search", "--text", "minimax h3", "--where", "cloud"], capsys)
+        assert env["data"]["total"] == 4
+        assert env["data"]["total_is_lower_bound"] is True
+
+    def test_a_scan_that_reaches_the_end_has_an_exact_total(self, cloud_target, monkeypatch, capsys):
+        _patch_asset_server(monkeypatch, _CLOUD_CATALOG)
+        env = _run(["search", "--text", "MiniMax H3", "--where", "cloud"], capsys)
+        assert env["data"]["total_is_lower_bound"] is False
+
+
 # ---------------------------------------------------------------------------
 # show
 # ---------------------------------------------------------------------------
@@ -896,6 +1029,27 @@ class TestShow:
         assert env["data"]["row"]["base_model"] == "Flux.1 D"
         assert env["data"]["row"]["trained_words"] == ["redux", "blend"]
 
+    def test_asks_for_public_models(self, cloud_target, monkeypatch, capsys):
+        # `show` looks a name up in the whole catalog, public models included.
+        # It says so on every page, rather than depending on the server's
+        # default, which is planned to change to own assets only.
+        wan, flux = _ASSETS_RESPONSE["assets"][0], _ASSETS_RESPONSE["assets"][1]
+        assert flux["name"] == "flux1-redux-dev.safetensors"
+        calls = _patch_urlopen(
+            monkeypatch,
+            {
+                "offset=1": {"assets": [flux], "has_more": False},
+                "offset=0": {"assets": [wan], "has_more": True},
+            },
+        )
+        env = _run(["show", "flux1-redux-dev.safetensors", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["asset"]["id"] == flux["id"]
+        assert len(calls) == 2
+        for call in calls:
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(call["url"]).query)
+            assert query["include_public"] == ["true"]
+
     def test_no_exact_match_returns_close_matches(self, cloud_target, monkeypatch, capsys):
         # Substring hits but no exact name match.
         _patch_urlopen(monkeypatch, {"/api/assets": _ASSETS_RESPONSE})
@@ -911,3 +1065,250 @@ class TestShow:
         env = _run(["show", "anything.safetensors", "--where", "local"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "models_show_local_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# --host/--port routing — mirrors `comfy upload`
+# ---------------------------------------------------------------------------
+
+
+class TestHostPortRouting:
+    """``comfy models <verb> --host/--port`` aims a LOCAL query at a specific
+    ComfyUI, closing the gap where these four verbs could only reach the
+    process-wide ``COMFY_LOCAL_URL`` (or the 127.0.0.1:8188 default). The URL
+    the request actually hits is asserted end-to-end through the *real*
+    ``resolve_target`` — no fixture pins it — so the precedence (explicit flag >
+    ``COMFY_LOCAL_URL`` > default), resolved independently for host and port, is
+    exercised, not mocked.
+    """
+
+    def test_host_and_port_reach_the_resolved_url(self, monkeypatch, capsys):
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        _patch_urlopen(monkeypatch, {"10.0.0.5:9999/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "10.0.0.5", "--port", "9999"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://10.0.0.5:9999/models"
+
+    def test_no_flags_keeps_the_loopback_default(self, monkeypatch, capsys):
+        # Acceptance: no flags -> behavior identical to today.
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://127.0.0.1:8188/models"
+
+    def test_no_flags_still_honors_comfy_local_url(self, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.50:7777")
+        _patch_urlopen(monkeypatch, {"192.168.1.50:7777/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://192.168.1.50:7777/models"
+
+    def test_flags_beat_comfy_local_url(self, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.50:7777")
+        _patch_urlopen(monkeypatch, {"10.0.0.5:9999/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "10.0.0.5", "--port", "9999"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://10.0.0.5:9999/models"
+
+    def test_host_only_flag_keeps_the_env_port(self, monkeypatch, capsys):
+        # host and port resolve independently, so --host alone must not drop the
+        # env var's port back to the 8188 default.
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.50:7777")
+        _patch_urlopen(monkeypatch, {"10.0.0.5:7777/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "10.0.0.5"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://10.0.0.5:7777/models"
+
+    def test_ipv6_host_is_bracketed_in_the_url(self, monkeypatch, capsys):
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        _patch_urlopen(monkeypatch, {"[::1]:8189/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "::1", "--port", "8189"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://[::1]:8189/models"
+
+    def test_unicode_host_is_forwarded_as_idna_ascii(self, monkeypatch, capsys):
+        # urllib copies the authority into the Host header, which http.client
+        # encodes as Latin-1 — a raw Unicode host would raise UnicodeEncodeError
+        # before connecting. The request reaching the opener must carry the
+        # punycode form, and its Host header must encode the way http.client does.
+        import urllib.request
+
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        ascii_host = "例え.test".encode("idna").decode("ascii")
+        calls = _patch_urlopen(monkeypatch, {f"{ascii_host}:8188/models/loras": _LOCAL_FILES_BY_FOLDER["loras"]})
+        env = _run(["search", "--where", "local", "--host", "例え.test", "--type", "lora"], capsys)
+        assert env["ok"] is True, env
+        url = calls[0]["url"]
+        assert url == f"http://{ascii_host}:8188/models/loras"
+        urllib.request.Request(url).host.encode("latin-1")
+
+    def test_host_whose_idna_form_is_unsafe_is_a_usage_error(self, monkeypatch, capsys):
+        # Fullwidth ``％`` NFKC-folds to ``%`` during IDNA conversion, so the
+        # ASCII form carries a percent-encoded CRLF the Unicode input did not.
+        # It must surface as the host_port_invalid usage envelope, not escape
+        # from the request layer as a traceback.
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        calls = _patch_urlopen(monkeypatch, {})
+        _force_json_renderer()
+        result = CliRunner().invoke(
+            search_cmd.app, ["search", "--where", "local", "--host", "localhost％0d％0a", "--type", "lora"]
+        )
+        assert result.exit_code == 2, result.output
+        out = capsys.readouterr().out or result.stdout
+        env = json.loads(out.strip().splitlines()[-1])
+        assert env["ok"] is False
+        assert env["error"]["code"] == "host_port_invalid"
+        assert calls == []
+
+    def test_search_threads_host_port_to_resolve_target(self, monkeypatch, capsys):
+        # The other verbs route through the same helper; assert `search` in
+        # particular hands the pair to `resolve_target`.
+        from comfy_cli.target import Target
+
+        seen: dict[str, Any] = {}
+
+        def fake_resolve_target(**kwargs):
+            seen.update(kwargs)
+            return Target(
+                kind="local",
+                base_url="http://10.0.0.5:9999",
+                path_prefix="",
+                history_path="history",
+                host="10.0.0.5",
+                port=9999,
+            )
+
+        monkeypatch.setattr("comfy_cli.target.resolve_target", fake_resolve_target)
+        _patch_urlopen(monkeypatch, {"10.0.0.5:9999/models/loras": _LOCAL_FILES_BY_FOLDER["loras"]})
+        env = _run(
+            ["search", "--text", "ltx", "--type", "lora", "--where", "local", "--host", "10.0.0.5", "--port", "9999"],
+            capsys,
+        )
+        assert env["ok"] is True, env
+        assert seen["host"] == "10.0.0.5"
+        assert seen["port"] == 9999
+        assert seen["where"] == "local"
+
+
+class TestHostPortCloudRejection:
+    """``--host``/``--port`` name a LOCAL server, so pairing them with an
+    effective cloud target is a structured usage error rather than a silently
+    ignored flag — the comfy-mcp root cause this ticket fixes."""
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["list-folders", "--where", "cloud", "--host", "10.0.0.5"],
+            ["list-folders", "--where", "cloud", "--port", "9999"],
+            ["list-folder", "loras", "--where", "cloud", "--host", "10.0.0.5"],
+            ["search", "--where", "cloud", "--host", "10.0.0.5", "--port", "9999"],
+            ["show", "flux1-dev.safetensors", "--where", "cloud", "--port", "9999"],
+        ],
+    )
+    def test_host_or_port_with_cloud_where_flag_is_rejected(self, args, monkeypatch, capsys):
+        # urlopen must never be reached: the rejection fires before routing.
+        _patch_urlopen(monkeypatch, {})
+        env = _run(args, capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "host_flag_cloud"
+
+    def test_cloud_where_env_is_rejected_and_names_the_source(self, monkeypatch, capsys):
+        # COMFY_WHERE is how a top-level `comfy --where cloud` arrives, so the
+        # guard keys off the RESOLVED target, not the flag.
+        monkeypatch.setenv("COMFY_WHERE", "cloud")
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["search", "--host", "10.0.0.5"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "host_flag_cloud"
+        assert "COMFY_WHERE" in env["error"]["message"]
+        assert env["error"]["details"]["where_source"] == "env"
+
+    def test_rejection_envelope_names_the_subcommand(self, monkeypatch, capsys):
+        # The shared helper stamps the verb, so the failure line carries the
+        # same ``command`` a consumer sees on that verb's success envelope.
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["list-folder", "loras", "--where", "cloud", "--host", "10.0.0.5"], capsys)
+        assert env["error"]["code"] == "host_flag_cloud"
+        assert env["command"] == "models list-folder"
+
+
+class TestRoutingResolutionFallbacks:
+    """Routing resolution in ``_resolve_and_stamp`` keeps the defensive config
+    read ``resolve_target`` had before the --host/--port flags existed."""
+
+    def test_unreadable_config_falls_through_to_next_source(self, monkeypatch, capsys):
+        import configparser
+
+        def broken_config(*_a, **_kw):
+            raise configparser.MissingSectionHeaderError("config.ini", 1, "garbage")
+
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        monkeypatch.setattr("comfy_cli.config_manager.ConfigManager", broken_config)
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://127.0.0.1:8188/models"
+
+    def test_invalid_where_env_is_a_where_invalid_envelope(self, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "moon")
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["search", "--text", "x"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "where_invalid"
+        # The hint names every source a bad value can come from, not just --where.
+        assert "COMFY_WHERE" in env["error"]["hint"]
+        assert env["command"] == "models search"
+
+
+class TestHostPortUsageErrors:
+    """A bad ``--host``/``--port`` is a usage error (exit 2), validated the same
+    way ``comfy upload`` validates its flags, before any request is made."""
+
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "evil/host",
+            "user@evil",
+            "host?x",
+            "host#x",
+            "host\rname",
+            "host\nname",
+            "",
+            "   ",
+            "a%0d%0aX-Injected:%201",
+            "host%2fpath",
+            "127.0.0.1:8188",
+            "localhost:8188",
+            # Colon-free brackets used to slip past validation and crash
+            # urlsplit with "Invalid IPv6 URL"; an un-IDNA-encodable host used
+            # to escape as a raw UnicodeError.
+            "[localhost]",
+            "a]b",
+            "a" * 64 + ".example",
+            "a..b",
+        ],
+    )
+    def test_invalid_host_is_a_usage_error(self, runner, bad):
+        # typer.BadParameter -> click UsageError -> exit code 2.
+        result = runner.invoke(search_cmd.app, ["list-folders", "--where", "local", "--host", bad])
+        assert result.exit_code == 2, result.output
+
+    @pytest.mark.parametrize("bad", ["0", "65536", "-1"])
+    def test_out_of_range_port_is_a_usage_error(self, runner, bad):
+        result = runner.invoke(search_cmd.app, ["list-folders", "--where", "local", "--port", bad])
+        assert result.exit_code == 2, result.output
+
+    @pytest.mark.parametrize("good", ["::1", "[::1]", "fe80::1"])
+    def test_ipv6_literal_host_is_accepted(self, good, monkeypatch, capsys):
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        bracketed = good if good.startswith("[") else f"[{good}]"
+        _patch_urlopen(monkeypatch, {f"{bracketed}:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", good], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == f"http://{bracketed}:8188/models"

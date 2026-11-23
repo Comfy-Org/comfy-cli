@@ -44,6 +44,7 @@ _LINE_SECONDS: Final = 5.0
 EVENT_PLAN: Final = "upload_plan"
 EVENT_PROGRESS: Final = "upload_progress"
 EVENT_COMPLETE: Final = "upload_complete"
+EVENT_STORING: Final = "upload_storing"
 
 
 class Clock(Protocol):
@@ -151,6 +152,17 @@ class UploadProgressReporter:
             self._event(EVENT_PLAN, files=len(uploads), bytes_total=self._overall_total, already_held=already_held)
         else:
             self._say(plan_line(len(uploads), self._overall_total, already_held))
+
+    def storing(self, task_id: str) -> None:
+        """Report the model's storage task without letting a closed pipe stop verification."""
+        if self._renderer.is_pretty():
+            self._say(f"Uploaded; Comfy Cloud is checking and storing the file. Task id: {task_id}")
+        self._event(EVENT_STORING, task_id=task_id)
+
+    def waiting(self, seconds: int) -> None:
+        """Keep storage polling notices inside the same muted-output boundary."""
+        if self._renderer.is_pretty():
+            self._say(f"Comfy Cloud is still checking and storing the file ({seconds}s so far).")
 
     # ----- one file -----
 
@@ -276,15 +288,18 @@ class UploadProgressReporter:
             return
         try:
             self._renderer.progress_event(type, **fields)
-        except OSError:
+        except (OSError, ValueError, SystemExit):
             self._muted = True
 
     def _say(self, message: str) -> None:
         if self._muted:
             return
+        # Rich converts a broken pipe to SystemExit and a closed stream to
+        # ValueError. Suppress those only at this progress-output boundary;
+        # task polling and byte verification must still finish.
         try:
             self._renderer.info(message)
-        except OSError:
+        except (OSError, ValueError, SystemExit):
             self._muted = True
 
     def _open_live(self, transfer: _Transfer) -> None:
@@ -316,18 +331,18 @@ class UploadProgressReporter:
                 rate="",
                 left="",
             )
-        except OSError:
+        except (OSError, ValueError, SystemExit):
             self._muted = True
             try:
                 live.stop()
-            except OSError:
+            except (OSError, ValueError, SystemExit):
                 pass
             return
         self._live = live
         self._live_task = task
 
     def _update_live(self, numbers: dict[str, Any]) -> None:
-        if self._live is None:
+        if self._live is None or self._muted:
             return
         rate = numbers["bytes_per_second"]
         left = numbers["overall_eta_seconds"]
@@ -338,7 +353,7 @@ class UploadProgressReporter:
                 rate="" if rate is None else f"{human_bytes(rate)}/s",
                 left="" if left is None else f"{human_seconds(left)} left",
             )
-        except OSError:
+        except (OSError, ValueError, SystemExit):
             self._muted = True
 
     def _close_live(self) -> None:
@@ -347,7 +362,7 @@ class UploadProgressReporter:
             return
         try:
             live.stop()
-        except OSError:
+        except (OSError, ValueError, SystemExit):
             self._muted = True
 
 

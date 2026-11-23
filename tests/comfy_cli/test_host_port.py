@@ -527,3 +527,20 @@ def test_report_usage_error_command_overrides_the_renderer_default():
         with report_usage_error(r, command="jobs status"):
             raise typer.BadParameter("nope")
     assert json.loads(buf.getvalue().strip().splitlines()[-1])["command"] == "jobs status"
+
+
+@pytest.mark.parametrize("host", ["[localhost]", "a]b", "[x", "[not-ipv6]"])
+def test_validate_host_rejects_stray_brackets(host):
+    with pytest.raises(typer.BadParameter, match="brackets"):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["a" * 64 + ".example", "a..b", "example\uff0ftest", "example\uff1ftest"])
+def test_validate_host_rejects_unencodable_hostnames(host):
+    with pytest.raises(typer.BadParameter, match="not a valid hostname"):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]", "localhost", "127.0.0.1", "b\u00fccher.example"])
+def test_validate_host_accepts_url_parseable_hosts(host):
+    assert validate_host(host) == host

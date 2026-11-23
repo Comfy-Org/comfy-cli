@@ -52,13 +52,30 @@ def ndjson_renderer():
     reset_renderer_for_testing()
 
 
+@pytest.fixture(autouse=True)
+def local_preflight_catalog(monkeypatch):
+    """Keep event/queue tests independent of any real server on localhost.
+
+    Validation still runs against complete schemas. Tests for conversion HTTP
+    and deliberately invalid catalogs override their specific boundary below.
+    """
+    from copy import deepcopy
+
+    monkeypatch.setattr("comfy_cli.command.run._fetch_object_info", lambda *a, **k: deepcopy(OBJECT_INFO))
+
+    def unexpected_catalog_request(*args, **kwargs):
+        pytest.fail("unexpected real catalog request; mock the specific object_info transport")
+
+    monkeypatch.setattr("comfy_cli.http._PLAIN_OPENER.open", unexpected_catalog_request)
+
+
 @pytest.fixture
 def simple_workflow():
     return {
         "1": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {"width": 64, "height": 64, "batch_size": 1},
-            "_meta": {"title": "Latent"},
+            "class_type": "EmptyImage",
+            "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+            "_meta": {"title": "Image"},
         },
         "2": {
             "class_type": "SaveImage",
@@ -524,8 +541,8 @@ class TestQueuedEventShape:
         nodes = queued["nodes"]
         assert len(nodes) == 2
         by_id = {n["node_id"]: n for n in nodes}
-        assert by_id["1"]["class_type"] == "EmptyLatentImage"
-        assert by_id["1"]["title"] == "Latent"  # _meta.title wins
+        assert by_id["1"]["class_type"] == "EmptyImage"
+        assert by_id["1"]["title"] == "Image"  # _meta.title wins
         assert by_id["2"]["class_type"] == "SaveImage"
         assert by_id["2"]["title"] == "Save"
 
@@ -621,7 +638,7 @@ class TestWebSocketEvents:
                     "data": {
                         "prompt_id": "p",
                         "node_id": "1",
-                        "node_type": "EmptyLatentImage",
+                        "node_type": "EmptyImage",
                         "exception_type": "RuntimeError",
                         "exception_message": "boom",
                         "traceback": ['  File "x.py"\n', "    raise RuntimeError\n"],
@@ -635,12 +652,12 @@ class TestWebSocketEvents:
         assert any(e["type"] == "execution_error" for e in _events(lines))
         env = _envelope(lines)
         assert env["error"]["code"] == "execution_error"
-        assert env["error"]["message"] == "EmptyLatentImage (node 1): boom"
+        assert env["error"]["message"] == "EmptyImage (node 1): boom"
         details = env["error"]["details"]
         assert details["node_id"] == "1"
-        assert details["class_type"] == "EmptyLatentImage"
+        assert details["class_type"] == "EmptyImage"
         assert details["exception_type"] == "RuntimeError"
-        assert details["title"] == "Latent"  # from _meta.title
+        assert details["title"] == "Image"  # from _meta.title
         # The envelope carries only the traceback tail; the full traceback
         # stays on the execution_error event.
         assert isinstance(details["traceback_tail"], list)
@@ -658,7 +675,7 @@ class TestWebSocketEvents:
                     "data": {
                         "prompt_id": "p",
                         "node_id": 7,
-                        "node_type": "EmptyLatentImage",
+                        "node_type": "EmptyImage",
                         "exception_type": "RuntimeError",
                         "exception_message": "boom",
                         "traceback": [],
@@ -797,8 +814,8 @@ class TestNodeBookkeeping:
             assert isinstance(ev["node"], str), f"{ev['type']} node is {type(ev['node']).__name__}"
 
     def test_title_falls_back_to_class_type(self):
-        ex = _make_workflow_execution({"1": {"class_type": "EmptyLatentImage", "inputs": {}}})
-        assert ex.get_node_title("1") == "EmptyLatentImage"
+        ex = _make_workflow_execution({"1": {"class_type": "EmptyImage", "inputs": {}}})
+        assert ex.get_node_title("1") == "EmptyImage"
 
     def test_title_falls_back_to_node_id_for_unknown(self):
         ex = _make_workflow_execution({})
@@ -809,10 +826,10 @@ UI_WORKFLOW = {
     "nodes": [
         {
             "id": 1,
-            "type": "EmptyLatentImage",
+            "type": "EmptyImage",
             "inputs": [],
-            "outputs": [{"name": "LATENT", "type": "LATENT", "links": [10]}],
-            "widgets_values": [64, 64, 1],
+            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [10]}],
+            "widgets_values": [64, 64, 1, 0],
             "mode": 0,
         },
         {
@@ -827,17 +844,26 @@ UI_WORKFLOW = {
 }
 
 OBJECT_INFO = {
-    "EmptyLatentImage": {
+    "EmptyImage": {
         "input": {
             "required": {
                 "width": ["INT", {"default": 512}],
                 "height": ["INT", {"default": 512}],
                 "batch_size": ["INT", {"default": 1}],
+                "color": ["INT", {"default": 0}],
             }
         },
-        "input_order": {"required": ["width", "height", "batch_size"]},
+        "input_order": {"required": ["width", "height", "batch_size", "color"]},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
         "output_node": False,
-        "display_name": "Empty Latent Image",
+        "display_name": "Empty Image",
+    },
+    "SaveImage": {
+        "input": {"required": {"filename_prefix": ["STRING", {"default": "ComfyUI"}], "images": ["IMAGE"]}},
+        "input_order": {"required": ["filename_prefix", "images"]},
+        "output": [],
+        "output_node": True,
     },
     "PreviewImage": {
         "input": {"required": {"images": ["IMAGE"]}},
@@ -970,7 +996,7 @@ class TestPromptPreviewAlwaysEmitted:
         assert types[0] == "prompt_preview"
         assert "queued" in types
         assert types.index("prompt_preview") < types.index("queued")
-        assert _events(lines)[0]["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+        assert _events(lines)[0]["prompt"]["1"]["class_type"] == "EmptyImage"
 
     def test_ui_input_emits_converted_then_prompt_preview_then_queued(self, ui_workflow_file, capsys):
         with (
@@ -1035,7 +1061,7 @@ class TestPrintPrompt:
         assert [e["type"] for e in _events(lines)] == ["prompt_preview"]
         preview = _events(lines)[0]
         assert preview["schema"] == "event/1"
-        assert preview["prompt"]["1"]["class_type"] == "EmptyLatentImage"
+        assert preview["prompt"]["1"]["class_type"] == "EmptyImage"
         env = _envelope(lines)
         assert env["ok"] is True
         assert env["data"]["status"] == "preview"
@@ -1092,7 +1118,7 @@ class TestPrintPrompt:
         out, _err = capsys.readouterr()
         parsed = json.loads(out)
         assert "1" in parsed
-        assert parsed["1"]["class_type"] == "EmptyLatentImage"
+        assert parsed["1"]["class_type"] == "EmptyImage"
 
     def test_print_prompt_does_not_post_when_workflow_invalid(self, capsys):
         # Pre-flight failures (workflow_not_found, workflow_not_api_format)
@@ -1240,10 +1266,10 @@ class TestNodeCachedIntegration:
 
         cached_events = [e for e in _events(lines) if e["type"] == "execution_cached"]
         assert len(cached_events) == 2
-        # Node 1 has _meta.title="Latent"; class_type=EmptyLatentImage
+        # Node 1 has _meta.title="Image"; class_type=EmptyImage
         n1 = next(e for e in cached_events if e["node"] == "1")
-        assert n1["class_type"] == "EmptyLatentImage"
-        assert n1["title"] == "Latent"
+        assert n1["class_type"] == "EmptyImage"
+        assert n1["title"] == "Image"
         # Node 2 has _meta.title="Save"; class_type=SaveImage
         n2 = next(e for e in cached_events if e["node"] == "2")
         assert n2["class_type"] == "SaveImage"
@@ -1380,9 +1406,9 @@ class TestErrorPathCoverage:
     def _make_workflow(self):
         return {
             "1": {
-                "class_type": "EmptyLatentImage",
-                "inputs": {"width": 64, "height": 64, "batch_size": 1},
-                "_meta": {"title": "Latent"},
+                "class_type": "EmptyImage",
+                "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                "_meta": {"title": "Image"},
             },
             "2": {
                 "class_type": "SaveImage",
@@ -1399,10 +1425,10 @@ class TestErrorPathCoverage:
             "nodes": [
                 {
                     "id": 1,
-                    "type": "EmptyLatentImage",
+                    "type": "EmptyImage",
                     "inputs": [],
                     "outputs": [],
-                    "widgets_values": [64, 64, 1],
+                    "widgets_values": [64, 64, 1, 0],
                     "mode": 0,
                 }
             ],
@@ -1414,9 +1440,10 @@ class TestErrorPathCoverage:
         try:
             with (
                 patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
-                patch("comfy_cli.http._AUTHED_OPENER.open", side_effect=TimeoutError("timed out")),
+                patch("comfy_cli.http._PLAIN_OPENER.open", side_effect=TimeoutError("timed out")) as mock_open,
             ):
                 lines, exit_code = _run_execute_capture(path, capsys)
+            mock_open.assert_called_once_with("http://127.0.0.1:8188/object_info", timeout=30)
             assert _envelope(lines)["error"]["code"] == "connection_error"
         finally:
             os.unlink(path)
@@ -1427,10 +1454,10 @@ class TestErrorPathCoverage:
             "nodes": [
                 {
                     "id": 1,
-                    "type": "EmptyLatentImage",
+                    "type": "EmptyImage",
                     "inputs": [],
                     "outputs": [],
-                    "widgets_values": [64, 64, 1],
+                    "widgets_values": [64, 64, 1, 0],
                     "mode": 0,
                 }
             ],
@@ -1876,7 +1903,7 @@ class TestCloudStreamContract:
         assert isinstance(queued["client_id"], str) and queued["client_id"]
         assert queued["validation_warnings"] == []
         assert queued["nodes"] == [
-            {"node_id": "1", "class_type": "EmptyLatentImage", "title": "Latent"},
+            {"node_id": "1", "class_type": "EmptyImage", "title": "Image"},
             {"node_id": "2", "class_type": "SaveImage", "title": "Save"},
         ]
         assert queued["base_url"] == "https://api.comfy.org"
@@ -2753,6 +2780,21 @@ class TestCloudRateLimited:
         assert err["details"]["status"] == 402
         assert "comfy jobs ls" not in err["hint"]
 
+    def test_submit_403_scope_detected_past_the_rendered_body_cap(self, monkeypatch, workflow_file, capsys):
+        """Detection reads the full body; only ``details.body`` is capped."""
+        import json as _json
+
+        from comfy_cli.comfy_client import HTTPError
+
+        body = _json.dumps({"padding": "x" * 3000, "error": "insufficient_scope: comfy-cloud:agent:write"})
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(403, "Forbidden", body)))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_unauthorized"
+        assert err["details"]["required_scope"] == "comfy-cloud:agent:write"
+        assert len(err["details"]["body"]) == 2000
+
     @pytest.mark.parametrize("status", [400, 500, 503])
     def test_submit_other_statuses_keep_cloud_http_error(self, monkeypatch, workflow_file, capsys, status):
         from comfy_cli.comfy_client import HTTPError
@@ -2890,6 +2932,41 @@ class TestPollRateLimitedIsNotTerminal:
         assert status == "error"
         assert error["code"] == "cloud_http_error"
 
+    def test_poll_403_insufficient_scope_records_the_relogin_reason(self, monkeypatch, workflow_file, capsys):
+        """The job record keeps the same re-login verdict the envelope renders."""
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Denied(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(
+                    403,
+                    "Forbidden",
+                    "denied",
+                    www_authenticate=(
+                        'Basic realm="x"',
+                        'Bearer error="insufficient_scope", scope="comfy-cloud:jobs:read"',
+                    ),
+                )
+
+        _install_cloud_stubs(monkeypatch, client_cls=Denied)
+        writes: list[tuple] = []
+        monkeypatch.setattr(
+            jobs_state_mod, "write", lambda state: writes.append((state.status, state.error)) or "/tmp/state.json"
+        )
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        rendered = _envelope(lines)["error"]
+        status, error = writes[-1]
+        assert status == "error"
+        assert error["code"] == rendered["code"] == "cloud_unauthorized"
+        assert error["details"]["reason"] == "insufficient_scope"
+        assert error["details"]["required_scope"] == "comfy-cloud:jobs:read"
+        assert error["details"]["prompt_id"] == "cloud-pid"
+
 
 # ---------------------------------------------------------------------------
 # --output-node-ids → partial_execution_targets
@@ -3019,6 +3096,55 @@ class TestOutputNodeIdsCloud:
         # Node 2 is outside target 3's subgraph, so the server ran more than asked.
         assert ignored["code"] == "partial_execution_targets_ignored"
         assert ignored["untargeted_output_node_ids"] == ["2"]
+
+    def test_async_run_records_targets_for_a_later_watch(self, monkeypatch, two_output_workflow_file, capsys):
+        """Without --wait nothing checks the returned outputs at submit time,
+        so the job record keeps the targets and their subgraph for
+        `comfy jobs watch` / `jobs status` to judge, and the queued envelope
+        says the check happens there."""
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        written = []
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: written.append(state) or "/tmp/state.json")
+        lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        state = written[-1]
+        assert state.output_node_ids == ["3"]
+        # Target 3 and the latent it reads; node 2 is outside the run graph.
+        assert sorted(state.run_graph_node_ids) == ["1", "3"]
+        assert state.output_node_ids_checked is True
+        data = _envelope(lines)["data"]
+        assert data["status"] == "queued"
+        assert "comfy jobs watch cloud-pid --where cloud" in data["note"]
+
+    def test_async_run_without_a_state_file_promises_no_watch_check(
+        self, monkeypatch, two_output_workflow_file, capsys
+    ):
+        """When the state file could not be written the targets were never
+        stored, so pointing at `jobs watch` for the check would be false."""
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: None)
+        lines, exit_code = _cloud_capture(
+            capsys, two_output_workflow_file, wait=False, timeout=5, output_node_ids=["3"]
+        )
+        assert exit_code == 0
+        assert "note" not in _envelope(lines)["data"]
+
+    def test_async_untargeted_run_records_no_targets(self, monkeypatch, two_output_workflow_file, capsys):
+        import comfy_cli.jobs_state as jobs_state_mod
+
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(), object_info=_TARGET_OBJECT_INFO)
+        written = []
+        monkeypatch.setattr(jobs_state_mod, "write", lambda state: written.append(state) or "/tmp/state.json")
+        lines, _exit_code = _cloud_capture(capsys, two_output_workflow_file, wait=False, timeout=5)
+        assert written[-1].output_node_ids is None
+        assert written[-1].run_graph_node_ids is None
+        assert "note" not in _envelope(lines)["data"]
 
     def test_empty_output_lists_count_as_missing(self, monkeypatch, two_output_workflow_file, capsys):
         record = {"status": {"status_str": "success"}, "outputs": {"3": {"images": [], "animated": [False]}}}

@@ -97,6 +97,10 @@ class OAuthTimeout(OAuthError):
     code = "oauth_timeout"
 
 
+class SessionNotSaved(OSError):
+    """A refresh succeeded but its tokens could not be stored, so the stored refresh token is spent."""
+
+
 class SessionReplaced(Exception):
     """The stored sign-in is not the one ``ensure_fresh_session(expect=...)`` was asked to refresh.
 
@@ -636,6 +640,7 @@ _REFRESH_RETRY_MIN_ATTEMPT_S = 5.0
 # peer) we fall back to whatever is persisted rather than racing an in-flight
 # refresh.
 _REFRESH_LOCK_TIMEOUT_S = 90.0
+_SAVE_RETRY_DELAY_S = 0.25
 
 # OAuth2 token-endpoint error codes that mean the refresh-token *family* is
 # truly dead — only a fresh ``comfy cloud login`` can recover, so we clear the
@@ -782,6 +787,7 @@ def ensure_fresh_session(
     force: bool = False,
     allow_clear: bool = True,
     expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
 ):
     """Return the stored cloud session, refreshing it first when the access
     token is expired (or within ``leeway_s`` of expiring) and a refresh token
@@ -802,6 +808,10 @@ def ensure_fresh_session(
     token has been rejected even if our clock — skewed, or with no
     ``expires_at`` recorded — still thinks it is valid. The refresh token is
     still required; without one this is a no-op.
+
+    ``rejected_access_token`` identifies the token that received the 401. If a
+    peer already replaced it, adopt that session instead of refreshing again.
+    This also covers a late 401 that arrives after the peer released the lock.
 
     ``allow_clear=False`` keeps the stored session on disk even when a refresh
     hits a fatal token error (reuse-detection / ``invalid_grant``). Background,
@@ -855,6 +865,7 @@ def ensure_fresh_session(
                 force=force,
                 allow_clear=allow_clear,
                 expect=expect,
+                rejected_access_token=rejected_access_token,
             )
     except TimeoutError:
         # A peer has held the lock longer than a refresh should take. Don't
@@ -875,6 +886,7 @@ def _locked_refresh(
     force: bool,
     allow_clear: bool = True,
     expect: Callable[[CloudSession], bool] | None = None,
+    rejected_access_token: str | None = None,
 ):
     """Decide → POST → persist, executed while holding the secrets lock.
 
@@ -890,11 +902,25 @@ def _locked_refresh(
     if session is None or not session.refresh_token:
         return session
 
+    # The rejected request may have been in flight while a peer finished its
+    # refresh, before even our first store read. Don't rotate that peer's token
+    # again just because this client's older request was refused.
+    if (
+        rejected_access_token is not None
+        and session.access_token != rejected_access_token
+        and session.expires_at is not None
+        and not session.is_expired(leeway_s=leeway_s)
+    ):
+        return session
+
     # Double-check after acquiring the lock. A peer may have refreshed while we
     # blocked: if the stored refresh token rotated away from what we observed
     # before locking, the family already advanced — use it, never re-send the
     # consumed token (that is exactly what trips reuse-detection).
-    if session.refresh_token != observed_refresh_token:
+    # A usable reactive peer already returned above. Otherwise refresh its
+    # current family, never replaying the older token observed before locking.
+    # Ordinary proactive callers still coalesce on any peer rotation.
+    if session.refresh_token != observed_refresh_token and rejected_access_token is None:
         return session
     if not force and not session.is_expired(leeway_s=leeway_s):
         # Peer advanced the access token's expiry without us noticing a token
@@ -951,16 +977,25 @@ def _locked_refresh(
     # fresh access token and degrades to a clean re-login when it expires,
     # rather than tripping reuse-detection mid-use.
     _last_fatal.reason = None  # success — drop any reason from an earlier attempt
-    return auth_store.save_cloud_session(
-        base_url=session.base_url,
-        resource=session.resource,
-        client_id=session.client_id,
-        scope=session.scope,
-        access_token=new_tokens.access_token,
-        refresh_token=new_tokens.refresh_token,
-        token_type=new_tokens.token_type,
-        expires_at=new_tokens.expires_at,
-    )
+    rotated = {
+        "base_url": session.base_url,
+        "resource": session.resource,
+        "client_id": session.client_id,
+        "scope": session.scope,
+        "access_token": new_tokens.access_token,
+        "refresh_token": new_tokens.refresh_token,
+        "token_type": new_tokens.token_type,
+        "expires_at": new_tokens.expires_at,
+        "keep_partner_node_token": True,
+    }
+    try:
+        return auth_store.save_cloud_session(**rotated)
+    except OSError:
+        time.sleep(_SAVE_RETRY_DELAY_S)
+    try:
+        return auth_store.save_cloud_session(**rotated)
+    except OSError as error:
+        raise SessionNotSaved(str(error)) from error
 
 
 # ---------------------------------------------------------------------------
