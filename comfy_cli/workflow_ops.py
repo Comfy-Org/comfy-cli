@@ -77,6 +77,7 @@ from comfy_cli.cql.engine import (
     DynamicGroupBindingError,
     SavedWidgetLayoutError,
     _dynamic_group_widgets,
+    _update_named_widget_value,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
     frontend_injected_widget_error,
@@ -4127,6 +4128,18 @@ def _apply_positional_write(node: dict, positional: dict, value: Any) -> None:
         values.append(None)
     values[idx] = value
     node["widgets_values"] = values
+    # A23: both callers of this function write a legacy PrimitiveNode's single
+    # widget — a frontend-only node with no catalog entry, so its layout is
+    # the frontend's own fixed order (cql.promoted._PRIMITIVE_WIDGET_ORDER:
+    # ``value``, then an optional ``control_after_generate``), not something
+    # `_write_widget`'s catalog-driven order resolves. Mirror a present
+    # register under that fixed name through the same gates every other
+    # writer uses (foreign/non-dict register, name never carried, duplicated
+    # name) so a replayed op leaves it correct or untouched, never stale.
+    from comfy_cli.cql.promoted import _PRIMITIVE_WIDGET_ORDER
+
+    if idx < len(_PRIMITIVE_WIDGET_ORDER):
+        _update_named_widget_value(node, list(_PRIMITIVE_WIDGET_ORDER), _PRIMITIVE_WIDGET_ORDER[idx], value)
 
 
 def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: str, value: Any) -> None:

@@ -446,6 +446,50 @@ def test_legacy_primitive_write_carries_a_positional_payload(graph):
     assert workflow_ops.apply_op(wf, op, graph) is wf
 
 
+def test_legacy_primitive_write_mirrors_a_present_widgets_values_named(graph):
+    """jaeone94's review on #1106 (comment-6734369598): the op-replay path
+    (``_apply_positional_write``, which both of ``_apply_set_widget``'s
+    ``legacy_primitive``/``promoted``-non-subgraph branches call) wrote
+    ``widgets_values`` positionally but never touched a present
+    ``widgets_values_named``, leaving it stale. A legacy ``PrimitiveNode`` has
+    no catalog entry, so its register key is the frontend's fixed ``"value"``
+    name (``cql.promoted._PRIMITIVE_WIDGET_ORDER``), not something resolved
+    from a schema — the same name `_apply_one_slot_impl`'s direct-address
+    ``legacy_primitive`` branch (``comfy_cli/cql/engine.py``) must mirror
+    under too."""
+    wf = _load("image_z_image_turbo.json")
+    wf["last_node_id"] += 1
+    legacy = wf["last_node_id"]
+    wf["nodes"].append(
+        {
+            "id": legacy,
+            "type": "PrimitiveNode",
+            "pos": [0, 0],
+            "size": [210, 82],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "INT", "type": "INT", "widget": {"name": "width"}, "links": []}],
+            "properties": {"Run widget replace on values": False},
+            "widgets_values": [1024, "fixed"],
+            "widgets_values_named": {"value": 1024},
+        }
+    )
+    wf, _ = workflow_ops.connect(wf, graph, legacy, "INT", 57, "width")
+    base = copy.deepcopy(wf)
+    wf, op = workflow_ops.set_widget(wf, graph, 57, "width", 512)
+    assert op["legacy_primitive"] is True
+
+    primitive = _node(wf, legacy)
+    assert primitive["widgets_values"] == [512, "fixed"]
+    assert primitive["widgets_values_named"] == {"value": 512}
+
+    # Replay on a pre-write copy must mirror the register the same way.
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
+    assert _node(replayed, legacy)["widgets_values_named"] == {"value": 512}
+
+
 def test_later_connect_to_a_materialized_promoted_input_stays_on_the_declared_register(graph):
     """Once ``57.width`` is materialized, a later connect to it must still be
     a promoted grow on ``("input", 57, "grow", "width")`` — not a concrete

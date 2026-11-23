@@ -6628,6 +6628,13 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             values.append(None)
         values[0] = value
         node["widgets_values"] = values
+        # A23: a legacy PrimitiveNode has no catalog entry, so its layout is
+        # the frontend's own fixed order (``value``, then an optional
+        # ``control_after_generate``) rather than something `_write_widget`
+        # can resolve — mirror a present register under that fixed name
+        # directly, through the same gates (foreign/non-dict register, name
+        # never carried, duplicated name) every other writer uses.
+        _update_named_widget_value(node, list(_promoted._PRIMITIVE_WIDGET_ORDER), "value", value)
         return []
     # --- Direct mode: a regular top-level node (or the primitive feeding a promoted input). ---
     return _write_widget(target.node, target.widget, value, graph, extend=True)
