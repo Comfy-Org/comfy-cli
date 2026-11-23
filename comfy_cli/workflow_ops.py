@@ -3572,7 +3572,215 @@ def _split_ref_slot(spec_val: str, aliases: dict[str, Any]) -> tuple[Any, Any]:
     return resolve_ref(node_part, aliases), slot
 
 
+def _admission_write_applied(workflow: dict, op: dict) -> bool:
+    """Whether ``op`` won its LWW register and therefore changed this document."""
+    stamps = workflow.get("_widget_stamps")
+    if not isinstance(stamps, dict):
+        return False
+    actual = stamps.get(json.dumps(_write_target(op), default=str))
+    return actual == _stamp_key(op)
+
+
+def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | None, str, tuple[str, ...], tuple | None]:
+    """Return the concrete catalog node/widget and its structural owner.
+
+    A promoted write is stored on its subgraph host, but structural ownership
+    still comes from the interior widget backing that promoted input. Its owner
+    path therefore joins the instance path to the promoted input's deepest
+    source path, matching an explicit address of that same interior node.
+    """
+    target = _write_target(op)
+    widget = target[2]
+    if op.get("path"):
+        owner = tuple(str(segment) for segment in op["path"])
+        return _navigate_subgraph_path(workflow, op["path"]), widget, owner, None
+    if graph is not None and op.get("promoted"):
+        from comfy_cli.cql import promoted as _promoted
+
+        definitions = _promoted.defs_by_id(workflow)
+        instance_path = [str(s) for s in op["promoted"].get("instance_path") or [str(op["node_id"])]]
+        try:
+            instance = _navigate_subgraph_path(workflow, instance_path)
+            definition = definitions.get(str(instance.get("type", "")))
+            promoted = _promoted.find_promoted(definition, definitions, op["widget"]) if definition else None
+            source = _promoted.deepest_source(definition, promoted, definitions) if promoted else None
+            if source is not None:
+                source_path, source_widget = source
+                owner_path = [*instance_path, *source_path]
+                roster_instance = _find_by_str(workflow, instance_path[0])
+                roster_definition = definitions[str(roster_instance.get("type", ""))]
+                roster_source_path = [*instance_path[1:], *source_path]
+                roster = (roster_instance, workflow, roster_definition, roster_source_path, definitions)
+                return _navigate_subgraph_path(workflow, owner_path), source_widget, tuple(owner_path), roster
+        except ValueError:
+            # A schema-less PrimitiveNode also carries positional ``promoted``
+            # metadata, but has no subgraph definition to resolve through.
+            pass
+        node = _find_by_str(workflow, str(op["node_id"]))
+        return node, widget, tuple(instance_path), None
+    node = _find_by_str(workflow, str(op["node_id"]))
+    return node, widget, (str(target[1]),), None
+
+
+def _admission_combo_children(m) -> dict[str, set[str]]:
+    """Collect structural children from every dynamic-combo option schema.
+
+    Equal dotted selector names can occur in separate outer variants. Their
+    descendants are unioned instead of letting the first flattened occurrence
+    hide the others.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    combos: dict[str, set[str]] = {}
+
+    def visit(port, depth: int) -> None:
+        """Union this selector occurrence into its dotted-name ownership entry."""
+        if depth >= _engine._MAX_DYNAMIC_COMBO_DEPTH or not port.dynamic_options or not port.is_dynamic_combo:
+            return
+        children = combos.setdefault(port.name, set())
+        for option in port.dynamic_options:
+            for child in _engine._dynamic_combo_option_ports(option, port.name):
+                if child.is_link:
+                    continue
+                children.add(child.name)
+                visit(child, depth + 1)
+
+    for port in m.inputs:
+        visit(port, 0)
+    return combos
+
+
+def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, None]) -> None:
+    """Refuse producer batches that destroy an earlier child register.
+
+    This is admission only; raw-op replay and consumer hidden values are unchanged.
+    Minted ops supply canonical targets and normalized old/new values.
+    """
+    if not _admission_write_applied(workflow, op):
+        return
+    target = _write_target(op)
+    node, widget, structural_owner, promoted_roster = _admission_schema_target(workflow, graph, op)
+    display_widget = op.get("inner_widget", op["widget"])
+    if graph is None:
+        written.setdefault((structural_owner, widget, None, display_widget), None)
+        return
+    class_type = node.get("type", "") if node else ""
+    m = graph.node(class_type)
+    combos = _admission_combo_children(m) if m is not None else {}
+    seen: set[str] = set()
+    if widget in combos and op.get("old") != op["value"]:
+        # Follow selector ownership, including nested selectors. Whether a
+        # prior write belongs to this span comes from its resolved saved slot,
+        # not from every same-named child any historical option declares.
+        pending = [widget]
+        while pending:
+            selector = pending.pop()
+            if selector in seen:
+                continue
+            seen.add(selector)
+            for child in combos[selector]:
+                if child in combos:
+                    pending.append(child)
+    slot_owner = None
+    if m is not None and node is not None:
+        from comfy_cli.cql import engine as _engine
+
+        # Like the native writer, resolve the FIRST actual saved slot. This
+        # distinguishes an independent dotted widget from a same-named child
+        # declared only by another combo option, and also preserves repeated
+        # control-marker ownership.
+        try:
+            saved_names = _engine.saved_widget_order(node, graph, class_type)
+        except (SavedWidgetLayoutError, DynamicGroupBindingError):
+            # A promoted source can carry only the markers needed to describe
+            # its host wiring. They are not a complete positional save layout;
+            # the production promoted writer already resolved the source, so
+            # retain its ordinary catalog-layout fallback here.
+            saved_names = None
+        values = node.get("widgets_values") or []
+        entries = _engine._expand_widget_entries(m, values, saved_widget_names=saved_names)
+        if promoted_roster is not None and combos:
+            from comfy_cli.cql import promoted as _promoted
+
+            # A promoted selector's host value is the roster execution uses;
+            # the interior saved value is only its fallback. Recover saved
+            # selector positions before applying those host overlays, then
+            # expand ownership by name so a wider effective roster cannot
+            # reinterpret later saved positions as newly materialized children.
+            selector_values: dict[str, Any] = {}
+            for index, entry in enumerate(entries):
+                if entry.name not in combos:
+                    continue
+                if isinstance(values, dict):
+                    if entry.name in values:
+                        selector_values[entry.name] = values[entry.name]
+                elif index < len(values):
+                    selector_values[entry.name] = values[index]
+            instance, scope, definition, source_path, definitions = promoted_roster
+            for selector in combos:
+                effective = _engine._promoted_selector_value(
+                    instance, scope, definition, source_path, selector, definitions
+                )
+                if effective is not _promoted.UNSET:
+                    selector_values[selector] = effective
+            entries = _engine._expand_widget_entries(m, selector_values)
+        slot_owner = next((entry.owner for entry in entries if entry.name == widget), None)
+    group = next((p for p in m.inputs if p.name == widget and p.is_dynamic_group), None) if m else None
+    for earlier in written:
+        if earlier[0] != structural_owner:
+            continue
+        removed_row = False
+        if group is not None and earlier[1].startswith(widget + "."):
+            row, dot, field = earlier[1][len(widget) + 1 :].partition(".")
+            if dot and row.isdecimal() and int(row) >= op["value"]:
+                removed_row = any(p.name == earlier[1] for p in _dynamic_group_widgets(group, f"{widget}.{row}"))
+        child_destroyed = earlier[2] in seen
+        if child_destroyed or removed_row:
+            raise ValueError(
+                f"destructive structural rebuild of {display_widget!r} would erase earlier batch write "
+                f"to {earlier[3]!r} on {target[1]}; put the selector/count before child writes"
+            )
+    written.setdefault((structural_owner, widget, slot_owner, display_widget), None)
+
+
 def apply_specs(
+    workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
+) -> tuple[dict, list, dict]:
+    """Apply once in place, restoring original containers if the batch fails."""
+    if len(specs) > _MAX_OPS_PER_BATCH:
+        return _apply_specs_impl(workflow, graph, specs, actor=actor, base_version=base_version)
+    snapshots: list[tuple[dict | list, dict | list]] = []
+    pending = [workflow]
+    seen: set[int] = set()
+    container_types = (dict, list, tuple)
+    while pending:
+        value = pending.pop()
+        if not isinstance(value, container_types) or id(value) in seen:
+            continue
+        seen.add(id(value))
+        if isinstance(value, dict):
+            snapshots.append((value, value.copy()))
+            pending.extend(value.values())
+        else:
+            if isinstance(value, list):
+                snapshots.append((value, value.copy()))
+            pending.extend(value)
+    try:
+        return _apply_specs_impl(workflow, graph, specs, actor=actor, base_version=base_version)
+    except BaseException:
+        # Saved child references point to the ORIGINAL containers, including
+        # any detached by deletion/rebuild. Restore those objects too so an
+        # external node/widget reference cannot retain a refused mutation.
+        for original, before in snapshots:
+            if isinstance(original, dict):
+                original.clear()
+                original.update(before)
+            else:
+                original[:] = before
+        raise
+
+
+def _apply_specs_impl(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases).
@@ -3621,6 +3829,7 @@ def apply_specs(
     ops: list[dict] = []
     replaced: dict[tuple, bool] = {}
     input_targets: set[str] = set()
+    widget_writes: dict[tuple, None] = {}
     try:
         for i, spec in enumerate(specs):
             if not isinstance(spec, dict) or "op" not in spec:
@@ -3693,6 +3902,8 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                    for row_op in row_ops:
+                        _admit_rebuild_write(workflow, graph, row_op, widget_writes)
                     ops.extend(row_ops)
                     replaced.update({_write_target(row_op): row_op is row_ops[0] for row_op in row_ops})
                     continue
@@ -3718,6 +3929,8 @@ def apply_specs(
                     raise ValueError(f"spec #{i}: unknown op {kind!r}")
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
+            if op.get("op") == "set_widget":
+                _admit_rebuild_write(workflow, graph, op, widget_writes)
             # A later write at the batch's stamp would tie with the replacement
             # on the op_id tiebreak. Amendment v1.14 keeps this refusal.
             target = _write_target(op) if op.get("op") == "set_widget" else None

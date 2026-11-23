@@ -47,15 +47,23 @@ def test_an_unchanged_file_is_hashed_once_across_separate_commands(model: Path, 
     "replacement",
     [pytest.param(b"CHANGED-AND-LONGER", id="different size"), pytest.param(b"OTHER", id="identical size")],
 )
-def test_edited_content_is_hashed_again(model: Path, tmp_path: Path, replacement: bytes) -> None:
+def test_edited_content_with_changed_metadata_is_hashed_again(model: Path, tmp_path: Path, replacement: bytes) -> None:
     # Given
     digest = _CountingDigest()
     memo = tmp_path / "digests.json"
     cache = ModelDigestCache(digest, memo)
     cache(model)
+    before = model.stat()
 
     # When
     model.write_bytes(replacement)
+    # A fast rewrite can share the filesystem's timestamp tick. Exercise the
+    # two cache-key invalidations explicitly: size alone, or mtime alone.
+    # Same-size content with unchanged metadata is a separate cache limitation.
+    mtime = before.st_mtime_ns + 1_000_000_000 if len(replacement) == before.st_size else before.st_mtime_ns
+    os.utime(model, ns=(before.st_atime_ns, mtime))
+    after = model.stat()
+    assert (after.st_mtime_ns, after.st_size) != (before.st_mtime_ns, before.st_size)
     reread = ModelDigestCache(digest, memo)(model)
 
     # Then
@@ -76,6 +84,25 @@ def test_a_moved_mtime_alone_is_enough_to_hash_again(model: Path, tmp_path: Path
     ModelDigestCache(digest, memo)(model)
 
     # Then
+    assert digest.reads == [model, model]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the documented identity stamp cannot detect a same-size rewrite whose mtime is restored",
+)
+def test_same_size_same_mtime_rewrite_is_hashed_again(model: Path, tmp_path: Path) -> None:
+    """Keep the known stamp collision executable instead of masking it with an mtime bump."""
+    digest = _CountingDigest()
+    memo = tmp_path / "digests.json"
+    ModelDigestCache(digest, memo)(model)
+    before = model.stat()
+
+    model.write_bytes(b"OTHER")
+    os.utime(model, ns=(before.st_atime_ns, before.st_mtime_ns))
+    reread = ModelDigestCache(digest, memo)(model)
+
+    assert reread == hashlib.sha256(b"OTHER").hexdigest()
     assert digest.reads == [model, model]
 
 
