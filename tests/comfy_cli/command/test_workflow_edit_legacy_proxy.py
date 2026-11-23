@@ -306,6 +306,35 @@ def test_concurrent_repairs_of_one_instance_converge(graph):
     assert _node(ab, 143)["widgets_values"] == ["Nano Banana 2", "1K", "1:1"]
 
 
+def test_second_write_without_repair_still_migrates_a_peer_that_sees_it_first(graph):
+    """Only the FIRST write on a replica that ever observes the pending
+    legacy tuples carries ``promoted.repair`` — by the second write, that
+    replica has already flushed locally, so its op carries none. If a peer
+    replica is delivered that second (higher-stamped, repair-less) op
+    BEFORE the first one, gating the flush on the op's own ``repair`` field
+    used to skip the migration there entirely: the peer's definition is
+    never repaired, so writing the host value on it (``set_host_value``)
+    raised ``ValueError`` — the promoted input doesn't exist yet. The flush
+    must run from the live document instead, on every apply, independent of
+    which op carries the ``repair`` payload.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941925
+    """
+    base = _load(FLUX)
+    replica_a = copy.deepcopy(base)
+    replica_a, op1 = workflow_ops.set_widget(replica_a, graph, 56, "seed", 111, actor="a", base_version=0)
+    replica_a, op2 = workflow_ops.set_widget(replica_a, graph, 56, "seed", 222, actor="a", base_version=1)
+    assert "repair" in op1["promoted"]
+    assert "repair" not in op2["promoted"]  # already flushed locally by the time op2 was created
+
+    # A peer meets the second (higher-stamped) op FIRST.
+    replica_b = copy.deepcopy(base)
+    replica_b = workflow_ops.apply_op(replica_b, op2, graph)
+    replica_b = workflow_ops.apply_op(replica_b, op1, graph)  # the lower-stamped op loses LWW, but must still migrate
+
+    assert _stripped(replica_b) == _stripped(replica_a)
+    assert promoted.effective_value(replica_b, _node(replica_b, 56), "seed", graph) == 222
+
+
 @pytest.mark.parametrize(("widget", "value"), [("seed", 5), ("text", "new prompt")])
 def test_shared_definition_is_forked_not_mutated(graph, widget, value):
     wf = _load(FLUX)

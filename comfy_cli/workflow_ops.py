@@ -4021,10 +4021,6 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
-    # Last-writer-wins: a lower-stamped concurrent write to this target is
-    # dropped, so the surviving value is the same in any apply order.
-    if not _lww_gate(workflow, op):
-        return
     promoted_write = op.get("promoted")
     if promoted_write:
         # Host-owned value of a promoted subgraph input (cql.promoted). The
@@ -4038,19 +4034,44 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
             return  # instance concurrently deleted => no-op (delete wins)
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
-        repair = promoted_write.get("repair")
-        if repair:
-            # Legacy ``proxyWidgets`` promotion: repair the instance's
-            # definition (the frontend's forward migration) before the host
-            # write. The definition is MUTATED, so a shared one is forked
-            # first (deterministic fork id), and the input/link ids come from
-            # the op — replay anywhere yields the same document. Re-resolved
-            # against the current graph: an entry another replica already
-            # repaired is consumed as already linked.
+        # Legacy ``proxyWidgets`` promotion: repair the instance's definition
+        # (the frontend's forward migration) before the host write, the same
+        # way the op's own creation decided to. Recomputed from the CURRENT
+        # document rather than trusting ``promoted_write.get("repair")`` —
+        # only the first write that ever observed the pending migration on
+        # its originating replica carries that payload; a later write to the
+        # same widget on that replica no longer does, because by then the
+        # migration had already run locally. If that later (higher-stamped)
+        # op is the one a peer replica meets FIRST, gating the flush on the
+        # op's own ``repair`` field would skip it there, and the earlier,
+        # repair-carrying op can then lose the LWW gate below and never run
+        # it either — leaving that replica permanently unmigrated while
+        # others converge. The repair itself is deterministic and idempotent
+        # (derived ids, a no-op once already flushed), so running it from
+        # live document state on every apply — independent of this op's own
+        # LWW outcome for the VALUE — converges regardless of delivery order.
+        # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941925
+        plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs_by_id)
+        if any(e.repairable for e in plan):
+            # The definition is MUTATED, so a shared one is forked first
+            # (deterministic fork id), and the input/link ids come from the
+            # op when carried — replay anywhere yields the same document.
+            # Re-resolved against the current graph: an entry another
+            # replica already repaired is consumed as already linked.
             _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
             _promoted.flush_proxy_migration(
-                workflow, instance, graph, ids=repair.get("ids") or None, instance_path=instance_path
+                workflow,
+                instance,
+                graph,
+                ids=(promoted_write.get("repair") or {}).get("ids") or None,
+                instance_path=instance_path,
             )
+        # Last-writer-wins: a lower-stamped concurrent write to this target is
+        # dropped, so the surviving value is the same in any apply order. The
+        # migration above already ran unconditionally — only the VALUE write
+        # is gated.
+        if not _lww_gate(workflow, op):
+            return
         if _engine._subgraph_defs_by_id(workflow).get(str(instance.get("type", ""))) is not None:
             _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
         else:
@@ -4058,6 +4079,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
             # positional write, aligned from the op's materialized array.
             _apply_positional_write(instance, promoted_write, op["value"])
         _lww_commit(workflow, op)
+        return
+    # Last-writer-wins: a lower-stamped concurrent write to this target is
+    # dropped, so the surviving value is the same in any apply order.
+    if not _lww_gate(workflow, op):
         return
     if op.get("legacy_primitive"):
         # Pre-payload shape (no ``promoted`` block): widgets_values[0].
