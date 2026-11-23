@@ -3607,11 +3607,10 @@ def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | No
             if source is not None:
                 source_path, source_widget = source
                 owner_path = [*instance_path, *source_path]
-                scope = workflow
-                if len(instance_path) > 1:
-                    parent = _navigate_subgraph_path(workflow, instance_path[:-1])
-                    scope = definitions[str(parent.get("type", ""))]
-                roster = (instance, scope, definition, source_path, definitions)
+                roster_instance = _find_by_str(workflow, instance_path[0])
+                roster_definition = definitions[str(roster_instance.get("type", ""))]
+                roster_source_path = [*instance_path[1:], *source_path]
+                roster = (roster_instance, workflow, roster_definition, roster_source_path, definitions)
                 return _navigate_subgraph_path(workflow, owner_path), source_widget, tuple(owner_path), roster
         except ValueError:
             # A schema-less PrimitiveNode also carries positional ``promoted``

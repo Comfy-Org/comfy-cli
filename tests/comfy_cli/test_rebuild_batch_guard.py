@@ -880,6 +880,78 @@ def test_nested_promoted_and_explicit_addresses_share_the_deepest_owner():
     assert wf == before
 
 
+def test_outer_promoted_selector_owns_child_left_on_nested_host():
+    g, inner_workflow, _ = promoted_fresh(renamed=True, interior_selector="base", host_selector="base")
+    inner_definition = inner_workflow["definitions"]["subgraphs"][0]
+    inner_instance = inner_workflow["nodes"][0]
+    inner_instance["inputs"][0]["link"] = 11
+    outer_definition = {
+        "id": "outer",
+        "name": "Outer",
+        "inputs": [
+            {
+                "id": "outer-selector",
+                "name": "outer_selector",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "linkIds": [11],
+            }
+        ],
+        "outputs": [],
+        "nodes": [inner_instance],
+        "links": [
+            {
+                "id": 11,
+                "origin_id": -10,
+                "origin_slot": 0,
+                "target_id": inner_instance["id"],
+                "target_slot": 0,
+                "type": "COMFY_DYNAMICCOMBO_V3",
+            }
+        ],
+    }
+    host = {
+        "id": 8,
+        "type": "outer",
+        "inputs": [
+            {
+                "name": "outer_selector",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {"name": "outer_selector"},
+                "link": None,
+            }
+        ],
+        "outputs": [],
+        "properties": {},
+        "widgets_values": ["max"],
+    }
+    wf = {
+        "nodes": [host],
+        "links": [],
+        "definitions": {"subgraphs": [inner_definition, outer_definition]},
+    }
+    before = copy.deepcopy(wf)
+    definitions = wf["definitions"]
+    outer_nodes = outer_definition["nodes"]
+    nested_widgets = inner_instance["widgets_values"]
+
+    with pytest.raises(ValueError, match="write to 'child_alias'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [
+                write(f"8/{inner_instance['id']}", "child_alias", "quality"),
+                write(8, "outer_selector", "base"),
+            ],
+        )
+
+    assert wf == before
+    assert wf["nodes"][0] is host
+    assert wf["definitions"] is definitions
+    assert outer_definition["nodes"] is outer_nodes
+    assert outer_nodes[0] is inner_instance
+    assert inner_instance["widgets_values"] is nested_widgets
+
+
 def test_nested_promoted_instance_path_and_explicit_address_share_owner():
     g, wf, instance_id, interior_id = nested_promoted_fresh()
     before = copy.deepcopy(wf)
