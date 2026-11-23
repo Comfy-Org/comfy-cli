@@ -100,6 +100,21 @@ def test_legacy_write_repairs_the_definition_and_writes_the_host(graph):
     assert repair["ids"]["52.seed"]["links"][0] == sg["inputs"][-1]["linkIds"][0]
 
 
+def test_set_widget_does_not_claim_a_repair_marker_for_an_unrepairable_plan(graph):
+    """The op's own ``repair`` marker must gate on ``e.repairable`` — not
+    ``e.plan != PLAN_PREVIEW``, which is also true for ``alreadyLinked``/
+    ``quarantine`` entries that a flush would not touch. A stray
+    ``promoted.repair`` on an op that triggers no structural change is
+    misleading to anything that reads the op (it implies a migration ran).
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+    """
+    wf = _load(FLUX)
+    inst = _node(wf, 56)
+    inst["properties"]["proxyWidgets"] = [e for e in inst["properties"]["proxyWidgets"] if e != ["52", "seed"]]
+    wf, op = workflow_ops.set_widget(wf, graph, 56, "width", 800)
+    assert "repair" not in op["promoted"]
+
+
 @pytest.mark.parametrize("order", list(permutations(["text", "width", "seed"])))
 @pytest.mark.parametrize("reload_between_writes", [False, True])
 def test_mixed_legacy_and_declared_writes_preserve_values(graph, order, reload_between_writes):

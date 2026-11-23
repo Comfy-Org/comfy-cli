@@ -1733,11 +1733,19 @@ def _set_widget_impl(
         else:
             pi = _promoted.find_promoted(sg, defs, widget)
             promoted_meta["value_index"] = pi.value_index
-            old = _promoted.effective_value(workflow, instance, widget, graph)
             # Materializing declared-order values while legacy tuples remain
             # makes a later migration reinterpret them in proxy order.
             plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs)
-            if any(e.plan != _promoted.PLAN_PREVIEW for e in plan):
+            # Fork + flush only when something would actually CHANGE: a plan
+            # of only ``alreadyLinked``/``quarantine`` entries leaves the
+            # definition exactly as ``flush_proxy_migration`` found it, so
+            # forcing ``_isolate_shared_subgraph`` to fork the (possibly
+            # shared) definition for it forks it for nothing — the instance
+            # permanently stops sharing definition edits with its siblings
+            # over an op that would not have written anything structural.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+            old = _promoted.effective_value(workflow, instance, widget, graph)
+            if any(e.repairable for e in plan):
                 promoted_meta["repair"] = {
                     "ids": _promoted.plan_repair_ids(list(target.segments), plan),
                 }

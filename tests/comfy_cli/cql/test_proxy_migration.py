@@ -598,6 +598,44 @@ def test_flush_consumes_an_entry_a_previous_repair_already_linked(graph):
     assert [i["name"] for i in _def_of(wf, inst)["inputs"]].count("seed") == 1
 
 
+# --------------------------------------------------------------------------- #
+# apply: the repair gate at the engine's own write site (``apply_slots``)
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_slot_does_not_fork_a_shared_definition_for_an_unrepairable_plan(graph):
+    """``_apply_one_slot_impl`` used to fork+flush whenever ANY pending entry
+    was not a preview — which includes a plan of only ``alreadyLinked``
+    and/or ``quarantine`` entries. ``flush_proxy_migration`` never changes
+    the definition for those, so forking a SHARED definition for one is pure
+    cost: the instance permanently stops sharing definition edits with its
+    sibling, and the quarantine entry is written as final even though
+    nothing needed to run. A write to an unrelated, already-linked widget
+    (``width``) must not trigger either.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+    """
+    wf = _load(FLUX)
+    inst = _instance(wf, 56)
+    # Drop the one repairable entry (``seed``): what's left is only
+    # ``alreadyLinked`` entries plus the unrepairable ``control_after_generate``
+    # quarantine — no entry for which the flush would change anything.
+    inst["properties"]["proxyWidgets"] = [e for e in inst["properties"]["proxyWidgets"] if e != ["52", "seed"]]
+    sibling = copy.deepcopy(inst)
+    sibling["id"] = 156
+    wf["nodes"].append(sibling)
+    plan = promoted.plan_proxy_migration(wf, inst, graph)
+    assert plan and not any(e.repairable for e in plan)
+    original_type = inst["type"]
+
+    wf, warnings = graph.apply_slots(wf, {"56.width": 768})
+
+    assert warnings == []
+    assert _instance(wf, 56)["type"] == original_type  # not forked
+    assert _instance(wf, 156)["type"] == original_type  # sibling untouched
+    assert _instance(wf, 56)["properties"]["proxyWidgets"] == inst["properties"]["proxyWidgets"]
+    assert "proxyWidgetErrorQuarantine" not in _instance(wf, 56)["properties"]
+
+
 def test_repair_ids_are_stable_across_processes():
     ids = promoted.repair_ids(["56"], "52", "seed", 1)
     again = promoted.repair_ids(["56"], "52", "seed", 1)

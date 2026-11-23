@@ -6564,11 +6564,17 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
         if target.repair is not None or any(
-            e.plan != _promoted.PLAN_PREVIEW for e in _promoted.plan_proxy_migration(workflow, instance, graph)
+            e.repairable for e in _promoted.plan_proxy_migration(workflow, instance, graph)
         ):
             # A legacy ``proxyWidgets`` promotion: run the frontend's forward
             # migration on this instance first (forking a shared definition,
-            # since the repair mutates it), exactly as the op path does.
+            # since the repair mutates it), exactly as the op path does. Only
+            # when something would actually change (a ``createSubgraphInput``
+            # or ``primitiveBypass`` entry pending) — a plan of only
+            # ``alreadyLinked``/``quarantine`` entries leaves the definition
+            # exactly as the flush found it, so forking a shared definition
+            # for it would fork it for nothing.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
             _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow))
             _promoted.flush_proxy_migration(workflow, instance, graph, instance_path=list(target.segments))
         _promoted.set_host_value(workflow, instance, target.widget, value, graph)
