@@ -23,7 +23,7 @@ import copy
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _validate_dynamic_group_layout
+from comfy_cli.cql.engine import _update_named_widget_value, _validate_dynamic_group_layout
 
 #: Precision tags: a token that, on its own, names a numeric format.
 _PRECISION_CORE = frozenset({"int4", "int8", "fp4", "fp8", "fp16", "fp32", "bf16", "nvfp4", "mxfp4"})
@@ -137,10 +137,14 @@ def _workflow_nodes(workflow: dict) -> list[tuple[dict, str | None]]:
     return out
 
 
-def _model_widgets(node: dict, graph) -> list[tuple[Any, Any, str, Any]]:
-    """``(key, port, field, value)`` for each model-file COMBO value on ``node``,
-    ``key`` indexing its ``widgets_values`` (a position, or a name for the
-    dict form some custom nodes save)."""
+def _model_widgets(node: dict, graph) -> list[tuple[Any, Any, str, Any, list[str]]]:
+    """``(key, port, field, value, order)`` for each model-file COMBO value on
+    ``node``, ``key`` indexing its ``widgets_values`` (a position, or a name
+    for the dict form some custom nodes save). ``order`` is the node's widget
+    name order (``field`` appears in it exactly once for an unambiguous
+    name) — what Amendment A23 (``comfy_cli.cql.engine._update_named_widget_value``)
+    needs to decide whether a ``widgets_values_named`` mirror of ``field`` is
+    still safe to update after a substitution."""
     m = graph.node(str(node.get("type", "")))
     wv = node.get("widgets_values")
     if m is None or not isinstance(wv, list | dict):
@@ -152,8 +156,12 @@ def _model_widgets(node: dict, graph) -> list[tuple[Any, Any, str, Any]]:
         saved_names = saved_widget_order(node, graph, str(node["type"]))
         names = graph.widget_order_for_node(node["type"], wv, saved_names)
         pairs = [(i, names[i]) for i in range(min(len(wv), len(names)))]
+        order = names
     else:
         pairs = [(k, k) for k in wv]
+        # A dict-form save is already name-keyed; each key is its own
+        # one-occurrence "order" for the A23 finality gate.
+        order = list(wv.keys())
     out = []
     for key, field in pairs:
         value, port = wv[key], ports.get(field)
@@ -161,7 +169,7 @@ def _model_widgets(node: dict, graph) -> list[tuple[Any, Any, str, Any]]:
             continue
         if port is None or port.type != "COMBO" or not port.enum_values or port.is_upload_backed:
             continue
-        out.append((key, port, field, value))
+        out.append((key, port, field, value, order))
     return out
 
 
@@ -205,7 +213,7 @@ def _resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[di
     # instance of that definition may carry the value as a promoted widget.
     renamed: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
     for node, sg_id in nodes:
-        for key, port, field, value in _model_widgets(node, graph):
+        for key, port, field, value, order in _model_widgets(node, graph):
             if value in {str(o) for o in port.enum_values}:
                 continue
             where = {"node_id": node.get("id"), "class_type": node.get("type"), "field": field}
@@ -226,6 +234,13 @@ def _resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[di
                 )
                 continue
             node["widgets_values"][key] = sibling
+            # A23: keep a present widgets_values_named register mirroring this
+            # substitution rather than leaving it to name the model the server
+            # just proved it does not have. Same gates as every other writer
+            # (comfy_cli.cql.engine._write_widget): a foreign/non-dict register,
+            # a name the register never carried, or a duplicated name the
+            # write didn't land on the final occurrence of is left untouched.
+            _update_named_widget_value(node, order, field, sibling)
             _rename_download(node, value, sibling)
             if sg_id is not None:
                 renamed.setdefault(sg_id, {})[(str(node.get("id")), field)] = (value, sibling)
