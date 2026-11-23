@@ -31,6 +31,15 @@ promoted-widget tests (`tests/comfy_cli/cql/test_promoted_inputs.py`,
 covered by `../object_info_subgraph_promoted.json`, a trimmed copy of the
 cloud catalog entries (tooltips stripped, structure verbatim).
 
+`image_qwen_image_2_1_image_edit.json` (one promoted `prompt` feeding both a
+`TextGenerate` widget and a `ComfySwitchNode` `on_false` socket) backs the
+socket-target tests in `tests/comfy_cli/test_workflow_to_api_promoted.py`; its
+node classes were added to `../object_info_subgraph_promoted.json` the same way.
+It is NOT verbatim and is left out of the refresh loop above: its "Note: Model
+links" MarkdownNote text is blanked (a UI-only node) because the public-repo
+hygiene check reads its model links as repository references, and the tests rely
+on its prompt text and on `prompt` linking the switch socket before the widget.
+
 `templates_graphic_design_recomposer.json` (two `PrimitiveNode` fan-outs and a
 labelled value widget promoted only through legacy `proxyWidgets`),
 `template_horizontal_vertical_extension.json` (three `$$canvas-image-preview`

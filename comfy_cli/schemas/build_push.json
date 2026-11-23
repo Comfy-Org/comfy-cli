@@ -12,7 +12,8 @@
     "upload_count",
     "upload_bytes",
     "uploaded",
-    "deduped"
+    "deduped",
+    "public_pins_checked"
   ],
   "additionalProperties": false,
   "properties": {
@@ -25,6 +26,7 @@
     "upload_bytes": {"type": "integer", "minimum": 0},
     "uploaded": {"description": "Blobs whose bytes were transferred. Never exceeds `upload_count`: the builder answers with an id it already holds, and no upload URL, when the workspace already stored those exact bytes.", "type": "integer", "minimum": 0},
     "deduped": {"description": "Blobs the builder already held, so `upload_count` was planned but not transferred. Always `upload_count - uploaded`.", "type": "integer", "minimum": 0},
+    "public_pins_checked": {"description": "How many public custom nodes (registry versions and GitHub repositories) the builder placed in the pin check, on a push and a dry run alike. 0 when the spec has none; the builder was then not asked. A pin it cannot place fails the command with `build_registry_pin_missing`, so every pin counted here passed.", "type": "integer", "minimum": 0},
     "folder_case_checked": {
       "description": "Present only when the spec has models. False when no usable folder list was read from the builder (`--dry-run`; a read that failed or named no folder), so a case variant of a folder (`Loras` for `loras`) passed unchecked; the builder refuses it at the release.",
       "type": "boolean"

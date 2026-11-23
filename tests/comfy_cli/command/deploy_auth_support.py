@@ -126,6 +126,7 @@ class DeployRecordingTransport:
                 {"deploymentId": DEPLOYMENT_ID, "events": []},
             ),
             ("GET", "/v1/compute-catalog"): (200, {"regions": []}),
+            ("GET", "/v1/limits"): (200, {"maxActiveDeployments": 3, "maxModelStorageGb": 100}),
         }
         if method == "PATCH" and path == f"/v1/deployments/{DEPLOYMENT_ID}":
             return 200, copy.deepcopy({**row, **(body or {})})

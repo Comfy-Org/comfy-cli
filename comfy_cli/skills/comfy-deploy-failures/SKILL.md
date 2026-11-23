@@ -39,7 +39,7 @@ argument you pass.
 | `deploy_unrelated_deployment` | `--deployment` names one outside this scope | Pick from `details.candidateIds` |
 | `deploy_missing_input` | A required option was omitted non-interactively | Pass everything in `details.missing` |
 | `deploy_compute_unavailable` | That GPU/region cannot provision now | Choose another pair from `comfy deploy refs compute` |
-| `deploy_quota_exceeded` | Workspace deployment or worker limit | Stop or scale down another deployment |
+| `deploy_quota_exceeded` | Workspace active-deployment limit, or the per-deployment worker limit; at the active limit `up` lists the slot holders in `details.activeDeployments` | Active limit: `comfy deploy stop --deployment <id>` on one the user names, read the limit with `comfy build quota`; worker limit: lower `--max` |
 | `deploy_payment_required` | No active subscription or credit | Billing problem; a retry will not fix it |
 | `deploy_conflict` | The deployment's state rejects the operation | Let it settle, re-read `status` |
 | `deploy_not_found` | No deployment with that id | `comfy deploy ls --workspace` |
@@ -51,10 +51,11 @@ argument you pass.
 | `deploy_ambiguous_build` | Two or more Builds share the name before the slash | Name the Build by its id, as `<build id>/<name>` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
-| `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
-| `deploy_update_replaced` | A watched `up`, `promote` or `rollback` was replaced by a newer update; `details.replacing_release_id` names its release | Follow it with `comfy deploy status --deployment <id>`, or end it with `comfy deploy cancel --deployment <id>` |
+| `deploy_server_error` | Control plane unavailable or 5xx | Re-read `comfy deploy show --deployment <id>` before retrying, so a retry cannot double-create |
+| `deploy_update_replaced` | A watched `up`, `promote` or `rollback` was replaced by a newer update; `details.replacing_release_id` names its release | Read it with `comfy deploy show --deployment <id>`, or end it with `comfy deploy cancel --deployment <id>` |
 | `deploy_updates_unavailable` | `promote`, `rollback`, `history`, `cancel` or `events --release` on a deployment with no `revision`, or `cancel` against a deploy service too old for it | `promote` or `rollback`: `up --create` on the release instead. `history`: read `events`. `cancel`: wait for the update to land or fail. `events`: drop `--release`; those events do not say which release made them |
-| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`, or after a move `comfy deploy show --deployment <id>` until it shows no `pendingUpdate`; do not redeploy |
+| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | Read `comfy deploy show --deployment <id>` from any folder; watching requires `comfy deploy status <spec-PATH> --deployment <id> --watch` with this Build's verified spec. After a move, read until no `pendingUpdate`; do not redeploy |
+| `watch_auth_lost` | A watch's read was refused with a 401 despite session recovery, and a refreshable sign-in remains stored (exit 75); the deployment may still be coming up | Reattach as for `deploy_watch_lost` before considering a new sign-in; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow
@@ -68,8 +69,8 @@ argument you pass.
 | `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; the job was not submitted | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
-| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
-| `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read | Confirm the file is stable, retry |
+| `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set, or its hash is not one `--allow-upload` names | `details.missing[]` lists each file: `local_path`, `bytes`, `hash`. Rerun with `--allow-upload <hash>` per approved file, drop `--no-upload`, or pre-upload it |
+| `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read, or with `--allow-upload` the private temporary copy of the file could not be made (a full disk, say; `details.temp_dir` names the folder; that file was not uploaded, though approved files before it may be, and a retry reuses them) | Confirm the file is stable, retry. For a failed copy, free space in `details.temp_dir` or set `TMPDIR` to a folder with room, then retry |
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
 | `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** The CLI cannot look the job up — ask the user |
@@ -93,8 +94,7 @@ idempotency key the submission carried (`details.idempotency_key`). So "I looked
 and found nothing" is not evidence the job was never created, and must never be
 read as permission to resubmit. `comfy deploy status` is still
 the thing to read: the deployment's own state may be what caused the timeout, and
-the `serving` worker counts and `jobsInQueue` say whether *something* is running.
-Report that much, and let the user decide.
+the `serving` worker counts and `jobsInQueue` describe only the sample time (`sampledAt`). Counts may lag after workers scale down and cannot establish whether a worker or job is running now. Report the sample's timestamp and age with the counts, and let the user decide.
 
 ## Endpoint trust refusals
 

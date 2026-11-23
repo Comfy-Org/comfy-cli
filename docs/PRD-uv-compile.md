@@ -1,5 +1,8 @@
 # PRD: Unified Dependency Resolution (--uv-compile) Support
 
+The implemented ownership boundary is recorded in
+[ADR-DEPENDENCIES-0001](adr/DEPENDENCIES-0001-delegate-unified-resolution-to-comfyui-manager.md).
+
 ## Overview
 
 Add `--uv-compile` flag to comfy-cli to integrate with ComfyUI-Manager v4.1+'s

@@ -5,7 +5,19 @@
   "type": "object",
   "required": ["deployments"],
   "additionalProperties": false,
+  "if": {"required": ["scope"], "properties": {"scope": {"const": "build"}}},
+  "then": {"required": ["buildId"]},
+  "else": {"not": {"required": ["buildId"]}},
   "properties": {
+    "scope": {
+      "enum": ["build", "workspace"],
+      "description": "What was listed: `build` for one Build's deployments (the spec at PATH or in the current folder), `workspace` for every Build's (`--workspace`, or a bare `deploy ls` with no spec in the current folder). The CLI always sends it; it is optional here so a payload from a CLI before it still validates."
+    },
+    "buildId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The Build whose deployments were listed. Present only when `scope` is `build`."
+    },
     "deployments": {
       "type": "array",
       "items": {
@@ -24,6 +36,10 @@
           "createdAt": {"type": "string", "format": "date-time"},
           "deletedAt": {"type": ["string", "null"], "format": "date-time"},
           "deletedBy": {"type": ["string", "null"]},
+          "editor": {
+            "type": ["boolean", "null"],
+            "description": "Whether the deployment keeps a CPU server for the editor; null where comfy-deploy did not say."
+          },
           "endpointUrl": {"type": ["string", "null"]},
           "id": {"type": "string", "minLength": 1},
           "name": {

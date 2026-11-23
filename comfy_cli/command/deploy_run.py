@@ -68,6 +68,7 @@ class DeployRunRequest:
     timeout: float | None
     no_upload: bool
     asset_roots: tuple[Path, ...] = ()
+    allowed_uploads: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +249,12 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         data_target = Target(kind="cloud", base_url=endpoint_origin, path_prefix="/api/v2", auth_token=data_credential)
         assets = resolve_assets(
             plan,
-            AssetResolveContext(DeployAssetClient(endpoint_origin, token), renderer, not request.no_upload),
+            AssetResolveContext(
+                DeployAssetClient(endpoint_origin, token),
+                renderer,
+                not request.no_upload,
+                request.allowed_uploads,
+            ),
         )
         submitted = DeployJobClient(endpoint_origin, token.current()).submit_job(
             JobSubmitRequest(assets.workflow, str(uuid.uuid4()), deployment_id, partner_credential),

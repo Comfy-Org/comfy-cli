@@ -11,9 +11,11 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from comfy_cli import constants, logging, tracking, ui, utils
 from comfy_cli._safe_exec import BinaryNotFoundError
+from comfy_cli.command.custom_nodes.agent_packs import find_agent_packs
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
 from comfy_cli.command.custom_nodes.cm_cli_util import (
     execute_cm_cli,
@@ -31,6 +33,7 @@ from comfy_cli.file_utils import (
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.registry import (
     RegistryAPI,
     RegistryAPIError,
@@ -57,6 +60,46 @@ class ShowTarget(str, Enum):
     ALL = "all"
     SNAPSHOT = "snapshot"
     SNAPSHOT_LIST = "snapshot-list"
+    AGENT_CREATED = "agent-created"
+
+
+def _show_agent_created(simple: bool) -> None:
+    """List the packs the local Comfy agent says it created. Read from disk, not cm-cli."""
+    renderer = get_renderer()
+    workspace = workspace_manager.workspace_path
+    custom_nodes = pathlib.Path(workspace) / "custom_nodes" if workspace else None
+    if custom_nodes is None or not custom_nodes.is_dir():
+        renderer.error(
+            code="not_in_workspace",
+            message=f"No custom_nodes folder found in {sanitize_markup(workspace or 'any ComfyUI workspace')}.",
+            hint="run `comfy install`, or pass `--workspace`",
+            command="node show",
+        )
+        raise typer.Exit(code=1)
+    packs = find_agent_packs(custom_nodes)
+    if renderer.is_pretty():
+        if not packs:
+            print("No agent-created packs found.")
+        elif simple:
+            for pack in packs:
+                print(f"{sanitize_markup(pack.pack)} ({pack.state})")
+        else:
+            table = Table(title="Agent-created packs (record found, not verified)")
+            for column in ("Pack", "State", "Folder", "Created", "Route"):
+                table.add_column(column)
+            for pack in packs:
+                table.add_row(
+                    *(
+                        sanitize_markup(value)
+                        for value in (pack.pack, pack.state, pack.folder, pack.created_at, pack.route)
+                    )
+                )
+            console.print(table)
+            print(
+                "These packs carry the local agent's install record. comfy-cli cannot verify its signature; "
+                "ask the agent to confirm."
+            )
+    renderer.emit({"packs": [pack.to_dict() for pack in packs], "verified": False})
 
 
 def _resolve_uv_compile(uv_compile: bool | None, fast_deps: bool = False, no_deps: bool = False) -> bool:
@@ -557,6 +600,10 @@ def show(
 ):
     validate_mode(mode)
 
+    if arg is ShowTarget.AGENT_CREATED:
+        _show_agent_created(simple=False)
+        return
+
     execute_cm_cli(["show", arg.value], channel=channel, mode=mode)
 
 
@@ -581,6 +628,10 @@ def simple_show(
     ),
 ):
     validate_mode(mode)
+
+    if arg is ShowTarget.AGENT_CREATED:
+        _show_agent_created(simple=True)
+        return
 
     execute_cm_cli(["simple-show", arg.value], channel=channel, mode=mode)
 
@@ -1144,12 +1195,58 @@ def validate_node_for_publishing():
     return config
 
 
+MAX_HYGIENE_FINDINGS_SHOWN = 50
+
+
+def _report_agent_pack_hygiene(force: bool) -> None:
+    """Advisory: what Settings > Extensions cannot turn off in an agent pack. Never fails."""
+    from comfy_cli.command.custom_nodes import agent_pack_hygiene
+    from comfy_cli.output.sanitize import sanitize_markup
+
+    pack = pathlib.Path.cwd()
+    notes: list[str] = []
+    try:
+        if not (force or agent_pack_hygiene.is_agent_pack(pack)):
+            return
+        findings = agent_pack_hygiene.check_pack(pack, notes)
+    except Exception as e:  # noqa: BLE001 - advisory only: never block the publishing checks
+        print(f"[yellow]Agent pack hygiene check could not run: {sanitize_markup(str(e))}[/yellow]")
+        return
+    if not findings and not notes:
+        print("[green]Agent pack hygiene: no findings.[/green]")
+        return
+    if findings:
+        print(
+            f"[yellow]Agent pack hygiene: {len(findings)} advisory finding(s) "
+            "(validation does not fail on these):[/yellow]"
+        )
+    for finding in findings[:MAX_HYGIENE_FINDINGS_SHOWN]:
+        print(
+            f"[yellow]  {sanitize_markup(finding.file)}:{finding.line} {finding.kind}: "
+            f"{sanitize_markup(finding.message)}[/yellow]"
+        )
+    if len(findings) > MAX_HYGIENE_FINDINGS_SHOWN:
+        print(f"[yellow]  ... and {len(findings) - MAX_HYGIENE_FINDINGS_SHOWN} more[/yellow]")
+    for note in notes:
+        print(f"[yellow]Agent pack hygiene: not checked: {sanitize_markup(note)}[/yellow]")
+
+
 @app.command("validate", help="Validate this custom node for registry publishing")
 @tracking.track_command("publish")
-def validate():
+def validate(
+    agent_pack: Annotated[
+        bool,
+        typer.Option(
+            "--agent-pack",
+            help="Also run the advisory agent-pack hygiene check. It runs on its own when the pack "
+            "carries the local agent's install record or an `agent.` extension name.",
+        ),
+    ] = False,
+):
     """
     Run validation checks that would be performed during publishing.
     """
+    _report_agent_pack_hygiene(agent_pack)
     validate_node_for_publishing()
 
 

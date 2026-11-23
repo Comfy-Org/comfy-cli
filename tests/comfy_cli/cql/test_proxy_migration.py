@@ -1,5 +1,5 @@
 """Legacy ``properties.proxyWidgets`` → linked-input repair: a port of the
-frontend's forward migration (``proxyWidgetMigration.ts``, ADR 0009).
+frontend's forward migration (``proxyWidgetMigration.ts``, ADR-SUBGRAPH-PROMOTION-0009).
 
 The frontend runs ``flushProxyWidgetMigration`` on every subgraph host at load
 time. The CLI runs the same flush on the instance whose legacy promotion a

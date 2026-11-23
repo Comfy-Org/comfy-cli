@@ -2,14 +2,18 @@
 auth-leak-safe redirect policy."""
 
 import functools
+import http.client
 import json
 import os
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from email.message import Message
+from typing import Any, Final
 
 # Default timeout (seconds) for plain, non-streaming API calls. Without an
 # explicit timeout ``requests`` blocks forever on a stalled peer; this makes such
@@ -344,6 +348,64 @@ def no_redirect_urlopen(url, *, timeout: float = 30.0):
     return _AUTHED_OPENER.open(url, timeout=timeout)
 
 
+def https_without_userinfo(url: str) -> bool:
+    """Through an HTTP proxy urllib sends a link's userinfo, percent-decoded, in its
+    clear-text ``CONNECT`` line, so an ``@`` or ``%`` before the path is refused
+    (ADR-BUILD-VALIDATION-0015)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme.lower() == "https" and bool(parts.hostname) and not any(c in parts.netloc for c in "@%")
+
+
+def _within(seconds: float, call: Callable[[], Any]) -> Any:
+    """*call* in a daemon thread, or None when it has not returned in *seconds*.
+
+    urllib's timeout bounds each socket operation, not the request: a host that
+    sends its headers a little at a time can hold a HEAD open indefinitely. The
+    thread left behind is a daemon, so it never keeps the command from exiting."""
+    outcome: list[tuple[bool, Any]] = []
+
+    def run() -> None:
+        try:
+            outcome.append((True, call()))
+        except BaseException as error:  # handed back to the caller below
+            outcome.append((False, error))
+
+    worker = threading.Thread(target=run, name="comfy-link-head", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if not outcome:
+        return None
+    returned, value = outcome[0]
+    if not returned:
+        raise value
+    return value
+
+
+def head_headers(url: str, *, timeout: float) -> Message | None:
+    """The headers one HEAD to *url* answers with, a refused redirect's included, with
+    *timeout* bounding the whole request. None for a link that fails
+    :func:`https_without_userinfo`, an error status, or any failure."""
+    if not https_without_userinfo(url):
+        return None
+
+    def head() -> Message | None:
+        try:
+            with no_redirect_urlopen(urllib.request.Request(url, method="HEAD"), timeout=timeout) as response:
+                return response.headers
+        except urllib.error.HTTPError as error:
+            # The redirect the opener refused, which is where a host may state a hash.
+            headers = error.headers if 300 <= error.code < 400 else None
+            error.close()
+            return headers
+        except (OSError, ValueError, http.client.HTTPException):
+            return None
+
+    return _within(timeout, head)
+
+
 def build_authed_request(
     url: str,
     target,
@@ -351,6 +413,7 @@ def build_authed_request(
     method: str = "GET",
     data: bytes | None = None,
     content_type: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> urllib.request.Request:
     """Build a urllib Request carrying the target's credential header.
 
@@ -358,8 +421,8 @@ def build_authed_request(
     single ``is_cloud`` gate every other call site goes through, so a local
     Target can't carry a stray credential into this path either.
     """
-    req = urllib.request.Request(url, data=data, method=method)
-    for k, v in {**USAGE_SOURCE_HEADERS, **target_auth_headers(target)}.items():
+    req = urllib.request.Request(url, data=data, method=method, headers={**USAGE_SOURCE_HEADERS, **(headers or {})})
+    for k, v in target_auth_headers(target).items():
         req.add_header(k, v)
     if content_type:
         req.add_header("Content-Type", content_type)
@@ -373,11 +436,12 @@ def authed_urlopen(
     method: str = "GET",
     data: bytes | None = None,
     content_type: str | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 30.0,
 ):
     """Open an authed request via the no-redirect opener. A 30x raises
     HTTPError instead of replaying credentials at the redirect target."""
-    req = build_authed_request(url, target, method=method, data=data, content_type=content_type)
+    req = build_authed_request(url, target, method=method, data=data, content_type=content_type, headers=headers)
     return _AUTHED_OPENER.open(req, timeout=timeout)
 
 
