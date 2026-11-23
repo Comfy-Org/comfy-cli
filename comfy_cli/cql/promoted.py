@@ -1366,6 +1366,13 @@ class LegacyEntry:
     source_input: str | None = None  # a nested instance source: the input it projects
     slot_index: int | None = None  # createSubgraphInput: the backing input slot (None → synthesize)
     label: str | None = None
+    #: ``missingSourceWidget`` only because the LOCAL catalog does not know the
+    #: source node's type (an uninstalled custom node, or no catalog at all) —
+    #: never set for any other quarantine reason. A frontend with that node
+    #: installed could still migrate this entry, so :func:`flush_proxy_migration`
+    #: leaves it pending in ``proxyWidgets`` instead of permanently quarantining
+    #: it (see ``_source_widget_resolution_is_catalog_gap``).
+    catalog_unresolvable: bool = False
 
     @property
     def repairable(self) -> bool:
@@ -1626,6 +1633,29 @@ def _resolve_source_widget(
     return None
 
 
+def _source_widget_resolution_is_catalog_gap(source: dict, defs: dict[str, dict], graph) -> bool:
+    """Whether a ``missingSourceWidget`` quarantine of ``source`` stems only
+    from the LOCAL catalog not knowing its node type (an uninstalled custom
+    node, or no catalog at all) rather than a genuine mismatch a frontend with
+    that node installed would also reject.
+
+    Narrow and conservative on purpose: a nested subgraph-instance source is
+    never a catalog gap (``defs`` already proves its type is known — a failed
+    match there is a real wiring mismatch), and a KNOWN node type whose saved
+    widget layout the catalog cannot reconcile (``SavedWidgetLayoutError``,
+    swallowed to ``[]`` by :func:`_node_widget_names`) is left as a genuine
+    quarantine — that is a version-drift question distinct from "never heard
+    of this node type," and conflating the two would need a product decision
+    this entry's reason code does not carry yet. Only an outright unknown node
+    type, or replaying with no catalog at all, counts.
+    """
+    if defs.get(str(source.get("type", ""))) is not None:
+        return False
+    if graph is None:
+        return True
+    return graph.node(str(source.get("type", ""))) is None
+
+
 def _slot_for_widget(source: dict, widget: str, projecting_input: str | None, defs: dict[str, dict], graph):
     """``getSlotFromWidget``: ``(index, entry, type)`` of the input slot backing
     ``widget``. The serialized ``inputs[]`` may omit an unlinked widget slot
@@ -1741,6 +1771,7 @@ def plan_proxy_migration(workflow: dict, instance: dict, graph, defs: dict[str, 
         resolved = _resolve_source_widget(sg, source, widget, disambiguator, defs, graph)
         if resolved is None:
             e.reason = "missingSourceWidget"
+            e.catalog_unresolvable = _source_widget_resolution_is_catalog_gap(source, defs, graph)
             continue
         widget_name, projecting = resolved
         if widget.startswith("$$") or _is_preview_pseudo_widget(widget_name):
@@ -2052,7 +2083,15 @@ def flush_proxy_migration(
             remaining.append(list(e.original))
             continue
         if e.plan == PLAN_QUARANTINE:
-            if e.reason != "primitiveBypassFailed":
+            if e.catalog_unresolvable:
+                # Unrepairable only because THIS replica's catalog doesn't
+                # know the source node's type — not a decision any frontend
+                # would reach, so it is never final. Leave it in
+                # ``proxyWidgets`` (like a preview exposure) instead of
+                # ``proxyWidgetErrorQuarantine``, so a later flush with a
+                # fuller catalog (this node installed) still repairs it.
+                remaining.append(list(e.original))
+            elif e.reason != "primitiveBypassFailed":
                 quarantine.append(_quarantine_entry(e, str(e.reason)))
             else:
                 cohorts.setdefault(e.source_node, []).append(e)

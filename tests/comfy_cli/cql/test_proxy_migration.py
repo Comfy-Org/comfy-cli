@@ -599,6 +599,100 @@ def test_flush_consumes_an_entry_a_previous_repair_already_linked(graph):
 
 
 # --------------------------------------------------------------------------- #
+# flush: a catalog gap is not a final quarantine
+# --------------------------------------------------------------------------- #
+
+
+_UNKNOWN_SOURCE_OUTER = "0f6b0a4e-unknown-0000-0000-000000000003"
+
+
+def _unknown_node_legacy_workflow(host_value: float = 2.0) -> dict:
+    """Synthetic: a legacy promotion whose source is an interior node of a
+    type the (local) catalog has never heard of — an uninstalled custom node.
+    ``_resolve_source_widget`` cannot enumerate its widgets at all (``graph``
+    has no entry for the type), which is indistinguishable, from inside
+    ``plan_proxy_migration`` alone, from a genuine name mismatch. Only
+    ``_source_widget_resolution_is_catalog_gap`` tells them apart."""
+    return {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": _UNKNOWN_SOURCE_OUTER,
+                "inputs": [],
+                "outputs": [],
+                "properties": {"proxyWidgets": [["5", "scale"]]},
+                "widgets_values": [host_value],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": _UNKNOWN_SOURCE_OUTER,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 5, "lastLinkId": 0, "lastRerouteId": 0},
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 5,
+                            "type": "CustomNodeNotInstalled",
+                            "inputs": [],
+                            "outputs": [],
+                            "widgets_values": [host_value],
+                        }
+                    ],
+                    "links": [],
+                }
+            ]
+        },
+    }
+
+
+def test_plan_marks_a_missing_source_widget_as_a_catalog_gap_only_when_the_type_is_unknown(graph):
+    wf = _unknown_node_legacy_workflow()
+    entry = _plans(wf, 1, graph)[("5", "scale")]
+    assert entry.plan == "quarantine" and entry.reason == "missingSourceWidget"
+    assert entry.catalog_unresolvable is True
+
+
+def test_flush_leaves_a_catalog_gap_quarantine_pending_instead_of_permanent(graph):
+    """Before this fix every ``missingSourceWidget`` quarantine — including one
+    that exists only because THIS replica's catalog doesn't know the source
+    node's type — was moved into ``proxyWidgetErrorQuarantine`` and dropped
+    from ``proxyWidgets`` for good. A replica with that custom node installed
+    could still have migrated it, so the entry must stay pending instead.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941923
+    """
+    wf = _unknown_node_legacy_workflow()
+    inst = _instance(wf, 1)
+    report = promoted.flush_proxy_migration(wf, inst, graph)
+    assert report.created == [] and report.quarantined == []
+    assert inst["properties"]["proxyWidgets"] == [["5", "scale"]]
+    assert "proxyWidgetErrorQuarantine" not in inst["properties"]
+
+
+def test_flush_still_permanently_quarantines_a_known_node_missing_widget(graph):
+    """A genuine name mismatch on a node type the catalog DOES know (the FLUX
+    fixture's ``control_after_generate``, a real frontend-only widget with no
+    backing input slot) is not a catalog gap, and still quarantines for
+    good — the fix narrows, it does not widen, what stays pending."""
+    wf = _load(FLUX)
+    inst = _instance(wf, 56)
+    inst["properties"]["proxyWidgets"] = [["52", "control_after_generate"]]
+    entry = _plans(wf, 56, graph)[("52", "control_after_generate")]
+    assert entry.reason == "missingSubgraphInput"
+    assert entry.catalog_unresolvable is False
+    promoted.flush_proxy_migration(wf, inst, graph)
+    assert "proxyWidgets" not in inst["properties"]
+    assert inst["properties"]["proxyWidgetErrorQuarantine"] == [
+        {"originalEntry": ["52", "control_after_generate"], "reason": "missingSubgraphInput", "attemptedAtVersion": 1}
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # apply: the repair gate at the engine's own write site (``apply_slots``)
 # --------------------------------------------------------------------------- #
 
