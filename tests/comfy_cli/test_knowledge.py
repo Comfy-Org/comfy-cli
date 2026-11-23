@@ -1948,6 +1948,46 @@ class TestNamedModelDisambiguation:
         assert knowledge.resolve_id(b, " acme-pro-2-1") == "acme-pro-2-1"
         assert knowledge.model_candidates(b, "Acme Pro 2.1") == ["acme-pro-2-1"]
 
+    @pytest.mark.parametrize("padded_id", [" acme-pro-2-1", "acme-pro-2-1 "])
+    def test_loaded_candidates_resolve_back_to_their_own_rows(self, tmp_path, monkeypatch, capsys, padded_id):
+        canonical_id = "acme-pro-2-1"
+        case_ids = ["ACME-CASE-2-1", "acme-case-2-1"]
+        data = {
+            "models": {
+                canonical_id: {"owner": "canonical", "aliases": ["Acme Normal 2.1", "Acme—Symbol 2.1"]},
+                padded_id: {"owner": "padded", "aliases": ["Acme Special 2.1"]},
+                case_ids[0]: {"owner": "upper"},
+                case_ids[1]: {"owner": "lower"},
+            },
+            "aliases": {
+                "Acme Featured 2.1": padded_id,
+                "Acme Missing 2.1": "missing-row",
+                "Acme 文本 2.1": canonical_id,
+            },
+        }
+        path = tmp_path / "candidate-knowledge.json"
+        path.write_text(json.dumps(data))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(path))
+
+        bundle = knowledge.load_bundle()
+        assert bundle is not None
+        assert set(bundle.models) == {canonical_id, padded_id, *case_ids}
+        assert knowledge.resolve_id(bundle, padded_id) == canonical_id
+        assert knowledge.resolve_id(bundle, "  Acme Normal 2.1 ") == canonical_id
+        assert knowledge.resolve_id(bundle, "Acme Missing 2.1") is None
+        assert knowledge.resolve_id(bundle, "AcMe-CaSe-2-1") is None
+        assert knowledge.model_candidates(bundle, "Acme 文本 2.1") == []
+
+        candidates = knowledge.model_candidates(bundle, "Acme 2.1")
+        assert knowledge.model_candidates(bundle, "Acme—2.1") == candidates
+        assert candidates == sorted([canonical_id, *case_ids])
+        for model_id in candidates:
+            assert knowledge.resolve_id(bundle, model_id) == model_id
+            assert knowledge.resolve(bundle, model_id) is bundle.models[model_id]
+            rc, resolved = _run(["resolve", model_id], capsys)
+            assert rc == 0
+            assert resolved["data"]["id"] == model_id
+
     def test_candidates_skip_aliases_that_target_a_missing_row(self):
         b = knowledge._index(
             {

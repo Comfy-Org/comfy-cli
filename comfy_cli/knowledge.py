@@ -802,8 +802,9 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     candidate_aliases: dict[str, str] = {}
     for alias, mid in candidate_sources:
         # Eligibility is checked on the raw spelling before lowercasing, and a
-        # candidate source must observe the same precedence as resolve_id.
-        if _candidate_tokens(alias) and indexed_target(alias) == mid:
+        # candidate source and the id it offers must both observe the same
+        # precedence as resolve_id.
+        if _candidate_tokens(alias) and indexed_target(alias) == mid and indexed_target(mid) == mid:
             candidate_aliases.setdefault(alias, mid)
 
     version = manifest.get("version") if manifest is not None else None
