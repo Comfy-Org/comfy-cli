@@ -131,6 +131,19 @@ history.
 
 ### Fixed
 
+- `comfy generate --emit-workflow` / `--emit-ops` with two or more `--image`
+  files no longer builds a chain of the deprecated `ImageBatch` node. The
+  images now go into one `BatchImagesNode` (one slot per image, in `--image`
+  order), so the emitted graph has no node marked deprecated in ComfyUI. N
+  images now give one batch node instead of N-1.
+- Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
+  `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
+  the ComfyUI canvas as a workflow. The run sends the canvas graph as
+  `extra_data.extra_pnginfo.workflow`, the same as the editor's Queue button,
+  so save nodes (SaveImage, VHS Video Combine and others) write `workflow`
+  next to `prompt`. Before, the files carried only `prompt` and dropped in as a
+  plain image or video. Applies to local and `--where cloud` runs; API-format
+  inputs are unchanged.
 - The workspace venv that `comfy install` creates (comfy-cli in pipx, uv tool
   or a PEP 668 system Python) now upgrades its pip. The bundled pip (22.3.1 on
   Python 3.11) could not install torch from the PyTorch index (`No matching
@@ -156,6 +169,17 @@ history.
   cached token's own session, so Cloud jobs keep renewing, and warns when it
   cannot. API keys, `COMFY_CLOUD_AUTH_TOKEN`, `comfy deploy run` and a ComfyUI
   on another host (which gets no partner-node credential, as before) are
+  unchanged.
+- A local `comfy run` signed in with `comfy cloud login` no longer asks Comfy
+  Cloud for a partner-node token on every run once a mint has failed (Comfy
+  Cloud refused it, was unreachable or did not answer). comfy-cli remembers
+  the failure for that sign-in and environment for 10 minutes. Meanwhile runs
+  make no mint request and get the sign-in token, refreshed unless it is under
+  a minute old. A hanging mint is tried once per 10 minutes, not on every run;
+  only the runs that start while it hangs wait for it. A new
+  `comfy cloud login` or `comfy setup` sign-in, `comfy cloud logout`, a
+  successful mint, and a successful renewal that the session's end does not
+  cut short end the wait. Renewal of a cached partner-node token is
   unchanged.
 - Two `comfy model download` runs from different workspaces aimed at the same
   file now refuse each other. Before, each workspace kept its own download
@@ -404,6 +428,7 @@ history.
 
 ### Fixed
 
+- `comfy templates ls --model` (and `templates get --where model=`) find a template asked for by base model plus variant. The gallery lists the base model in `models` ("Seedream 5.0", "Krea 2") and names the variant only in the title, tags or template name, so `--model "Seedream 5.0 Lite"`, `--model "krea 2 turbo"` and `--model "Qwen Image ControlNet"` found nothing. A template now also matches when the first word is a word of one of its model names and every other word is a whole word of that model name, the title, the tags or the template name; a number outside the model name counts only in the title. A query that matched before matches the same templates.
 - Search matches names however their separators are written. `comfy models search --text` on Cloud now finds `minimax_h3_ref2va_….safetensors` for `MiniMax H3` and `wan2.2_t2v_….safetensors` for `wan 2.2`: every word must appear, with `- _ . space` ignored, the rule local search already used. Before, Cloud sent the whole query as one substring and a multi-word name found nothing. `comfy templates ls` (and `templates get --where`) match `--model`, `--name` and `--provider` the same way, so `--model "Wan 2.2"` finds the gallery's `Wan2.2`, and `comfy nodes search` finds `LTX 2.5` nodes for `LTX-2.5`. On Cloud a word the filename splits (`sdxl` for `sd_xl_base_1.0.safetensors`) is found too: when the server's narrowed answer has no match, search scans without the server filter. A scan stops after 10,000 assets, and `total_is_lower_bound` is then true.
 
 - `comfy build push --dry-run` now runs the push's registry-pin check, so a pin the builder cannot place fails the dry run with the push's own `build_registry_pin_missing` error instead of passing it. A version the registry has Flagged was the common case: the dry run passed, and the push was refused only after the plan had been disclosed. The check asks the builder's snapshot importer to place each public pack, a read that writes nothing, and the dry run still uploads and saves nothing. The `--json` payload of a push and a dry run carries `public_pins_checked`, the number of public pins the builder placed (0 when the spec has none and the builder was not asked), so a script can tell a checked pin set from a spec with nothing to check. A spec that pins a public pack now needs sign-in for its dry run (`build_not_signed_in` otherwise); a spec whose packs are all local still sends no request. Push and dry run also refuse when the registry did not answer for a pack (the importer's `unverifiedPins`), instead of treating the unchecked pin as resolved; refuse with `build_spec_invalid`, before sending anything, a `repository` that is not a public GitHub address (`https://github.com/<org>/<repo>`, `git@github.com:<org>/<repo>.git` or `ssh://git@github.com/<org>/<repo>`), so one that carries a user name or token, does not parse, or names another host never leaves the machine; and report a builder response that times out or drops mid-body as `build_builder_error` instead of an internal error.

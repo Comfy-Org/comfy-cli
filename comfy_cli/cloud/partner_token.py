@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 AUDIENCE = "comfy-partner-node"
 RENEW_WITHIN_S = 45 * 60
+RETRY_MINT_AFTER_S = 10 * 60
 _STILL_VALID_S = 60
 _SIGN_IN_LIFETIME_S = 15 * 60
 _LATEST_EPOCH_S = 10**11
@@ -160,11 +161,18 @@ def _renew(base_url: str, held: _Token) -> _Token:
     return token
 
 
-def _held(key: dict[str, str]) -> _Token | None:
+def _record(key: dict[str, str]) -> dict[str, Any]:
     record = auth_store.get_partner_node_token()
-    if not isinstance(record, dict) or record.get("login") != key:
-        return None
-    return _parse(record.get("token"))
+    return record if isinstance(record, dict) and record.get("login") == key else {"login": key}
+
+
+def _held(key: dict[str, str]) -> _Token | None:
+    return _parse(_record(key).get("token"))
+
+
+def _mint_failed_lately(key: dict[str, str]) -> bool:
+    failed_at = _record(key).get("mint_failed_at")
+    return _epoch(failed_at) and 0 <= time.time() - failed_at < RETRY_MINT_AFTER_S
 
 
 def _keep(key: dict[str, str], token: _Token) -> None:
@@ -179,8 +187,9 @@ def current(session: CloudSession, sign_in: Callable[[], CloudSession | None]) -
     sign-in token. A new one is minted when renewal is refused (401/403), stops
     at the session's end, or fails for a shorter-lived token; a 429 never mints.
     No mint is made into a store that cannot be written, since it would be lost
-    and made again on every run. ``sign_in`` returns the live sign-in a mint is
-    made from.
+    and made again on every run, nor within ``RETRY_MINT_AFTER_S`` of a failed
+    mint for this sign-in. ``sign_in`` returns the live sign-in a mint is made
+    from.
     """
     key = login_key(session)
     if key is None:
@@ -195,7 +204,7 @@ def current(session: CloudSession, sign_in: Callable[[], CloudSession | None]) -
         except PartnerTokenError as error:
             _log.info("partner-node token renewal failed: %s", error)
             if error.status in (401, 403):
-                auth_store.save_partner_node_token({"login": key})
+                auth_store.save_partner_node_token({k: v for k, v in _record(key).items() if k != "token"})
             elif held.left() > _SIGN_IN_LIFETIME_S:
                 return held.value
             elif error.status == 429:
@@ -205,6 +214,9 @@ def current(session: CloudSession, sign_in: Callable[[], CloudSession | None]) -
                 _keep(key, renewed)
                 return renewed.value
             capped = renewed
+    if _mint_failed_lately(key):
+        _log.info("not minting a partner-node token: a mint failed in the last %d minutes", RETRY_MINT_AFTER_S // 60)
+        return _outlasting_a_sign_in(capped)
     live = sign_in()
     if live is None or live.is_expired() or login_key(live) != key:
         return _outlasting_a_sign_in(capped)
@@ -217,6 +229,7 @@ def current(session: CloudSession, sign_in: Callable[[], CloudSession | None]) -
         minted = _mint(live)
     except PartnerTokenError as error:
         _log.info("partner-node token mint failed: %s", error)
+        auth_store.save_partner_node_token({**_record(key), "mint_failed_at": time.time()})
         return _outlasting_a_sign_in(capped)
     _keep(key, minted)
     return minted.value
