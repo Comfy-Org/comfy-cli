@@ -357,7 +357,8 @@ def _candidate_tokens(value: str) -> list[str]:
     # control could turn a different spelling into a misleading suggestion.
     # Unicode punctuation, symbols, and separators are safe token boundaries.
     for char in value:
-        if not char.isascii() and unicodedata.category(char)[0] not in {"P", "S", "Z"}:
+        category = unicodedata.category(char)[0]
+        if category == "C" or (not char.isascii() and category not in {"P", "S", "Z"}):
             return []
     return re.findall(r"[a-z]+|[0-9]+", value.lower())
 
@@ -803,8 +804,14 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     for alias, mid in candidate_sources:
         # Eligibility is checked on the raw spelling before lowercasing, and a
         # candidate source and the id it offers must both observe the same
-        # precedence as resolve_id.
-        if _candidate_tokens(alias) and indexed_target(alias) == mid and indexed_target(mid) == mid:
+        # precedence as resolve_id. Padded ids remain loaded but are never safe
+        # suggestion targets: trimming can select a different row now or later.
+        if (
+            mid == mid.strip()
+            and _candidate_tokens(alias)
+            and indexed_target(alias) == mid
+            and indexed_target(mid) == mid
+        ):
             candidate_aliases.setdefault(alias, mid)
 
     version = manifest.get("version") if manifest is not None else None

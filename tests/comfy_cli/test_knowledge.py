@@ -1949,20 +1949,25 @@ class TestNamedModelDisambiguation:
         assert knowledge.model_candidates(b, "Acme Pro 2.1") == ["acme-pro-2-1"]
 
     @pytest.mark.parametrize("padded_id", [" acme-pro-2-1", "acme-pro-2-1 "])
-    def test_loaded_candidates_resolve_back_to_their_own_rows(self, tmp_path, monkeypatch, capsys, padded_id):
+    @pytest.mark.parametrize("with_trimmed_twin", [False, True])
+    def test_loaded_candidates_resolve_back_to_their_own_rows(
+        self, tmp_path, monkeypatch, capsys, padded_id, with_trimmed_twin
+    ):
         canonical_id = "acme-pro-2-1"
         case_ids = ["ACME-CASE-2-1", "acme-case-2-1"]
+        models = {
+            padded_id: {"owner": "padded", "aliases": ["Acme Special 2.1"]},
+            case_ids[0]: {"owner": "upper"},
+            case_ids[1]: {"owner": "lower", "aliases": ["Acme Normal 2.1", "Acme—Symbol 2.1"]},
+        }
+        if with_trimmed_twin:
+            models[canonical_id] = {"owner": "canonical"}
         data = {
-            "models": {
-                canonical_id: {"owner": "canonical", "aliases": ["Acme Normal 2.1", "Acme—Symbol 2.1"]},
-                padded_id: {"owner": "padded", "aliases": ["Acme Special 2.1"]},
-                case_ids[0]: {"owner": "upper"},
-                case_ids[1]: {"owner": "lower"},
-            },
+            "models": models,
             "aliases": {
                 "Acme Featured 2.1": padded_id,
                 "Acme Missing 2.1": "missing-row",
-                "Acme 文本 2.1": canonical_id,
+                "CJK 文本 9.9": canonical_id,
             },
         }
         path = tmp_path / "candidate-knowledge.json"
@@ -1971,22 +1976,69 @@ class TestNamedModelDisambiguation:
 
         bundle = knowledge.load_bundle()
         assert bundle is not None
-        assert set(bundle.models) == {canonical_id, padded_id, *case_ids}
-        assert knowledge.resolve_id(bundle, padded_id) == canonical_id
-        assert knowledge.resolve_id(bundle, "  Acme Normal 2.1 ") == canonical_id
+        expected_ids = {padded_id, *case_ids}
+        expected_candidates = sorted(case_ids)
+        if with_trimmed_twin:
+            expected_ids.add(canonical_id)
+            expected_candidates.append(canonical_id)
+            expected_candidates.sort()
+        assert set(bundle.models) == expected_ids
+        resolved_padded_id = canonical_id if with_trimmed_twin else padded_id
+        assert knowledge.resolve_id(bundle, padded_id) == resolved_padded_id
+        assert knowledge.resolve(bundle, padded_id) is bundle.models[resolved_padded_id]
+        assert knowledge.resolve_id(bundle, "  Acme Normal 2.1 ") == case_ids[1]
         assert knowledge.resolve_id(bundle, "Acme Missing 2.1") is None
         assert knowledge.resolve_id(bundle, "AcMe-CaSe-2-1") is None
-        assert knowledge.model_candidates(bundle, "Acme 文本 2.1") == []
+        assert knowledge.model_candidates(bundle, "CJK 文本 9.9") == []
 
         candidates = knowledge.model_candidates(bundle, "Acme 2.1")
         assert knowledge.model_candidates(bundle, "Acme—2.1") == candidates
-        assert candidates == sorted([canonical_id, *case_ids])
+        assert candidates == expected_candidates
+
+        rc, unknown = _run(["resolve", "Acme 2.1"], capsys)
+        assert rc == 1
+        assert unknown["error"]["details"]["candidate_ids"] == expected_candidates
         for model_id in candidates:
             assert knowledge.resolve_id(bundle, model_id) == model_id
             assert knowledge.resolve(bundle, model_id) is bundle.models[model_id]
             rc, resolved = _run(["resolve", model_id], capsys)
             assert rc == 0
             assert resolved["data"]["id"] == model_id
+
+    @pytest.mark.parametrize("control", ["\x00", "\t", "\n", "\x7f"])
+    def test_ascii_controls_cannot_influence_query_or_alias_suggestions(self, tmp_path, monkeypatch, capsys, control):
+        safe_id = "acme-safe-2-1"
+        control_id = "opaque-control-target"
+        control_alias = f"Acme{control}Control 2.1"
+        path = tmp_path / "control-candidate-knowledge.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "models": {
+                        safe_id: {"aliases": ["Acme Safe 2.1"]},
+                        control_id: {"aliases": [control_alias]},
+                    }
+                }
+            )
+        )
+        monkeypatch.setenv(knowledge.ENV_FILE, str(path))
+
+        bundle = knowledge.load_bundle()
+        assert bundle is not None
+        assert set(bundle.models) == {safe_id, control_id}
+        assert knowledge.resolve_id(bundle, control_alias) == control_id
+        assert knowledge.model_candidates(bundle, "Acme 2.1") == [safe_id]
+        assert knowledge.model_candidates(bundle, f"Acme{control} 2.1") == []
+
+        rc, unknown = _run(["resolve", "Acme 2.1"], capsys)
+        assert rc == 1
+        assert unknown["error"]["details"]["candidate_ids"] == [safe_id]
+        rc, control_unknown = _run(["resolve", f"Acme{control} 2.1"], capsys)
+        assert rc == 1
+        assert control_unknown["error"]["details"].get("candidate_ids", []) == []
+        rc, resolved = _run(["resolve", control_alias], capsys)
+        assert rc == 0
+        assert resolved["data"]["id"] == control_id
 
     def test_candidates_skip_aliases_that_target_a_missing_row(self):
         b = knowledge._index(
