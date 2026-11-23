@@ -3581,7 +3581,7 @@ def _admission_write_applied(workflow: dict, op: dict) -> bool:
     return actual == _stamp_key(op)
 
 
-def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | None, str, tuple[str, ...]]:
+def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | None, str, tuple[str, ...], tuple | None]:
     """Return the concrete catalog node/widget and its structural owner.
 
     A promoted write is stored on its subgraph host, but structural ownership
@@ -3593,7 +3593,7 @@ def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | No
     widget = target[2]
     if op.get("path"):
         owner = tuple(str(segment) for segment in op["path"])
-        return _navigate_subgraph_path(workflow, op["path"]), widget, owner
+        return _navigate_subgraph_path(workflow, op["path"]), widget, owner, None
     if graph is not None and op.get("promoted"):
         from comfy_cli.cql import promoted as _promoted
 
@@ -3607,15 +3607,20 @@ def _admission_schema_target(workflow: dict, graph, op: dict) -> tuple[dict | No
             if source is not None:
                 source_path, source_widget = source
                 owner_path = [*instance_path, *source_path]
-                return _navigate_subgraph_path(workflow, owner_path), source_widget, tuple(owner_path)
+                scope = workflow
+                if len(instance_path) > 1:
+                    parent = _navigate_subgraph_path(workflow, instance_path[:-1])
+                    scope = definitions[str(parent.get("type", ""))]
+                roster = (instance, scope, definition, source_path, definitions)
+                return _navigate_subgraph_path(workflow, owner_path), source_widget, tuple(owner_path), roster
         except ValueError:
             # A schema-less PrimitiveNode also carries positional ``promoted``
             # metadata, but has no subgraph definition to resolve through.
             pass
         node = _find_by_str(workflow, str(op["node_id"]))
-        return node, widget, tuple(instance_path)
+        return node, widget, tuple(instance_path), None
     node = _find_by_str(workflow, str(op["node_id"]))
-    return node, widget, (str(target[1]),)
+    return node, widget, (str(target[1]),), None
 
 
 def _admission_combo_children(m) -> dict[str, set[str]]:
@@ -3655,7 +3660,7 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, N
     if not _admission_write_applied(workflow, op):
         return
     target = _write_target(op)
-    node, widget, structural_owner = _admission_schema_target(workflow, graph, op)
+    node, widget, structural_owner, promoted_roster = _admission_schema_target(workflow, graph, op)
     display_widget = op.get("inner_widget", op["widget"])
     if graph is None:
         written.setdefault((structural_owner, widget, None, display_widget), None)
@@ -3693,7 +3698,33 @@ def _admit_rebuild_write(workflow: dict, graph, op: dict, written: dict[tuple, N
             # the production promoted writer already resolved the source, so
             # retain its ordinary catalog-layout fallback here.
             saved_names = None
-        entries = _engine._expand_widget_entries(m, node.get("widgets_values") or [], saved_widget_names=saved_names)
+        values = node.get("widgets_values") or []
+        entries = _engine._expand_widget_entries(m, values, saved_widget_names=saved_names)
+        if promoted_roster is not None and combos:
+            from comfy_cli.cql import promoted as _promoted
+
+            # A promoted selector's host value is the roster execution uses;
+            # the interior saved value is only its fallback. Recover saved
+            # selector positions before applying those host overlays, then
+            # expand ownership by name so a wider effective roster cannot
+            # reinterpret later saved positions as newly materialized children.
+            selector_values: dict[str, Any] = {}
+            for index, entry in enumerate(entries):
+                if entry.name not in combos:
+                    continue
+                if isinstance(values, dict):
+                    if entry.name in values:
+                        selector_values[entry.name] = values[entry.name]
+                elif index < len(values):
+                    selector_values[entry.name] = values[index]
+            instance, scope, definition, source_path, definitions = promoted_roster
+            for selector in combos:
+                effective = _engine._promoted_selector_value(
+                    instance, scope, definition, source_path, selector, definitions
+                )
+                if effective is not _promoted.UNSET:
+                    selector_values[selector] = effective
+            entries = _engine._expand_widget_entries(m, selector_values)
         slot_owner = next((entry.owner for entry in entries if entry.name == widget), None)
     group = next((p for p in m.inputs if p.name == widget and p.is_dynamic_group), None) if m else None
     for earlier in written:

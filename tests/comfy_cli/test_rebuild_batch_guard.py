@@ -511,8 +511,10 @@ def test_dynamic_group_inside_combo_remains_an_explicitly_unsupported_schema():
         ops.add_node({"nodes": [], "links": []}, g, "Gen")
 
 
-def promoted_fresh(*, renamed=False):
+def promoted_fresh(*, renamed=False, interior_selector="max", host_selector="max"):
     g, interior, nid = fresh()
+    if interior_selector != "max":
+        interior, _ = ops.set_widget(interior, g, nid, "model", interior_selector)
     selector_name = "selector_alias" if renamed else "model"
     child_name = "child_alias" if renamed else "model.mode"
     inner = interior["nodes"][0]
@@ -550,7 +552,7 @@ def promoted_fresh(*, renamed=False):
         ],
         "outputs": [],
         "properties": {},
-        "widgets_values": ["max", "balanced"],
+        "widgets_values": [host_selector, "balanced"],
     }
     return g, {"nodes": [host], "links": [], "definitions": {"subgraphs": [definition]}}, host["id"]
 
@@ -655,6 +657,99 @@ def test_promoted_child_then_promoted_selector_refuses_atomically():
     assert wf == before
 
 
+@pytest.mark.parametrize(
+    "child_address,selector_address",
+    [("promoted", "promoted"), ("promoted", "explicit"), ("explicit", "promoted"), ("explicit", "explicit")],
+)
+def test_promoted_host_roster_owns_child_when_interior_saved_roster_differs(child_address, selector_address):
+    g, wf, nid = promoted_fresh(renamed=True, interior_selector="base", host_selector="max")
+    before = copy.deepcopy(wf)
+    host = wf["nodes"][0]
+    nodes = wf["nodes"]
+    definitions = wf["definitions"]
+    subgraphs = definitions["subgraphs"]
+    definition = subgraphs[0]
+    inner_nodes = definition["nodes"]
+    inner = inner_nodes[0]
+    host_widgets = host["widgets_values"]
+    inner_widgets = inner["widgets_values"]
+    explicit = f"{nid}/{inner['id']}"
+    child_node = nid if child_address == "promoted" else explicit
+    selector_node = nid if selector_address == "promoted" else explicit
+    child_name = "child_alias" if child_address == "promoted" else "model.mode"
+    selector_name = "selector_alias" if selector_address == "promoted" else "model"
+
+    with pytest.raises(ValueError, match="write to 'child_alias'"):
+        ops.apply_specs(
+            wf,
+            g,
+            [write(child_node, child_name, "quality"), write(selector_node, selector_name, "base")],
+        )
+
+    assert wf == before
+    assert wf["nodes"] is nodes
+    assert wf["nodes"][0] is host
+    assert host["widgets_values"] is host_widgets
+    assert wf["definitions"] is definitions
+    assert definitions["subgraphs"] is subgraphs
+    assert subgraphs[0] is definition
+    assert definition["nodes"] is inner_nodes
+    assert inner_nodes[0] is inner
+    assert inner["widgets_values"] is inner_widgets
+
+
+def test_promoted_host_hides_child_when_interior_saved_roster_is_wider():
+    g, wf, nid = promoted_fresh(renamed=True, interior_selector="max", host_selector="base")
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [write(nid, "child_alias", "quality"), write(nid, "selector_alias", "max")],
+    )
+
+    assert result is wf
+    assert [op["widget"] for op in stream] == ["child_alias", "selector_alias"]
+    assert wf["nodes"][0]["widgets_values"] == ["max", "quality"]
+
+
+def test_live_linked_promoted_selector_keeps_interior_saved_roster():
+    g, wf, nid = promoted_fresh(renamed=True, interior_selector="base", host_selector="max")
+    host = wf["nodes"][0]
+    host["inputs"][0]["link"] = 99
+    source = {
+        "id": 60,
+        "type": "PrimitiveNode",
+        "inputs": [],
+        "outputs": [
+            {
+                "name": "COMFY_DYNAMICCOMBO_V3",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "links": [99],
+                "widget": {"name": "value"},
+            }
+        ],
+        "widgets_values": ["base"],
+    }
+    wf["nodes"].insert(0, source)
+    wf["links"] = [[99, 60, 0, nid, 0, "COMFY_DYNAMICCOMBO_V3"]]
+
+    result, stream, _ = ops.apply_specs(
+        wf,
+        g,
+        [
+            write(nid, "child_alias", "quality"),
+            {"op": "disconnect", "to": f"{nid}.selector_alias"},
+            write(nid, "selector_alias", "base"),
+        ],
+    )
+
+    assert result is wf
+    assert [op["op"] for op in stream] == ["set_widget", "disconnect", "set_widget"]
+    assert host["widgets_values"] == ["base", "quality"]
+    assert source["widgets_values"] == ["base"]
+    assert wf["links"] == []
+
+
 def test_distinct_promoted_interior_owners_under_one_host_succeed():
     g, wf, nid = distinct_promoted_owners_fresh()
 
@@ -718,7 +813,7 @@ def test_same_interior_owner_refuses_promoted_and_explicit_aliases(
 
 
 def test_nested_promoted_and_explicit_addresses_share_the_deepest_owner():
-    g, inner_workflow, _ = promoted_fresh(renamed=True)
+    g, inner_workflow, _ = promoted_fresh(renamed=True, interior_selector="base", host_selector="base")
     inner_definition = inner_workflow["definitions"]["subgraphs"][0]
     inner_instance = inner_workflow["nodes"][0]
     inner_instance["inputs"][0]["link"] = 11
