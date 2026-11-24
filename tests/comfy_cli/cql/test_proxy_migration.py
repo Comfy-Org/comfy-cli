@@ -692,6 +692,82 @@ def test_flush_still_permanently_quarantines_a_known_node_missing_widget(graph):
     ]
 
 
+_MIXED_GAP_OUTER = "0f6b0a4e-mixedgap-0000-000000000004"
+
+
+def _mixed_catalog_gap_and_create_workflow(scale_value: float = 2.0, width_value: int = 768) -> dict:
+    """Synthetic: TWO legacy entries in one ``proxyWidgets`` — ``scale``
+    backed by an uninstalled custom node (a catalog gap, left pending) and
+    ``width`` backed by a known node (migrated in this same flush)."""
+    return {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": _MIXED_GAP_OUTER,
+                "inputs": [],
+                "outputs": [],
+                "properties": {"proxyWidgets": [["5", "scale"], ["6", "width"]]},
+                "widgets_values": [scale_value, width_value],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": _MIXED_GAP_OUTER,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 6, "lastLinkId": 0, "lastRerouteId": 0},
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 5,
+                            "type": "CustomNodeNotInstalled",
+                            "inputs": [],
+                            "outputs": [],
+                            "widgets_values": [scale_value],
+                        },
+                        {
+                            "id": 6,
+                            "type": "EmptySD3LatentImage",
+                            "inputs": [],
+                            "outputs": [],
+                            "widgets_values": [width_value, 1024, 1],
+                        },
+                    ],
+                    "links": [],
+                }
+            ]
+        },
+    }
+
+
+def test_flush_preserves_a_retained_catalog_gaps_value_when_a_sibling_migrates(graph):
+    """Before this fix, flushing an instance with BOTH a catalog-gap entry
+    (left pending in ``proxyWidgets``) and a repairable sibling dropped the
+    pending entry's own saved value: the final ``widgets_values`` rebuild is
+    positional over DECLARED widget inputs only, which has no slot left for
+    an entry still sitting in ``proxyWidgets``. A LATER
+    ``plan_proxy_migration`` call then read the pending entry's host value
+    off the rebuilt array by its (now unrelated) position, landing on the
+    migrated sibling's value instead of its own.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514857
+    """
+    wf = _mixed_catalog_gap_and_create_workflow(scale_value=2, width_value=768)
+    inst = _instance(wf, 1)
+    report = promoted.flush_proxy_migration(wf, inst, graph)
+
+    assert report.created == ["width"]
+    assert inst["properties"]["proxyWidgets"] == [["5", "scale"]]
+    assert inst["widgets_values"] == [768]  # only the migrated widget is declared now
+
+    later = promoted.plan_proxy_migration(wf, inst, graph)
+    scale = next(e for e in later if e.original == ["5", "scale"])
+    assert scale.host_value == 2  # not 768 — the sibling's value a positional re-read would grab
+
+
 # --------------------------------------------------------------------------- #
 # apply: the repair gate at the engine's own write site (``apply_slots``)
 # --------------------------------------------------------------------------- #

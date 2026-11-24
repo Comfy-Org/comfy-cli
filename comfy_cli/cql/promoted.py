@@ -775,6 +775,27 @@ def _quarantine_entries(instance: dict) -> list[dict]:
     return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
 
 
+def _pending_value_lookup(instance: dict) -> dict[tuple, dict]:
+    """``{originalEntry tuple: stashed record}`` from :data:`PENDING_VALUE_PROPERTY`.
+
+    A flush that both migrates one entry and leaves another pending in the
+    SAME call rebuilds ``widgets_values`` positionally over the (now changed)
+    declared widget inputs — a layout that no longer has any slot for the
+    entry still waiting in ``proxyWidgets``. Without this stash, the next
+    ``plan_proxy_migration`` would read that entry's host value positionally
+    off the rebuilt array anyway, landing on whatever OTHER entry's value now
+    occupies that position instead of the pending entry's own.
+    """
+    raw = (instance.get("properties") or {}).get(PENDING_VALUE_PROPERTY)
+    if not isinstance(raw, list):
+        return {}
+    out: dict[tuple, dict] = {}
+    for e in raw:
+        if isinstance(e, dict) and isinstance(e.get("originalEntry"), list):
+            out[tuple(e["originalEntry"])] = e
+    return out
+
+
 def host_value(instance: dict, pi: PromotedInput) -> Any:
     """The value the host instance materialized for ``pi``, or :data:`UNSET`.
 
@@ -1299,6 +1320,13 @@ def trace_upstream_write(
 # documents (the convergence requirement of :mod:`comfy_cli.workflow_ops`).
 
 QUARANTINE_PROPERTY = "proxyWidgetErrorQuarantine"
+#: Catalog-gap entries left pending in ``proxyWidgets`` (see
+#: ``_source_widget_resolution_is_catalog_gap``) whose host value a flush that
+#: also migrated a SIBLING entry could no longer recover positionally —
+#: ``widgets_values`` is rebuilt over declared widget inputs after that flush,
+#: not over ``proxyWidgets`` order. Stashed here instead, and replaced
+#: wholesale on every flush from the then-current pending set, never merged.
+PENDING_VALUE_PROPERTY = "proxyWidgetPendingValues"
 PROXY_BYPASS_MARKER_PROPERTY = "proxyBypassedToSubgraphInput"
 QUARANTINE_VERSION = 1
 CANVAS_IMAGE_PREVIEW_WIDGET = "$$canvas-image-preview"
@@ -1728,12 +1756,20 @@ def plan_proxy_migration(workflow: dict, instance: dict, graph, defs: dict[str, 
         return []
     host_values = instance.get("widgets_values")
     host_values = host_values if isinstance(host_values, list) else None
+    pending = _pending_value_lookup(instance)
 
     normalized = [_normalize_entry(sg, defs, t[0], t[1], t[2] if len(t) > 2 else None, graph) for t in tuples]
     cohort = [(n[0], n[1]) for n in normalized]
     entries: list[LegacyEntry] = []
     for index, (original, (node_id, widget, disambiguator)) in enumerate(zip(tuples, normalized)):
-        host_value = host_values[index] if host_values is not None and index < len(host_values) else UNSET
+        stashed = pending.get(tuple(original))
+        if stashed is not None:
+            # A prior flush already rebuilt ``widgets_values`` out from under
+            # this still-pending entry's position: trust the stash over the
+            # (now unrelated) positional slot.
+            host_value = stashed.get("hostValue", UNSET)
+        else:
+            host_value = host_values[index] if host_values is not None and index < len(host_values) else UNSET
         e = LegacyEntry(original, index, node_id, widget, disambiguator, PLAN_QUARANTINE, host_value=host_value)
         entries.append(e)
         linked = _find_host_input_for_promotion(sg, defs, node_id, widget)
@@ -2208,6 +2244,23 @@ def flush_proxy_migration(
     else:
         props.pop("proxyWidgets", None)
     report.remaining = remaining
+
+    # ``widgets_values`` below is about to be rebuilt positionally over
+    # declared widget inputs, which drops any slot a still-pending
+    # catalog-gap entry had under the OLD ``proxyWidgets`` positions. Stash
+    # its host value so a later ``plan_proxy_migration`` (over this
+    # same-or-fuller-catalog instance) doesn't misread a sibling's value in
+    # its place. Replaced wholesale from the current pending set — never
+    # merged — so a resolved/consumed entry's stash cannot linger.
+    pending_stash = [
+        {"originalEntry": list(e.original), **({"hostValue": e.host_value} if e.host_value is not UNSET else {})}
+        for e in plan
+        if e.plan == PLAN_QUARANTINE and e.catalog_unresolvable
+    ]
+    if pending_stash:
+        props[PENDING_VALUE_PROPERTY] = pending_stash
+    else:
+        props.pop(PENDING_VALUE_PROPERTY, None)
 
     # The host array, positional over the (now repaired) widget-backed inputs:
     # migrated values first, then what the host already carried, then the
