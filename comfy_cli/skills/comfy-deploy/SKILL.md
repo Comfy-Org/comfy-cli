@@ -564,8 +564,11 @@ whole loop, including reading a failed build's log.
 A model file is the exception: `comfy deploy models add` puts one on a running
 deployment with no new release (see `comfy deploy models` above). It goes in
 `comfy-build.yaml` instead when every deployment of the release should have it,
-or when `add` is refused: `deploy_models_unavailable` where adding is off for
-the workspace, or `deploy_conflict` for the release's model policy.
+or when `add` is refused with `deploy_models_unavailable` (adding is off for
+the workspace) or with a `deploy_conflict` whose `details.server_code` is
+`MODEL_POLICY` (the release's model policy). Any other `deploy_conflict` (the
+name taken, the deployment busy, too little storage) is not a reason to cut a
+release; follow the error's own sentence.
 
 Remember what a new release costs here: a new deployment, a new endpoint URL, and
 an old deployment that keeps billing until it is stopped.

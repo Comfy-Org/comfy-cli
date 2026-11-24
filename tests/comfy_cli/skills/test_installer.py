@@ -500,6 +500,8 @@ def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
     assert "a pack, a model," not in flat
     assert "`comfy deploy models add` puts one on a running deployment with no new release" in flat
     assert "`deploy_models_unavailable`" in flat
+    assert "`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`" in flat
+    assert "`deploy_conflict` for the release's model policy" not in flat
 
 
 def test_build_and_deploy_skills_hand_off_to_each_other():
