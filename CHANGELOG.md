@@ -18,10 +18,11 @@ history.
 ### Changed
 
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads
-  anything, and names the node, its size and the limit. `--dry-run`, `build
-  init`, `build update` and `build pull` refuse it the same way. The builder
-  cannot use a node that large, so a push used to upload it and the release's
-  build then failed.
+  anything, and names the node, its size and the limit. `--dry-run` refuses it
+  the same way. The builder cannot use a node that large, so a push used to
+  upload it and the release's build then failed. `build pull`, `build init`,
+  `build update` and `build status` still read such a node, so a pull can drop
+  it from the spec.
 
 ## [1.29.0] - 2026-11-24
 

@@ -256,7 +256,7 @@ def _write_archive(root: Path, members: Sequence[tuple[str, Path]], stream: IO[b
     return digest.hexdigest(), size_bytes
 
 
-def package_node(path: Path, destination: Path | None = None) -> NodePackage:
+def package_node(path: Path, destination: Path | None = None, *, size_limit: bool = False) -> NodePackage:
     """Build one custom-node archive and its identity in a single pass.
 
     The archive is never resident in memory. ``destination`` names where the
@@ -277,11 +277,13 @@ def package_node(path: Path, destination: Path | None = None) -> NodePackage:
         raise NodePackageError(root, "node root must be a directory")
 
     members, skipped = _package_files(root, _excluded_member(root, destination))
-    _refuse_oversized(root, _member_bytes(root, members))
+    if size_limit:
+        _refuse_oversized(root, _member_bytes(root, members))
     if destination is None:
         with tempfile.TemporaryFile(prefix="comfy-node-package-") as scratch:
             sha256, size_bytes = _write_archive(root, members, scratch)
-        _refuse_oversized(root, size_bytes)
+        if size_limit:
+            _refuse_oversized(root, size_bytes)
         return NodePackage(None, sha256, size_bytes, tuple(skipped))
     try:
         stream = destination.open("wb+")
@@ -290,5 +292,6 @@ def package_node(path: Path, destination: Path | None = None) -> NodePackage:
         raise NodePackageError(root, f"archive could not be written to {destination}: {detail}") from error
     with stream:
         sha256, size_bytes = _write_archive(root, members, stream)
-    _refuse_oversized(root, size_bytes)
+    if size_limit:
+        _refuse_oversized(root, size_bytes)
     return NodePackage(destination, sha256, size_bytes, tuple(skipped))

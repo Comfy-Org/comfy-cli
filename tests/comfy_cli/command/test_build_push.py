@@ -672,8 +672,9 @@ def test_an_unreadable_node_file_is_a_spec_error_rather_than_a_traceback(
     assert error["details"]["path"] == str(workspace / "custom_nodes" / "local-node")
 
 
+@pytest.mark.parametrize("args", [(), ("--dry-run",)], ids=["push", "dry-run"])
 def test_a_node_over_the_size_limit_stops_the_push_before_any_upload(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
 ) -> None:
     # Given
     path = write_spec(workspace)
@@ -683,7 +684,7 @@ def test_a_node_over_the_size_limit_stops_the_push_before_any_upload(
     _install_client(monkeypatch, client)
 
     # When
-    result = invoke_push(workspace)
+    result = invoke_push(workspace, *args)
 
     # Then
     assert result.exit_code == 1

@@ -11,7 +11,7 @@ from build_pull_support import PullBuilder, invoke_pull, serve
 from build_push_support import envelope, invoke_push, local_node, make_workspace, reloaded, write_spec
 
 from comfy_cli.caller import Caller
-from comfy_cli.command import build
+from comfy_cli.command import build, build_package
 from comfy_cli.command.build_spec import read_build_spec
 from comfy_cli.discovery import COMMAND_SCHEMAS
 
@@ -292,6 +292,25 @@ def test_pull_says_nothing_about_a_skipped_node_it_is_deleting_from_the_spec(
     assert data["definition"]["customNodes"] == []
     assert "skipped_symlinks" not in data
     assert "excluded" not in result.stderr
+
+
+def test_pull_drops_a_local_node_over_the_size_limit_that_the_build_no_longer_carries(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, build_id="build-a")
+    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 1)
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert envelope(result)["data"]["definition"]["customNodes"] == []
+    assert reloaded(workspace)["definition"]["customNodes"] == []
 
 
 def test_tty_decline_leaves_the_spec_byte_identical(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

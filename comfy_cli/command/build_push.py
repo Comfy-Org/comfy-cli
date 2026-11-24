@@ -130,7 +130,12 @@ def _has_text(entry: JsonObject, key: str) -> bool:
 
 
 def prepare_push(
-    spec: JsonObject, paths: BuildPaths, model_digest: ModelDigest, *, package_dir: Path | None = None
+    spec: JsonObject,
+    paths: BuildPaths,
+    model_digest: ModelDigest,
+    *,
+    package_dir: Path | None = None,
+    size_limit: bool = False,
 ) -> PushPreparation:
     """Reconcile the spec against local bytes and plan what still has to upload.
 
@@ -180,7 +185,9 @@ def prepare_push(
         # `NodePackageError` propagates: it already names the node directory the
         # user must fix, which a `BuildSpecInvalidError` here would relabel with
         # the spec file's path at the call site.
-        package = package_node(path, package_dir / f"node-{index}.zip" if package_dir is not None else None)
+        package = package_node(
+            path, package_dir / f"node-{index}.zip" if package_dir is not None else None, size_limit=size_limit
+        )
         digest, size = package.sha256, package.size_bytes
         # `_local_path` above already proved localPath is a non-empty str.
         local_path = str(node["localPath"])

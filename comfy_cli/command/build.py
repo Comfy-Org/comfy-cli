@@ -2223,7 +2223,9 @@ def push_cmd(
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
             validate_local_build_spec(spec, paths, model_directories=directories)
-            preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
+            preparation = prepare_push(
+                spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir), size_limit=True
+            )
             validate_kept_links(preparation.definition)
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)
