@@ -210,6 +210,14 @@ _POLL_SPECS: dict[str, PollSpec] = {
         failure_values=("FAILED", "CANCELLED", "THROTTLED"),
         progress_path="progress",
     ),
+    "moonvalley": PollSpec(
+        name="moonvalley",
+        id_paths=("id",),
+        poll_url="/proxy/moonvalley/prompts/{id}",
+        status_paths=("status",),
+        success_values=("completed",),
+        failure_values=("failed", "error"),
+    ),
     "pika": PollSpec(
         name="pika",
         id_paths=("video_id", "id"),

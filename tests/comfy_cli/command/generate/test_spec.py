@@ -607,9 +607,9 @@ def test_find_property_descends_top_level_composition():
 # ── dead aliases — retired on /proxy, removed from the alias table ──
 
 
-@pytest.mark.parametrize("dead", ["kling-extend", "luma", "luma-i2v", "moonvalley-t2v", "moonvalley-i2v"])
+@pytest.mark.parametrize("dead", ["kling-extend", "luma", "luma-i2v"])
 def test_retired_aliases_removed(dead):
-    """The five aliases dead on /proxy are gone from both tables, and typing
+    """The three aliases dead on /proxy are gone from both tables, and typing
     one yields the normal unknown-model error — not a silent skip."""
     assert dead not in spec._ALIASES
     endpoint_ids = {eid for eid, _cat, _poll in spec._ENDPOINT_ALLOWLIST}
@@ -623,10 +623,10 @@ def test_retired_aliases_removed(dead):
 
 
 def test_router_ids_exhaustive_over_aliases():
-    """Every alias has a Router-id row and vice versa (40 rows after the
+    """Every alias has a Router-id row and vice versa (42 rows after the
     dead-alias removal)."""
     assert set(spec._ROUTER_IDS) == set(spec._ALIASES)
-    assert len(spec._ROUTER_IDS) == 40
+    assert len(spec._ROUTER_IDS) == 42
 
 
 def test_router_ids_match_router_segment_pattern():
@@ -644,6 +644,9 @@ def test_router_id_resolves_families_and_proxy_only():
     assert spec.router_id("recraft") == "recraft/recraftv3"
     assert spec.router_id("recraft", "recraftv4_pro") == "recraft/recraftv4_pro"
     assert spec.router_id("vidu") is None
+    # Moonvalley left the Router catalog but its routes stay on /proxy.
+    assert spec.router_id("moonvalley-t2v") is None
+    assert spec.get_endpoint("moonvalley-t2v").polling == "moonvalley"
     # i2v shares the base alias's id — Router selects image2video from the payload.
     assert spec.router_id("kling-i2v") == spec.router_id("kling")
     # A plain (non-family) id pins one model: naming that model resolves to it,
