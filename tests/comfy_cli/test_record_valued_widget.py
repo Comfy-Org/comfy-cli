@@ -259,9 +259,7 @@ def test_an_image_combo_with_a_trailing_record_keeps_the_saved_filename():
         "version": 0.4,
     }
     api = convert_ui_to_api(wf, object_info)
-    assert api["1"]["inputs"]["image"] == "green.png"
-    assert "upload" not in api["1"]["inputs"]
-    assert "button" not in api["1"]["inputs"]
+    assert api["1"]["inputs"] == {"image": "green.png"}
 
 
 def test_a_lora_entry_mixed_with_a_record_still_takes_the_lora_path():
