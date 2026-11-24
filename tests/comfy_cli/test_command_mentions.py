@@ -211,6 +211,7 @@ def test_valid_mentions_pass(text, tree, globals_):
     ("text", "unknown"),
     [
         ("comfy auth login", "login"),  # the original regression itself
+        ("comfy auth whoami", "whoami"),  # sibling rot: removed in favour of `comfy cloud whoami`
         ("comfy cloud singin", "singin"),
         ("comfy nope", "nope"),
         ("comfy model downlaod --url x", "downlaod"),
