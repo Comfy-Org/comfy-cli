@@ -15,6 +15,10 @@ history.
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-11-24
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0.
+
 ### Added
 
 - `comfy deploy models add <deployment> <file> --type <folder>`, `comfy deploy
@@ -64,65 +68,6 @@ history.
   turn off: code at module top level and CSS aimed at the whole page, plus an
   extension name with no `agent.` prefix or provenance. Findings never fail
   validation.
-- `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
-  finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
-  `data.warnings` reports `partial_execution` for a target that returned
-  nothing and `partial_execution_targets_ignored` when the server also ran
-  nodes outside the targets. An async targeted run records its targets on the
-  job state file, and its `queued` envelope carries a `data.note` naming the
-  watch command.
-- `comfy templates ls --local-only` drops partner-API templates from the
-  index (a name starting with `api_`, or an API tag) with no network
-  beyond the index. `--runnable` implies `--local-only`, then checks
-  each remaining template against the local install and annotates every
-  row with a verdict and `missing_count`. A single template's fetch or
-  parse failure becomes `verdict: "unknown"` with a warning and does not
-  abort the list. A workflow body with no `nodes` list is `unknown`, not
-  `runnable`. A model folder whose listing fails with an HTTP error other
-  than 404 is reported missing with a warning. When the local server's
-  object_info is unavailable, a run-level warning says verdicts rely on
-  the index heuristic alone. The JSON payload adds `local_only_dropped`.
-  An oversized folder listing is `model_listing_too_large`.
-- `comfy models search`, `list-folders`, `list-folder` and `show` take
-  `--host`/`--port` the same way `comfy upload` does, so they can point
-  at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
-  rejected against an effective cloud target with `host_flag_cloud`, and
-  a bad host or port yields `host_port_invalid` instead of a traceback.
-  With no flags, behavior is unchanged.
-- `comfy workflow slots` rows for a subgraph's promoted widgets carry
-  `source_address`, the interior node and widget the row stands for
-  (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
-  The key is optional: a row omits it when its interior widget does not
-  resolve, when its value comes from an interior PrimitiveNode, or when the
-  input is a plain legacy `proxyWidgets` fallback (a legacy entry that will be
-  repaired into a linked input does carry it).
-  The row's `address` is unchanged and stays the one to edit.
-- `comfy build init`, `update` and `validate` carry `data.warnings[]` as
-  `{code, message}` under `--json`. `build_comfy_version_missing` means the
-  spec has no `baseComfyVersion`; `build_snapshot_empty` means a
-  `--from-snapshot` import carries no custom nodes or models. Its message says
-  whether the snapshot lists none (likely older than the install) or counts
-  the listed packs left out by cause: disabled, or the importer's own advisory
-  line for each cause its report gives, with no cause guessed where the report
-  gives none. On stderr those advisory lines appear only inside this warning,
-  so each pack is named once (also warned in pretty output); `--json` still
-  carries them under `advisories` as well.
-- `comfy build release create` refuses a spec with no `baseComfyVersion` with
-  `build_comfy_version_missing` when the Build it names has none either, before
-  the cut, and the hint names `comfy build update --comfy-version <ref>`. With
-  `--id` the spec is not read.
-- `comfy build validate --remote` asks a model's own `sourceUri` for its hash
-  when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
-  HEAD that does not follow redirects). Only an https link with no user or
-  password before its host, written out or percent-encoded (`TOKEN%40host`),
-  is asked, so a credential in the link never goes out without TLS or to a
-  proxy. The lookup reads
-  `declared_ok` or `declared_mismatch`, with the link's hash in
-  `sourceSha256`. Each HEAD, from connect to its last header, may take 5
-  seconds and all of them 15 seconds
-  together; a link past that budget, or one that states no hash or does not
-  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0015
-  records that `validate --remote` now contacts the model hosts.
 
 ### Changed
 
@@ -130,30 +75,6 @@ history.
   validation and preflight runs. Declining still saves the prepared workflow
   and returns its Cloud link with execution marked unverified. Upload, build,
   and deployment approvals remain separate from job consent.
-- **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
-  `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
-  `where_invalid` envelope and a non-zero exit. Before, `comfy --json
-  nodes show --where bogus` printed a traceback with nothing on stdout,
-  and `comfy --json jobs ls --where bogus` printed a successful local
-  listing for a target the caller never named.
-- **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
-  following poll) now emits `cloud_unauthorized` instead of
-  `cloud_http_error`. The message says the login predates a permission
-  change and `comfy cloud login` fixes it, and the envelope carries
-  `details.reason` and `details.required_scope`. `comfy cloud login` now
-  also requests the `comfy-cloud:secrets:write` and
-  `comfy-cloud:agent:write` default OAuth scopes, so a new login can
-  call the Cloud secrets and agent APIs. A refresh does not widen an
-  existing grant; a session minted before this change needs a re-login
-  for those scopes.
-- The `comfy-run-on-cloud` skill makes a custom build from the person's whole
-  install (Path A of `comfy-build`), not from the workflow alone
-  (`--from-workflow`). Its custom build step is short and uploads nothing
-  before one yes to the plan.
-- `comfy build quota` uses the release and active-deployment counts the builder
-  and comfy-deploy send with their limits, when they do: such a count is exact
-  (`exact: true` for deployments, no `truncated` for releases), and the note
-  saying it can read low is left out. `note` is empty when nothing is left to say.
 
 ### Fixed
 
@@ -210,6 +131,109 @@ history.
   the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
   downloads before upgrading, since an older version keeps its claims per
   workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+
+## [1.28.0] - 2026-11-18
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.28.0) · 2 commits since v1.27.0.
+
+### Added
+
+- `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
+  finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
+  `data.warnings` reports `partial_execution` for a target that returned
+  nothing and `partial_execution_targets_ignored` when the server also ran
+  nodes outside the targets. An async targeted run records its targets on the
+  job state file, and its `queued` envelope carries a `data.note` naming the
+  watch command.
+
+## [1.27.0] - 2026-11-18
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.27.0) · 24 commits since v1.26.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
+- `comfy templates ls --local-only` drops partner-API templates from the
+  index (a name starting with `api_`, or an API tag) with no network
+  beyond the index. `--runnable` implies `--local-only`, then checks
+  each remaining template against the local install and annotates every
+  row with a verdict and `missing_count`. A single template's fetch or
+  parse failure becomes `verdict: "unknown"` with a warning and does not
+  abort the list. A workflow body with no `nodes` list is `unknown`, not
+  `runnable`. A model folder whose listing fails with an HTTP error other
+  than 404 is reported missing with a warning. When the local server's
+  object_info is unavailable, a run-level warning says verdicts rely on
+  the index heuristic alone. The JSON payload adds `local_only_dropped`.
+  An oversized folder listing is `model_listing_too_large`.
+- `comfy models search`, `list-folders`, `list-folder` and `show` take
+  `--host`/`--port` the same way `comfy upload` does, so they can point
+  at a specific local ComfyUI without `COMFY_LOCAL_URL`. The flags are
+  rejected against an effective cloud target with `host_flag_cloud`, and
+  a bad host or port yields `host_port_invalid` instead of a traceback.
+  With no flags, behavior is unchanged.
+- `comfy workflow slots` rows for a subgraph's promoted widgets carry
+  `source_address`, the interior node and widget the row stands for
+  (`57/28.unet_name`), resolved through nested promotions and renamed inputs.
+  The key is optional: a row omits it when its interior widget does not
+  resolve, when its value comes from an interior PrimitiveNode, or when the
+  input is a plain legacy `proxyWidgets` fallback (a legacy entry that will be
+  repaired into a linked input does carry it).
+  The row's `address` is unchanged and stays the one to edit.
+- `comfy build init`, `update` and `validate` carry `data.warnings[]` as
+  `{code, message}` under `--json`. `build_comfy_version_missing` means the
+  spec has no `baseComfyVersion`; `build_snapshot_empty` means a
+  `--from-snapshot` import carries no custom nodes or models. Its message says
+  whether the snapshot lists none (likely older than the install) or counts
+  the listed packs left out by cause: disabled, or the importer's own advisory
+  line for each cause its report gives, with no cause guessed where the report
+  gives none. On stderr those advisory lines appear only inside this warning,
+  so each pack is named once (also warned in pretty output); `--json` still
+  carries them under `advisories` as well.
+- `comfy build release create` refuses a spec with no `baseComfyVersion` with
+  `build_comfy_version_missing` when the Build it names has none either, before
+  the cut, and the hint names `comfy build update --comfy-version <ref>`. With
+  `--id` the spec is not read.
+- `comfy build validate --remote` asks a model's own `sourceUri` for its hash
+  when the entry also has a `sha256` (Hugging Face's `X-Linked-Etag`, with one
+  HEAD that does not follow redirects). Only an https link with no user or
+  password before its host, written out or percent-encoded (`TOKEN%40host`),
+  is asked, so a credential in the link never goes out without TLS or to a
+  proxy. The lookup reads
+  `declared_ok` or `declared_mismatch`, with the link's hash in
+  `sourceSha256`. Each HEAD, from connect to its last header, may take 5
+  seconds and all of them 15 seconds
+  together; a link past that budget, or one that states no hash or does not
+  answer, gets the filename lookup as before. ADR-BUILD-VALIDATION-0015
+  records that `validate --remote` now contacts the model hosts.
+
+### Changed
+
+- **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
+  `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
+  `where_invalid` envelope and a non-zero exit. Before, `comfy --json
+  nodes show --where bogus` printed a traceback with nothing on stdout,
+  and `comfy --json jobs ls --where bogus` printed a successful local
+  listing for a target the caller never named.
+- **Breaking:** a 403 `insufficient_scope` on `comfy run submit` (and the
+  following poll) now emits `cloud_unauthorized` instead of
+  `cloud_http_error`. The message says the login predates a permission
+  change and `comfy cloud login` fixes it, and the envelope carries
+  `details.reason` and `details.required_scope`. `comfy cloud login` now
+  also requests the `comfy-cloud:secrets:write` and
+  `comfy-cloud:agent:write` default OAuth scopes, so a new login can
+  call the Cloud secrets and agent APIs. A refresh does not widen an
+  existing grant; a session minted before this change needs a re-login
+  for those scopes.
+- The `comfy-run-on-cloud` skill makes a custom build from the person's whole
+  install (Path A of `comfy-build`), not from the workflow alone
+  (`--from-workflow`). Its custom build step is short and uploads nothing
+  before one yes to the plan.
+- `comfy build quota` uses the release and active-deployment counts the builder
+  and comfy-deploy send with their limits, when they do: such a count is exact
+  (`exact: true` for deployments, no `truncated` for releases), and the note
+  saying it can read low is left out. `note` is empty when nothing is left to say.
+
+### Fixed
+
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
@@ -1764,7 +1788,10 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.29.0...HEAD
+[1.29.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.28.0...v1.29.0
+[1.28.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.27.0...v1.28.0
+[1.27.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...v1.25.0
 [1.24.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...v1.24.0
