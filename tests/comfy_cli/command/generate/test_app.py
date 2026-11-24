@@ -870,6 +870,104 @@ def test_video_resume_retired_alias(runner, api_key, monkeypatch, alias, body, p
     assert seen and seen[0].endswith(poll_path)
 
 
+_SEEDANCE_DEFAULT_POLL = "/proxy/byteplus/api/v3/contents/generations/tasks/sd-1"
+_SEEDANCE2_POLL = "/proxy/byteplus-seedance2/api/v3/contents/generations/tasks/sd-1"
+_SEEDANCE_DONE = {"id": "sd-1", "status": "succeeded", "content": {"video_url": "https://cdn/sd.mp4"}}
+
+
+def _capture_seedance_poll(monkeypatch) -> list[str]:
+    polled: list[str] = []
+
+    def fake_get(url, **_kw):
+        polled.append(url)
+        return httpx.Response(200, json=_SEEDANCE_DONE)
+
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", fake_get)
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+    return polled
+
+
+@pytest.mark.parametrize(
+    ("model_args", "sent_model", "poll_url"),
+    [
+        (["--model", "dreamina-seedance-2-5-260628"], "dreamina-seedance-2-5-260628", _SEEDANCE2_POLL),
+        (["--model", "dreamina-seedance-2-0-fast-260128"], "dreamina-seedance-2-0-fast-260128", _SEEDANCE2_POLL),
+        (["--model", "seedance-1-5-pro-251215"], "seedance-1-5-pro-251215", _SEEDANCE_DEFAULT_POLL),
+        ([], "seedance-1-0-pro-250528", _SEEDANCE_DEFAULT_POLL),
+    ],
+)
+def test_seedance_submit_polls_route_of_sent_model(runner, api_key, monkeypatch, model_args, sent_model, poll_url):
+    sent: dict = {}
+
+    def fake_post(url, **kw):
+        sent.update(url=url, body=kw.get("json"))
+        return httpx.Response(200, json={"id": "sd-1"})
+
+    monkeypatch.setattr(gen_app.client.httpx, "post", fake_post)
+    polled = _capture_seedance_poll(monkeypatch)
+    r = runner.invoke(cli_app, ["generate", "seedance", "--prompt", "a wave", *model_args])
+    assert r.exit_code == 0, r.stdout
+    assert sent["url"].endswith("/proxy/byteplus/api/v3/contents/generations/tasks")
+    assert sent["body"]["model"] == sent_model
+    assert polled == [poll_url]
+    assert "https://cdn/sd.mp4" in r.stdout
+
+
+@pytest.mark.parametrize(
+    ("model", "hint"),
+    [
+        (
+            "dreamina-seedance-2-5-260628",
+            "resume: comfy generate resume seedance sd-1 --model dreamina-seedance-2-5-260628",
+        ),
+        (
+            "seedance-1-5-pro-251215",
+            "resume: comfy generate resume seedance sd-1 --model seedance-1-5-pro-251215",
+        ),
+        (None, "resume: comfy generate resume seedance sd-1 --model seedance-1-0-pro-250528"),
+    ],
+)
+def test_seedance_async_resume_hint_carries_model(runner, api_key, monkeypatch, model, hint):
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: httpx.Response(200, json={"id": "sd-1"}))
+    model_args = ["--model", model] if model else []
+    r = runner.invoke(cli_app, ["generate", "seedance", "--prompt", "x", *model_args, "--async"])
+    assert r.exit_code == 0, r.stdout
+    assert " ".join(r.stdout.split()).endswith(hint)
+
+
+def test_seedance_async_hint_resumes_1x_job_when_default_is_2x(runner, api_key, monkeypatch):
+    enum = ["dreamina-seedance-2-5-260628", "seedance-1-5-pro-251215"]
+    monkeypatch.setattr(gen_app.spec, "model_enum", lambda endpoint_id, field="model": list(enum))
+    monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: httpx.Response(200, json={"id": "sd-1"}))
+    r = runner.invoke(
+        cli_app, ["generate", "seedance", "--prompt", "x", "--model", "seedance-1-5-pro-251215", "--async"]
+    )
+    assert r.exit_code == 0, r.stdout
+    hint = " ".join(r.stdout.split()).split("resume: comfy ", 1)[1].split()
+    assert hint == ["generate", "resume", "seedance", "sd-1", "--model", "seedance-1-5-pro-251215"]
+    polled = _capture_seedance_poll(monkeypatch)
+    r = runner.invoke(cli_app, hint)
+    assert r.exit_code == 0, r.stdout
+    assert polled == [_SEEDANCE_DEFAULT_POLL]
+
+
+@pytest.mark.parametrize(
+    ("extra", "poll_url"),
+    [
+        (["--model", "dreamina-seedance-2-5-260628"], _SEEDANCE2_POLL),
+        (["--model=dreamina-seedance-2-0-260128"], _SEEDANCE2_POLL),
+        (["--model", "seedance-1-5-pro-251215"], _SEEDANCE_DEFAULT_POLL),
+        ([], _SEEDANCE_DEFAULT_POLL),
+    ],
+)
+def test_seedance_resume_polls_route_of_model(runner, api_key, monkeypatch, extra, poll_url):
+    polled = _capture_seedance_poll(monkeypatch)
+    r = runner.invoke(cli_app, ["generate", "resume", "seedance", "sd-1", *extra])
+    assert r.exit_code == 0, r.stdout
+    assert polled == [poll_url]
+    assert "https://cdn/sd.mp4" in r.stdout
+
+
 def test_list_video_filter(runner):
     r = runner.invoke(cli_app, ["generate", "list", "--style", "text-to-video"])
     assert r.exit_code == 0

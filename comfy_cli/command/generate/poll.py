@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -259,9 +259,21 @@ _POLL_SPECS: dict[str, PollSpec] = {
         poll_url="/proxy/byteplus/api/v3/contents/generations/tasks/{id}",
         status_paths=("status",),
         success_values=("succeeded",),
-        failure_values=("failed", "cancelled"),
+        failure_values=("failed", "cancelled", "expired"),
     ),
 }
+_POLL_SPECS["seedance2"] = replace(
+    _POLL_SPECS["seedance"],
+    name="seedance2",
+    poll_url="/proxy/byteplus-seedance2/api/v3/contents/generations/tasks/{id}",
+)
+
+
+def poller_name(name: str, model: str | None) -> str:
+    """The poller for a job of ``model`` submitted to a ``name`` endpoint."""
+    if name == "seedance" and model and model.startswith("dreamina-seedance-2"):
+        return "seedance2"
+    return name
 
 
 def _build_poll_url(spec: PollSpec, job_id: str, create_path: str | None) -> str:
