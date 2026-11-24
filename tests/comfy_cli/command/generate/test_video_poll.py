@@ -41,6 +41,21 @@ def test_kling_sibling_poll_path(no_sleep, monkeypatch):
     assert result.image_urls == ["https://cdn/v.mp4"]
 
 
+def test_luma_succeeds(no_sleep, monkeypatch):
+    monkeypatch.setattr(
+        "comfy_cli.command.generate.client.get",
+        _make_runner(
+            [
+                _resp({"id": "luma-1", "state": "dreaming"}),
+                _resp({"id": "luma-1", "state": "completed", "assets": {"video": "https://cdn/x.mp4"}}),
+            ]
+        ),
+    )
+    result = poll.get_poller("luma")({"id": "luma-1", "state": "queued"}, api_key="k")
+    assert result.status == "succeeded"
+    assert "https://cdn/x.mp4" in result.image_urls
+
+
 def test_runway_progress_normalized(no_sleep, monkeypatch):
     """Runway reports progress as 0–1 floats — the poller forwards as-is."""
     seen: list[float] = []
@@ -146,7 +161,7 @@ def test_kling_without_create_path_raises():
 
 def test_build_synthetic_initial_for_each_partner():
     """Sanity-check the resume helper for every registered partner."""
-    for name in ("kling", "minimax", "runway", "moonvalley", "pika", "vidu", "xai_video"):
+    for name in ("kling", "luma", "minimax", "runway", "moonvalley", "pika", "vidu", "xai_video"):
         body = poll.build_synthetic_initial(name, "abc")
         assert poll.extract_job_id(name, body) == "abc", name
 
@@ -171,6 +186,7 @@ def test_extract_urls_recognizes_query_strings():
 
 def test_extract_job_id_from_nested_paths():
     assert poll.extract_job_id("kling", {"data": {"task_id": "k1"}}) == "k1"
+    assert poll.extract_job_id("luma", {"id": "l1"}) == "l1"
     assert poll.extract_job_id("minimax", {"task_id": "m1"}) == "m1"
     assert poll.extract_job_id("xai_video", {"request_id": "x1"}) == "x1"
 

@@ -829,6 +829,47 @@ def test_video_resume_kling(runner, api_key, monkeypatch):
     assert "https://cdn/resumed.mp4" in r.stdout
 
 
+def test_video_submit_retired_luma_refused(runner, api_key, monkeypatch):
+    def _no_post(*a, **kw):
+        raise AssertionError("a retired alias must not reach the proxy")
+
+    monkeypatch.setattr(gen_app.client.httpx, "post", _no_post)
+    r = runner.invoke(cli_app, ["generate", "luma", "--prompt", "a cat"])
+    assert r.exit_code == 1
+    assert "Unknown model" in r.stdout
+
+
+@pytest.mark.parametrize(
+    ("alias", "body", "poll_path"),
+    [
+        (
+            "luma",
+            {"id": "luma-1", "state": "completed", "assets": {"video": "https://cdn/l.mp4"}},
+            "/proxy/luma/generations/luma-1",
+        ),
+        (
+            "kling-extend",
+            {"data": {"task_status": "succeed", "task_result": {"videos": [{"url": "https://cdn/l.mp4"}]}}},
+            "/proxy/kling/v1/videos/video-extend/luma-1",
+        ),
+    ],
+)
+def test_video_resume_retired_alias(runner, api_key, monkeypatch, alias, body, poll_path):
+    """A job submitted before its alias was retired is still fetched by resume."""
+    seen: list[str] = []
+
+    def _get(url, *a, **kw):
+        seen.append(str(url))
+        return httpx.Response(200, json=body)
+
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", _get)
+    monkeypatch.setattr("comfy_cli.command.generate.poll._sleep", lambda *_: None)
+    r = runner.invoke(cli_app, ["generate", "resume", alias, "luma-1"])
+    assert r.exit_code == 0, r.stdout
+    assert "https://cdn/l.mp4" in r.stdout
+    assert seen and seen[0].endswith(poll_path)
+
+
 def test_list_video_filter(runner):
     r = runner.invoke(cli_app, ["generate", "list", "--style", "text-to-video"])
     assert r.exit_code == 0

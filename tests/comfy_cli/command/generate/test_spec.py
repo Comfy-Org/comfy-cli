@@ -619,6 +619,32 @@ def test_retired_aliases_removed(dead):
     assert "Unknown model" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(("dead", "polling"), [("kling-extend", "kling"), ("luma", "luma"), ("luma-i2v", "luma")])
+def test_retired_aliases_stay_resumable(dead, polling):
+    """Retiring submit does not retire retrieval: /proxy still serves the GET a
+    job is fetched by, so `resume` resolves the retired alias (and its endpoint
+    id) while `get_endpoint`, which every submit goes through, refuses it."""
+    endpoint = spec.get_resume_endpoint(dead)
+    assert endpoint.polling == polling
+    assert endpoint.path == spec.PROXY_PREFIX + spec._RESUME_ONLY_ALIASES[dead]
+    assert spec.get_resume_endpoint(endpoint.id) == endpoint
+    assert endpoint.id not in {e.id for e in spec.list_endpoints()}
+
+
+def test_resume_endpoint_still_rejects_unknown_models():
+    with pytest.raises(spec.SpecError) as excinfo:
+        spec.get_resume_endpoint("nope-model")
+    assert "Unknown model" in str(excinfo.value)
+
+
+def test_resume_only_tables_agree_and_exist_in_vendored_spec(monkeypatch, tmp_path):
+    resume_only = {endpoint_id for endpoint_id, _, _ in spec._RESUME_ONLY_ALLOWLIST}
+    assert set(spec._RESUME_ONLY_ALIASES.values()) == resume_only
+    assert not resume_only & {endpoint_id for endpoint_id, _, _ in spec._ENDPOINT_ALLOWLIST}
+    assert not set(spec._RESUME_ONLY_ALIASES) & set(spec._ALIASES)
+    assert resume_only <= _bundled_proxy_ids(monkeypatch, tmp_path)
+
+
 # ── _ROUTER_IDS — the alias → Router v2 id table ──
 
 

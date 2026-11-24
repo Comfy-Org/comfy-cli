@@ -95,7 +95,7 @@ class Endpoint:
     request_schema: dict[str, Any]  # resolved (no $ref) request body schema
     request_content_type: str  # "application/json" | "multipart/form-data"
     response_schema: dict[str, Any]  # resolved 200 response schema
-    polling: str | None  # "bfl" | "kling" | "seedance" | None
+    polling: str | None  # "bfl" | "kling" | "luma" | "seedance" | None
 
 
 # Short, creative-facing aliases mapping to the curated openapi paths below.
@@ -346,6 +346,23 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     ("vertexai/gemini/{model}", "image-edit", None),
     # ByteDance Seedance (video) — async, custom poller.
     ("byteplus/api/v3/contents/generations/tasks", "text-to-video", "seedance"),
+]
+
+
+# Retired aliases kept for `comfy generate resume` only. Their submit routes are
+# dead upstream, but /proxy still serves the GET a job is fetched by, so a job
+# accepted before the retirement stays retrievable. Submit, `list` and `schema`
+# never see these: they go through `get_endpoint`, which reads only the curated
+# tables above.
+_RESUME_ONLY_ALIASES: dict[str, str] = {
+    "kling-extend": "kling/v1/videos/video-extend",
+    "luma": "luma/generations",
+    "luma-i2v": "luma/generations/image",
+}
+_RESUME_ONLY_ALLOWLIST: list[tuple[str, str, str | None]] = [
+    ("kling/v1/videos/video-extend", "video-extend", "kling"),
+    ("luma/generations", "text-to-video", "luma"),
+    ("luma/generations/image", "image-to-video", "luma"),
 ]
 
 
@@ -605,6 +622,15 @@ def _select_operation(node: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
 
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, Endpoint]:
+    return _build_registry(_ENDPOINT_ALLOWLIST)
+
+
+@lru_cache(maxsize=1)
+def _resume_only_registry() -> dict[str, Endpoint]:
+    return _build_registry(_RESUME_ONLY_ALLOWLIST)
+
+
+def _build_registry(allowlist: list[tuple[str, str, str | None]]) -> dict[str, Endpoint]:
     spec = load_raw_spec()
     paths = spec.get("paths") or {}
     if not isinstance(paths, dict):
@@ -613,7 +639,7 @@ def _registry() -> dict[str, Endpoint]:
     resolution_budget_limit = _schema_resolution_budget(spec)
     aggregate_resolution_budget = [resolution_budget_limit * 4]
     resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
-    for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
+    for endpoint_id, category, polling_hint in allowlist:
         if aggregate_resolution_budget[0] <= 0:
             break
         path = PROXY_PREFIX + endpoint_id
@@ -722,6 +748,19 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     if canonical in reg:
         return reg[canonical]
     raise SpecError(_unknown_endpoint_message(endpoint_id))
+
+
+def get_resume_endpoint(endpoint_id: str) -> Endpoint:
+    """Like `get_endpoint`, but also resolves the retired, resume-only aliases
+    so `comfy generate resume` can fetch a job submitted before retirement."""
+    try:
+        return get_endpoint(endpoint_id)
+    except SpecError:
+        canonical = _RESUME_ONLY_ALIASES.get(endpoint_id) or resolve_alias(endpoint_id)
+        endpoint = _resume_only_registry().get(canonical)
+        if endpoint is None:
+            raise
+        return endpoint
 
 
 def _schema_accepts_string_value(
@@ -1353,6 +1392,7 @@ def write_cache(yaml_text: str) -> Path:
     # Invalidate in-process cache so the next load picks it up.
     load_raw_spec.cache_clear()
     _registry.cache_clear()
+    _resume_only_registry.cache_clear()
     return _USER_CACHE
 
 

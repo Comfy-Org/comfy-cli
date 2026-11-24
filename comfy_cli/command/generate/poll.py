@@ -191,6 +191,14 @@ _POLL_SPECS: dict[str, PollSpec] = {
         success_values=("succeed",),
         failure_values=("failed",),
     ),
+    "luma": PollSpec(
+        name="luma",
+        id_paths=("id",),
+        poll_url="/proxy/luma/generations/{id}",
+        status_paths=("state",),
+        success_values=("completed",),
+        failure_values=("failed",),
+    ),
     "minimax": PollSpec(
         name="minimax",
         id_paths=("task_id",),
