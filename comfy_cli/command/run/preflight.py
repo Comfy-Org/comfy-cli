@@ -97,6 +97,7 @@ def _preflight_validate(
     target_label: str = "server",
     where: str | None = None,
     submitted_workflow: dict | None = None,
+    own_models=None,
 ) -> None:
     """Pre-submit validation via the pure-Python CQL engine.
 
@@ -115,6 +116,12 @@ def _preflight_validate(
     error envelope. It is deliberately NOT ``target_label`` — that one is prose
     for the message and its local value (``"server"``) isn't in the envelope's
     ``local|cloud`` vocabulary.
+
+    ``own_models`` (a :class:`comfy_cli.cloud_own_models.OwnModels`, Cloud only)
+    is asked about each model file value the catalog refuses: Cloud's
+    ``object_info`` never lists a workspace's uploads, yet Cloud runs them. A
+    value the library holds is admitted and the workflow validated again; for
+    the rest, the refusal's hint says what the library said.
     """
     if not object_info:
         return
@@ -123,6 +130,20 @@ def _preflight_validate(
 
     graph = Graph.from_object_info(object_info)
     validation = graph.validate_workflow(workflow)
+    admitted: list[dict] = []
+    if own_models is not None and not validation.get("valid", True):
+        from comfy_cli.cloud_own_models import admit_refused, note_refusals
+
+        admitted = admit_refused(graph, workflow, validation.get("errors", []), own_models)
+        if admitted:
+            validation = graph.validate_workflow(workflow)
+        note_refusals(workflow, validation.get("errors", []), own_models)
+    if admitted and renderer.is_pretty():
+        for row in admitted:
+            pprint(
+                f"[dim]✓ node {sanitize_markup(row['node_id'])}: {sanitize_markup(str(row['value']))} "
+                "is in your Comfy Cloud model library[/dim]"
+            )
     errors = list(validation.get("errors", [])) if not validation.get("valid", True) else []
     if submitted_workflow is not None and submitted_workflow is not workflow:
         skipped = graph.validate_workflow({k: v for k, v in submitted_workflow.items() if k not in workflow})

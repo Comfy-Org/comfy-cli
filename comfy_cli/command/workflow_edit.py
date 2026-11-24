@@ -104,6 +104,9 @@ def _emit_edit_error(
             finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}? {hint}"
         else:
             finding_hint = hint
+        if f.get("library"):
+            # What the workspace's Comfy Cloud model library said about a refused model value.
+            finding_hint = f"{f['library']}; {finding_hint}"
         details = {k: _json_safe_evidence(v) for k, v in f.items() if k != "message"}
         if extra_details:
             details.update(_json_safe_evidence(extra_details))
@@ -185,6 +188,46 @@ def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> No
 
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
+
+
+def _cloud_own_models(input_path: str | None, where: str | None):
+    """The workspace's Comfy Cloud model library when the edit validates against
+    Cloud's live catalog, else ``None``. Cloud's ``object_info`` never lists a
+    workspace's uploads, yet Cloud runs them (see :mod:`comfy_cli.cloud_own_models`).
+    An offline ``--input`` dump has no workspace to ask."""
+    if input_path is not None:
+        return None
+    from comfy_cli import where as where_module
+
+    if where_module.resolve_default_or_exit(where).target is not where_module.WhereTarget.CLOUD:
+        return None
+    from comfy_cli import cloud_own_models
+
+    return cloud_own_models.for_cloud()
+
+
+def _admitting_own_models(graph, own, edit):
+    """Run ``edit()``; when the catalog refuses a model value the workspace's
+    Comfy Cloud library holds, admit the value into that input's options and run
+    it again. Any other refusal propagates, with what the library said about the
+    value added to the finding as ``library``."""
+    from comfy_cli.cloud_own_models import ADMITTABLE_CODES
+
+    admitted: set[tuple[str, str, str]] = set()
+    while True:
+        try:
+            return edit()
+        except workflow_ops.FatalFindingError as e:
+            value = e.finding.get("value")
+            key = (str(e.class_type), str(e.input_name), repr(value))
+            if own is None or e.finding.get("code") not in ADMITTABLE_CODES or e.class_type is None or key in admitted:
+                raise
+            if not (own.holds(value) and graph.admit_combo_value(e.class_type, e.input_name, value)):
+                note = own.refusal_note(value)
+                if note:
+                    e.finding["library"] = note
+                raise
+            admitted.add(key)
 
 
 # ---------------------------------------------------------------------------
@@ -358,9 +401,14 @@ def set_widget_cmd(
     # ``57/27.text``) — are resolved inside ``workflow_ops.set_widget`` against
     # the same CQL resolver `slots` uses, and emit a replayable op that writes
     # back into the subgraph definition.
+    own_models = _cloud_own_models(input_path, where)
     try:
-        workflow, op = workflow_ops.set_widget(
-            workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
+        workflow, op = _admitting_own_models(
+            graph,
+            own_models,
+            lambda: workflow_ops.set_widget(
+                workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
+            ),
         )
     except workflow_ops.NoteTextNotWritable as e:
         _emit_edit_error(renderer, e, hint=e.hint)

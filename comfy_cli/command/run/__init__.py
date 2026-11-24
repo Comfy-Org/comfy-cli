@@ -1407,7 +1407,11 @@ def execute_cloud(
     # Only the targets' subgraph runs on a targeted submit (see `execute`).
     run_graph = target_subgraph(parsed_workflow, output_node_ids) if output_node_ids else parsed_workflow
 
-    # Pre-submit validation via pure-Python CQL engine.
+    # Pre-submit validation via pure-Python CQL engine. Cloud's object_info never
+    # lists the workspace's uploaded models, so a model value it refuses is first
+    # looked up in the workspace's library; credentials are resolved only then.
+    from comfy_cli import cloud_own_models
+
     _preflight_validate(
         renderer,
         run_graph,
@@ -1415,6 +1419,7 @@ def execute_cloud(
         target_label="cloud",
         where="cloud",
         submitted_workflow=parsed_workflow,
+        own_models=cloud_own_models.for_cloud(),
     )
 
     # Spend gate: the cloud also bills partner-API nodes, so apply the

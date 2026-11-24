@@ -820,7 +820,7 @@ def _rehint_discarded_batch(e: Exception, pre_batch_hint: str) -> ValueError:
         # ids created earlier in this failed batch no longer exist.
         finding = dict(e.finding)
         finding["message"] = rendered
-        return FatalFindingError(finding)
+        return FatalFindingError(finding, class_type=e.class_type, input_name=e.input_name)
     return ValueError(rendered)
 
 
@@ -1742,7 +1742,7 @@ def _set_widget_impl(
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=f"{'/'.join(target.segments)}.{widget}") for w in port.validate_catalog(value)]
-            _refuse_fatal(warnings)
+            _refuse_fatal(warnings, class_type=inner_type, input_name=port.name)
         if norm_note:
             warnings = [norm_note, *warnings]
         op = _new_op(
@@ -1900,12 +1900,12 @@ def _set_widget_impl(
     return apply_op(workflow, op, graph), op
 
 
-def _refuse_fatal(warnings: list[dict]) -> None:
+def _refuse_fatal(warnings: list[dict], *, class_type: str | None = None, input_name: str | None = None) -> None:
     from comfy_cli.cql.engine import FATAL_FINDING_CODES
 
     for w in warnings:
         if w.get("code") in FATAL_FINDING_CODES:
-            raise FatalFindingError(w)
+            raise FatalFindingError(w, class_type=class_type, input_name=input_name)
 
 
 def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
@@ -5153,8 +5153,13 @@ class FatalFindingError(ValueError):
     catch it — they just lose the structure.
     """
 
-    def __init__(self, finding: dict):
+    def __init__(self, finding: dict, *, class_type: str | None = None, input_name: str | None = None):
         self.finding = finding
+        # The node type and input whose catalog refused the value, when known:
+        # where a caller that can vouch for the value (a model the workspace
+        # uploaded to Comfy Cloud) admits it before retrying the edit.
+        self.class_type = class_type
+        self.input_name = input_name
         super().__init__(finding.get("message", finding.get("code", "invalid value")))
 
 
@@ -5196,7 +5201,7 @@ def _validate_widget(
     # returning ok:true.
     fatal = next((f for f in findings if f.get("severity") == SEVERITY_ERROR), None)
     if fatal is not None:
-        raise FatalFindingError(fatal)
+        raise FatalFindingError(fatal, class_type=class_type, input_name=port.name)
     return findings
 
 
