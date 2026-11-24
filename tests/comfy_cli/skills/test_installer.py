@@ -503,6 +503,7 @@ def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
     assert "`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`" in flat
     assert "`deploy_conflict` for the release's model policy" not in flat
     assert "a `modelPolicy` that lets it through" in flat
+    assert "Where the workspace has deployment updates on, `up` moves the deployment onto it" in flat
 
 
 def test_build_and_deploy_skills_hand_off_to_each_other():

@@ -577,5 +577,7 @@ release should have it, or when `add` is refused in one of two ways:
 Any other `deploy_conflict` (the name taken, the deployment busy, too little
 storage) is not a reason to cut a release; follow the error's own sentence.
 
-Remember what a new release costs here: a new deployment, a new endpoint URL, and
-an old deployment that keeps billing until it is stopped.
+Remember what a new release costs here (the cost model above). Where the
+workspace has deployment updates on, `up` moves the deployment onto it and the
+endpoint URL stays. Where they are off, it is a new deployment, a new endpoint
+URL, and an old deployment that keeps billing until it is stopped.
