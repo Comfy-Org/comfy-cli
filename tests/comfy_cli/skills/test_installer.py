@@ -494,6 +494,18 @@ def test_deploy_skills_say_when_a_refused_model_add_already_sent_the_file():
     assert "`comfy assets library upload <file> --type <folder>`" in deploy
 
 
+def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
+    back = skill_content("comfy-deploy").split("## Going back to the build", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(back.split())
+    assert "a pack, a model," not in flat
+    assert "`comfy deploy models add` puts one on a deployment, running or stopped, with no new release" in flat
+    assert "`deploy_models_unavailable`" in flat
+    assert "`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`" in flat
+    assert "`deploy_conflict` for the release's model policy" not in flat
+    assert "a `modelPolicy` that lets it through" in flat
+    assert "Where the workspace has deployment updates on, `up` moves the deployment onto it" in flat
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 

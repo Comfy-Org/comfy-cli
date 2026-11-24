@@ -556,10 +556,28 @@ for `delete`, `deploy_missing_input` for an omitted `--gpu`, `--region` or
 
 ## Going back to the build
 
-A change to what the environment *contains* — a pack, a model, a pin, a ComfyUI
-version — is a build change, not a deploy one. Edit `comfy-build.yaml`, push, cut
-a new release, and only then deploy it. `comfy skills show comfy-build` covers
-that whole loop, including reading a failed build's log.
+A change to what the environment *contains* — a pack, a pin, a ComfyUI version —
+is a build change, not a deploy one. Edit `comfy-build.yaml`, push, cut a new
+release, and only then deploy it. `comfy skills show comfy-build` covers that
+whole loop, including reading a failed build's log.
 
-Remember what a new release costs here: a new deployment, a new endpoint URL, and
-an old deployment that keeps billing until it is stopped.
+A model file is the exception: `comfy deploy models add` puts one on a
+deployment, running or stopped, with no new release (see `comfy deploy models`
+above). It goes in `comfy-build.yaml` instead when every deployment of the
+release should have it, or when `add` is refused in one of two ways:
+
+- **`deploy_models_unavailable`:** adding is off for the workspace. The error's
+  hint, `comfy assets library upload`, stores the file in the workspace library
+  but puts nothing on the deployment, so the build is the way onto it.
+- **`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`:** the
+  release's `modelPolicy` refuses the file. The new release needs the file
+  under `models` and a `modelPolicy` that lets it through: named in an
+  `allowlist`, or left out of a `blocklist`.
+
+Any other `deploy_conflict` (the name taken, the deployment busy, too little
+storage) is not a reason to cut a release; follow the error's own sentence.
+
+Remember what a new release costs here (the cost model above). Where the
+workspace has deployment updates on, `up` moves the deployment onto it and the
+endpoint URL stays. Where they are off, it is a new deployment, a new endpoint
+URL, and an old deployment that keeps billing until it is stopped.
