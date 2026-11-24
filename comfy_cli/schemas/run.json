@@ -36,7 +36,7 @@
     },
     "warnings": {
       "type": "array",
-      "description": "Cloud --wait only (an async targeted run is checked by `comfy jobs watch`/`jobs status` instead): non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch, partial_execution_targets_ignored when an --output-node-ids run also ran untargeted nodes). Empty when none.",
+      "description": "Cloud --wait only (an async targeted run is checked by `comfy jobs watch`/`jobs status` instead): non-fatal diagnostics about the run (e.g. partial_execution when the cloud pruned an output branch, partial_execution_targets_ignored when an --output-node-ids run also ran untargeted output nodes). Empty when none.",
       "items": {
         "type": "object",
         "required": ["code", "message"],
