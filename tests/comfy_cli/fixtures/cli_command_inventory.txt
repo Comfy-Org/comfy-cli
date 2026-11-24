@@ -58,6 +58,10 @@ comfy deploy events
 comfy deploy history
 comfy deploy logs
 comfy deploy ls
+comfy deploy models
+comfy deploy models add
+comfy deploy models ls
+comfy deploy models rm
 comfy deploy promote
 comfy deploy refs
 comfy deploy refs compute
