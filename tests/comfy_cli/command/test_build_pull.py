@@ -11,7 +11,7 @@ from build_pull_support import PullBuilder, invoke_pull, serve
 from build_push_support import envelope, invoke_push, local_node, make_workspace, reloaded, write_spec
 
 from comfy_cli.caller import Caller
-from comfy_cli.command import build, build_package
+from comfy_cli.command import build
 from comfy_cli.command.build_spec import read_build_spec
 from comfy_cli.discovery import COMMAND_SCHEMAS
 
@@ -299,7 +299,7 @@ def test_pull_drops_a_local_node_over_the_size_limit_that_the_build_no_longer_ca
 ) -> None:
     # Given
     write_spec(workspace, build_id="build-a")
-    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 1)
+    monkeypatch.setattr(build, "_BUILDER_NODE_SIZE_LIMIT_BYTES", 1)
     client = PullBuilder()
     serve(client, "build-a", remote_definition())
     install_client(monkeypatch, client)

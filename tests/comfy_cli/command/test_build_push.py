@@ -26,8 +26,8 @@ from build_push_support import (
 
 from comfy_cli import error_codes
 from comfy_cli.builder_api import BuilderClient
-from comfy_cli.command import build, build_package
-from comfy_cli.command.build_package import package_node
+from comfy_cli.command import build
+from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_push import pending_uploads, prepare_push
 from comfy_cli.command.build_spec import JsonObject, JsonValue
@@ -679,7 +679,7 @@ def test_a_node_over_the_size_limit_stops_the_push_before_any_upload(
     # Given
     path = write_spec(workspace)
     before = path.read_bytes()
-    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 3)
+    monkeypatch.setattr(build, "_BUILDER_NODE_SIZE_LIMIT_BYTES", 3)
     client = RecordingBuilder()
     _install_client(monkeypatch, client)
 
@@ -697,6 +697,40 @@ def test_a_node_over_the_size_limit_stops_the_push_before_any_upload(
     assert _calls(client, "upload_blob") == []
     assert client.uploaded == []
     assert path.read_bytes() == before
+
+
+def test_the_push_uses_the_builder_s_two_gib_node_limit() -> None:
+    assert build._BUILDER_NODE_SIZE_LIMIT_BYTES == 2147483648
+
+
+def test_a_node_over_the_size_limit_is_refused_before_any_model_is_hashed(workspace: Path) -> None:
+    # Given
+    write_spec(workspace)
+    paths = resolve_build_paths(str(workspace))
+    hashed: list[Path] = []
+
+    def model_digest(path: Path) -> str:
+        hashed.append(path)
+        return build._sha256_file(path)
+
+    # When
+    with pytest.raises(NodePackageError, match="a custom node can be at most"):
+        prepare_push(reloaded(workspace), paths, model_digest, node_size_limit=3)
+
+    # Then
+    assert hashed == []
+
+
+def test_models_stay_ahead_of_nodes_in_the_upload_plan(workspace: Path) -> None:
+    # Given
+    write_spec(workspace)
+    paths = resolve_build_paths(str(workspace))
+
+    # When
+    preparation = prepare_push(reloaded(workspace), paths, build._sha256_file)
+
+    # Then
+    assert [upload.kind for upload in preparation.uploads] == ["model", "node_zip"]
 
 
 class _InterruptedBuilder(RecordingBuilder):

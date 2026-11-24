@@ -356,22 +356,17 @@ def test_an_unreadable_file_raises_the_packaging_error_rather_than_escaping(tmp_
         os.chmod(secret, 0o600)
 
 
-def test_the_node_size_limit_is_two_gib() -> None:
-    assert build_package._NODE_SIZE_LIMIT_BYTES == 2147483648
-
-
 @pytest.mark.parametrize("keep", [True, False], ids=["destination", "discarded"])
 def test_a_node_whose_files_exceed_the_limit_is_refused_before_its_archive_is_written(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: bool
+    tmp_path: Path, keep: bool
 ) -> None:
     # Given
     node = _node_tree(tmp_path)
-    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 7)
     destination = tmp_path / "node.zip" if keep else None
 
     # When
     with pytest.raises(NodePackageError) as raised:
-        package_node(node, destination, size_limit=True)
+        package_node(node, destination, max_bytes=7)
 
     # Then
     message = str(raised.value)
@@ -385,18 +380,15 @@ def test_a_node_whose_files_exceed_the_limit_is_refused_before_its_archive_is_wr
 
 
 @pytest.mark.parametrize("keep", [True, False], ids=["destination", "discarded"])
-def test_a_node_whose_archive_exceeds_the_limit_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: bool
-) -> None:
+def test_a_node_whose_archive_exceeds_the_limit_is_refused(tmp_path: Path, keep: bool) -> None:
     # Given
     node = _node_tree(tmp_path)
     archive_size = package_node(node).size_bytes
-    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 8)
     destination = tmp_path / "node.zip" if keep else None
 
     # When
     with pytest.raises(NodePackageError) as raised:
-        package_node(node, destination, size_limit=True)
+        package_node(node, destination, max_bytes=8)
 
     # Then
     message = str(raised.value)
@@ -406,35 +398,17 @@ def test_a_node_whose_archive_exceeds_the_limit_is_refused(
     assert "(8 bytes)" in message
 
 
-def test_a_node_at_the_limit_still_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_node_at_the_limit_still_packages(tmp_path: Path) -> None:
     # Given
     node = _node_tree(tmp_path)
     expected = package_node(node)
-    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", expected.size_bytes)
 
     # When
-    package = package_node(node, tmp_path / "node.zip", size_limit=True)
+    package = package_node(node, tmp_path / "node.zip", max_bytes=expected.size_bytes)
 
     # Then
     assert package.sha256 == expected.sha256
     assert package.size_bytes == expected.size_bytes
-
-
-@pytest.mark.parametrize("keep", [True, False], ids=["destination", "discarded"])
-def test_a_node_over_the_limit_still_packages_when_no_limit_is_asked_for(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: bool
-) -> None:
-    # Given
-    node = _node_tree(tmp_path)
-    expected = package_node(node)
-    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 1)
-    destination = tmp_path / "node.zip" if keep else None
-
-    # When
-    package = package_node(node, destination)
-
-    # Then
-    assert package.sha256 == expected.sha256
 
 
 def test_the_limit_message_names_gigabytes_and_two_gib(tmp_path: Path) -> None:
@@ -443,7 +417,7 @@ def test_the_limit_message_names_gigabytes_and_two_gib(tmp_path: Path) -> None:
 
     # When
     with pytest.raises(NodePackageError) as raised:
-        build_package._refuse_oversized(node, 7_900_000_000)
+        build_package._refuse_oversized(node, 7_900_000_000, 2147483648)
 
     # Then
     assert str(raised.value) == (
