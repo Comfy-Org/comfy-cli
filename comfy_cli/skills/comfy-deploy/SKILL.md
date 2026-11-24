@@ -561,14 +561,21 @@ is a build change, not a deploy one. Edit `comfy-build.yaml`, push, cut a new
 release, and only then deploy it. `comfy skills show comfy-build` covers that
 whole loop, including reading a failed build's log.
 
-A model file is the exception: `comfy deploy models add` puts one on a running
-deployment with no new release (see `comfy deploy models` above). It goes in
-`comfy-build.yaml` instead when every deployment of the release should have it,
-or when `add` is refused with `deploy_models_unavailable` (adding is off for
-the workspace) or with a `deploy_conflict` whose `details.server_code` is
-`MODEL_POLICY` (the release's model policy). Any other `deploy_conflict` (the
-name taken, the deployment busy, too little storage) is not a reason to cut a
-release; follow the error's own sentence.
+A model file is the exception: `comfy deploy models add` puts one on a
+deployment, running or stopped, with no new release (see `comfy deploy models`
+above). It goes in `comfy-build.yaml` instead when every deployment of the
+release should have it, or when `add` is refused in one of two ways:
+
+- **`deploy_models_unavailable`:** adding is off for the workspace. The error's
+  hint, `comfy assets library upload`, stores the file in the workspace library
+  but puts nothing on the deployment, so the build is the way onto it.
+- **`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`:** the
+  release's `modelPolicy` refuses the file. The new release needs the file
+  under `models` and a `modelPolicy` that lets it through: named in an
+  `allowlist`, or left out of a `blocklist`.
+
+Any other `deploy_conflict` (the name taken, the deployment busy, too little
+storage) is not a reason to cut a release; follow the error's own sentence.
 
 Remember what a new release costs here: a new deployment, a new endpoint URL, and
 an old deployment that keeps billing until it is stopped.
