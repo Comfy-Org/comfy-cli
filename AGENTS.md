@@ -71,6 +71,12 @@ with accepted ADRs. Proposed ADRs express design direction and should be
 treated as guidance during review. See `.agents/checks/adr-compliance.md` for
 the automated review rules.
 
+Review checks live in `.agents/checks/`. Alongside ADR compliance,
+`.agents/checks/partial-change-completeness.md` records when a deliberately
+partial change is complete enough to land — most changes here are one slice of a
+larger problem, and the rule is that a slice must name where it stops rather
+than that it must stop nowhere.
+
 Comfy repositories standardize the ADR behavior: canonical records, identifier
 and status semantics, review expectations, and supersession history should mean
 the same thing everywhere. Each repository implements validation and CI with
