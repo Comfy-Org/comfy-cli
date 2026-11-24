@@ -25,6 +25,17 @@ history.
   `build pull`, `build init`, `build update` and `build status` still read such
   a node, so a pull can drop it from the spec.
 
+### Removed
+
+- `comfy generate` drops three model aliases whose cloud routes are retired, so
+  every submit was already refused: `kling-extend` (Kling retired the V1.x
+  models the video-extend route accepts), and `luma` and `luma-i2v` (Luma
+  retired its Ray video models and shut Photon down). Submitting one now
+  returns the usual unknown-model error with suggestions rather than failing at
+  the proxy. `comfy generate resume <alias> <job_id>` still accepts all three,
+  since the proxy still serves the routes a job is fetched from, so a job
+  submitted before the retirement can still be collected.
+
 ## [1.29.0] - 2026-11-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.

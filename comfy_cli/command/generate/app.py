@@ -1216,7 +1216,7 @@ def _resume(extra_args: list[str]) -> None:
     model, job_id = extra_args[0], extra_args[1]
     tail = extra_args[2:]
     try:
-        ep = spec.get_endpoint(model)
+        ep = spec.get_resume_endpoint(model)
     except spec.SpecError as e:
         _fail(code="generate_unknown_model", message=str(e), details={"model": model})
         raise typer.Exit(code=1)
