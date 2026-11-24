@@ -33,8 +33,11 @@ change until it is unreviewable.
    a test that runs — not prose alone; a sentence like "deliberately not doing
    X" without one of these does not satisfy this step.
 3. Flag as medium when a change fixes part of a problem and names no boundary at
-   all. The defect is the silence, not the partiality: the next reader cannot
-   tell whether the remainder is known, forgotten, or deliberately refused.
+   all, **or names one in prose without a resolvable artifact per step 2** —
+   a sentence that points at a remainder without an issue, PR, section, or
+   test behind it does not satisfy step 2, so treat it the same as silence.
+   The defect is the silence, not the partiality: the next reader cannot tell
+   whether the remainder is known, forgotten, or deliberately refused.
 4. Flag as medium when the change cites evidence *for its fix* that the diff
    contradicts — a stated measurement the diff cannot produce, a cited fixture
    that does not exercise the path, or a test claimed to demonstrate the new
@@ -44,9 +47,11 @@ change until it is unreviewable.
    contradiction. Read the evidence before accepting it; this check's tools
    cannot execute anything, so treat a claim this check cannot read as unverified
    rather than run it yourself.
-5. Where the remainder is named and tracked per step 2, do not flag this axis.
-   A deliberately partial fix with a stated floor is a complete unit of work;
-   do not hold it for the rest of its epic.
+5. Where the remainder is named and tracked per step 2, do not flag the
+   boundary itself as a step-3 finding. A deliberately partial fix with a
+   stated floor is a complete unit of work; do not hold it for the rest of
+   its epic. This exempts only the remainder — step 4 still applies to
+   whatever evidence the change cites for the fix it does make.
 6. Do not flag scope the author explicitly refused with a reason **and** a
    resolvable artifact per step 2. Refused scope with a reason but no artifact
    is the step-3 case (medium): ask for the artifact, not for the scope to grow.
