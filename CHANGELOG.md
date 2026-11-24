@@ -15,6 +15,14 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- `comfy build push` refuses a local custom node over 2 GiB before it uploads
+  anything, and names the node, its size and the limit. `--dry-run`, `build
+  init`, `build update` and `build pull` refuse it the same way. The builder
+  cannot use a node that large, so a push used to upload it and the release's
+  build then failed.
+
 ## [1.29.0] - 2026-11-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.

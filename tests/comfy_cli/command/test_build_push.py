@@ -26,7 +26,7 @@ from build_push_support import (
 
 from comfy_cli import error_codes
 from comfy_cli.builder_api import BuilderClient
-from comfy_cli.command import build
+from comfy_cli.command import build, build_package
 from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_push import pending_uploads, prepare_push
@@ -670,6 +670,32 @@ def test_an_unreadable_node_file_is_a_spec_error_rather_than_a_traceback(
     # The node directory to fix, never the spec YAML: routing this failure
     # through `BuildSpecInvalidError` used to relabel it with the spec's path.
     assert error["details"]["path"] == str(workspace / "custom_nodes" / "local-node")
+
+
+def test_a_node_over_the_size_limit_stops_the_push_before_any_upload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    path = write_spec(workspace)
+    before = path.read_bytes()
+    monkeypatch.setattr(build_package, "_NODE_SIZE_LIMIT_BYTES", 3)
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "a custom node can be at most" in error["message"]
+    assert "(4 bytes)" in error["message"]
+    assert error["details"]["path"] == str(workspace / "custom_nodes" / "local-node")
+    assert _calls(client, "create_blob") == []
+    assert _calls(client, "upload_blob") == []
+    assert client.uploaded == []
+    assert path.read_bytes() == before
 
 
 class _InterruptedBuilder(RecordingBuilder):

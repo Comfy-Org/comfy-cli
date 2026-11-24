@@ -18,6 +18,7 @@ _FIXED_MODE: Final = stat.S_IFREG | 0o644
 # Bounds the resident cost of one member and of one hashing read. A node that
 # vendors a multi-GB weight file is the case this exists for.
 _CHUNK_BYTES: Final = 1024 * 1024
+_NODE_SIZE_LIMIT_BYTES: Final = 2 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +169,27 @@ def _package_files(root: Path, excluded: frozenset[str] = frozenset()) -> tuple[
     return members, skipped
 
 
+def _member_bytes(root: Path, members: Sequence[tuple[str, Path]]) -> int:
+    total = 0
+    for _, member_path in members:
+        try:
+            total += os.lstat(member_path).st_size
+        except OSError as error:
+            raise _unreadable(root, member_path, error) from error
+    return total
+
+
+def _refuse_oversized(root: Path, size_bytes: int) -> None:
+    limit = _NODE_SIZE_LIMIT_BYTES
+    if size_bytes <= limit:
+        return
+    raise NodePackageError(
+        root,
+        f"the node is {size_bytes / 1e9:.1f} GB ({size_bytes} bytes), and a custom node can be at most "
+        f"{limit / 1024**3:g} GiB ({limit} bytes); move large files such as model weights out of the node folder",
+    )
+
+
 def _copy_declared(source: IO[bytes], target: IO[bytes], declared: int) -> int:
     """Copy from *source* to *target*, returning the byte count, never past *declared*.
 
@@ -255,9 +277,11 @@ def package_node(path: Path, destination: Path | None = None) -> NodePackage:
         raise NodePackageError(root, "node root must be a directory")
 
     members, skipped = _package_files(root, _excluded_member(root, destination))
+    _refuse_oversized(root, _member_bytes(root, members))
     if destination is None:
         with tempfile.TemporaryFile(prefix="comfy-node-package-") as scratch:
             sha256, size_bytes = _write_archive(root, members, scratch)
+        _refuse_oversized(root, size_bytes)
         return NodePackage(None, sha256, size_bytes, tuple(skipped))
     try:
         stream = destination.open("wb+")
@@ -266,4 +290,5 @@ def package_node(path: Path, destination: Path | None = None) -> NodePackage:
         raise NodePackageError(root, f"archive could not be written to {destination}: {detail}") from error
     with stream:
         sha256, size_bytes = _write_archive(root, members, stream)
+    _refuse_oversized(root, size_bytes)
     return NodePackage(destination, sha256, size_bytes, tuple(skipped))
