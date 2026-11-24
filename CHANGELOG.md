@@ -15,6 +15,27 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- `comfy build push` refuses a local custom node over 2 GiB before it uploads
+  anything, and names the node, its size and the limit. It packages the custom
+  nodes before it hashes any model, so the refusal comes before a long model
+  hash. `--dry-run` refuses it the same way. The builder cannot use a node that
+  large, so a push used to upload it and the release's build then failed.
+  `build pull`, `build init`, `build update` and `build status` still read such
+  a node, so a pull can drop it from the spec.
+
+### Removed
+
+- `comfy generate` drops three model aliases whose cloud routes are retired, so
+  every submit was already refused: `kling-extend` (Kling retired the V1.x
+  models the video-extend route accepts), and `luma` and `luma-i2v` (Luma
+  retired its Ray video models and shut Photon down). Submitting one now
+  returns the usual unknown-model error with suggestions rather than failing at
+  the proxy. `comfy generate resume <alias> <job_id>` still accepts all three,
+  since the proxy still serves the routes a job is fetched from, so a job
+  submitted before the retirement can still be collected.
+
 ### Fixed
 
 - A `comfy workflow set-widget` edit keeps the frontend's name-keyed
@@ -28,6 +49,17 @@ history.
   addressed widget is that name's final occurrence. A duplicated name is left
   alone, because one name-keyed slot belongs to the final occurrence and writing
   an earlier one's value there would be a corrupt read rather than a stale one.
+- `comfy generate seedance` with a Seedance 2.x model (`--model
+  dreamina-seedance-2-*`) now polls the job on
+  `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
+  `/proxy/byteplus/...`, which answers 404 `ResourceNotFound` for them, so the
+  run failed after the job was submitted and billed. `--async` prints the
+  resume command with `--model <id>` for every Seedance job, and `comfy generate
+  resume seedance <job_id> --model <id>` polls the matching route (without `--model`,
+  resume uses the model a submit without `--model` would send). Seedance 1.x
+  jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
+  now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
+  the timeout.
 
 ## [1.29.0] - 2026-11-24
 

@@ -95,7 +95,7 @@ class Endpoint:
     request_schema: dict[str, Any]  # resolved (no $ref) request body schema
     request_content_type: str  # "application/json" | "multipart/form-data"
     response_schema: dict[str, Any]  # resolved 200 response schema
-    polling: str | None  # "bfl" | "kling" | "luma" | "topaz" | None
+    polling: str | None  # "bfl" | "kling" | "luma" | "seedance" | None
 
 
 # Short, creative-facing aliases mapping to the curated openapi paths below.
@@ -139,11 +139,7 @@ _ALIASES: dict[str, str] = {
     # Video — Kling
     "kling": "kling/v1/videos/text2video",
     "kling-i2v": "kling/v1/videos/image2video",
-    "kling-extend": "kling/v1/videos/video-extend",
     "kling-lipsync": "kling/v1/videos/lip-sync",
-    # Video — Luma Dream Machine
-    "luma": "luma/generations",
-    "luma-i2v": "luma/generations/image",
     # Video — MiniMax / Hailuo
     "hailuo": "minimax/video_generation",
     # Video — Runway Gen-3
@@ -166,6 +162,91 @@ _ALIASES: dict[str, str] = {
     # ByteDance Seedance (video).
     "seedance": "byteplus/api/v3/contents/generations/tasks",
 }
+
+
+# Router v2 id for each alias. None = proxy-only today: the operation has no
+# Router id (non-JSON encoding, or an unbound model family). A value ending in
+# "/{model}" is a family: the alias's model choice becomes the id suffix, and
+# the second element is the default when no model is chosen. A plain id pins
+# one model; `router_id` returns None for any other model choice.
+# This table is data only — nothing in `comfy generate` consumes it yet; the
+# Router client that will read it is separate work. Keep it exhaustive over
+# `_ALIASES` (the test in test_spec.py enforces that).
+_ROUTER_IDS: dict[str, tuple[str, str | None] | None] = {
+    "flux-pro": ("bfl/flux-pro-1.1", None),
+    "flux-ultra": ("bfl/flux-pro-1.1-ultra", None),
+    "flux-2": ("bfl/flux-2-pro", None),
+    "flux-kontext": ("bfl/flux-kontext-pro", None),
+    "flux-kontext-max": ("bfl/flux-kontext-max", None),
+    "flux-fill": ("bfl/flux-pro-1.0-fill", None),
+    "flux-expand": ("bfl/flux-pro-1.0-expand", None),
+    "ideogram": ("ideogram/ideogram-v3", None),
+    "ideogram-edit": None,
+    "ideogram-remix": None,
+    "ideogram-reframe": None,
+    "ideogram-bg": None,
+    "recraft": ("recraft/{model}", "recraftv3"),
+    "recraft-vectorize": None,
+    "recraft-upscale": None,
+    "recraft-upscale-creative": None,
+    "recraft-rmbg": None,
+    "recraft-replace-bg": None,
+    "recraft-i2i": None,
+    "recraft-inpaint": None,
+    "dalle": ("openai/{model}", "gpt-image-2.5-sunburst"),
+    "dalle-edit": ("openai/{model}", "gpt-image-2.5-sunburst"),  # same id; Router selects edits when `image` is present
+    "grok": ("xai/grok-imagine-image", None),
+    "grok-edit": ("xai/grok-imagine-image", None),  # same id; `image`/`images` selects the edit
+    "reve": None,
+    "reve-edit": None,
+    "runway": ("runway/gen4_image", None),
+    "runway-i2v": ("runway/gen4_turbo", None),
+    "kling": ("kling/{model}", "kling-v2-5-turbo"),
+    "kling-i2v": ("kling/{model}", "kling-v2-5-turbo"),  # same id; `image` selects image2video
+    "kling-lipsync": ("kling/videos-lip-sync", None),
+    "hailuo": None,
+    # Moonvalley left the Router catalog; its prompt routes stay on /proxy only.
+    "moonvalley-t2v": None,
+    "moonvalley-i2v": None,
+    "pika": None,
+    "pika-i2v": None,
+    "vidu": None,
+    "vidu-i2v": None,
+    "vidu-extend": None,
+    "grok-video": ("xai/grok-imagine-video", None),
+    "nano-banana": ("vertexai/{model}", "gemini-2.5-flash-image"),
+    "seedance": ("byteplus/{model}", "seedance-1-0-pro-250528"),
+}
+
+
+# One segment of a Router id: lowercase alphanumerics joined by `.`, `_` or `-`.
+_ROUTER_SEGMENT_RE = _re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$")
+
+
+def router_id(alias: str, model: str | None = None) -> str | None:
+    """Router v2 id for an alias, or None when the alias is proxy-only.
+
+    For a family id (one whose template contains ``{model}``) the suffix is
+    ``model`` when given, else the table's default. A non-family id pins one
+    model, so it is returned only when ``model`` is omitted or names that same
+    model; any other ``model`` has no Router id and gets None, rather than being
+    silently swapped for the pinned one. A resolved suffix that is not a valid
+    Router segment (empty, or carrying ``/``, ``..``, whitespace, uppercase, …)
+    also gets None. An alias absent from the table is treated as proxy-only
+    (None), so callers never raise on a stray key."""
+    entry = _ROUTER_IDS.get(alias)
+    if entry is None:
+        return None
+    template, default = entry
+    provider, _, pinned = template.partition("/")
+    if pinned == "{model}":
+        suffix = default if model is None else model
+        if not suffix or not _ROUTER_SEGMENT_RE.fullmatch(suffix):
+            return None
+        return f"{provider}/{suffix}"
+    if model is not None and model != pinned:
+        return None
+    return template
 
 
 # Used in the `list` table for endpoints whose openapi summary is empty or too
@@ -244,11 +325,7 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     # Video — Kling
     ("kling/v1/videos/text2video", "text-to-video", "kling"),
     ("kling/v1/videos/image2video", "image-to-video", "kling"),
-    ("kling/v1/videos/video-extend", "video-extend", "kling"),
     ("kling/v1/videos/lip-sync", "lipsync", "kling"),
-    # Video — Luma
-    ("luma/generations", "text-to-video", "luma"),
-    ("luma/generations/image", "image-to-video", "luma"),
     # Video — MiniMax / Hailuo
     ("minimax/video_generation", "text-to-video", "minimax"),
     # Video — Runway
@@ -269,6 +346,23 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     ("vertexai/gemini/{model}", "image-edit", None),
     # ByteDance Seedance (video) — async, custom poller.
     ("byteplus/api/v3/contents/generations/tasks", "text-to-video", "seedance"),
+]
+
+
+# Retired aliases kept for `comfy generate resume` only. Their submit routes are
+# dead upstream, but /proxy still serves the GET a job is fetched by, so a job
+# accepted before the retirement stays retrievable. Submit, `list` and `schema`
+# never see these: they go through `get_endpoint`, which reads only the curated
+# tables above.
+_RESUME_ONLY_ALIASES: dict[str, str] = {
+    "kling-extend": "kling/v1/videos/video-extend",
+    "luma": "luma/generations",
+    "luma-i2v": "luma/generations/image",
+}
+_RESUME_ONLY_ALLOWLIST: list[tuple[str, str, str | None]] = [
+    ("kling/v1/videos/video-extend", "video-extend", "kling"),
+    ("luma/generations", "text-to-video", "luma"),
+    ("luma/generations/image", "image-to-video", "luma"),
 ]
 
 
@@ -497,8 +591,6 @@ def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None
         return "bfl"
     if partner == "kling" and "data" in props:
         return "kling"
-    if partner == "luma" and ("state" in props or "id" in props):
-        return "luma"
     if partner == "topaz" and "process_id" in props:
         return "topaz"
     return None
@@ -530,6 +622,15 @@ def _select_operation(node: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
 
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, Endpoint]:
+    return _build_registry(_ENDPOINT_ALLOWLIST)
+
+
+@lru_cache(maxsize=1)
+def _resume_only_registry() -> dict[str, Endpoint]:
+    return _build_registry(_RESUME_ONLY_ALLOWLIST)
+
+
+def _build_registry(allowlist: list[tuple[str, str, str | None]]) -> dict[str, Endpoint]:
     spec = load_raw_spec()
     paths = spec.get("paths") or {}
     if not isinstance(paths, dict):
@@ -538,7 +639,7 @@ def _registry() -> dict[str, Endpoint]:
     resolution_budget_limit = _schema_resolution_budget(spec)
     aggregate_resolution_budget = [resolution_budget_limit * 4]
     resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
-    for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
+    for endpoint_id, category, polling_hint in allowlist:
         if aggregate_resolution_budget[0] <= 0:
             break
         path = PROXY_PREFIX + endpoint_id
@@ -647,6 +748,19 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     if canonical in reg:
         return reg[canonical]
     raise SpecError(_unknown_endpoint_message(endpoint_id))
+
+
+def get_resume_endpoint(endpoint_id: str) -> Endpoint:
+    """Like `get_endpoint`, but also resolves the retired, resume-only aliases
+    so `comfy generate resume` can fetch a job submitted before retirement."""
+    try:
+        return get_endpoint(endpoint_id)
+    except SpecError:
+        canonical = _RESUME_ONLY_ALIASES.get(endpoint_id) or resolve_alias(endpoint_id)
+        endpoint = _resume_only_registry().get(canonical)
+        if endpoint is None:
+            raise
+        return endpoint
 
 
 def _schema_accepts_string_value(
@@ -1278,6 +1392,7 @@ def write_cache(yaml_text: str) -> Path:
     # Invalidate in-process cache so the next load picks it up.
     load_raw_spec.cache_clear()
     _registry.cache_clear()
+    _resume_only_registry.cache_clear()
     return _USER_CACHE
 
 

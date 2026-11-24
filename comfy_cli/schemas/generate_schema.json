@@ -33,7 +33,7 @@
     },
     "polling": {
       "type": ["string", "null"],
-      "description": "Poller family driving the async result fetch (bfl, kling, luma, topaz), or null for sync models."
+      "description": "Poller family driving the async result fetch (e.g. bfl, kling, runway, seedance), or null for sync models."
     },
     "content_type": {
       "type": "string",
