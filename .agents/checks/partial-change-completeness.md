@@ -27,15 +27,17 @@ change until it is unreviewable.
 2. Find the boundary. A partial change must say where it stops. Accept any of:
    a named follow-up issue or PR, a `## Revisit triggers` section (the ADR
    convention, `docs/adr/`) or exception entry (`program/exceptions.md`), a
-   test that pins the unfixed case as currently-expected behaviour, or a
-   comment at the code site naming what is still wrong. Each of these must be
+   test that pins the unfixed case as currently-expected behaviour, a comment
+   at the code site naming what is still wrong, or a documented plan that
+   enumerates the later waves (see step 7). Each of these must be
    a resolvable artifact — a real issue/PR number, an existing file section, or
    a test that runs — not prose alone; a sentence like "deliberately not doing
    X" without one of these does not satisfy this step.
 3. Flag as medium when a change fixes part of a problem and names no boundary at
    all, **or names one in prose without a resolvable artifact per step 2** —
-   a sentence that points at a remainder without an issue, PR, section, or
-   test behind it does not satisfy step 2, so treat it the same as silence.
+   a sentence that points at a remainder with none of step 2's artifacts behind
+   it (issue, PR, section, test, **or a comment at the code site**) does not
+   satisfy step 2, so treat it the same as silence.
    The defect is the silence, not the partiality: the next reader cannot tell
    whether the remainder is known, forgotten, or deliberately refused.
 4. Flag as medium when the change cites evidence *for its fix* that the diff
@@ -58,6 +60,13 @@ change until it is unreviewable.
 7. Where a change is one wave of a documented plan, check it against that plan's
    acceptance for *this* wave only. A wave that meets its own acceptance is
    complete even while later waves are empty.
+
+   **The plan is itself a step 2 artifact** when it is a resolvable document
+   that names the later waves — a file in the repository, or a tracker item with
+   a number. That resolves the tension between this step and step 3: a wave need
+   not also open an issue for work its own plan already enumerates, because the
+   plan is where the remainder is tracked. A change that merely *claims* to be
+   one wave of a plan, with no such document to read, falls back to step 3.
 
 ## What this axis is not
 
