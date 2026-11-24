@@ -20,24 +20,36 @@ change until it is unreviewable.
 ## Review method
 
 1. Identify what the change claims to fix, from its title, body and tests — not
-   from the size of the diff.
+   from the size of the diff. Title and body come with the review context, not
+   from a fetch this check performs; a boundary stated only in a linked tracker
+   item is verified by reading that item's own text if it is in the diff or
+   context, and left unflagged rather than guessed at otherwise.
 2. Find the boundary. A partial change must say where it stops. Accept any of:
-   a named follow-up issue or PR, a `## Revisit` or exception entry, a test that
-   pins the unfixed case as currently-expected behaviour, or a comment at the
-   code site naming what is still wrong.
+   a named follow-up issue or PR, a `## Revisit triggers` section (the ADR
+   convention, `docs/adr/`) or exception entry (`program/exceptions.md`), a
+   test that pins the unfixed case as currently-expected behaviour, or a
+   comment at the code site naming what is still wrong. Each of these must be
+   a resolvable artifact — a real issue/PR number, an existing file section, or
+   a test that runs — not prose alone; a sentence like "deliberately not doing
+   X" without one of these does not satisfy this step.
 3. Flag as medium when a change fixes part of a problem and names no boundary at
    all. The defect is the silence, not the partiality: the next reader cannot
    tell whether the remainder is known, forgotten, or deliberately refused.
-4. Flag as medium when the change's own evidence contradicts its claim — a
-   stated measurement the diff cannot produce, a cited fixture that does not
-   exercise the path, or a test that passes identically before the change. Run
-   or read the evidence before accepting it.
-5. Flag as **low** when the remainder is named and tracked. A deliberately
-   partial fix with a stated floor is a complete unit of work. Do not hold it
-   for the rest of its epic.
-6. Do not flag scope the author explicitly refused with a reason. "Deliberately
-   not doing X, because Y" is a decision; ask for the reason to be recorded if
-   it is missing, not for the scope to grow.
+4. Flag as medium when the change cites evidence *for its fix* that the diff
+   contradicts — a stated measurement the diff cannot produce, a cited fixture
+   that does not exercise the path, or a test claimed to demonstrate the new
+   behaviour that in fact passes identically before the change. This does not
+   apply to a boundary-pinning test from step 2: that test is supposed to pass
+   unchanged, and passing before and after is how it does its job, not a
+   contradiction. Read the evidence before accepting it; this check's tools
+   cannot execute anything, so treat a claim this check cannot read as unverified
+   rather than run it yourself.
+5. Where the remainder is named and tracked per step 2, do not flag this axis.
+   A deliberately partial fix with a stated floor is a complete unit of work;
+   do not hold it for the rest of its epic.
+6. Do not flag scope the author explicitly refused with a reason **and** a
+   resolvable artifact per step 2. Refused scope with a reason but no artifact
+   is the step-3 case (medium): ask for the artifact, not for the scope to grow.
 7. Where a change is one wave of a documented plan, check it against that plan's
    acceptance for *this* wave only. A wave that meets its own acceptance is
    complete even while later waves are empty.
