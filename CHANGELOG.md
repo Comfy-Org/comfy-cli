@@ -36,6 +36,20 @@ history.
   since the proxy still serves the routes a job is fetched from, so a job
   submitted before the retirement can still be collected.
 
+### Fixed
+
+- `comfy generate seedance` with a Seedance 2.x model (`--model
+  dreamina-seedance-2-*`) now polls the job on
+  `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
+  `/proxy/byteplus/...`, which answers 404 `ResourceNotFound` for them, so the
+  run failed after the job was submitted and billed. `--async` prints the
+  resume command with `--model <id>` for every Seedance job, and `comfy generate
+  resume seedance <job_id> --model <id>` polls the matching route (without `--model`,
+  resume uses the model a submit without `--model` would send). Seedance 1.x
+  jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
+  now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
+  the timeout.
+
 ## [1.29.0] - 2026-11-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.
