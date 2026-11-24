@@ -17,7 +17,7 @@ history.
 
 ## [1.29.0] - 2026-11-24
 
-[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0.
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.
 
 ### Added
 
@@ -71,6 +71,23 @@ history.
 
 ### Changed
 
+- **Breaking:** `comfy generate --emit-workflow` / `--emit-ops` with two or
+  more `--image` files no longer builds a chain of the deprecated `ImageBatch`
+  node. The images now go into one `BatchImagesNode` (one slot per image, in
+  `--image` order), so the emitted graph has no node marked deprecated in
+  ComfyUI. N images now give one batch node instead of N-1, so the emitted node
+  classes and ids differ, and the graph loads only on a ComfyUI that has
+  `BatchImagesNode`. More than 50 files for one image flag, the node's limit,
+  now fails with an emit error; the old chain took any number.
+- **Breaking:** stream-dialect conformance: `comfy jobs watch` now emits one
+  `execution_cached` event **per cached node** (`{"node": "<id>", …}`), the same
+  shape `comfy run` has always emitted, instead of the single list-shaped
+  `{"nodes": [...]}` event that shipped in 1.16.0. `docs/json-output.md`
+  promises the run stream and the watch stream speak one dialect, so a consumer
+  written against the documented run dialect was undercounting every cached node
+  beyond the first on a watch stream. Consumers written to the documented shape
+  are unaffected or fixed by this; the `nodes` array remains accepted by the
+  published event schema so a stream captured from 1.16.0 still validates.
 - The Run on Cloud skill asks before submitting one paid test job, including
   validation and preflight runs. Declining still saves the prepared workflow
   and returns its Cloud link with execution marked unverified. Upload, build,
@@ -78,11 +95,7 @@ history.
 
 ### Fixed
 
-- `comfy generate --emit-workflow` / `--emit-ops` with two or more `--image`
-  files no longer builds a chain of the deprecated `ImageBatch` node. The
-  images now go into one `BatchImagesNode` (one slot per image, in `--image`
-  order), so the emitted graph has no node marked deprecated in ComfyUI. N
-  images now give one batch node instead of N-1.
+- `comfy templates ls --model` (and `templates get --where model=`) find a template asked for by base model plus variant. The gallery lists the base model in `models` ("Seedream 5.0", "Krea 2") and names the variant only in the title, tags or template name, so `--model "Seedream 5.0 Lite"`, `--model "krea 2 turbo"` and `--model "Qwen Image ControlNet"` found nothing. A template now also matches when the first word is a word of one of its model names and every other word is a whole word of that model name, the title, the tags or the template name; a number outside the model name counts only in the title. A query that matched before matches the same templates.
 - Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
   `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
   the ComfyUI canvas as a workflow. The run sends the canvas graph as
@@ -473,7 +486,6 @@ history.
 
 ### Fixed
 
-- `comfy templates ls --model` (and `templates get --where model=`) find a template asked for by base model plus variant. The gallery lists the base model in `models` ("Seedream 5.0", "Krea 2") and names the variant only in the title, tags or template name, so `--model "Seedream 5.0 Lite"`, `--model "krea 2 turbo"` and `--model "Qwen Image ControlNet"` found nothing. A template now also matches when the first word is a word of one of its model names and every other word is a whole word of that model name, the title, the tags or the template name; a number outside the model name counts only in the title. A query that matched before matches the same templates.
 - Search matches names however their separators are written. `comfy models search --text` on Cloud now finds `minimax_h3_ref2va_….safetensors` for `MiniMax H3` and `wan2.2_t2v_….safetensors` for `wan 2.2`: every word must appear, with `- _ . space` ignored, the rule local search already used. Before, Cloud sent the whole query as one substring and a multi-word name found nothing. `comfy templates ls` (and `templates get --where`) match `--model`, `--name` and `--provider` the same way, so `--model "Wan 2.2"` finds the gallery's `Wan2.2`, and `comfy nodes search` finds `LTX 2.5` nodes for `LTX-2.5`. On Cloud a word the filename splits (`sdxl` for `sd_xl_base_1.0.safetensors`) is found too: when the server's narrowed answer has no match, search scans without the server filter. A scan stops after 10,000 assets, and `total_is_lower_bound` is then true.
 
 - `comfy build push --dry-run` now runs the push's registry-pin check, so a pin the builder cannot place fails the dry run with the push's own `build_registry_pin_missing` error instead of passing it. A version the registry has Flagged was the common case: the dry run passed, and the push was refused only after the plan had been disclosed. The check asks the builder's snapshot importer to place each public pack, a read that writes nothing, and the dry run still uploads and saves nothing. The `--json` payload of a push and a dry run carries `public_pins_checked`, the number of public pins the builder placed (0 when the spec has none and the builder was not asked), so a script can tell a checked pin set from a spec with nothing to check. A spec that pins a public pack now needs sign-in for its dry run (`build_not_signed_in` otherwise); a spec whose packs are all local still sends no request. Push and dry run also refuse when the registry did not answer for a pack (the importer's `unverifiedPins`), instead of treating the unchecked pin as resolved; refuse with `build_spec_invalid`, before sending anything, a `repository` that is not a public GitHub address (`https://github.com/<org>/<repo>`, `git@github.com:<org>/<repo>.git` or `ssh://git@github.com/<org>/<repo>`), so one that carries a user name or token, does not parse, or names another host never leaves the machine; and report a builder response that times out or drops mid-body as `build_builder_error` instead of an internal error.
@@ -1557,18 +1569,6 @@ pull requests.
 ### Added
 
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
-
-### Fixed
-
-- Stream-dialect conformance: `comfy jobs watch` now emits one
-  `execution_cached` event **per cached node** (`{"node": "<id>", …}`), the same
-  shape `comfy run` has always emitted, instead of the single list-shaped
-  `{"nodes": [...]}` event that shipped in 1.16.0. `docs/json-output.md`
-  promises the run stream and the watch stream speak one dialect, so a consumer
-  written against the documented run dialect was undercounting every cached node
-  beyond the first on a watch stream. Consumers written to the documented shape
-  are unaffected or fixed by this; the `nodes` array remains accepted by the
-  published event schema so a stream captured from 1.16.0 still validates.
 
 ## [1.16.0] - 2026-08-10
 
