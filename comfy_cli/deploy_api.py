@@ -352,6 +352,17 @@ class DeployClient:
             _Request(operation="logs", parts=("deployments", deployment_id, "logs"), max_bytes=_MAX_LOG_JSON)
         )
 
+    def add_deployment_model(self, deployment_id: str, blob_id: str, folder: str) -> dict:
+        return self._post("models", ("deployments", deployment_id, "models"), {"blobId": blob_id, "type": folder})
+
+    def list_deployment_models(self, deployment_id: str) -> dict:
+        return self._get("models", ("deployments", deployment_id, "models"))
+
+    def remove_deployment_model(self, deployment_id: str, model_id: str) -> dict:
+        return self._request(
+            _Request(operation="models", parts=("deployments", deployment_id, "models", model_id), method="DELETE")
+        )
+
     def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> dict:
         return self._get(
             "estimate", ("deploy-estimate",), {"releaseId": release_id, "gpuClass": gpu_class, "region": region}

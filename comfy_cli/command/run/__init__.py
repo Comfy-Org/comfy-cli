@@ -37,6 +37,7 @@ from comfy_cli.command.run.loader import _load_workflow_file as _load_workflow_f
 from comfy_cli.command.run.loader import _node_errors_to_list as _node_errors_to_list
 from comfy_cli.command.run.loader import is_ui_workflow as is_ui_workflow
 from comfy_cli.command.run.loader import pop_compose_meta as pop_compose_meta
+from comfy_cli.command.run.loader import ui_workflow_extra_data as ui_workflow_extra_data
 from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PARTNER_NODE_CATEGORY_PREFIXES
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
@@ -379,7 +380,13 @@ def execute(
         # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
         # Resolved once — the result feeds both the telemetry prop below and the
         # credential gate that follows.
-        cred = _resolve_partner_credential() if not extra_data else None
+        from comfy_cli.cql._net import is_loopback_host
+
+        cred = (
+            _resolve_partner_credential(partner_node_token=is_loopback_host(host.strip("[]")))
+            if not extra_data
+            else None
+        )
         # Fired BEFORE the reject-for-missing-credential branch so runs that are
         # turned away are still counted: that funnel is exactly what the metric
         # is for, and `credential_present: False` marks them. class_types are
@@ -435,6 +442,14 @@ def execute(
                 )
                 raise typer.Exit(code=1)
             extra_data = {cred[0]: cred[1]}
+
+    # Send the canvas graph with the run, as the editor's Queue button does, so
+    # save nodes write `workflow` into the file and it drags back as a workflow.
+    # Merged only after the credential gate above, which reads an
+    # empty `extra_data` as "no explicit key".
+    pnginfo = ui_workflow_extra_data(raw_workflow) if is_ui else None
+    if pnginfo:
+        extra_data = {**(extra_data or {}), **pnginfo}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
     _preflight_validate(
@@ -1256,6 +1271,10 @@ def execute_cloud(
     # which must NOT trigger a second round-trip.
     cloud_object_info: dict | None = None
 
+    # Captured before the conversion below replaces `raw_workflow` with the API
+    # graph: the canvas graph rides the submit as extra_pnginfo.
+    submit_extra_data = ui_workflow_extra_data(raw_workflow) if is_ui else None
+
     if is_ui:
         # Frontend-format workflows (the `nodes`+`links` shape from the canvas
         # exporter and `comfy templates fetch`) have to be lowered to the API
@@ -1411,11 +1430,19 @@ def execute_cloud(
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
                 submit = client.submit_prompt(
-                    parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+                    parsed_workflow,
+                    client_id,
+                    workflow_id=workflow_id,
+                    output_node_ids=output_node_ids,
+                    extra_data=submit_extra_data,
                 )
         else:
             submit = client.submit_prompt(
-                parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+                parsed_workflow,
+                client_id,
+                workflow_id=workflow_id,
+                output_node_ids=output_node_ids,
+                extra_data=submit_extra_data,
             )
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")

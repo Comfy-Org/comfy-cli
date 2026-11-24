@@ -13,6 +13,7 @@ from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command import deploy_cancel as _deploy_cancel
 from comfy_cli.command import deploy_lifecycle as _deploy_lifecycle
 from comfy_cli.command import deploy_ls as _deploy_ls
+from comfy_cli.command import deploy_models as _deploy_models
 from comfy_cli.command import deploy_read as _deploy_read
 from comfy_cli.command import deploy_refs as _deploy_refs
 from comfy_cli.command import deploy_rename as _deploy_rename
@@ -72,6 +73,7 @@ from comfy_cli.output import get_renderer
 app = typer.Typer(no_args_is_help=True, help="Create and manage serverless deployments.")
 refs_app = typer.Typer(no_args_is_help=True, help="Inspect deployment reference catalogs.")
 app.add_typer(refs_app, name="refs")
+app.add_typer(_deploy_models.app, name="models")
 DeployPath = Annotated[
     str | None,
     typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),

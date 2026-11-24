@@ -353,11 +353,12 @@ a retry after a failed job. Run comfy commands one at a time.
 
 Save the prepared editor-format file whether or not a test job ran (the copy,
 if you changed one, never `api.json`). Include the selected deployment even
-when the person declined the test:
+when the person declined the test. Set `COMFY_WORKFLOW_SOURCE=run_on_cloud`
+for this command alone so Cloud can count saves from this flow.
 
 ```shell
-comfy --json workflow save <file> --name '<name>' --where cloud
-comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id>   # selected a deployment
+COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save <file> --name '<name>' --where cloud
+COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id>   # selected a deployment
 ```
 
 It saves into a new folder in the Cloud Workflows sidebar and never replaces a

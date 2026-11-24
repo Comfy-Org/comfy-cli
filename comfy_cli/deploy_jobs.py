@@ -59,6 +59,14 @@ _SUBMIT_ERRORS: Final = {
         "code": "deploy_workflow_invalid",
         "message": "the workflow is invalid",
     },
+    (422, "model_not_ready"): {
+        "code": "deploy_model_not_ready",
+        "message": "a model file the workflow names is still being added to the deployment",
+    },
+    (422, "model_failed"): {
+        "code": "deploy_model_failed",
+        "message": "a model file the workflow names was not added to the deployment",
+    },
     (422, "workflow_format_ui"): {
         "code": "deploy_workflow_invalid",
         "message": "the workflow is not in API format",

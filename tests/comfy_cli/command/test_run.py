@@ -271,6 +271,17 @@ class TestWorkflowExecutionAuth:
         body = json.loads(mock_open.call_args[0][0].data)
         assert body["extra_data"] == {"comfy_usage_source": "some-other-surface"}
 
+    def test_queue_sends_extra_pnginfo_in_the_body(self, workflow):
+        """The canvas graph handed in as ``extra_data`` reaches the ``/prompt``
+        body under ``extra_pnginfo.workflow``."""
+        canvas = {"nodes": [{"id": 1}], "links": []}
+        ex = self._make_exec(workflow, extra_data={"extra_pnginfo": {"workflow": canvas}})
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"]["extra_pnginfo"] == {"workflow": canvas}
+
     def test_queue_sends_usage_source_header(self, workflow):
         ex = self._make_exec(workflow)
         with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
@@ -1784,6 +1795,31 @@ class TestExecutePartnerNodePreflight:
             extra = kwargs.get("extra_data") or {}
             assert extra.get("api_key_comfy_org") == "test-key-abc"
 
+    @pytest.mark.parametrize(
+        ("host", "partner_node_token"),
+        [("127.0.0.1", True), ("localhost", True), ("[::1]", True), ("10.0.0.5", False), ("gpu-box.lan", False)],
+    )
+    def test_only_a_loopback_comfyui_gets_a_partner_node_token(self, tmp_path, host, partner_node_token):
+        wf_file = self._wf_file(tmp_path)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch(
+                "comfy_cli.command.run._resolve_partner_credential",
+                return_value=("auth_token_comfy_org", "partner-node-token"),
+            ) as MockCred,
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host=host, port=8188, wait=True, timeout=30, allow_spend=True)
+
+        MockCred.assert_called_once_with(partner_node_token=partner_node_token)
+        assert MockExec.call_args.kwargs["extra_data"] == {"auth_token_comfy_org": "partner-node-token"}
+
     def test_non_partner_workflow_skips_preflight(self, workflow_file, monkeypatch):
         """The preflight must not gate ordinary workflows. ``_fetch_object_info``
         is allowed to be skipped when no partner nodes are present (or
@@ -2521,6 +2557,49 @@ class TestExecuteUiWorkflow:
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             assert MockExec.call_args.kwargs["extra_data"]["api_key_comfy_org"] == "sk-test"
 
+    def test_ui_workflow_run_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file):
+        """The editor's Queue button sends the canvas graph as
+        ``extra_data.extra_pnginfo.workflow``; save nodes write it into the
+        output file, which is what lets the file drag back as a workflow. A UI
+        run from the CLI (how the Comfy agent submits) must send the same."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="sk-test")
+
+            extra = MockExec.call_args.kwargs["extra_data"]
+            assert extra["extra_pnginfo"] == {"workflow": self.UI}
+            # The explicit key still rides alongside it.
+            assert extra["api_key_comfy_org"] == "sk-test"
+
+    def test_api_workflow_run_sends_no_extra_pnginfo(self, tmp_path):
+        """An API-format input has no canvas graph to send."""
+        path = tmp_path / "api.json"
+        path.write_text(json.dumps({"1": {"class_type": "PreviewImage", "inputs": {}}}))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
+
+            assert "extra_pnginfo" not in (MockExec.call_args.kwargs["extra_data"] or {})
+
     def test_ui_workflow_exits_when_conversion_yields_nothing(self):
         # All nodes are UI-only (Note/PrimitiveNode/Reroute/GetNode/SetNode) and
         # therefore stripped by the converter → execute() should bail before
@@ -2671,6 +2750,28 @@ class TestExecuteCloudAutoConvert:
         # The CONVERTED workflow was passed to the submit call — not the raw UI form.
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
+
+    def test_ui_workflow_submit_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file, fake_target):
+        """Cloud path: the API graph is what runs, and the UI graph it
+        came from rides ``extra_data.extra_pnginfo.workflow`` like an editor run."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-png", number=1, node_errors={})
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={"KSampler": {"output_node": True}}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        submitted_args, submitted_kwargs = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+        assert submitted_kwargs["extra_data"] == {"extra_pnginfo": {"workflow": self.UI_WORKFLOW}}
 
     def test_ui_workflow_conversion_honors_object_info_file_env(
         self, ui_workflow_file, fake_target, tmp_path, monkeypatch

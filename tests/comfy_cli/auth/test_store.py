@@ -127,3 +127,12 @@ def test_corrupt_store_does_not_explode(isolated_secrets):
 def test_empty_key_is_rejected(isolated_secrets):
     with pytest.raises(ValueError):
         auth_store.set("civitai", "")
+
+
+@pytest.mark.parametrize("body", ["[]", '"text"', "3"])
+def test_a_store_holding_a_json_non_object_reads_as_empty(isolated_secrets, body):
+    isolated_secrets.write_text(body)
+    assert auth_store.get_cloud_session() is None
+    assert auth_store.get_partner_node_token() is None
+    auth_store.set("civitai", "abcd1234efgh5678")
+    assert auth_store.get("civitai").key == "abcd1234efgh5678"

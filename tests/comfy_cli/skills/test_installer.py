@@ -480,6 +480,32 @@ def test_deploy_skills_describe_approved_uploads():
     assert "details.temp_dir" in row
 
 
+def test_deploy_skills_say_when_a_refused_model_add_already_sent_the_file():
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_models_unavailable` |")
+    )
+    assert "nothing was sent" not in row
+    assert "one upload link" in row
+    assert "`comfy assets library upload <file> --type <folder>`" in row
+    deploy = " ".join(skill_content("comfy-deploy").split())
+    assert "answers one upload link instead sends the whole file before the refusal" in deploy
+    assert "`comfy assets library upload <file> --type <folder>`" in deploy
+
+
+def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
+    back = skill_content("comfy-deploy").split("## Going back to the build", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(back.split())
+    assert "a pack, a model," not in flat
+    assert "`comfy deploy models add` puts one on a deployment, running or stopped, with no new release" in flat
+    assert "`deploy_models_unavailable`" in flat
+    assert "`deploy_conflict` whose `details.server_code` is `MODEL_POLICY`" in flat
+    assert "`deploy_conflict` for the release's model policy" not in flat
+    assert "a `modelPolicy` that lets it through" in flat
+    assert "Where the workspace has deployment updates on, `up` moves the deployment onto it" in flat
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 
@@ -1666,3 +1692,14 @@ def test_run_on_cloud_skill_asks_about_the_exact_input_and_partner_spend():
     assert "Do not fetch it again" in text
     assert "`spend_consent_required`" in text
     assert "`--allow-spend`" in text
+
+
+def test_deploy_skills_say_a_file_being_removed_while_added_is_added_again_only_once_it_is_gone():
+    row = next(
+        line
+        for line in skill_content("comfy-deploy-failures").splitlines()
+        if line.startswith("| `deploy_model_removed` |")
+    )
+    assert "`comfy deploy models ls <deployment>` no longer lists it" in row
+    deploy = " ".join(skill_content("comfy-deploy").split())
+    assert "`deploy_model_removed` (once `ls` no longer lists it, add it again)" in deploy

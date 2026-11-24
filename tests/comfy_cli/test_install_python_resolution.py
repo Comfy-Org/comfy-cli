@@ -359,3 +359,25 @@ class TestTorchInstallCommands:
         cmd = _get_torch_install_cmd(mock_run.call_args_list)
         assert "--index-url" in cmd
         assert "https://download.pytorch.org/whl/cu126" in cmd
+
+    @pytest.mark.parametrize("plat", [constants.OS.LINUX, constants.OS.WINDOWS, constants.OS.MACOS])
+    def test_cpu_uses_cpu_wheel_index(self, tmp_path, plat):
+        """Regression test for #344: `--cpu` (gpu=None) must install torch from the CPU wheel index."""
+        repo_dir = str(tmp_path)
+        (tmp_path / "requirements.txt").write_text("some-package\n")
+
+        with patch("comfy_cli.command.install.subprocess.run", return_value=MagicMock(returncode=0)) as mock_run:
+            install.pip_install_comfyui_dependencies(
+                repo_dir,
+                gpu=None,
+                plat=plat,
+                cuda_version=constants.CUDAVersion.v12_6,
+                skip_torch_or_directml=False,
+                skip_requirement=False,
+                python="/usr/bin/python",
+            )
+
+        cmd = _get_torch_install_cmd(mock_run.call_args_list)
+        assert cmd is not None, "no torch install command was issued for the CPU path"
+        assert cmd[cmd.index("--extra-index-url") + 1] == "https://download.pytorch.org/whl/cpu"
+        assert not any("download.pytorch.org/whl/cu" in a for a in cmd)
