@@ -27,7 +27,7 @@ from build_push_support import (
 from comfy_cli import error_codes
 from comfy_cli.builder_api import BuilderClient
 from comfy_cli.command import build
-from comfy_cli.command.build_package import package_node
+from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_push import pending_uploads, prepare_push
 from comfy_cli.command.build_spec import JsonObject, JsonValue
@@ -670,6 +670,67 @@ def test_an_unreadable_node_file_is_a_spec_error_rather_than_a_traceback(
     # The node directory to fix, never the spec YAML: routing this failure
     # through `BuildSpecInvalidError` used to relabel it with the spec's path.
     assert error["details"]["path"] == str(workspace / "custom_nodes" / "local-node")
+
+
+@pytest.mark.parametrize("args", [(), ("--dry-run",)], ids=["push", "dry-run"])
+def test_a_node_over_the_size_limit_stops_the_push_before_any_upload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
+) -> None:
+    # Given
+    path = write_spec(workspace)
+    before = path.read_bytes()
+    monkeypatch.setattr(build, "_BUILDER_NODE_SIZE_LIMIT_BYTES", 3)
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, *args)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "a custom node can be at most" in error["message"]
+    assert "(4 bytes)" in error["message"]
+    assert error["details"]["path"] == str(workspace / "custom_nodes" / "local-node")
+    assert _calls(client, "create_blob") == []
+    assert _calls(client, "upload_blob") == []
+    assert client.uploaded == []
+    assert path.read_bytes() == before
+
+
+def test_the_push_uses_the_builder_s_two_gib_node_limit() -> None:
+    assert build._BUILDER_NODE_SIZE_LIMIT_BYTES == 2147483648
+
+
+def test_a_node_over_the_size_limit_is_refused_before_any_model_is_hashed(workspace: Path) -> None:
+    # Given
+    write_spec(workspace)
+    paths = resolve_build_paths(str(workspace))
+    hashed: list[Path] = []
+
+    def model_digest(path: Path) -> str:
+        hashed.append(path)
+        return build._sha256_file(path)
+
+    # When
+    with pytest.raises(NodePackageError, match="a custom node can be at most"):
+        prepare_push(reloaded(workspace), paths, model_digest, node_size_limit=3)
+
+    # Then
+    assert hashed == []
+
+
+def test_models_stay_ahead_of_nodes_in_the_upload_plan(workspace: Path) -> None:
+    # Given
+    write_spec(workspace)
+    paths = resolve_build_paths(str(workspace))
+
+    # When
+    preparation = prepare_push(reloaded(workspace), paths, build._sha256_file)
+
+    # Then
+    assert [upload.kind for upload in preparation.uploads] == ["model", "node_zip"]
 
 
 class _InterruptedBuilder(RecordingBuilder):
