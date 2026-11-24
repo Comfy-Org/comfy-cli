@@ -422,6 +422,27 @@ comfy --json workflow delete-node wf.json 7 $CAT                      # removes 
 comfy --json workflow ls-nodes    wf.json                            # id / type / title (no catalog needed)
 ```
 
+`ls-nodes` emits `data.nodes[]` for the TOP LEVEL only (a subgraph instance is one
+opaque row), plus a sibling `data.subgraph_nodes[]` for the nodes INSIDE every live
+subgraph instance — the ones `nodes[]` never shows you. Each interior row carries
+`path` / `instance` / `id` / `type` / `title`, and `mode` (`mute` | `bypass`) only
+when the node is disabled, same as the top-level rows. `path` uses the same
+`<instance>/<interior>` addressing as `comfy workflow slots` (nesting with `/`, e.g.
+`10/3/7`), so it composes directly into a slot address. `data.count` stays the
+top-level count; `data.subgraph_count` counts the interior rows.
+
+Interior rows are a LISTING, not an execution plan: they include muted and bypassed
+nodes, which is the point — `workflow_to_api` silently drops those, so this is the
+only place a reader sees them. To decide what actually runs, check `mode` on the row
+AND on every ancestor: a live `10/3/7` under a muted `10/3` (or under a disabled
+instance `10`, whose `mode` is on its `nodes[]` row) does not execute. Rarely,
+`data.subgraph_truncated: true` appears — the walk hit its row ceiling (10,000
+interior rows), so the listing is incomplete and `subgraph_count` is a floor;
+re-read the graph in smaller pieces. Traversal also has a depth cap of 32 (the
+same cap as the slot walker). An instance deeper than that is omitted, and
+unlike the row ceiling this does **not** set `subgraph_truncated` — a deep
+narrow graph can be incomplete with no truncation flag.
+
 **Building more than one or two nodes? Use `apply` — one batch, one catalog load,
 and `as` aliases so you never capture a minted id by hand:**
 
@@ -942,7 +963,9 @@ subgraph contains a partner node. If no partner credential is sent, it may fail
 mid-run with `execution_error`. On a
 `--where cloud --wait` run, `data.warnings` reports `partial_execution` with `missing_output_node_ids`
 when a targeted node returned nothing, and `partial_execution_targets_ignored`
-when the server ran untargeted nodes anyway.
+when the server ran untargeted nodes anyway. Without `--wait`, the same check
+runs when the job is followed with `comfy jobs watch <prompt_id> --where cloud`
+(or `comfy jobs status`): read `data.warnings` there.
 
 **Scope:** the async-first / `jobs watch` / state-file pattern above is the
 **`comfy run`** workflow path only. `comfy generate` (partner-API one-call)
@@ -1079,6 +1102,14 @@ comfy --json workflow slots path.json
 #   --node <id> lists one node's slots, subgraph interior included (a
 #   template id like 94 works on an inserted canvas; that node's own rows
 #   carry template_node_id)
+#   a promoted subgraph widget row (<instance_id>.<name>) carries
+#   source_address when its interior widget resolves — the interior widget
+#   it stands for, e.g. 57/28.unet_name (the real widget name, even when
+#   the promotion is renamed). Optional: a row omits it when its source
+#   does not resolve, when the value comes from an interior PrimitiveNode,
+#   or when the input is a plain legacy proxyWidgets fallback (a legacy
+#   entry the CLI will repair into a linked input does carry it). Read-only
+#   context: edit at the row's own address
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"

@@ -96,6 +96,21 @@ frames only for the value under this key. Earlier builds of this branch put it
 at `data.details.error` (live path) and `data.error` (terminal path); neither is
 published any more.
 
+The per-node events `jobs watch` streams carry the **same shape** as the `comfy
+run` ones — one event per node, keyed by `node`. ComfyUI's websocket delivers
+`execution_cached` as a single message listing every cached node, and `jobs
+watch` fans that out into one `execution_cached` event per node, exactly as
+`comfy run` does, so a consumer written against the run dialect counts cached
+nodes correctly on either stream. `jobs watch` has no workflow graph in hand,
+so it omits the optional `title` / `class_type` fields that `comfy run`
+attaches to `executing`, `execution_cached` and `executed`; it also does not
+carry the `outputs` array on `executed`, reporting each artifact as its own
+`output` event instead. *(Changed since 1.16.0, whose `jobs watch` emitted one
+`execution_cached` carrying a `nodes` array — a run-dialect consumer counting
+cached nodes per event undercounted every cached node beyond the first. The
+`nodes` array form is still accepted by the published event schema so a stream
+captured from 1.16.0 keeps validating, but nothing emits it.)*
+
 ## Overview
 
 When `--json` is passed, `comfy run` switches into a strict
@@ -235,7 +250,7 @@ the `--print-prompt` and `--no-wait` stream shapes.
 
 | `code`               | Triggered when                                                     | `details`                       | Exit |
 | -------------------- | ------------------------------------------------------------------ | -------------------------------- | ---- |
-| `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login` | —                     | 1 |
+| `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login`. A `403` with `details.reason: "insufficient_scope"` means the login predates a permission Comfy Cloud added; refreshing cannot widen it, so run `comfy cloud login` again to re-authorize | `reason`, `required_scope` (when the server named it) on an insufficient-scope 403; otherwise varies | 1 |
 | `cloud_http_error`   | The cloud API returned a non-2xx response on submit or while polling | `status` (int), `body` (str) on submit; `status`, `prompt_id` while polling | 1 |
 | `cloud_rate_limited` | The cloud API throttled the request (HTTP 429) on submit or while polling. Throttling is not a verdict on the workflow, but it does not by itself prove the submit had no effect, and the CLI never repeats a submit on its own. On submit, wait, then check `comfy jobs ls --where cloud` for the job before re-running; while polling, the job was already submitted, so follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running (the job record is left non-terminal). Cloud only: a local server's 429 is `client_error` | same as `cloud_http_error`, plus `retry_after` (seconds) when the server sent `Retry-After` | 1 |
 | `cloud_payment_required` | The cloud refused the request because the account's plan does not allow it (HTTP 402, or a legacy HTTP 429 whose body type is a plan refusal: free generations used up, subscription required, a partner node or model that needs a paid plan). Not throttling and not a workflow problem; nothing was queued, so do not retry or edit the workflow. A full queue stays `cloud_rate_limited` | `status` (402 or 429), `body` (str), `reason` (the server's refusal type, when it sent one) | 1 |
@@ -286,6 +301,17 @@ more than was asked for, most likely because it does not support
 
 A local run has no `data.warnings`; compare `data.executed_node_ids` with the
 targets to check the same thing.
+
+A cloud `--output-node-ids` run without `--wait` cannot check anything at
+submit time. Its `queued` envelope carries a `data.note` naming the
+`comfy jobs watch <prompt_id> --where cloud` command, and the job's state file
+records the targets (`output_node_ids`, `run_graph_node_ids`,
+`output_node_ids_checked`). Once the job completes, `comfy jobs watch --where
+cloud` and `comfy jobs status --where cloud` run the same check and carry the
+same entries in `data.warnings`; `comfy jobs wait` copies them onto the job's
+row. That key is present only for a targeted job. If the cloud has not
+returned the job's outputs yet, the one entry is `output_node_ids_unchecked`:
+run `comfy jobs status <prompt_id> --where cloud` again.
 
 ## Event reference
 
@@ -395,9 +421,19 @@ closing the previous one.
 ### `execution_cached`
 
 One event per node whose outputs were retrieved from the execution cache
-(from ComfyUI's `execution_cached` websocket message). Same fields as
+(from ComfyUI's `execution_cached` websocket message, which lists every
+cached node in one frame and is fanned out here). Same fields as
 `executing`. A cached output-bearing node (e.g., a cached `SaveImage`)
 may emit both `execution_cached` AND `executed`.
+
+```json
+{"schema": "event/1", "type": "execution_cached", "node": "1", "title": "Latent", "class_type": "EmptyLatentImage", "prompt_id": "9b1c…"}
+```
+
+`comfy jobs watch` emits the same per-node event without `title` /
+`class_type` (see [`jobs watch` attaches as the submitting
+session](#jobs-watch-attaches-as-the-submitting-session)). It never emits a
+list-shaped `nodes` field on this event.
 
 ### `progress`
 
@@ -490,9 +526,10 @@ time. If the callback never arrives, the terminal envelope is an
 ### `upload_plan`, `upload_progress`, `upload_complete`, `upload_storing`
 
 Emitted by `comfy build push` while it uploads model files and packaged custom
-nodes, and by `comfy model upload` and `comfy assets library upload` while they
-upload one model file. They are part of the upload, not the `run` stream, and
-validate against `build_push_event.json`.
+nodes, by `comfy model upload` and `comfy assets library upload` while they
+upload one model file, and by `comfy deploy models add` while it sends one.
+They are part of the upload, not the `run` stream, and validate against
+`build_push_event.json`.
 
 Where they go depends on the mode. Under `--json-stream` they are on stdout,
 ahead of the envelope, like every other event. Under plain `--json` (which is

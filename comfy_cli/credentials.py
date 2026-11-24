@@ -68,6 +68,9 @@ CLOUD_BEARER_ENV_VAR = "COMFY_CLOUD_AUTH_TOKEN"
 
 Purpose = Literal["cloud", "partner"]
 
+_PARTNER_NODE_LOCK_TIMEOUT_S = 90.0
+_FULL_SIGN_IN_LEEWAY_S = 14 * 60
+
 # purpose → (env var, stored-key provider, strip the stored key?)
 _PURPOSES: dict[str, tuple[str, str, bool]] = {
     "cloud": ("COMFY_CLOUD_API_KEY", CLOUD_API_KEY_PROVIDER, False),
@@ -93,6 +96,7 @@ def get_session(
     allow_clear: bool = True,
     expect: Callable[[CloudSession], bool] | None = None,
     rejected_access_token: str | None = None,
+    leeway_s: int | None = None,
 ) -> CloudSession | None:
     """Read the stored Comfy Cloud OAuth session.
 
@@ -116,6 +120,9 @@ def get_session(
     ``expect`` (refresh path only) forwards to ``ensure_fresh_session``: the
     stored session is checked with it under the refresh lock, and
     ``oauth.SessionReplaced`` is raised, with the store untouched, when it fails.
+
+    ``leeway_s`` (refresh path only) refreshes a token with less than that left,
+    in place of ``ensure_fresh_session``'s default minute.
     """
     if refresh or force:
         from comfy_cli.cloud import oauth
@@ -125,6 +132,8 @@ def get_session(
             options["expect"] = expect
         if rejected_access_token is not None:
             options["rejected_access_token"] = rejected_access_token
+        if leeway_s is not None:
+            options["leeway_s"] = leeway_s
         return oauth.ensure_fresh_session(force=force, allow_clear=allow_clear, **options)
     from comfy_cli.auth import store as auth_store
 
@@ -534,7 +543,7 @@ def resolve_cloud_credential(
     return _stored_api_key(provider, strip=strip)
 
 
-def resolve_partner_credential() -> tuple[str, str] | None:
+def resolve_partner_credential(*, partner_node_token: bool = False) -> tuple[str, str] | None:
     """The ``extra_data`` credential partner-API nodes authenticate with.
 
     Returns ``(field, value)`` — ``auth_token_comfy_org`` for a session,
@@ -551,6 +560,12 @@ def resolve_partner_credential() -> tuple[str, str] | None:
     When 1 or 2 is set the session is not read, refreshed or rewritten. Empty
     or whitespace-only env values count as unset.
 
+    ``partner_node_token=True`` (a run on a loopback ComfyUI) sends the session's
+    renewable partner-node token in place of its access token at 3
+    (:mod:`comfy_cli.cloud.partner_token`). When there is none to send, the
+    access token is refreshed unless it is under a minute old, so the run starts
+    with its full fifteen minutes.
+
     Best-effort: the session is refreshed when possible, but ``allow_clear=False``
     keeps a fatal refresh error from logging the user out from under a foreground
     command, and any unexpected error falls through to a network-free read of the
@@ -560,8 +575,18 @@ def resolve_partner_credential() -> tuple[str, str] | None:
     if handed_in is not None:
         field = "auth_token_comfy_org" if handed_in.kind == "oauth" else "api_key_comfy_org"
         return (field, handed_in.value)
+    sign_in = _SignIn()
+    if partner_node_token:
+        from comfy_cli.cloud.oauth import SessionNotSaved
+
+        try:
+            token = _partner_node_token(sign_in) or _fresh_sign_in_token(sign_in)
+        except SessionNotSaved:
+            token = None
+        if token is not None:
+            return ("auth_token_comfy_org", token)
     try:
-        cloud = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+        cloud = resolve_cloud_credential(purpose="cloud", refresh=not sign_in.refreshed, allow_clear=False)
     except Exception:  # noqa: BLE001 — best-effort: never abort a run on a refresh hiccup
         cloud = resolve_cloud_credential(purpose="cloud", refresh=False, allow_clear=False)
     if cloud is not None and cloud.kind == "oauth":
@@ -570,6 +595,57 @@ def resolve_partner_credential() -> tuple[str, str] | None:
     if key_credential is None:
         return None
     return ("api_key_comfy_org", key_credential.value)
+
+
+class _SignIn:
+    """The stored sign-in for one credential resolution, which starts at most one refresh sequence.
+
+    After the first refresh, whatever its outcome, later reads take the store as
+    it is, so a resolution never repeats a refresh and its retries.
+    """
+
+    def __init__(self) -> None:
+        self.refreshed = False
+
+    def session(self, *, leeway_s: int = 60) -> CloudSession | None:
+        stored = get_session(refresh=False)
+        if self.refreshed or stored is None or not stored.refresh_token or not stored.is_expired(leeway_s=leeway_s):
+            return stored
+        self.refreshed = True
+        return get_session(refresh=True, allow_clear=False, leeway_s=leeway_s)
+
+
+def _partner_node_token(sign_in: _SignIn) -> str | None:
+    from comfy_cli import locking
+    from comfy_cli.auth import store as auth_store
+    from comfy_cli.cloud import partner_token
+    from comfy_cli.cloud.oauth import SessionNotSaved
+
+    try:
+        with locking.file_lock(auth_store.lock_path(), timeout=_PARTNER_NODE_LOCK_TIMEOUT_S):
+            session = get_session(refresh=False)
+            if partner_token.login_key(session) is None:
+                return None
+            return partner_token.current(session, sign_in.session)
+    except SessionNotSaved:
+        raise
+    except Exception as error:  # noqa: BLE001 — best-effort: the sign-in token is sent instead
+        _log.info("no partner-node token for this run: %s", type(error).__name__)
+        return None
+
+
+def _fresh_sign_in_token(sign_in: _SignIn) -> str | None:
+    from comfy_cli.cloud.oauth import SessionNotSaved
+
+    try:
+        session = sign_in.session(leeway_s=_FULL_SIGN_IN_LEEWAY_S)
+    except SessionNotSaved:
+        raise
+    except Exception:  # noqa: BLE001 — best-effort, as below
+        return None
+    if session is None or session.is_expired() or not session.access_token:
+        return None
+    return session.access_token
 
 
 def keyed_partner_credential(workspace_key: str) -> tuple[str, str]:

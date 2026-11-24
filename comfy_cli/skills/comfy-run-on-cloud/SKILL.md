@@ -1,6 +1,6 @@
 ---
 name: comfy-run-on-cloud
-description: "Use when someone wants a workflow from their local ComfyUI running on Comfy Cloud, clicked Run on Cloud, or pasted a Run on Cloud prompt. Checks the workflow against Comfy Cloud, uses an existing build or a node swap where Cloud lacks something, runs one real job, saves the workflow to their Cloud workspace and hands back the link that opens it."
+description: "Use when someone wants a workflow from their local ComfyUI running on Comfy Cloud, clicked Run on Cloud, or pasted a Run on Cloud prompt."
 ---
 
 # comfy-run-on-cloud
@@ -14,11 +14,13 @@ original workflow.
 The Run on Cloud prompt is a yes to:
 
 - reading the workflow and the local server, and checking it against Comfy Cloud;
-- running it on Comfy Cloud (each run costs credits);
 - lossless changes made on a copy (the table in step 4).
 
 Each of these needs its own yes in chat, asked before you do it:
 
+- **one paid test job**, including validation or preflight jobs (step 6).
+  The Run on Cloud prompt does not authorize a paid job. Approval for uploads,
+  swaps, builds or deployments is not approval to run a job;
 - **uploading any file from this machine**: a model, a LoRA, an input image,
   video or audio, or a custom node folder. Ask by file name, one line per file:
   path, size, what it is for, where it goes. A yes covers the files you named; a
@@ -31,7 +33,8 @@ Each of these needs its own yes in chat, asked before you do it:
 
 Put the questions you have now into one short message. If the person says no to
 a file the workflow needs, do not upload it and do not swap in another file:
-report "prepared, not run" and say what is missing.
+say what is missing and that the workflow has not been run. Do not call an
+incomplete setup ready.
 
 ## 1. Get comfy-cli ready
 
@@ -105,14 +108,15 @@ fails, the server's answer proves nothing: ask the person where the model is.
 
 | verdict | meaning | next |
 |---|---|---|
-| `covered` | Comfy Cloud has every node type and model | Run `original.json` on Comfy Cloud (step 6) |
+| `covered` | Comfy Cloud has every node type and model | Prepare `original.json` for Comfy Cloud; step 6 asks before a paid test run |
 | `covered_with_remaps` | Runs once its models point at Cloud's copies; `models[]` lists each remap | Write the remapped copy (below), then treat it as `covered` or `covered_needs_check` |
-| `covered_needs_check` | Nothing is missing, but a model is not proven the same file as Cloud's copy | Run on Cloud's copy without asking (step 6); name those models in the report |
+| `covered_needs_check` | Nothing is missing, but a model is not proven the same file as Cloud's copy | Use Cloud's copy; step 6 asks before a paid test run; name those models in the report |
 | `needs_build` | A node type or model is missing, or the person's model differs from Cloud's; `blocking[]` lists each | Step 4 |
 
 A model that is not proven the same is any `models[]` row whose `identity` is
 `unverified`. Cloud's library models carry no content hash, so a workflow on
-stock models lands here at best; that is expected, not a reason to ask. A model
+stock models lands here at best; that needs no separate model-choice question.
+Paid-job consent is still required in step 6. A model
 proven different (`source` `yours`, `identity` `different`) is never run on
 Cloud's copy: it is already in `blocking[]` as `different_file`.
 
@@ -125,7 +129,7 @@ comfy --json workflow check "<work>/original.json" --where cloud \
 ```
 
 Run `cloud.json` from here on. If any of its `models[]` rows is still
-`unverified`, it is the `covered_needs_check` case: run it, and name those
+`unverified`, it is the `covered_needs_check` case: use step 6, and name those
 models in the report. A `remap_not_applied` warning means `cloud.json` still
 names the local file on that node: do not run it; report that node and model
 as what blocks the run.
@@ -148,10 +152,11 @@ at the first that works:
    manifest, never from `build show`: a Build's definition can change after the
    release was cut, and the deployment keeps the old release. It fits when the
    served release has every pack and model the workflow needs. Keep the workflow
-   unchanged and run it there (step 6). A build with no running deployment needs
-   a yes to start one (`comfy-deploy`).
+   unchanged and use step 6's paid-test consent before running it there. A build
+   with no running deployment needs a yes to start one (`comfy-deploy`).
 2. **A lossless node swap**, made on a copy without asking (below).
-3. **A lossy swap**, asked first. A yes runs the copy on Comfy Cloud. A no goes
+3. **A lossy swap**, asked first. A yes prepares the copy for Comfy Cloud;
+   step 6 separately asks before a paid test run. A no goes
    to a custom build.
 4. **A custom build.** Read `comfy skills show comfy-build` and `comfy skills
    show comfy-deploy`, and follow them. Build from the whole install that
@@ -178,7 +183,7 @@ order, so a number can wire a FLOAT where an INT went. `comfy --json nodes show
 <class> --where cloud` lists a node's inputs and outputs by name.
 
 **Asking about a lossy swap.** One message: each swap as `original -> replacement`
-and how the output may change; then two choices. **Swap**: runs on Comfy Cloud,
+and how the output may change; then two choices. **Swap**: prepares for Comfy Cloud,
 nothing to build, output may differ. **Keep the original**: a custom build, with
 its costs. Offer only replacements from the same model family, taken from
 `comfy --json nodes show <Loader> --where cloud --all-choices`.
@@ -262,9 +267,23 @@ comfy --json upload '<work>/inputs/<subfolder>/<file>' --where cloud
 
 Set the loader on the copy to the returned `uploads[].cloud_name`.
 
-## 6. Run one real job
+## 6. Ask whether to run one paid test job
 
-Never call it working before a real job succeeds.
+Ask: "Would you like me to run one test job? It costs money (Cloud credits or
+deployment GPU time). You can also run it yourself from the saved workflow link."
+Name the chosen target and any known partner-API nodes and their extra charges.
+Wait for an explicit yes to this paid test; the initial request to run on Cloud
+and approvals for preparation do not count. A yes covers one job.
+
+If they decline or have not answered, skip every job-submitting command in this
+step, including `deploy run --no-upload`: it can execute a paid job, not just
+check files. Use only checks that do not execute a workflow, then continue to
+step 7 to save the prepared workflow and return its link. Use the route-specific
+ready message in Report and add "It hasn't been run yet." A request to only
+prepare the link follows this path without asking again.
+
+After their yes, follow the chosen route below. Never call it working before a
+real job succeeds.
 
 - **Comfy Cloud:**
   `comfy --json run --workflow <file> --where cloud --wait`, then
@@ -272,7 +291,7 @@ Never call it working before a real job succeeds.
   `spend_consent_required` means nothing was submitted: the workflow has
   partner-API nodes (`details.partner_nodes`) that spend credits beyond the run.
   Ask, naming those nodes; after a yes, run the same command with
-  `--allow-spend`. On a no, report "prepared, not run".
+  `--allow-spend`. On a no, go to step 7 without running the job.
 - **A deployment** (existing or custom build): first read
   `comfy --json deploy logs --deployment <id>`; `data.comfyuiLog` must show no
   `IMPORT FAILED` for a pack the workflow uses. Make the API file against the
@@ -297,7 +316,8 @@ Never call it working before a real job succeeds.
   `details.missing[]` is the exact upload plan: one entry per file, with
   `local_path` (the full path it picked), `bytes` and `hash`. Ask about every
   entry in one message, by name, with its `local_path` and size (step 5's
-  rule). On a no, report "prepared, not run". After a yes that covers every
+  rule). On a no, report the missing inputs and that the workflow has not run;
+  do not call the setup ready. After a yes that covers every
   entry, run the same command from the same folder, with `--no-upload` replaced
   by one `--allow-upload <hash>` per approved file:
 
@@ -322,18 +342,23 @@ Never call it working before a real job succeeds.
   - `details.server_code` is `missing_asset`: the workflow names an asset
     already on the deployment's side that this account cannot reach. No local
     file is involved, so there is nothing to approve or upload. Report that
-    asset as unreachable, and the run as "prepared, not run".
+    asset as unreachable and say that the workflow has not run. Do not call the
+    setup ready.
 
 Keep the job id. On a timeout, watch the same job; never submit a second paid job
-to recover a download. Run comfy commands one at a time.
+to recover a download. Ask again before submitting another paid job, including
+a retry after a failed job. Run comfy commands one at a time.
 
 ## 7. Save it, then hand back the link
 
-Save the file that ran (the copy, if you changed one):
+Save the prepared editor-format file whether or not a test job ran (the copy,
+if you changed one, never `api.json`). Include the selected deployment even
+when the person declined the test. Set `COMFY_WORKFLOW_SOURCE=run_on_cloud`
+for this command alone so Cloud can count saves from this flow.
 
 ```shell
-comfy --json workflow save <file> --name '<name>' --where cloud
-comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id>   # ran on a deployment
+COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save <file> --name '<name>' --where cloud
+COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save <file> --name '<name>' --where cloud --deployment <id>   # selected a deployment
 ```
 
 It saves into a new folder in the Cloud Workflows sidebar and never replaces a
@@ -367,14 +392,21 @@ added to the Workflows sidebar and there is no link. Say that plainly, give
 
 ## Report
 
-Lead with the state: ran, or "prepared, not run" and what blocks it. Then:
+When preparation and the save succeed, lead with "Your custom build is ready."
+for a new custom build, or "Your workflow is ready on Comfy Cloud." for standard
+Cloud or an existing deployment. If no job was submitted, add "It hasn't been
+run yet." and say whether the test was declined or is awaiting consent. If the
+test succeeded, say so. A failed or pending job is reported as failed or pending,
+not as unrun or successfully tested. If setup or saving is blocked, lead with
+what could not be completed instead of saying it is ready. Then:
 
 - the route: Comfy Cloud, an existing deployment, or a custom build;
 - each change made to the copy, and each lossy swap they approved;
 - the files uploaded;
-- each model that ran on Cloud's copy unproven (`identity` `unverified`), by
+- each model that ran on Cloud's copy unproven (`identity` `unverified`), or
+  would use Cloud's copy when no test ran, by
   name, with one line: the output may differ if their file is another version;
-- the job id and where the outputs are on disk;
+- the job id and where the outputs are on disk, only if a job was submitted;
 - for a deployment: its id, GPU, region, worker bounds, cost, and
   `comfy deploy stop --deployment <id>` to stop the billing.
 

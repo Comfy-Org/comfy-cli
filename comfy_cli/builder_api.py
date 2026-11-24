@@ -20,10 +20,15 @@ Field names match services/comfy-builder/openapi.yaml exactly:
 
 from __future__ import annotations
 
+import errno
+import queue
+import threading
+import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO
 
@@ -56,6 +61,26 @@ _WORKFLOW_IMPORT_TIMEOUT = 90.0
 # instead of calling `read`. Only the chunked path does, and only for an empty
 # file, so the size is not a tuning knob.
 _UPLOAD_ITER_BYTES = 1024 * 1024
+_PARTS_AT_ONCE = 8
+_LINK_MARGIN = timedelta(minutes=2)
+_LINK_REFUSED = frozenset({400, 401, 403})
+_WAIT_STEP_SECONDS = 0.2
+_CANCEL_GRACE_SECONDS = 2.0
+
+
+class BlobFileError(Exception):
+    def __init__(self, path: Path, error: OSError) -> None:
+        self.path = path
+        self.error = error
+        super().__init__(f"{path} cannot be read ({error.strerror or error})")
+
+
+class BlobPlanError(Exception):
+    pass
+
+
+class _UploadStopped(Exception):
+    pass
 
 
 class _CountingReader:
@@ -95,6 +120,105 @@ class _CountingReader:
 
     def __iter__(self) -> Iterator[bytes]:
         return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
+class _PieceReader:
+    def __init__(
+        self,
+        raw: BinaryIO,
+        size: int,
+        progress: Callable[[int], None] | None,
+        stop: threading.Event | None = None,
+        path: Path | None = None,
+    ) -> None:
+        self._raw = raw
+        self._size = size
+        self._left = size
+        self._progress = progress
+        self._stop = stop
+        self._path = path
+
+    def __len__(self) -> int:
+        return self._size
+
+    def read(self, size: int = -1) -> bytes:
+        if self._stop is not None and self._stop.is_set():
+            raise _UploadStopped
+        wanted = self._left if size is None or size < 0 else min(size, self._left)
+        try:
+            block = self._raw.read(wanted) if wanted > 0 else b""
+        except OSError as error:
+            if self._path is None:
+                raise
+            raise BlobFileError(self._path, error) from error
+        if wanted > 0 and not block and self._path is not None:
+            raise BlobFileError(self._path, OSError(errno.EIO, "it is shorter than when it was hashed"))
+        self._left -= len(block)
+        if block and self._progress is not None:
+            self._progress(len(block))
+        return block
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
+class _PartProgress:
+    def __init__(self, report: Callable[[int], None]) -> None:
+        self._report = report
+        self._reported = 0
+        self._read = 0
+
+    def attempt(self) -> Callable[[int], None]:
+        self._read = 0
+        return self._advance
+
+    def _advance(self, n: int) -> None:
+        self._read += n
+        if self._read > self._reported:
+            self._report(self._read - self._reported)
+            self._reported = self._read
+
+
+@dataclass(frozen=True, slots=True)
+class BlobPart:
+    number: int
+    offset: int
+    size: int
+    url: str
+    expires_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class PartsUpload:
+    blob_id: str
+    deduplicated: bool
+    parts: tuple[BlobPart, ...]
+    upload_url: str | None
+
+
+def _blob_parts(answer: dict) -> tuple[BlobPart, ...]:
+    from comfy_cli.utils import parse_rfc3339
+
+    parts: list[BlobPart] = []
+    try:
+        for raw in answer.get("parts") or []:
+            try:
+                expires_at = parse_rfc3339(str(raw["expiresAt"]))
+            except (KeyError, ValueError):
+                expires_at = None
+            number, offset, size = int(raw["partNumber"]), int(raw["offsetBytes"]), int(raw["sizeBytes"])
+            if not isinstance(raw["uploadUrl"], str) or min(number, offset, size) < 0:
+                raise ValueError
+            parts.append(BlobPart(number, offset, size, raw["uploadUrl"], expires_at))
+    except (KeyError, TypeError, ValueError):
+        raise BlobPlanError(
+            "the builder answered an upload in pieces with a piece missing its number, offset, size or link"
+        ) from None
+    return tuple(sorted(parts, key=lambda part: part.number))
+
+
+def _expiring(part: BlobPart) -> bool:
+    return part.expires_at is not None and part.expires_at - _LINK_MARGIN <= datetime.now(timezone.utc)
 
 
 class BuilderAuthError(Exception):
@@ -262,6 +386,134 @@ class BuilderClient:
                 f"presigned upload was redirected ({resp.status_code}); refusing to follow", response=resp
             )
         resp.raise_for_status()
+
+    def create_blob_parts(self, kind: str, filename: str, sha256: str, size_bytes: int, *, blake3: str) -> PartsUpload:
+        body = {
+            "kind": kind,
+            "filename": filename,
+            "sha256": sha256,
+            "blake3": blake3,
+            "sizeBytes": size_bytes,
+            "reuse": True,
+            "parts": True,
+        }
+        r = self._post(("blobs",), body)
+        if r.get("deduplicated") is True:
+            return PartsUpload(r["blobId"], True, (), None)
+        parts = _blob_parts(r)
+        return PartsUpload(r["blobId"], False, parts, None if parts else r["uploadUrl"])
+
+    def refresh_blob_parts(self, blob_id: str) -> tuple[BlobPart, ...]:
+        return _blob_parts(self._post(("blobs", blob_id, "parts"), {}))
+
+    def complete_blob(self, blob_id: str) -> dict:
+        return self._post(("blobs", blob_id, "complete"), {})
+
+    def upload_blob_parts(
+        self, blob_id: str, parts: tuple[BlobPart, ...], path: Path, progress: Callable[[int], None] | None = None
+    ) -> None:
+        self.send_blob_parts(blob_id, parts, path, progress)
+        self.complete_blob(blob_id)
+
+    def send_blob_parts(
+        self, blob_id: str, parts: tuple[BlobPart, ...], path: Path, progress: Callable[[int], None] | None = None
+    ) -> None:
+        links = {part.number: part for part in parts}
+        links_lock, progress_lock = threading.Lock(), threading.Lock()
+
+        def link(number: int, stale: BlobPart | None = None) -> BlobPart | None:
+            with links_lock:
+                current = links.get(number)
+                if current is not None and current is not stale and not _expiring(current):
+                    return current
+                links.clear()
+                links.update({part.number: part for part in self.refresh_blob_parts(blob_id)})
+                return links.get(number)
+
+        def counted(n: int) -> None:
+            if progress is not None:
+                with progress_lock:
+                    progress(n)
+
+        def send(number: int) -> None:
+            part = link(number)
+            sent = _PartProgress(counted)
+            for attempt in range(2):
+                if part is None or stop.is_set():
+                    return
+                try:
+                    f = path.open("rb")
+                except OSError as error:
+                    raise BlobFileError(path, error) from error
+                with f:
+                    try:
+                        f.seek(part.offset)
+                    except OSError as error:
+                        raise BlobFileError(path, error) from error
+                    resp = requests.put(
+                        part.url,
+                        data=_PieceReader(f, part.size, sent.attempt(), stop, path),
+                        headers={"x-goog-if-generation-match": "0"},
+                        timeout=_UPLOAD_TIMEOUT,
+                        allow_redirects=False,
+                    )
+                if 300 <= resp.status_code < 400:
+                    raise requests.HTTPError(
+                        f"presigned upload was redirected ({resp.status_code}); refusing to follow", response=resp
+                    )
+                if resp.status_code == 412:
+                    return
+                if resp.status_code in _LINK_REFUSED and attempt == 0:
+                    part = link(number, stale=part)
+                    continue
+                resp.raise_for_status()
+                return
+
+        stop = threading.Event()
+        pending: queue.SimpleQueue[int] = queue.SimpleQueue()
+        for part in parts:
+            pending.put(part.number)
+        failures: list[BaseException] = []
+        failures_lock = threading.Lock()
+
+        def work() -> None:
+            while not stop.is_set():
+                try:
+                    number = pending.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    send(number)
+                except BaseException as error:  # noqa: BLE001
+                    with failures_lock:
+                        failures.append(error)
+                    stop.set()
+                    return
+
+        threads = [
+            threading.Thread(target=work, daemon=True, name=f"comfy-upload-part-{index}")
+            for index in range(min(_PARTS_AT_ONCE, len(parts)))
+        ]
+
+        def settle() -> None:
+            stop.set()
+            deadline = time.monotonic() + _CANCEL_GRACE_SECONDS
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(max(0.0, deadline - time.monotonic()))
+
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                while thread.is_alive() and not failures:
+                    thread.join(_WAIT_STEP_SECONDS)
+        except BaseException:
+            settle()
+            raise
+        if failures:
+            settle()
+            raise failures[0]
 
     def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:
         """Create a build from a definition. Returns the created build, carrying

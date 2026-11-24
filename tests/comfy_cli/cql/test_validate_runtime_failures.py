@@ -346,7 +346,7 @@ class TestAutogrowSlots:
         result = _graph().validate_workflow(wf)
 
         assert not result["valid"]
-        assert ("required_input_missing", "videos.video0") in _codes(result)
+        assert ("autogrow_below_min", "videos") in _codes(result)
 
     def test_required_autogrow_inside_dynamic_combo_needs_a_slot(self):
         # A Grok image edit submitted with no image wired.
@@ -361,7 +361,7 @@ class TestAutogrowSlots:
         result = _graph().validate_workflow(wf)
 
         assert not result["valid"]
-        assert ("required_input_missing", "model.images.image_1") in _codes(result)
+        assert ("autogrow_no_slots", "model.images") in _codes(result)
 
     def test_nested_autogrow_with_first_slot_wired_is_valid(self):
         wf = {

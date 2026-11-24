@@ -201,6 +201,21 @@ class TestLsPagination:
         assert query["capped_total"] == ["false"]
         assert query["name_contains"] == ["cat"]
 
+    def test_says_whether_to_include_public_assets(self, cloud_target, monkeypatch, capsys):
+        # Comfy Cloud returns public assets when `include_public` is left out,
+        # and that default is planned to change. `ls` keeps today's answer by
+        # saying so, rather than depending on the server's default.
+        calls = _patch_urlopen(monkeypatch, {"assets": [], "has_more": False, "total": 0})
+        _run(["ls", "--where", "cloud"], capsys)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]["url"]).query)
+        assert query["include_public"] == ["true"]
+
+    def test_mine_only_excludes_public_assets(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"assets": [], "has_more": False, "total": 0})
+        _run(["ls", "--mine-only", "--where", "cloud"], capsys)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(calls[0]["url"]).query)
+        assert query["include_public"] == ["false"]
+
     def test_forwards_has_more_false(self, cloud_target, monkeypatch, capsys):
         # `false` is a real answer, not a missing one — the falsy value must
         # survive, otherwise the consumer cannot distinguish "not truncated"

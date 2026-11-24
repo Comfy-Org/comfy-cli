@@ -37,6 +37,7 @@ from comfy_cli.command.run.loader import _load_workflow_file as _load_workflow_f
 from comfy_cli.command.run.loader import _node_errors_to_list as _node_errors_to_list
 from comfy_cli.command.run.loader import is_ui_workflow as is_ui_workflow
 from comfy_cli.command.run.loader import pop_compose_meta as pop_compose_meta
+from comfy_cli.command.run.loader import ui_workflow_extra_data as ui_workflow_extra_data
 from comfy_cli.command.run.preflight import PARTNER_NODE_CATEGORY_PREFIXES as PARTNER_NODE_CATEGORY_PREFIXES
 from comfy_cli.command.run.preflight import _detect_partner_nodes as _detect_partner_nodes
 from comfy_cli.command.run.preflight import _fetch_object_info as _fetch_object_info
@@ -379,7 +380,13 @@ def execute(
         # OAuth refresh, so skipping it here keeps an explicit-key run network-free.
         # Resolved once — the result feeds both the telemetry prop below and the
         # credential gate that follows.
-        cred = _resolve_partner_credential() if not extra_data else None
+        from comfy_cli.cql._net import is_loopback_host
+
+        cred = (
+            _resolve_partner_credential(partner_node_token=is_loopback_host(host.strip("[]")))
+            if not extra_data
+            else None
+        )
         # Fired BEFORE the reject-for-missing-credential branch so runs that are
         # turned away are still counted: that funnel is exactly what the metric
         # is for, and `credential_present: False` marks them. class_types are
@@ -435,6 +442,14 @@ def execute(
                 )
                 raise typer.Exit(code=1)
             extra_data = {cred[0]: cred[1]}
+
+    # Send the canvas graph with the run, as the editor's Queue button does, so
+    # save nodes write `workflow` into the file and it drags back as a workflow.
+    # Merged only after the credential gate above, which reads an
+    # empty `extra_data` as "no explicit key".
+    pnginfo = ui_workflow_extra_data(raw_workflow) if is_ui else None
+    if pnginfo:
+        extra_data = {**(extra_data or {}), **pnginfo}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
     _preflight_validate(
@@ -941,7 +956,7 @@ def _load_workflow_or_exit(renderer, workflow, preloaded):
         raise typer.Exit(code=1) from e
 
 
-def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, **where_fields):
+def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, targets=None, **where_fields):
     """Create + persist the initial ``queued`` job state. Shared by the local
     async path and the cloud non-wait path — the ``--wait`` paths (local and
     cloud) build the state inline instead, since they also stamp their own
@@ -950,6 +965,10 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     ``where_fields`` carries the target-specific locators (``host``/``port`` for
     local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair,
     whose second element is None when the write could not land.
+
+    ``targets`` is the ``(output_node_ids, run_graph, ids_checked)`` triple of
+    a cloud ``--output-node-ids`` run, recorded so ``comfy jobs watch`` can
+    judge the finished job; see :func:`_record_targets`.
 
     The write goes through ``_write_state``, not ``jobs_state.write`` directly,
     and that is load-bearing: both callers run *after* the server accepted the
@@ -970,8 +989,20 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
         **where_fields,
     )
     state.item_map = (compose_meta or {}).get("items")
+    if targets is not None:
+        _record_targets(state, *targets)
     state_file = _write_state(state)
     return state, state_file
+
+
+def _record_targets(state, output_node_ids, run_graph: dict, ids_checked: bool) -> None:
+    """Stamp a ``--output-node-ids`` run's targets on its job record. A no-op
+    for an untargeted run, so its record keeps the null defaults."""
+    if not output_node_ids:
+        return
+    state.output_node_ids = list(output_node_ids)
+    state.run_graph_node_ids = [str(nid) for nid in run_graph]
+    state.output_node_ids_checked = bool(ids_checked)
 
 
 def _announce_async_queued(
@@ -984,6 +1015,7 @@ def _announce_async_queued(
     state_file,
     watcher_spawned,
     locator_fields,
+    note=None,
 ):
     """Async-submit ``queued`` tail shared by the local async path and the
     cloud non-wait path: the pretty status panel (+ watcher-failure warning),
@@ -1019,6 +1051,8 @@ def _announce_async_queued(
         )
         if not watcher_spawned:
             pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
+        if note:
+            pprint(f"  [dim]{sanitize_markup(note)}[/dim]")
     renderer.emit(
         {
             "workflow": workflow_name,
@@ -1032,6 +1066,7 @@ def _announce_async_queued(
             # Lets a consumer know whether something is keeping the state file
             # fresh, or whether it must poll `comfy jobs status` itself.
             "watcher_spawned": watcher_spawned,
+            **({"note": note} if note else {}),
         },
         command="run",
         where=where,
@@ -1223,7 +1258,7 @@ def execute_cloud(
     (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
-    from comfy_cli.command._cloud_errors import emit_status_error
+    from comfy_cli.command._cloud_errors import emit_status_error, insufficient_scope_error
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -1235,6 +1270,10 @@ def execute_cloud(
     # means "not fetched yet" — distinct from a fetched-but-empty snapshot,
     # which must NOT trigger a second round-trip.
     cloud_object_info: dict | None = None
+
+    # Captured before the conversion below replaces `raw_workflow` with the API
+    # graph: the canvas graph rides the submit as extra_pnginfo.
+    submit_extra_data = ui_workflow_extra_data(raw_workflow) if is_ui else None
 
     if is_ui:
         # Frontend-format workflows (the `nodes`+`links` shape from the canvas
@@ -1391,11 +1430,19 @@ def execute_cloud(
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
                 submit = client.submit_prompt(
-                    parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+                    parsed_workflow,
+                    client_id,
+                    workflow_id=workflow_id,
+                    output_node_ids=output_node_ids,
+                    extra_data=submit_extra_data,
                 )
         else:
             submit = client.submit_prompt(
-                parsed_workflow, client_id, workflow_id=workflow_id, output_node_ids=output_node_ids
+                parsed_workflow,
+                client_id,
+                workflow_id=workflow_id,
+                output_node_ids=output_node_ids,
+                extra_data=submit_extra_data,
             )
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
@@ -1409,6 +1456,9 @@ def execute_cloud(
             message=f"Cloud server rejected the workflow (HTTP {e.status}): {e.message}",
             hint="check the workflow is valid and the cloud server has the required nodes",
             details={"status": e.status, "body": e.body[:2000]},
+            # Detection reads the whole body; only the rendered detail is capped.
+            scope_body=e.body,
+            www_authenticate=getattr(e, "www_authenticate", None),
             # A 429 alone does not prove the submit had no effect, and the
             # client never repeats a submit on its own. Look for the job before
             # re-running so one that did get through is not queued twice.
@@ -1483,6 +1533,7 @@ def execute_cloud(
             workflow_name,
             where="cloud",
             compose_meta=compose_meta,
+            targets=(output_node_ids, run_graph, bool(cloud_object_info)),
             base_url=target.base_url,
         )
         _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1493,15 +1544,26 @@ def execute_cloud(
         watcher_spawned = state_file is not None and _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
+        watch_command = f"comfy jobs watch {submit.prompt_id} --where cloud"
         _announce_async_queued(
             submit.prompt_id,
             client_id,
             workflow_name,
             where="cloud",
-            watch_command=f"comfy jobs watch {submit.prompt_id} --where cloud",
+            watch_command=watch_command,
             state_file=state_file,
             watcher_spawned=watcher_spawned,
             locator_fields={"base_url": target.base_url},
+            # Nothing judges the returned outputs at submit time, so say
+            # where the --output-node-ids check happens instead.
+            # Only when the targets reached the state file: without it the
+            # watch has nothing to judge against.
+            note=(
+                f"--output-node-ids is checked when the job finishes: run `{watch_command}` "
+                "to see whether the server ran only the targets"
+                if output_node_ids and state_file is not None
+                else None
+            ),
         )
         return
 
@@ -1521,6 +1583,7 @@ def execute_cloud(
         base_url=target.base_url,
     )
     state.item_map = (compose_meta or {}).get("items")
+    _record_targets(state, output_node_ids, run_graph, bool(cloud_object_info))
     jobs_state.stamp_watcher_identity(state)
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1591,7 +1654,14 @@ def execute_cloud(
                 )
             else:
                 state.status = "error"
-                state.error = {"code": "cloud_http_error", "message": str(e)}
+                # Record the same re-login verdict ``emit_status_error`` renders
+                # below, so a later `comfy jobs status` keeps the reason.
+                state.error = insufficient_scope_error(
+                    e.status,
+                    e.body,
+                    getattr(e, "www_authenticate", None),
+                    details={"status": e.status, "prompt_id": submit.prompt_id},
+                ) or {"code": "cloud_http_error", "message": str(e)}
             jobs_state.write(state)
             emit_status_error(
                 renderer,
@@ -1602,6 +1672,8 @@ def execute_cloud(
                 hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
                 rate_limited_next_step=follow_up,
+                scope_body=e.body,
+                www_authenticate=getattr(e, "www_authenticate", None),
             )
             raise typer.Exit(code=1) from e
         except KeyboardInterrupt:

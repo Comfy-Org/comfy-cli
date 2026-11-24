@@ -26,6 +26,9 @@ State-file contract (the same shape across local and cloud):
       "watcher_pid_create_time": <float epoch seconds> | null,
       "record": {<full final cloud history record>} | null,
       "item_map": {<item>: {"nodes": [...], "save_node": "...", "prefix": "..."}} | null,
+      "output_node_ids": ["9", ...] | null,
+      "run_graph_node_ids": ["9", "4", ...] | null,
+      "output_node_ids_checked": true | false,
       "client_id_borrowed": true | false
     }
 
@@ -33,6 +36,13 @@ State-file contract (the same shape across local and cloud):
 a terminal state; ``item_map`` maps blueprint foreach items to the node ids
 they produced (written at submit by ``comfy run``). Both are null for older
 files and local runs — readers must tolerate their absence.
+
+``output_node_ids`` / ``run_graph_node_ids`` are written at submit by a cloud
+``comfy run --output-node-ids``: the targets, and the node ids of the subgraph
+they run. ``output_node_ids_checked`` says whether the targets' classes were
+checked against the node catalog. ``comfy jobs status`` / ``jobs watch`` read
+them to judge a finished targeted job the way ``comfy run --wait`` does. Null
+(and false) for untargeted runs and older files.
 
 Terminal states (``completed``, ``error``, ``cancelled``) mean the file
 won't change further; agents can stop polling.
@@ -154,6 +164,13 @@ class JobState:
     # foreach item -> {"nodes": [...], "save_node": ..., "prefix": ...} map,
     # written at submit time by `comfy run` for composed workflows.
     item_map: dict[str, Any] | None = None
+    # `comfy run --output-node-ids` targets, the node ids of the subgraph they
+    # run, and whether the targets' classes were checked against the catalog.
+    # Written at submit for cloud runs so a later `jobs status`/`jobs watch`
+    # can judge the finished job the same way `comfy run --wait` does.
+    output_node_ids: list[str] | None = None
+    run_graph_node_ids: list[str] | None = None
+    output_node_ids_checked: bool = False
     # True when `client_id` was borrowed from a live client via
     # `comfy run --client-id` rather than minted for this run. Re-attaching to a
     # borrowed id would evict that client's socket, so watchers must not.

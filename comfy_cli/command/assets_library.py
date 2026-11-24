@@ -28,6 +28,7 @@ from comfy_cli.command.model_upload_resume import TlsSetupFailed as _TlsSetupFai
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow, upload).")
+DEPLOYMENT_POINTER = "To add a model to a deployment, use: comfy deploy models add <deployment> <file> --type <folder>"
 
 # A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in
 # the canonical ``blake3:<hex>`` wire form. Comfy Cloud's from-hash lookup
@@ -129,7 +130,10 @@ def _normalize_content_hash(value: str) -> str:
     return f"blake3:{m.group(1).lower()}" if m else value
 
 
-@app.command("ls", help="List your assets on Comfy Cloud.")
+@app.command(
+    "ls",
+    help="List assets on Comfy Cloud: your own plus public ones. --mine-only lists only your own.",
+)
 @tracking.track_command("assets")
 def ls_cmd(
     name: Annotated[
@@ -143,6 +147,13 @@ def ls_cmd(
         ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", help="Cap rows returned (max 500).")] = 20,
+    include_public: Annotated[
+        bool,
+        typer.Option(
+            "--include-public/--mine-only",
+            help="Include public/shared assets (default true). --mine-only lists only your own.",
+        ),
+    ] = True,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
     import http.client
@@ -155,6 +166,9 @@ def ls_cmd(
     # `capped_total=false` asks Comfy Cloud for the exact `total` this command
     # forwards; without it the server may answer with a capped count.
     params: list[tuple[str, Any]] = [("limit", min(max(limit, 1), 500)), ("capped_total", "false")]
+    # Always said: Comfy Cloud returns public assets when this is left out, and
+    # that default is planned to change to own assets only.
+    params.append(("include_public", "true" if include_public else "false"))
     if name:
         params.append(("name_contains", name))
     for t in tags.split(",") if tags else []:
@@ -1050,6 +1064,7 @@ def upload_cmd(
     ] = False,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
+    get_renderer().info(DEPLOYMENT_POINTER)
     run_upload(file, folder, where=where, dry_run=dry_run, command="assets library upload")
 
 

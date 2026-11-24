@@ -8,6 +8,10 @@ person pastes it into Claude Code or Codex, and the agent loads the
 Run my ComfyUI workflow on Comfy Cloud.
 If comfy is missing: uv tool install comfy-cli
 Read the skill first: comfy skills show comfy-run-on-cloud
+Ask before running one paid test job, including validation or preflight runs.
+Explain the cost and wait for my explicit yes. If I decline, save the prepared
+workflow and return its link. Say the workflow or custom build is ready and
+that it hasn't been run yet.
 Workflow: workflows/<name>.json
 ComfyUI: http://127.0.0.1:8188
 ```
@@ -26,4 +30,4 @@ Fill it from the running app:
   ```
 
 The prompt names no build, GPU or upload. The skill asks for those in the chat,
-only when the workflow needs them.
+only when the workflow needs them. Their approvals do not authorize a paid job.
