@@ -371,6 +371,37 @@ def _resolve_civitai_source(fetch, url: str):
     return resolved
 
 
+# Hugging Face's own hosts. `hf.co` is HF's documented short domain and redirects
+# to `huggingface.co`; `huggingface.com` was already accepted here. Matched on
+# `hostname` rather than `netloc` on purpose: `netloc` keeps the port and any
+# userinfo and is not lowercased, so `huggingface.co:443`, `HuggingFace.co` and
+# `user@huggingface.co` all compare unequal to the literal while naming the same
+# host. One set, read by both recognizers, so "on Hugging Face" cannot mean two
+# different things two lines apart.
+HUGGINGFACE_HOSTS = frozenset(
+    {
+        "huggingface.co",
+        "www.huggingface.co",
+        "huggingface.com",
+        "www.huggingface.com",
+        "hf.co",
+        "www.hf.co",
+    }
+)
+
+# The path segments after which Hugging Face serves file BYTES rather than a web
+# page: `/<marker>/<branch>/<path>`. `resolve` and `blob` are what
+# `check_huggingface_url` parses; `raw` is the third one HF serves and it reaches
+# the generic direct-URL path, so it must not be mistaken for a page.
+HUGGINGFACE_FILE_MARKERS = frozenset({"resolve", "blob", "raw"})
+
+
+def is_huggingface_host(url: str) -> bool:
+    """True when *url*'s host is one of Hugging Face's own."""
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return host in HUGGINGFACE_HOSTS
+
+
 def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str | None, str | None]:
     """
     Check if the given URL is a Hugging Face URL and extract relevant information.
@@ -388,7 +419,7 @@ def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str |
     """
     parsed_url = urlparse(url)
 
-    if parsed_url.netloc != "huggingface.co" and parsed_url.netloc != "huggingface.com":
+    if not is_huggingface_host(url):
         return False, None, None, None, None
 
     path_parts = [p for p in parsed_url.path.split("/") if p]
@@ -409,17 +440,10 @@ def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str |
 
 
 def is_huggingface_page_url(url: str) -> bool:
-    """True when *url* is on Hugging Face but does NOT address a single file.
+    """True when *url* is on Hugging Face but names a web PAGE, not file bytes.
 
-    :func:`check_huggingface_url` accepts only the two forms that name one file:
-    ``/<org>/<repo>/resolve/<branch>/<path>`` and the ``/blob/`` variant. Every
-    other Hugging Face URL is a web PAGE — a bare repo (``/<org>/<repo>``), a
-    ``/tree/<branch>`` file browser, a dataset or space landing page, a
-    discussion. Those are what a person copies out of the address bar, and the
-    bare repo form is the one most often pasted.
-
-    This exists because Hugging Face answers every one of them ``200
-    text/html``. Left to the ``else`` branch below ("source is unknown, treat it
+    This exists because Hugging Face answers every page URL ``200 text/html``.
+    Left to the ``else`` branch in :func:`download` ("source is unknown, treat it
     as a direct file URL") the transfer therefore SUCCEEDS: a model card's HTML
     lands at the destination under the caller's ``--filename``, the command
     reports ``Done``, and ``comfy models search`` — which reads filenames and
@@ -427,16 +451,64 @@ def is_huggingface_page_url(url: str) -> bool:
     as an opaque parse error inside ComfyUI, far from its cause. A refusal that
     names the ``/resolve/`` form is worth more than a success that is a lie.
 
-    Host matching is deliberately the same pair ``check_huggingface_url``
-    accepts, so this covers exactly the hosts the recognizer covers and no URL
-    can be a page here while being a file there.
-    """
-    parsed_url = urlparse(url)
+    **A page is identified positively, not as "whatever the file parser
+    rejects".** The first cut of this function was
+    ``not check_huggingface_url(url)[0]``, and that parser accepts exactly
+    ``/<org>/<repo>/{resolve,blob}/<branch>/<path>``. Negating it refuses four
+    shapes that are real files and used to download through the generic
+    direct-URL branch:
 
-    if parsed_url.netloc != "huggingface.co" and parsed_url.netloc != "huggingface.com":
+    * dataset and space files — ``/datasets/<org>/<repo>/resolve/<branch>/<file>``
+      (ReActor's ``inswapper_128.onnx`` is one), ``/spaces/...``;
+    * legacy unnamespaced repos — ``/gpt2/resolve/main/model.safetensors``;
+    * ``/raw/<branch>/<file>``, which HF serves as bytes;
+    * anything HF adds a namespace for later.
+
+    Refusing those with ``hf_not_a_file`` and a hint naming the ``/resolve/``
+    form they already used would be a worse bug than the one being fixed, so the
+    rule is instead: a URL on an HF host that carries
+    ``<marker>/<branch>/<path>`` for a marker in :data:`HUGGINGFACE_FILE_MARKERS`
+    names a file, and every other HF URL is a page.
+
+    Note the consequence, which the tests pin: ``is_huggingface_page_url`` and
+    ``check_huggingface_url`` are NOT each other's complement. A dataset
+    ``/resolve/`` URL is neither — not a page, and not a shape the HF-hub
+    downloader can parse — and falls through to the generic path, which is where
+    it worked before and still works.
+    """
+    if not is_huggingface_host(url):
         return False
 
-    return not check_huggingface_url(url)[0]
+    path_parts = [p for p in urlparse(url).path.split("/") if p]
+
+    for index, part in enumerate(path_parts):
+        # `<marker>/<branch>/<at least one path segment>`. The length test is
+        # what keeps `/<org>/<repo>/resolve/<branch>` — a branch listing with no
+        # file after it — a page.
+        if part in HUGGINGFACE_FILE_MARKERS and len(path_parts) > index + 2:
+            return False
+
+    return True
+
+
+def _huggingface_blob_to_resolve(url: str) -> str:
+    """Rewrite a Hugging Face ``/blob/`` file URL to its ``/resolve/`` sibling.
+
+    ``/blob/`` serves the HTML file viewer; ``/resolve/`` serves the bytes. Only
+    the one path segment that :data:`HUGGINGFACE_FILE_MARKERS` matched is
+    touched, and only on an HF host, so a file or repo legitimately NAMED
+    ``blob`` elsewhere in the path is left alone.
+    """
+    if not is_huggingface_host(url):
+        return url
+
+    split = urlsplit(url)
+    path_parts = split.path.split("/")
+    for index, part in enumerate(path_parts):
+        if part == "blob" and len(path_parts) > index + 2:
+            path_parts[index] = "resolve"
+            return urlunsplit(split._replace(path="/".join(path_parts)))
+    return url
 
 
 def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
@@ -671,6 +743,15 @@ def download(
 
             relative_path = _default_destination(model_path, basemodel)
     elif is_huggingface_url:
+        # `/blob/<branch>/<file>` is Hugging Face's HTML file VIEWER, not the
+        # bytes. `check_huggingface_url` accepts it, and on a public repo
+        # `needs_hf_auth` stays False and the raw `url` goes to `download_file`
+        # unchanged — so a `/blob/` link saved the viewer page as the model, the
+        # same failure `hf_not_a_file` refuses a repo page for. Rewriting it to
+        # the `/resolve/` sibling is what makes the refusal's hint ("a `/blob/`
+        # link works too") true rather than a pointer back into the bug.
+        url = _huggingface_blob_to_resolve(url)
+
         model_id = "/".join(url.split("/")[-2:])
 
         local_filename = potentially_strip_param_url(url.split("/")[-1])

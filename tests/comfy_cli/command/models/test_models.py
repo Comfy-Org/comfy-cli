@@ -6,6 +6,7 @@ import typer.testing
 from comfy_cli import constants
 from comfy_cli.command.models.models import (
     _format_elapsed,
+    _huggingface_blob_to_resolve,
     app,
     check_civitai_url,
     check_huggingface_url,
@@ -387,18 +388,85 @@ def test_non_huggingface_host_is_never_a_page():
     assert is_huggingface_page_url("https://nothuggingface.co/org/repo") is False
 
 
-def test_huggingface_page_and_file_recognizers_cannot_both_claim_a_url():
-    """The split is total and exclusive over the hosts it covers — otherwise a URL
-    could be refused as a page while resolving as a file, or neither."""
-    urls = [
-        "https://huggingface.co/black-forest-labs/FLUX.1-dev",
-        "https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main",
-        "https://huggingface.co/datasets/foo/bar",
-        "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/x.safetensors",
-        "https://huggingface.com/stabilityai/sdxl-turbo/blob/main/x.safetensors",
+def test_huggingface_file_urls_the_hub_parser_cannot_read_are_not_pages():
+    """The regression the first cut of this would have shipped.
+
+    `is_huggingface_page_url` was `not check_huggingface_url(url)[0]`, and that
+    parser accepts only `/<org>/<repo>/{resolve,blob}/<branch>/<path>`. Every
+    URL below names real file bytes, reaches the generic direct-URL branch, and
+    worked before this change — so refusing it with `hf_not_a_file`, under a
+    hint naming the `/resolve/` form it already uses, would be a worse bug than
+    the one being fixed. Each is a shape somebody downloads today: ReActor ships
+    `inswapper_128.onnx` from a dataset repo, and `gpt2` is the unnamespaced
+    legacy form.
+    """
+    file_urls = [
+        "https://huggingface.co/datasets/org/weights/resolve/main/inswapper_128.onnx",
+        "https://huggingface.co/spaces/org/demo/resolve/main/model.safetensors",
+        "https://huggingface.co/gpt2/resolve/main/model.safetensors",
+        "https://huggingface.co/org/repo/raw/main/config.json",
     ]
-    for url in urls:
-        assert is_huggingface_page_url(url) is not check_huggingface_url(url)[0], url
+    for url in file_urls:
+        assert is_huggingface_page_url(url) is False, url
+        # And they are NOT hub-parseable either: not a page and not a hub file
+        # is the third state, and it is the one that works. The two recognizers
+        # are deliberately not each other's complement.
+        assert check_huggingface_url(url)[0] is False, url
+
+
+def test_huggingface_branch_listing_with_no_file_after_it_is_a_page():
+    """`/resolve/<branch>` with nothing after it addresses no file."""
+    assert is_huggingface_page_url("https://huggingface.co/org/repo/resolve/main") is True
+
+
+def test_huggingface_page_detection_covers_the_hosts_people_paste():
+    """`netloc` kept the port, the case and any userinfo, so each of these
+    skipped the guard and saved the page HTML as the model."""
+    for url in [
+        "https://hf.co/black-forest-labs/FLUX.1-dev",
+        "https://www.huggingface.co/black-forest-labs/FLUX.1-dev",
+        "https://HuggingFace.co/black-forest-labs/FLUX.1-dev",
+        "https://huggingface.co:443/black-forest-labs/FLUX.1-dev",
+        "https://huggingface.co./black-forest-labs/FLUX.1-dev",
+    ]:
+        assert is_huggingface_page_url(url) is True, url
+
+
+def test_huggingface_host_set_is_shared_by_both_recognizers():
+    """One host set, so "on Hugging Face" cannot mean two things two lines
+    apart: a `/resolve/` link on HF's short domain parses as a hub file."""
+    url = "https://hf.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
+    assert is_huggingface_page_url(url) is False
+    assert check_huggingface_url(url) == (
+        True,
+        "stabilityai/sdxl-turbo",
+        "sd_xl_turbo_1.0_fp16.safetensors",
+        None,
+        "main",
+    )
+
+
+def test_huggingface_blob_url_is_rewritten_to_resolve():
+    """`/blob/` is the HTML file viewer. On a public repo the URL goes to
+    `download_file` unchanged, so without this rewrite a `/blob/` link saved the
+    viewer page as the model — and `hf_not_a_file`'s hint recommends `/blob/`."""
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/org/repo/blob/main/x.safetensors")
+        == "https://huggingface.co/org/repo/resolve/main/x.safetensors"
+    )
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/datasets/org/repo/blob/main/x.bin")
+        == "https://huggingface.co/datasets/org/repo/resolve/main/x.bin"
+    )
+
+
+def test_blob_rewrite_leaves_a_file_named_blob_and_other_hosts_alone():
+    for url in [
+        "https://huggingface.co/org/repo/resolve/main/blob",
+        "https://huggingface.co/org/repo/resolve/main/weights/blob.safetensors",
+        "https://example.com/a/blob/b/c.safetensors",
+    ]:
+        assert _huggingface_blob_to_resolve(url) == url, url
 
 
 def test_huggingface_url_with_com_domain():

@@ -659,3 +659,91 @@ def test_non_hf_unknown_source_still_downloads(tmp_path):
 
     assert result.exit_code == 0, result.output
     download.assert_called_once()
+
+
+def test_hf_dataset_resolve_url_still_downloads(tmp_path):
+    """The regression the negated recognizer would have shipped.
+
+    `https://huggingface.co/datasets/<org>/<repo>/resolve/<branch>/<file>` names
+    one file — ReActor's `inswapper_128.onnx` is distributed exactly this way —
+    but `check_huggingface_url` cannot parse it (its third path segment is the
+    repo, not `resolve`), so it reaches the generic direct-URL branch and
+    downloads. Defining a page as "whatever that parser rejects" refused it with
+    `hf_not_a_file` and a hint naming the `/resolve/` form already in the URL.
+    """
+    download = Mock()
+    result = _invoke(
+        [
+            "--url",
+            "https://huggingface.co/datasets/org/weights/resolve/main/inswapper_128.onnx",
+            "--filename",
+            "inswapper_128.onnx",
+        ],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, _stdout() + "\n" + result.output
+    assert "hf_not_a_file" not in _stdout()
+    download.assert_called_once()
+
+
+def test_hf_legacy_and_raw_file_urls_still_download(tmp_path):
+    """Unnamespaced legacy repos (`/gpt2/resolve/...`) and `/raw/` both serve
+    bytes and both reached the generic branch before this change."""
+    for url, filename in (
+        ("https://huggingface.co/gpt2/resolve/main/model.safetensors", "model.safetensors"),
+        ("https://huggingface.co/org/repo/raw/main/config.json", "config.json"),
+    ):
+        download = Mock()
+        result = _invoke(
+            ["--url", url, "--filename", filename],
+            get_workspace={"return_value": tmp_path / filename},
+            download_file={"new": download},
+        )
+        assert result.exit_code == 0, url + "\n" + _stdout() + "\n" + result.output
+        download.assert_called_once(), url
+
+
+def test_hf_short_domain_repo_page_is_refused(tmp_path):
+    """`hf.co` is Hugging Face's own short domain. The guard compared the raw
+    `netloc` against two literals, so this one skipped it and saved the page."""
+    download = Mock()
+    result = _invoke(
+        ["--url", "https://hf.co/black-forest-labs/FLUX.1-dev", "--filename", "flux1-dev.safetensors"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    _assert_error_envelope(result, "hf_not_a_file")
+    download.assert_not_called()
+
+
+def test_hf_blob_url_downloads_the_resolve_sibling(tmp_path):
+    """`/blob/` is the HTML viewer, and `hf_not_a_file`'s hint recommends it.
+
+    On a public repo `needs_hf_auth` is False and the URL goes to
+    `download_file` unchanged, so before the rewrite a `/blob/` link saved the
+    file-viewer page as the model — the same failure this command now refuses a
+    repo page for, reached by following its own hint.
+    """
+    download = Mock()
+    result = _invoke(
+        [
+            "--url",
+            "https://huggingface.co/stabilityai/sdxl-turbo/blob/main/model.safetensors",
+            "--relative-path",
+            "models/checkpoints",
+            "--filename",
+            "model.safetensors",
+        ],
+        check_huggingface_url={"return_value": (True, "stabilityai/sdxl-turbo", "model.safetensors", None, "main")},
+        check_unauthorized={"return_value": False},
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, _stdout() + "\n" + result.output
+    download.assert_called_once()
+    sent = download.call_args.args[0] if download.call_args.args else download.call_args.kwargs["url"]
+    assert sent == "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/model.safetensors"
