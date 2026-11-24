@@ -54,6 +54,7 @@ show    One deployment's raw control-plane record.
 logs    One deployment's captured ComfyUI log snapshot.
 events  One deployment's status events in server order.
 refs    compute — deployable regions and GPU classes with availability.
+models  add, ls, rm — model files added straight to a deployment, no new release.
 ```
 
 ## The path
@@ -324,6 +325,58 @@ comfy deploy cancel [PATH] [--deployment <name|id>]
   or fail instead.
 - **A cancelled move back to a kept release leaves that release as it was:**
   one you stopped stays stopped and yours, and one on its way out still goes.
+
+## `comfy deploy models`
+
+```shell
+comfy deploy models add <deployment> <file> --type <folder> [--no-wait]
+comfy deploy models ls <deployment>
+comfy deploy models rm <deployment> <name> [--yes]
+```
+
+- **`add` puts one model file on a deployment without a new release.** It
+  hashes the file, uploads it in pieces (a file the workspace already holds
+  under the same name and hashes is not sent again), and waits until the
+  deployment can use it, printing each status; `--no-wait` returns once the
+  bytes are in. `<deployment>` is a name, an id or `<build>/<name>`. The wait
+  gives up after 30 minutes, or after a minute of reads the deploy API does
+  not answer, with `deploy_model_wait_timeout` (exit 75; the file may still be
+  adding, `ls` shows when it is ready), and a file whose removal starts while
+  it is being added ends it with `deploy_model_removed` (once `ls` no longer
+  lists it, add it again). A send that fails after the file was added takes it
+  off the deployment again only where the upload definitely failed (a piece
+  not sent, the builder refusing the join); the hint says to wait until `ls`
+  no longer lists it, or, if that removal failed, names the `comfy deploy
+  models rm` to run first. Ctrl-C removes nothing, so it stops at once; it
+  prints the `comfy deploy models rm <deployment> <id>` to run. Where the
+  builder's join went unanswered (a timeout, a dropped connection, a 5xx) the
+  builder may have stored the file, so the entry stays and may still be
+  adding: check it with `comfy deploy models ls <deployment>`. Run the
+  `comfy deploy models rm <deployment> <id>` the hint names only if `ls` shows
+  it failed, or if the user chooses to cancel it. Still adding after 30
+  minutes is not a failure: copying to the deployment can take longer, and
+  removing it cancels that work. Another add of the same file may also share
+  that entry.
+- **Not on for every workspace yet:** where it is off, `add` exits 1 with
+  `deploy_models_unavailable` before sending the pieces (a builder that
+  answers one upload link instead sends the whole file before the refusal);
+  `comfy assets library upload <file> --type <folder>` puts the file in the
+  workspace library instead. A 409 (the
+  release's model policy, the name taken, the deployment busy, too little
+  storage) is `deploy_conflict` with comfy-deploy's own sentence. The builder
+  refusing the upload itself (an empty file, a size over the limit, a failed
+  join) is `build_builder_error` with the builder's own sentence.
+- **`ls` lists folder, name, size and status** (`adding`, `ready`, `failed`,
+  `removing`). A failed file was not added: remove it, wait until `ls` no
+  longer lists it, then add it again. Why it failed is in comfy-deploy's log,
+  never in the output.
+- **`rm` deletes the file from the deployment's disk.** Jobs that name it fail;
+  one already running may finish. It asks first; `--yes` answers, and refusing
+  without it is `deploy_model_remove_needs_confirm`. Name the file as
+  `<folder>/<name>` or by id where two folders hold the same name.
+- **A job naming a file still being added** is refused by `comfy deploy run`
+  with `deploy_model_not_ready`, one naming a failed file with
+  `deploy_model_failed`; neither is retried.
 
 ## `comfy deploy run`
 

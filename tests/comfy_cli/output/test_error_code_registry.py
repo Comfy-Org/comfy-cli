@@ -444,15 +444,27 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
         deploy_workflow_not_api_format deploy_status_terminal deploy_workflow_too_large deploy_watch_lost
         deploy_update_failed deploy_update_replaced deploy_updates_unavailable deploy_name_not_found deploy_invalid_name deploy_name_taken
         deploy_names_unavailable deploy_editor_unchanged
-        deploy_build_not_found deploy_ambiguous_build""".split()
+        deploy_build_not_found deploy_ambiguous_build deploy_model_not_ready deploy_model_failed
+        deploy_model_removed deploy_model_wait_timeout
+        deploy_models_unavailable deploy_model_not_found deploy_model_remove_needs_confirm""".split()
     )
 
     # When
     actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
 
     # Then
-    assert len(actual) == 46
+    assert len(actual) == 53
     assert actual == expected
+
+
+def test_deploy_model_removed_says_to_add_again_only_once_ls_no_longer_lists_it() -> None:
+    entry = error_codes.get("deploy_model_removed")
+
+    assert entry is not None
+    assert "`removing`" in entry.meaning
+    assert "nothing to remove" not in entry.meaning
+    assert entry.hint is not None
+    assert "`comfy deploy models ls <deployment>` no longer lists it" in entry.hint
 
 
 def test_codes_match_pattern():

@@ -28,6 +28,7 @@ from comfy_cli.command.model_upload_resume import TlsSetupFailed as _TlsSetupFai
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow, upload).")
+DEPLOYMENT_POINTER = "To add a model to a deployment, use: comfy deploy models add <deployment> <file> --type <folder>"
 
 # A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in
 # the canonical ``blake3:<hex>`` wire form. Comfy Cloud's from-hash lookup
@@ -1063,6 +1064,7 @@ def upload_cmd(
     ] = False,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
+    get_renderer().info(DEPLOYMENT_POINTER)
     run_upload(file, folder, where=where, dry_run=dry_run, command="assets library upload")
 
 
