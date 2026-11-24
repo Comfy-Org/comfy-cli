@@ -69,7 +69,10 @@ jobs:
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: false
-          python-version: '3.10'  # Follow the min version in pyproject.toml
+          # The newest supported Python, not the minimum: typer releases can drop
+          # old Pythons (0.29.2 needs >=3.11), and on 3.10 the upgrade below would
+          # quietly settle on an older typer.
+          python-version: '3.13'
 
       - name: Install dependencies with the newest typer
         run: |
