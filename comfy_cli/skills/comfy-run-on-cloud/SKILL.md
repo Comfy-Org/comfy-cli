@@ -105,9 +105,12 @@ workflow, ask which one. In the URL, percent-encode the whole path after
 every other character outside letters, digits, `-`, `_` and `.` the same way
 (`workflows/team/My flow.json` gives `workflows%2Fteam%2FMy%20flow.json`).
 
-Work in one folder, `<work>`: `run-on-cloud/` plus the workflow's file name (no
-folders, no `.json`) with every character other than a letter, digit, `-` or
-`_` turned into `-` (`My flow (2)` gives `run-on-cloud/My-flow--2-`). Quote
+Work in one folder, `<work>`: `run-on-cloud/` plus the workflow's path after
+`workflows/` (subfolders included, no `.json`) with every character other than a
+letter, digit, `-` or `_` turned into `-` (`team/My flow (2)` gives
+`run-on-cloud/team-My-flow--2-`). Two workflows can still map to one folder, so
+`saved.json` and `consent.json` (steps 6 and 7) record the `workflow` path and
+`server` URL; ignore either file when they differ from this run's. Quote
 every path. Put each name that comes from the workflow, the server or the disk
 in single quotes, writing a `'` inside it as `'\''`: inside double quotes the
 shell still runs `$(...)` and backticks.
@@ -368,11 +371,11 @@ and no link; report it as the blocker.
 
 **Finding a model's source**, while preparing, even when a node also blocks: the
 item's `url`; `comfy --json build refs resolve '<file>'`; the README of the pack
-whose node loads it, which often links its models; then Hugging Face by name, `curl -s
-"https://huggingface.co/api/models?search=<file name without extension>&limit=20"`,
+whose node loads it, which often links its models; then Hugging Face by name, `curl -sG 'https://huggingface.co/api/models'
+--data-urlencode 'search=<file name without extension>' --data-urlencode 'limit=20'`,
 and again without a trailing version (`myVae_v10` -> `myVae`) when
 that finds nothing. For each repo, `curl -s
-"https://huggingface.co/api/models/<repo>/tree/main?recursive=true"` lists its
+'https://huggingface.co/api/models/<repo>/tree/main?recursive=true'` lists its
 files with `size` and `lfs.oid` (the sha256). Only a file of the exact name counts. It is the person's file when its sha256
 matches their local copy (`shasum -a 256`), or, when their only copy is a
 private upload in the Cloud model library, when its `size` matches that copy's
@@ -383,7 +386,7 @@ it came from. Otherwise offer it in the first stop (repo and size) and use it
 after a yes; the same goes for a link the person gives. With no exact-name source, look for
 near-name files: same folder, a name that differs only in case, separators or a
 version (`AlbedoBaseXL` and `albedobaseXL_v04`), in the person's own uploads
-(`comfy --json model search --text <name without version> --type <folder>
+(`comfy --json model search --text '<name without version>' --type <folder>
 --where cloud --mine-only`) and in the Hugging Face file lists above. Offer up to
 three in the first stop, or in the blocked report's question, each by name,
 place and size, saying the output may differ if it is another version; use one only after the person picks it, and only on the copy. A build takes the `url` as the model's source; on standard
@@ -457,14 +460,17 @@ skip the test and its question: say the test was skipped for the missing input,
 and go to step 7.
 
 **A yes stands.** Right after the person says yes, write `<work>/consent.json`:
-`{"test_job": true, "target": "<standard or deployment id>", "partner_nodes":
-[...], "approved_at": "<date -u +%Y-%m-%dT%H:%M:%SZ>"}`. When they said yes
-earlier in this conversation, or `consent.json` was there when you started, do
-not ask again, for a retry they ask for or a later attempt at this workflow:
-run the test and say it ran on their earlier yes; that yes is the ask the
-prompt requires. Ask again only when the target
-moves to another deployment or GPU, or the workflow runs partner-API nodes the
-yes did not name. A no is not remembered.
+`{"test_job": true, "workflow": "<path>", "server": "<url>", "target": "<standard
+or deployment id>", "gpu": "<GPU or null>", "price": "<what you quoted>",
+"sha256": "<shasum -a 256 of the file the test runs>", "partner_nodes": [...],
+"approved_at": "<date -u +%Y-%m-%dT%H:%M:%SZ>"}`. When they said yes earlier in
+this conversation, do not ask again for a retry they ask for: run the test and
+say it ran on their earlier yes; that yes is the ask the prompt requires. A
+`consent.json` from an earlier session counts the same only when its
+`workflow`, `server`, `target` and `gpu` match this run and the file the test
+runs still has its `sha256`. Either way, ask again when the target moves to
+another deployment or GPU, or the workflow runs partner-API nodes the yes did
+not name. A no is not remembered.
 
 Otherwise ask in the first stop, once for whichever route they pick: "Would you like
 me to run one test job? It costs money (Cloud credits or deployment GPU time).
@@ -486,24 +492,22 @@ After a yes, follow the route below. Never call it working before a real job
 succeeds.
 
 - **Comfy Cloud:**
-  `comfy --json run --workflow <file> --where cloud --wait`, then
+  `comfy --json run --workflow '<file>' --where cloud --wait`, then
   `comfy --json download <prompt_id> --where cloud --out-dir "<work>/outputs"`.
   `spend_consent_required` means nothing was submitted: the workflow has
   partner-API nodes (`details.partner_nodes`) that spend credits beyond the run.
   If the test's yes named them, run the same command with `--allow-spend`;
   otherwise ask, naming them, and add `--allow-spend` after a yes. On a no, go
-  to step 7 without running the job. A model you uploaded (by its `loader_path`) refused as unknown
-  means this CLI cannot yet check private uploads; never hand-edit around it.
-  From `run` (`workflow_unknown_nodes`): nothing was submitted; save, and
-  report that the test could not run from here and that the person can run it
-  from the link. From `set-widget` (`unknown_enum_value`): the copy cannot take
-  that model, so do not save it; report the blocker and that a newer comfy-cli
-  fixes it.
+  to step 7 without running the job. `run` and `set-widget` look a model up in the workspace's
+  Cloud model library before refusing it. A model you uploaded still refused
+  as unknown means the library does not hold it under that name, or the lookup
+  failed; the error's hint says which. Never hand-edit around it: report it
+  as the blocker, with no save.
 - **A deployment** (existing or custom build): first read
   `comfy --json deploy logs --deployment <id>`; `data.comfyuiLog` must show no
   `IMPORT FAILED` for a pack the workflow uses. Make the API file against the
   local server, which has the packs:
-  `COMFY_LOCAL_URL=<server> comfy --json run --workflow <file> --print-prompt --where local`,
+  `COMFY_LOCAL_URL=<server> comfy --json run --workflow '<file>' --print-prompt --where local`,
   `.data.prompt` into `"<work>/api.json"`.
 
   `deploy run` picks local files itself (any string input with a file
@@ -555,13 +559,14 @@ instead. A missing input file does not block the save. Save one Cloud copy per
 workflow, not one per attempt. Start each save command with
 `COMFY_WORKFLOW_SOURCE=run_on_cloud` (for that command alone) so Cloud can count
 saves from this flow. The `cat '<work>/saved.json'` you ran while
-preparing decides the case:
+preparing decides the case; a save with no `filename` (record-only) is replaced
+by a plain save, and `--expected-sha256` goes only with a `sha256` that is set:
 
 - **You already saved this workflow in this conversation:** replace that save,
   without asking, with the `filename` and `sha256` from that save's envelope:
 
   ```shell
-  COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save <file> --replace '<filename>' --expected-sha256 <sha256> --where cloud
+  COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save '<file>' --replace '<filename>' --expected-sha256 <sha256> --where cloud
   ```
 
 - **`<work>/saved.json` was already there when you started** (a save from an
@@ -572,13 +577,14 @@ preparing decides the case:
   Workflows sidebar:
 
   ```shell
-  COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save <file> --name '<name>' --where cloud
+  COMFY_WORKFLOW_SOURCE=run_on_cloud comfy --json workflow save '<file>' --name '<name>' --where cloud
   ```
 
 Right after every save that succeeds, a replace or record-only save included
 (null for any field the envelope lacks), and before you reply, write
 `<work>/saved.json` with that envelope's `filename`, `workflow_id`, `sha256`,
-`url` and `deployment`, plus `saved_at` from `date -u +%Y-%m-%dT%H:%M:%SZ`. A
+`url` and `deployment`, plus the `workflow` path, the `server` URL and
+`saved_at` from `date -u +%Y-%m-%dT%H:%M:%SZ`. A
 stale `sha256` there makes the next replace fail.
 
 | replace error | what to do |

@@ -1834,15 +1834,21 @@ def test_run_on_cloud_skill_asks_once_then_runs_to_the_end():
 
 
 def test_run_on_cloud_skill_remembers_a_test_job_yes():
-    """A yes to a test job is recorded and not asked again, for a retry or a
-    later attempt at the workflow; a new target or unnamed partner node needs
-    a new yes, a no is not remembered, and nothing resubmits on its own."""
+    """A yes to a test job is recorded and not asked again for a retry; one
+    from an earlier session counts only for the same workflow, target, GPU and
+    unchanged file. A new target or unnamed partner node needs a new yes, a no
+    is not remembered, and nothing resubmits on its own."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "Right after the person says yes, write `<work>/consent.json`" in text
-    assert "do not ask again, for a retry they ask for or a later attempt at this workflow" in text
+    assert '"sha256": "<shasum -a 256 of the file the test runs>"' in text
+    assert "do not ask again for a retry they ask for" in text
     assert "run the test and say it ran on their earlier yes" in text
     assert "that yes is the ask the prompt requires" in text
-    assert "Ask again only when the target moves to another deployment or GPU" in text
+    assert (
+        "A `consent.json` from an earlier session counts the same only when its `workflow`, `server`, `target` "
+        "and `gpu` match this run and the file the test runs still has its `sha256`" in text
+    )
+    assert "ask again when the target moves to another deployment or GPU" in text
     assert "A no is not remembered" in text
     assert "never submit a second on your own" in text
     assert "a retry the person asks for runs on their earlier yes" in text
@@ -1855,7 +1861,7 @@ def test_run_on_cloud_skill_finds_a_model_source_and_offers_ways_to_unblock():
     asking how to unblock it, never with a substitute model."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "**Finding a model's source**, while preparing" in text
-    assert "https://huggingface.co/api/models?search=<file name without extension>&limit=20" in text
+    assert "--data-urlencode 'search=<file name without extension>'" in text
     assert "https://huggingface.co/api/models/<repo>/tree/main?recursive=true" in text
     assert "Only a file of the exact name counts" in text
     assert "It is the person's file when its sha256 matches their local copy" in text
@@ -1896,16 +1902,35 @@ def test_run_on_cloud_skill_places_unattributed_nodes_and_finds_pack_models():
 
 
 def test_run_on_cloud_skill_stops_cleanly_when_the_cli_rejects_a_private_upload():
-    """Cloud's loader choices never list a workspace's own uploads, so the
-    CLI's pre-submit check rejects them; the skill saves and reports instead
-    of editing around it."""
+    """`run` and `set-widget` look an upload up in the workspace's library, so
+    an upload still refused is a real blocker: reported, never edited around,
+    and not saved."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
-    assert "means this CLI cannot yet check private uploads; never hand-edit around it" in text
-    assert (
-        "From `run` (`workflow_unknown_nodes`): nothing was submitted; save, and report that the test could not run from here"
-        in text
-    )
-    assert "From `set-widget` (`unknown_enum_value`): the copy cannot take that model, so do not save it" in text
+    assert "`run` and `set-widget` look a model up in the workspace's Cloud model library before refusing it" in text
+    assert "the library does not hold it under that name, or the lookup failed; the error's hint says which" in text
+    assert "Never hand-edit around it: report it as the blocker, with no save" in text
+
+
+def test_run_on_cloud_skill_keeps_state_files_to_their_own_workflow():
+    """The work folder comes from the whole path, and saved.json and
+    consent.json name the workflow and server, so one workflow never reuses
+    another's paid-test yes or save. A record-only save is not replaced."""
+    text = " ".join(skill_content("comfy-run-on-cloud").split())
+    assert "plus the workflow's path after `workflows/` (subfolders included, no `.json`)" in text
+    assert "`team/My flow (2)` gives `run-on-cloud/team-My-flow--2-`" in text
+    assert "ignore either file when they differ from this run's" in text
+    assert "a save with no `filename` (record-only) is replaced by a plain save" in text
+    assert "`--expected-sha256` goes only with a `sha256` that is set" in text
+    assert "plus the `workflow` path, the `server` URL and `saved_at`" in text
+
+
+def test_run_on_cloud_skill_quotes_every_file_placeholder():
+    """A file name from the workflow never reaches the shell unquoted."""
+    text = skill_content("comfy-run-on-cloud")
+    assert "--workflow <file>" not in text
+    assert "workflow save <file>" not in text
+    assert '"https://huggingface.co/api/models?search=' not in text
+    assert "--text '<name without version>'" in text
 
 
 def test_run_on_cloud_skill_shows_the_steps_left_as_a_checklist():
