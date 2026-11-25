@@ -4032,6 +4032,25 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         instance_path = [str(s) for s in promoted_write.get("instance_path") or [str(op["node_id"])]]
         if _find_by_str(workflow, instance_path[0]) is None:
             return  # instance concurrently deleted => no-op (delete wins)
+        # Validate the WHOLE path against the current definition before the
+        # mutating resolver below forks shared ancestors along it. A nested
+        # host (``instance_path`` longer than one segment) is reached by
+        # forking every non-terminal hop en route — unconditionally, before
+        # the final segment is even looked up — so a concurrently-deleted
+        # interior host made ``_resolve_node_path`` raise ValueError only
+        # AFTER it had already forked every ancestor's shared definition,
+        # and ``apply_op``'s rollback does not undo a definition fork: the
+        # fork leaked on every concurrent-delete race. Only the top-level
+        # segment had this guard; extend it the same way the plain interior
+        # write branch below already guards its own path.
+        # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514882
+        if len(instance_path) > 1:
+            try:
+                _navigate_subgraph_path(workflow, instance_path)
+            except ValueError:
+                if _interior_path_deleted(workflow, instance_path):
+                    return  # interior host concurrently deleted => no-op (delete wins)
+                raise
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
         # Legacy ``proxyWidgets`` promotion: repair the instance's definition

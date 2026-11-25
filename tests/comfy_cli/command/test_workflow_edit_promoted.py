@@ -375,6 +375,75 @@ def test_nested_host_payload_reflects_the_forked_instance(graph):
     assert next(n for n in outer["nodes"] if n["id"] == 7)["widgets_values"] == []
 
 
+def test_replaying_a_promoted_write_to_a_deleted_nested_host_does_not_leak_a_fork(graph):
+    """A replica builds a ``set_widget`` op against nested host ``900/7`` while
+    node 7 still exists; a peer deletes node 7 first and then replays that op.
+    ``_apply_set_widget`` resolved ``instance_path`` with the engine's
+    MUTATING ``_resolve_node_path`` before checking the final segment existed
+    — which forks every non-terminal ancestor's shared definition (900's) en
+    route, unconditionally, and only THEN discovers the interior host is gone
+    and raises. ``apply_op``'s exception rollback does not undo a definition
+    fork, so the fork leaked: instance 900 permanently stopped sharing its
+    definition with sibling 901 over a write that never actually happened.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514882
+    """
+    wf = _load("image_z_image_turbo.json")
+    inner_sg = wf["definitions"]["subgraphs"][0]
+    outer_id = "0e0e0e0e-0000-4000-8000-000000000002"
+    outer = {
+        "id": outer_id,
+        "name": "Outer",
+        "inputs": [],
+        "outputs": [],
+        "widgets": [],
+        "links": [],
+        "nodes": [
+            {
+                "id": 7,
+                "type": inner_sg["id"],
+                "pos": [0, 0],
+                "size": [1, 1],
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+                "widgets_values": [],
+            }
+        ],
+    }
+    wf["definitions"]["subgraphs"].append(outer)
+    for nid in (900, 901):  # two instances share the outer definition
+        wf["nodes"].append(
+            {
+                "id": nid,
+                "type": outer_id,
+                "pos": [0, 0],
+                "size": [1, 1],
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+                "widgets_values": [],
+            }
+        )
+    # The op a replica minted while node 7 still existed.
+    _, op = workflow_ops.set_widget(copy.deepcopy(wf), graph, "900/7", "width", 640)
+
+    # This replica deletes node 7 before the op above arrives for replay.
+    outer["nodes"] = []
+    definitions_before = len(wf["definitions"]["subgraphs"])
+
+    wf = workflow_ops.apply_op(wf, op, graph)  # no-op: delete wins, and nothing is forked
+
+    assert _node(wf, 900)["type"] == outer_id  # not forked
+    assert _node(wf, 901)["type"] == outer_id  # sibling untouched
+    assert len(wf["definitions"]["subgraphs"]) == definitions_before  # no new fork left behind
+
+
 def test_connect_does_not_type_check_against_an_untyped_declared_input(graph):
     wf, prim = _with_primitive(graph)
     sg = next(d for d in wf["definitions"]["subgraphs"] if d["id"] == _node(wf, 57)["type"])
