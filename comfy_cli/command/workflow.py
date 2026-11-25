@@ -1753,7 +1753,11 @@ def _cloud_replace_key(renderer, filename: str) -> str:
     home paths, backslashes, empty or dot-only segments), and also unless it
     is one folder deep and ends in ``.json``: the shape a sidebar save writes.
     """
-    key = filename.strip().removeprefix(f"{_WORKFLOWS_DIR}/")
+    stripped = filename.strip()
+    # Only `workflows/<folder>/<name>.json` carries the optional prefix; a
+    # two-part value is already the key, even when its folder is `workflows`.
+    prefixed = stripped.count("/") == 2 and stripped.startswith(f"{_WORKFLOWS_DIR}/")
+    key = stripped[len(_WORKFLOWS_DIR) + 1 :] if prefixed else stripped
     parts = key.split("/")
     if (
         not key

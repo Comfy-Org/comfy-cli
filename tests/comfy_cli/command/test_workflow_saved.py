@@ -1529,6 +1529,19 @@ class TestSaveReplace:
         (post,) = _posts(calls)
         assert post["url"] == _REPLACE_FILE_URL + "?overwrite=true"
 
+    @pytest.mark.parametrize("filename", ["workflows/wf.json", "workflows/workflows.json"])
+    def test_a_folder_named_workflows_is_not_taken_for_the_prefix(
+        self, cloud_target, wf_path, monkeypatch, capsys, filename
+    ):
+        # Two parts are already the key, even when the folder is `workflows`;
+        # only `workflows/<folder>/<name>.json` carries the optional prefix.
+        calls = _patch_cloud(monkeypatch, _replace_cloud(files={filename: _OLD_BYTES}))
+        env = self._replace(wf_path, capsys, filename=filename)
+        assert env["ok"] is True
+        assert env["data"]["filename"] == f"workflows/{filename}"
+        (post,) = _posts(calls)
+        assert post["url"].startswith("https://cloud.example.com/api/userdata/workflows%2Fworkflows%2F")
+
     def test_a_missing_file_is_never_made(self, cloud_target, wf_path, monkeypatch, capsys):
         calls = _patch_cloud(monkeypatch, _replace_cloud(files={}))
         env = self._replace(wf_path, capsys)
@@ -1615,7 +1628,6 @@ class TestSaveReplace:
         [
             "../x.json",
             "x.json",
-            "workflows/x.json",
             "flux/../x.json",
             "workflows/../flux/x.json",
             "/workflows/flux/flux.json",

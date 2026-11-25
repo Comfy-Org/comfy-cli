@@ -88,7 +88,9 @@ making a new folder per save.
 
 - Any CLI call that deletes a userdata file under `workflows/`, or overwrites
   one other than the existing file `--replace` names.
-- A file write whose `<folder>/<name>` matches a live record.
+- A new file write whose `<folder>/<name>` matches a live record. A
+  `--replace` write is the exception: it adds a version to the record its
+  own earlier save made, which is what it is for.
 - Naming a file in `sidebar_file_kept` on a name match alone.
 
 ## Consequences

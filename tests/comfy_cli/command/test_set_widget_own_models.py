@@ -99,6 +99,28 @@ def test_cloud_set_widget_never_asks_about_a_non_model_value(tmp_path, capsys, m
     assert library.asked == []
 
 
+def test_cloud_set_widget_never_writes_an_upload_into_an_input_that_picks_no_model(
+    tmp_path, capsys, monkeypatch, library
+):
+    # The library holds the file, but the sampler's options are samplers: an
+    # upload named *.safetensors is refused there, and nothing is written.
+    sampler = json.loads(json.dumps(CHECKPOINT_LOADER))
+    sampler["input"]["required"] = {"sampler_name": [["euler", "dpmpp_2m"], {}]}
+    sampler["input_order"]["required"] = ["sampler_name"]
+    graph = Graph.from_object_info({"SamplerPick": sampler})
+    monkeypatch.setattr(workflow_edit, "_get_graph", lambda *a, **kw: graph)
+    wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0, "version": 0.4}
+    wf, op = workflow_ops.add_node(wf, graph, "SamplerPick")
+    path = tmp_path / "wf.json"
+    path.write_text(json.dumps(wf))
+    before = path.read_text()
+    env = _run(["set-widget", str(path), f"{op['node_id']}.sampler_name", UPLOAD["name"], "--where", "cloud"], capsys)
+    assert env["error"]["code"] == "unknown_enum_value"
+    assert "library" not in env["error"]["details"]
+    assert library.asked == []
+    assert path.read_text() == before
+
+
 @pytest.mark.parametrize("catalog", [["--where", "local"], ["--input", "object_info.json"]])
 def test_set_widget_off_clouds_live_catalog_reads_no_library(tmp_path, capsys, monkeypatch, library, catalog):
     path, node_id = _checkpoint_workflow(tmp_path, monkeypatch)

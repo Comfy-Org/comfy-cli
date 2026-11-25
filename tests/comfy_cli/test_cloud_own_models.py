@@ -137,7 +137,8 @@ def test_for_cloud_resolves_credentials_only_on_the_first_lookup():
         resolve.assert_not_called()
         assert own.holds("my_finetune_v1.safetensors")
         assert own.holds("other.safetensors") is False
-    resolve.assert_called_once_with(where="cloud")
+    # A side lookup: a refresh that fails there must not sign the person out.
+    resolve.assert_called_once_with(where="cloud", allow_clear=False)
     assert fetch.call_args_list[0].args == (target, "my_finetune_v1.safetensors")
     assert fetch.call_args_list[0].kwargs == {"include_public": False}
 
@@ -188,8 +189,38 @@ def test_note_refusals_says_what_the_library_said():
     errors = graph.validate_workflow(wf)["errors"]
     own = OwnModels(Library(UPLOAD))
     assert admit_refused(graph, wf, errors, own) == []
-    note_refusals(wf, errors, own)
+    note_refusals(graph, wf, errors, own)
     assert "has this file as 'my_finetune_v1.safetensors': set that" in errors[0]["hint"]
+    assert errors[0]["library"].startswith("your Comfy Cloud model library has this file")
+
+
+def test_an_upload_is_never_admitted_into_an_input_that_picks_no_model():
+    # The library holds the file, but sampler_name lists samplers, not model files.
+    graph = Graph.from_object_info(OBJECT_INFO)
+    wf = _workflow("sd_xl_base_1.0.safetensors", sampler="my_finetune_v1.safetensors")
+    errors = graph.validate_workflow(wf)["errors"]
+    lib = Library(UPLOAD)
+    own = OwnModels(lib)
+    assert admit_refused(graph, wf, errors, own) == []
+    note_refusals(graph, wf, errors, own)
+    assert lib.asked == []
+    assert "library" not in errors[0]
+    assert [(e["node_id"], e["field"]) for e in graph.validate_workflow(wf)["errors"]] == [("2", "sampler_name")]
+
+
+@pytest.mark.parametrize(
+    ("class_type", "input_name", "expected"),
+    [
+        ("CheckpointLoaderSimple", "ckpt_name", True),
+        ("UNETLoader", "unet_name", True),  # no options: a model folder Cloud ships empty
+        ("KSamplerLite", "sampler_name", False),
+        ("KSamplerLite", "model", False),
+        ("NoSuchNode", "ckpt_name", False),
+    ],
+)
+def test_loads_a_model_reads_the_inputs_own_options(class_type, input_name, expected):
+    graph = Graph.from_object_info(OBJECT_INFO)
+    assert cloud_own_models.loads_a_model(graph, class_type, input_name) is expected
 
 
 # --- run preflight ---------------------------------------------------------------
@@ -232,6 +263,8 @@ def test_preflight_still_refuses_a_model_nobody_holds():
     (entry,) = err["details"]["errors"]
     assert entry["code"] == "unknown_enum_value"
     assert "no model in your Comfy Cloud model library is named 'nobody_has_this.safetensors'" in entry["hint"]
+    # The envelope's own hint, the one pretty mode shows, says it too.
+    assert "no model in your Comfy Cloud model library is named 'nobody_has_this.safetensors'" in err["hint"]
 
 
 def test_preflight_refuses_when_the_library_cannot_be_read():

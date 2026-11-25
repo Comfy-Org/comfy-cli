@@ -211,7 +211,7 @@ def _admitting_own_models(graph, own, edit):
     Comfy Cloud library holds, admit the value into that input's options and run
     it again. Any other refusal propagates, with what the library said about the
     value added to the finding as ``library``."""
-    from comfy_cli.cloud_own_models import ADMITTABLE_CODES
+    from comfy_cli.cloud_own_models import ADMITTABLE_CODES, admit, note_for
 
     admitted: set[tuple[str, str, str]] = set()
     while True:
@@ -222,8 +222,8 @@ def _admitting_own_models(graph, own, edit):
             key = (str(e.class_type), str(e.input_name), repr(value))
             if own is None or e.finding.get("code") not in ADMITTABLE_CODES or e.class_type is None or key in admitted:
                 raise
-            if not (own.holds(value) and graph.admit_combo_value(e.class_type, e.input_name, value)):
-                note = own.refusal_note(value)
+            if not admit(graph, e.class_type, e.input_name, value, own):
+                note = note_for(graph, e.class_type, e.input_name, value, own)
                 if note:
                     e.finding["library"] = note
                 raise

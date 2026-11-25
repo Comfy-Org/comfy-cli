@@ -61,8 +61,9 @@ history.
   (`comfy model upload`). Cloud's node list only offers Cloud's own models, so
   the pre-submit check failed every upload with `unknown_enum_value` (`run`:
   `workflow_unknown_nodes`), although Cloud runs it. Before refusing a model
-  file value, both commands now look it up in the library, by the same lookup
-  and matching rule as `comfy workflow check`, and accept a value found there.
+  file value of an input that picks a model file, both commands now look it up
+  in the library, by the same lookup and matching rule as `comfy workflow
+  check`, and accept a value found there.
   A model nobody holds is still refused, and the hint now says what the library
   said: no such model, the upload's name when it sits under another folder, or
   that the library could not be read. A workflow that names only Cloud's own

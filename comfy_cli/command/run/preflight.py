@@ -137,7 +137,7 @@ def _preflight_validate(
         admitted = admit_refused(graph, workflow, validation.get("errors", []), own_models)
         if admitted:
             validation = graph.validate_workflow(workflow)
-        note_refusals(workflow, validation.get("errors", []), own_models)
+        note_refusals(graph, workflow, validation.get("errors", []), own_models)
     if admitted and renderer.is_pretty():
         for row in admitted:
             pprint(
@@ -155,6 +155,8 @@ def _preflight_validate(
             suggestions = e.get("suggestions") or []
             if suggestions:
                 line += f" (did you mean: {', '.join(suggestions)}?)"
+            if e.get("library"):
+                line += f" — {e['library']}"
             hint_parts.append(line)
         renderer.error(
             code="workflow_unknown_nodes",
