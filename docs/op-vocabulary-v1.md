@@ -623,10 +623,6 @@ Current contract, pinned:
   widget)` — deterministic, never random — so replay on any replica produces
   a byte-identical document. The repair mutates the definition, so a shared
   one is forked first exactly like an interior write.
-  A write to an already-linked input also carries `promoted.repair = {ids}`
-  when the instance has pending legacy value entries: those must be consumed
-  before materializing a declaration-order host array. `entry` is omitted
-  because the written input already exists; replay still runs the same flush.
 * OPEN: the shared-definition forking semantics above are apply-time behavior
   that rewrites `instance.type` without an explicit op saying so. A full
   specification (fork visibility, interaction with concurrent interior writes
@@ -1030,8 +1026,6 @@ the op additionally carries `promoted.repair = {entry, ids}` with the
 subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
-This flush also precedes writes to already-linked inputs while legacy value
-entries remain; those ops carry `{ids}` without a newly repaired `entry`.
 
 ## 15. Amendment v1.6 — 2026-09-22 (`set_node_field`: a generalized node-field op — PROPOSED, pending ratification)
 
@@ -1666,3 +1660,65 @@ selector or count, because the rebuild resets the value but not the stamp
 
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 24. Amendment v1.15 — 2026-11-25 (promoted `set_widget`: legacy proxy flush on already-linked inputs)
+
+**The bug.** §8.7's pinned text says the forward-migration flush
+(`promoted.flush_proxy_migration`) runs before a write to the LEGACY entry
+itself. It did not run before a write to an already-linked DECLARED input on
+the same instance while that instance still had other `proxyWidgets` tuples
+pending (an `alreadyLinked` or `quarantine` plan). While any such tuple is
+pending, the instance's `widgets_values` stays laid out in legacy PROXY
+order; the host write indexes it by DECLARATION-order `value_index`. When
+the two orders disagree, the write landed in whatever slot declaration order
+assigned it, silently overwriting a different widget's value
+(comfy-cli#1168, discussion r4670514870). A second, narrower case: only the
+FIRST write on a replica that ever observed the pending plan carried a
+repair payload at all, so a later, higher-stamped write reaching a peer
+first could win the LWW register while leaving `proxyWidgets` unconsumed,
+and the earlier op then lost the gate without its flush ever running
+(discussion r4623941925).
+
+**The rule.** `_apply_set_widget` (`workflow_ops.py`) and
+`_apply_one_slot_impl` (`cql/engine.py`) now recompute
+`plan_proxy_migration` from the live document on every apply of a HOST
+write (§14.1/§14.4), and run the flush whenever that plan is non-empty —
+not only when it contains a repairable (`createSubgraphInput` /
+`primitiveBypass`) entry. This runs **before the §11.1 LWW gate** for the
+value, and independently of it: the repair is deterministic and idempotent
+(derived ids, a no-op once already flushed), so running it from live state
+on every apply converges regardless of delivery order, even when the op
+that happens to win LWW is not the one that first observed the pending
+plan. Only the VALUE write stays LWW-gated.
+
+**Wire shape: `promoted.repair = {ids}` on an already-linked write.** The
+minting side (§14.4) already attached `promoted.repair = {entry, ids}` to a
+write that itself repairs a legacy entry. It now ALSO attaches
+`promoted.repair = {ids}` (no `entry` — the input already exists) to a
+write to an unrelated, already-linked declared input, whenever the
+instance's plan contains at least one repairable entry; `ids` carries the
+same deterministically-minted subgraph-input and boundary-link ids §14.4
+already specifies. This is additive, not a shape change: `{ids}` without
+`entry` was already valid under v1.5 (§14.4's `entry`-omitted case for a
+repair-carrying write), so a v1.5 consumer that already handles that case
+handles this one. A plan with no repairable entry (`alreadyLinked`/
+`quarantine` only) carries no `repair` payload at all — the flush still
+runs on apply (the rule above), from the recomputed plan, independently of
+anything the op carries.
+
+**Why not amend §8.7/§14.4 in place.** The flush's precondition (what
+triggers it) changed; its wire effect for the cases §14.4 already
+specifies, and the convergence invariant that makes replay order-
+independent, did not. Recording that as a dated amendment — rather than
+editing the pinned sections — keeps the sections' own text matching what a
+pre-v1.15 implementation already does, and keeps this amendment's rationale
+(the wrong-slot bug, the LWW-ordering race, why the fix is safe to apply
+unconditionally) attached to the change instead of folded silently into
+prose a future reader has no reason to re-derive.
+
+**No change to §§1-7, 9-13, or 14.1-14.3.** No op kind, register, or batch
+rule changed; `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+Offline replay (no catalog) of a write that would otherwise reach the flush
+now skips it and applies the write as-is — matching every other offline-
+degradation site in `workflow_ops.py` — rather than raising, since
+`flush_proxy_migration` itself refuses to run without a catalog.
