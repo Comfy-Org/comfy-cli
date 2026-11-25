@@ -417,6 +417,91 @@ def test_seedance_resume_helper_round_trip():
     assert poll.extract_job_id("seedance", body) == "t-42"
 
 
+@pytest.mark.parametrize(
+    ("name", "model", "expected"),
+    [
+        ("seedance", "dreamina-seedance-2-5-260628", "seedance2"),
+        ("seedance", "dreamina-seedance-2-0-fast-260128", "seedance2"),
+        ("seedance", "dreamina-seedance-2-0-mini", "seedance2"),
+        ("seedance", "seedance-1-5-pro-251215", "seedance"),
+        ("seedance", "seedance-2-0-260128", "seedance"),
+        ("seedance", None, "seedance"),
+        ("kling", "dreamina-seedance-2-5-260628", "kling"),
+    ],
+)
+def test_seedance_poller_name_routes_by_model(name, model, expected):
+    from comfy_cli.command.generate import poll
+
+    assert poll.poller_name(name, model) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_url"),
+    [
+        ("seedance", "/proxy/byteplus/api/v3/contents/generations/tasks/t1"),
+        ("seedance2", "/proxy/byteplus-seedance2/api/v3/contents/generations/tasks/t1"),
+    ],
+)
+def test_seedance_poll_routes(monkeypatch, name, expected_url):
+    from comfy_cli.command.generate import poll
+
+    monkeypatch.setattr(poll, "_sleep", lambda *_: None)
+    captured = {}
+
+    def fake_get(url, **_kw):
+        captured["url"] = url
+        return httpx.Response(
+            200, json={"id": "t1", "status": "succeeded", "content": {"video_url": "https://cdn/v.mp4"}}
+        )
+
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", fake_get)
+    body = poll.build_synthetic_initial(name, "t1")
+    assert poll.extract_job_id(name, body) == "t1"
+    result = poll.get_poller(name)(body, api_key="k")
+    assert captured["url"] == expected_url
+    assert result.status == "succeeded"
+
+
+@pytest.mark.parametrize("name", ["seedance", "seedance2"])
+@pytest.mark.parametrize("status", ["expired", "failed", "cancelled"])
+def test_seedance_terminal_failure_ends_poll(monkeypatch, name, status):
+    from comfy_cli.command.generate import poll
+
+    clock = iter([0.0, 0.0, 0.0, 1000.0])
+    monkeypatch.setattr(poll, "_now", lambda: next(clock))
+    monkeypatch.setattr(poll, "_sleep", lambda *_: None)
+    calls = []
+
+    def fake_get(url, **_kw):
+        calls.append(url)
+        return httpx.Response(200, json={"id": "t1", "status": status})
+
+    monkeypatch.setattr("comfy_cli.command.generate.client.get", fake_get)
+    result = poll.get_poller(name)(poll.build_synthetic_initial(name, "t1"), api_key="k", timeout=300)
+    assert (result.status, result.error, len(calls)) == ("failed", status, 1)
+
+
+@pytest.mark.parametrize(
+    ("values", "expected_model", "expected_poller"),
+    [
+        ({"prompt": "x"}, "dreamina-seedance-2-5-260628", "seedance2"),
+        ({"prompt": "x", "model": "seedance-1-0-pro-250528"}, "seedance-1-0-pro-250528", "seedance"),
+    ],
+)
+def test_seedance_request_model_matches_body(_spec_cache, values, expected_model, expected_poller):
+    from comfy_cli.command.generate import poll
+
+    models = ["dreamina-seedance-2-5-260628", "seedance-1-0-pro-250528"]
+    spec.write_cache(_seedance_fixture_spec({"type": "string", "enum": models[:1]}))
+    model = adapters.request_model(adapters._SEEDANCE_ENDPOINT_ID, values)
+    assert model == adapters._seedance_build_body(values, api_key="k")["model"] == expected_model
+    assert poll.poller_name("seedance", model) == expected_poller
+
+
+def test_request_model_none_for_endpoints_without_body_model():
+    assert adapters.request_model("vertexai/gemini/{model}", {"model": "gemini-2.5-flash-image"}) is None
+
+
 # ── Inline blob saving ────────────────────────────────────────────────────
 
 

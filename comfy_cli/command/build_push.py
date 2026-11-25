@@ -130,7 +130,12 @@ def _has_text(entry: JsonObject, key: str) -> bool:
 
 
 def prepare_push(
-    spec: JsonObject, paths: BuildPaths, model_digest: ModelDigest, *, package_dir: Path | None = None
+    spec: JsonObject,
+    paths: BuildPaths,
+    model_digest: ModelDigest,
+    *,
+    package_dir: Path | None = None,
+    node_size_limit: int | None = None,
 ) -> PushPreparation:
     """Reconcile the spec against local bytes and plan what still has to upload.
 
@@ -145,8 +150,36 @@ def prepare_push(
     if not isinstance(definition, dict):
         raise BuildSpecInvalidError("definition must be a mapping")
     uploads: list[PushUpload] = []
+    node_uploads: list[PushUpload] = []
     stale_source_uris: list[int] = []
     skipped_symlinks: list[SkippedSymlink] = []
+
+    for index, node in enumerate(_entries(definition, "customNodes")):
+        if node.get("source") != "local":
+            continue
+        location = f"definition.customNodes[{index}]"
+        path = _local_path(node, paths.custom_nodes_dir, location=location)
+        # One build, one identity: packaging twice lets the directory change
+        # between calls and pairs these bytes with another archive's digest.
+        # `NodePackageError` propagates: it already names the node directory the
+        # user must fix, which a `BuildSpecInvalidError` here would relabel with
+        # the spec file's path at the call site.
+        package = package_node(
+            path, package_dir / f"node-{index}.zip" if package_dir is not None else None, max_bytes=node_size_limit
+        )
+        digest, size = package.sha256, package.size_bytes
+        # `_local_path` above already proved localPath is a non-empty str.
+        local_path = str(node["localPath"])
+        skipped_symlinks.extend(SkippedSymlink(location, local_path, member) for member in package.skipped_symlinks)
+        if node.get("localDigest") != digest:
+            node.pop("blobId", None)
+        node["localDigest"] = digest
+        node["localSizeBytes"] = size
+        if not _has_text(node, "blobId"):
+            name = str(node.get("name") or f"node-{index}")
+            node_uploads.append(
+                PushUpload("node_zip", "customNodes", index, f"{name}.zip", digest, size, package.archive_path)
+            )
 
     for index, model in enumerate(_entries(definition, "models")):
         if model.get("source") != "local":
@@ -170,31 +203,7 @@ def prepare_push(
                 PushUpload("model", "models", index, str(model.get("filename") or path.name), digest, size, path)
             )
 
-    for index, node in enumerate(_entries(definition, "customNodes")):
-        if node.get("source") != "local":
-            continue
-        location = f"definition.customNodes[{index}]"
-        path = _local_path(node, paths.custom_nodes_dir, location=location)
-        # One build, one identity: packaging twice lets the directory change
-        # between calls and pairs these bytes with another archive's digest.
-        # `NodePackageError` propagates: it already names the node directory the
-        # user must fix, which a `BuildSpecInvalidError` here would relabel with
-        # the spec file's path at the call site.
-        package = package_node(path, package_dir / f"node-{index}.zip" if package_dir is not None else None)
-        digest, size = package.sha256, package.size_bytes
-        # `_local_path` above already proved localPath is a non-empty str.
-        local_path = str(node["localPath"])
-        skipped_symlinks.extend(SkippedSymlink(location, local_path, member) for member in package.skipped_symlinks)
-        if node.get("localDigest") != digest:
-            node.pop("blobId", None)
-        node["localDigest"] = digest
-        node["localSizeBytes"] = size
-        if not _has_text(node, "blobId"):
-            name = str(node.get("name") or f"node-{index}")
-            uploads.append(
-                PushUpload("node_zip", "customNodes", index, f"{name}.zip", digest, size, package.archive_path)
-            )
-
+    uploads.extend(node_uploads)
     return PushPreparation(prepared, tuple(uploads), tuple(stale_source_uris), tuple(skipped_symlinks))
 
 

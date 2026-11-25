@@ -42,3 +42,48 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
           verbose: true
+
+  # The `build` job pins dependencies via uv.lock (currently typer 0.27.2), so a
+  # breaking typer release can land on users long before CI notices. This lane
+  # resolves dependencies from pyproject *without* the lockfile and force-upgrades
+  # typer/click to the newest published versions, deliberately past pyproject's
+  # typer<0.29 cap, so an incompatibility (e.g. the help JSON surface in
+  # comfy_cli/help_json.py) fails here first. It is an early
+  # signal, not a required check: a breaking upstream release turns this lane red
+  # on every PR until comfy-cli is fixed, but it does not gate merges.
+  #
+  # Because it installs an unpinned dependency tree and runs it, the job gets a
+  # read-only token and does not persist it into .git/config.
+  newest-typer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: false
+          # The newest supported Python, not the minimum: typer releases can drop
+          # old Pythons (0.29.2 needs >=3.11), and on 3.10 the upgrade below would
+          # quietly settle on an older typer.
+          python-version: '3.13'
+
+      - name: Install dependencies with the newest typer
+        run: |
+          uv venv
+          uv pip install -e '.[dev]'
+          uv pip install --upgrade typer click
+
+      - name: Show resolved typer/click versions
+        run: uv run --no-sync python -c "from importlib.metadata import version; print('typer', version('typer')); print('click', version('click'))"
+
+      - name: Run tests against the newest typer
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: uv run --no-sync pytest .

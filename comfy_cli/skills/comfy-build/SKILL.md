@@ -308,7 +308,10 @@ naming them on stderr and in a `skipped_symlinks` payload key — read those,
 because a pack that vendors its dependencies through a symlink packages to a
 near-empty archive whose digest the spec then commits. Packaging fails outright
 if the node root is a symlink, if any file cannot be read, or if a file changes
-size while being read.
+size while being read. `push` and `push --dry-run` also refuse a local node over
+2 GiB (`build_spec_invalid`, `a custom node can be at most 2 GiB`) before they
+upload anything, because the builder cannot use a node that large. Move large
+files such as model weights out of the node folder, then push again.
 
 **Push is resumable and conflict-checked.** It rewrites the spec after every blob
 lands, so an interrupted push resumes instead of re-uploading. It refuses with

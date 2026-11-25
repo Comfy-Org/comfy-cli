@@ -196,13 +196,17 @@ def _seedance_default_model() -> str:
     return SEEDANCE_MODELS[0] if SEEDANCE_MODELS[0] in models else models[0]
 
 
+def _seedance_model(values: dict) -> str:
+    return values.get("model") or _seedance_default_model()
+
+
 def _seedance_build_body(values: dict, api_key: str) -> dict[str, Any]:
     content: list[dict[str, Any]] = [{"type": "text", "text": _seedance_text(values)}]
     image = values.get("image")
     if image:
         content.append({"type": "image_url", "image_url": {"url": _seedance_image_url(str(image), api_key)}})
     body: dict[str, Any] = {
-        "model": values.get("model") or _seedance_default_model(),
+        "model": _seedance_model(values),
         "content": content,
     }
     if "generate_audio" in values:
@@ -265,6 +269,13 @@ _ADAPTERS: dict[str, Adapter] = {
     _GEMINI_ENDPOINT_ID: _gemini_adapter,
     _SEEDANCE_ENDPOINT_ID: _seedance_adapter,
 }
+
+
+def request_model(endpoint_id: str, values: dict) -> str | None:
+    """The model id ``build_body`` sends in the request body, where it sends one."""
+    if endpoint_id == _SEEDANCE_ENDPOINT_ID:
+        return _seedance_model(values)
+    return None
 
 
 def _spec_model_flags(endpoint_id: str, flags: list[FlagDef]) -> list[FlagDef]:
