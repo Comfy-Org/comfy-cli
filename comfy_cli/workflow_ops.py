@@ -656,16 +656,47 @@ class DeprecatedNodeType(ValueError):
 
 
 _DEPRECATED_DISPLAY_SUFFIX = re.compile(r"\s*\((?:deprecated|legacy)\)\s*$", re.I)
+# A trailing "(…)" qualifier, e.g. the format in "Save Audio (FLAC)". Requires
+# something before it, so a wholly parenthesised name is left alone.
+_TRAILING_PARENTHETICAL = re.compile(r"(?<=\S)\s*\([^()]*\)\s*$")
+
+
+def _display_base(name: str) -> str:
+    """Display name with its trailing parenthetical qualifier removed.
+
+    "Save Audio (FLAC)" -> "save audio". Only the LAST group goes, and only
+    when something precedes it, so a wholly parenthesised name keeps its shape.
+    """
+    return _TRAILING_PARENTHETICAL.sub("", name).strip().lower()
 
 
 def _deprecated_replacement(graph, m) -> str | None:
     want = _DEPRECATED_DISPLAY_SUFFIX.sub("", m.display_name).strip().lower()
     # A free node and a paid partner node can share a display name; never
     # answer a free class with one that bills credits (or vice versa).
-    for n in graph.all_nodes():
-        if not n.deprecated and n.is_api_node == m.is_api_node and n.display_name.strip().lower() == want:
+    same_class = [n for n in graph.all_nodes() if not n.deprecated and n.is_api_node == m.is_api_node]
+    for n in same_class:
+        if n.display_name.strip().lower() == want:
             return n.id
-    return None
+    # THE BARE-NAME RULE DOES NOT HOLD FOR A FAMILY SPLIT BY A QUALIFIER.
+    #
+    # Retiring a node usually suffixes its display name and registers the
+    # successor under the bare one (ImageBatch -> BatchImagesNode), which the
+    # exact match above covers. Core's audio writers do not work that way:
+    # they are "Save Audio (FLAC) (DEPRECATED)", "(MP3)" and "(Opus)", and the
+    # successor is "Save Audio (Advanced)". Stripping "(DEPRECATED)" leaves
+    # "save audio (flac)", which matches nothing, so the caller is told the
+    # class is retired and not what to use instead. Measured in production
+    # 2026-11-23: an agent was refused SaveAudio with `"replacement": null`.
+    #
+    # So fall back to the name before the qualifier, and only when exactly one
+    # live class answers to it. A tie stays None rather than becoming a guess,
+    # the same discipline the exact path already keeps for billing class.
+    base = _display_base(want)
+    if not base or base == want:
+        return None
+    matches = {n.id for n in same_class if _display_base(n.display_name) == base}
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _find(workflow: dict, node_id: Any) -> dict | None:

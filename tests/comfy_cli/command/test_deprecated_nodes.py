@@ -95,6 +95,50 @@ def _object_info_with_deprecated() -> dict[str, Any]:
         "deprecated": True,
         "python_module": "nodes",
     }
+    # A family split by a format qualifier, mirroring core's audio writers:
+    # the retired classes are "Save Audio (FLAC|MP3|Opus) (DEPRECATED)" and the
+    # successor is "Save Audio (Advanced)", not a bare "Save Audio".
+    for cls, fmt in (("SaveAudio", "FLAC"), ("SaveAudioMP3", "MP3"), ("SaveAudioOpus", "Opus")):
+        info[cls] = {
+            "input": {"required": {"audio": "AUDIO"}},
+            "input_order": {"required": ["audio"]},
+            "output": [],
+            "output_name": [],
+            "category": "audio",
+            "display_name": f"Save Audio ({fmt}) (DEPRECATED)",
+            "deprecated": True,
+            "python_module": "nodes",
+        }
+    info["SaveAudioAdvanced"] = {
+        "input": {"required": {"audio": "AUDIO"}},
+        "input_order": {"required": ["audio"]},
+        "output": [],
+        "output_name": [],
+        "category": "audio",
+        "display_name": "Save Audio (Advanced)",
+        "python_module": "nodes",
+    }
+    # A qualified family with TWO live successors: ambiguous, so no answer.
+    info["OldExport"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": [],
+        "output_name": [],
+        "category": "image",
+        "display_name": "Export Image (PNG) (DEPRECATED)",
+        "deprecated": True,
+        "python_module": "nodes",
+    }
+    for cls, fmt in (("ExportFast", "Fast"), ("ExportSmall", "Small")):
+        info[cls] = {
+            "input": {"required": {"image": "IMAGE"}},
+            "input_order": {"required": ["image"]},
+            "output": [],
+            "output_name": [],
+            "category": "image",
+            "display_name": f"Export Image ({fmt})",
+            "python_module": "nodes",
+        }
     return info
 
 
@@ -143,6 +187,38 @@ class TestAddNode:
         path = _write(tmp_path, _base_workflow())
         env = _run(workflow_cmd.app, ["add-node", str(path), "OldSampler"], capsys)
         assert env["ok"] is False
+        assert env["error"]["code"] == "node_deprecated"
+        assert env["error"]["details"]["replacement"] is None
+        assert "nodes search" in env["error"]["hint"]
+
+    @pytest.mark.parametrize("requested", ["SaveAudio", "SaveAudioMP3", "SaveAudioOpus"])
+    def test_qualified_family_still_names_its_successor(self, patched_graph, tmp_path, capsys, requested):
+        """A format qualifier must not hide the replacement.
+
+        The bare-name rule this module documents holds for
+        ``ImageBatch -> BatchImagesNode`` but not for a family split by format.
+        Core's audio writers retire as "Save Audio (FLAC|MP3|Opus) (DEPRECATED)"
+        with "Save Audio (Advanced)" as the successor, so stripping only
+        "(DEPRECATED)" leaves "save audio (flac)" and matches nothing. Measured
+        in production 2026-11-23: an agent was refused ``SaveAudio`` with
+        ``"replacement": null`` and carried on guessing.
+        """
+        path = _write(tmp_path, _base_workflow())
+        env = _run(workflow_cmd.app, ["add-node", str(path), requested], capsys)
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "node_deprecated", err
+        assert err["details"] == {"requested": requested, "replacement": "SaveAudioAdvanced"}
+        assert "SaveAudioAdvanced" in err["hint"]
+
+    def test_an_ambiguous_qualified_family_offers_nothing(self, patched_graph, tmp_path, capsys):
+        """Two live successors is not an answer.
+
+        Same discipline the exact path already keeps for billing class: a tie
+        stays ``None`` rather than becoming a guess the caller cannot check.
+        """
+        path = _write(tmp_path, _base_workflow())
+        env = _run(workflow_cmd.app, ["add-node", str(path), "OldExport"], capsys)
         assert env["error"]["code"] == "node_deprecated"
         assert env["error"]["details"]["replacement"] is None
         assert "nodes search" in env["error"]["hint"]
