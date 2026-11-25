@@ -4071,7 +4071,20 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         # LWW outcome for the VALUE — converges regardless of delivery order.
         # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941925
         plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs_by_id)
-        if plan:
+        # Without a catalog ``flush_proxy_migration`` cannot resolve any
+        # interior widget, so it raises rather than quarantine everything
+        # (see its own docstring) -- correct when something actually asked
+        # it to run the repair, but the flush below now also runs for an
+        # ORDINARY declared-widget write whenever any legacy entry merely
+        # sits pending. Before this file started flushing on any pending
+        # plan (not just a repairable one), only a write to the legacy
+        # widget itself reached this far offline. Every other offline-
+        # degradation site in this module (``_apply_inputcount_bump``,
+        # ``_autogrow_group_port``) no-ops instead of raising when ``graph``
+        # is unavailable; match that instead of crashing an offline merge
+        # over a write that would have applied fine before this change.
+        # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941930
+        if plan and graph is not None:
             # Flush whenever ANY entry is pending — including a plan of only
             # ``alreadyLinked``/``quarantine`` entries, which still needs
             # consuming: ``set_host_value`` below writes by DECLARED-order

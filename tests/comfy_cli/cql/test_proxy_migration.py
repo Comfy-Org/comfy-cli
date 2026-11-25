@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from comfy_cli import workflow_ops
 from comfy_cli.cql import promoted
 from comfy_cli.cql.engine import Graph
 
@@ -901,6 +902,93 @@ def test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking(graph):
     by_name = {p.name: p for p in promoted.promoted_inputs(sg, promoted.defs_by_id(wf)) if p.is_widget}
     assert promoted.host_value(inst, by_name["width"]) == 800
     assert promoted.host_value(inst, by_name["text"]) == "legacy prompt"  # not 640
+
+
+def test_apply_op_replays_a_pending_alreadylinked_write_offline_without_crashing(graph):
+    """A write to a declared widget while an ``alreadyLinked`` entry is still
+    pending now always runs ``flush_proxy_migration`` (see the fix above), to
+    keep ``widgets_values`` from staying stuck in legacy proxy order. That
+    flush raises ``ValueError`` ("needs the node catalog") when ``graph`` is
+    ``None`` -- the honest answer when it actually can't resolve anything.
+    But offline merge replay (no catalog available at all) now reaches that
+    raise for an ORDINARY declared-widget write, not just a write to the
+    legacy widget itself: before this fix, only the latter hit this path at
+    all. Every other offline-degradation site in ``workflow_ops``
+    (``_apply_inputcount_bump``, ``_autogrow_group_port``) no-ops instead of
+    raising when ``graph`` is unavailable; applying this op during an offline
+    merge must do the same instead of crashing the merge.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941930
+    """
+    outer = "test-outer-alreadylinked-offline-0000000006"
+    wf = {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": outer,
+                "inputs": [],
+                "outputs": [],
+                # proxy order: width, text — the REVERSE of declaration order.
+                "properties": {"proxyWidgets": [["20", "width"], ["10", "text"]]},
+                "widgets_values": [640, "legacy prompt"],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": outer,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 20, "lastLinkId": 2, "lastRerouteId": 0},
+                    # declaration order: text, width
+                    "inputs": [
+                        {"id": "i-text", "name": "text", "type": "STRING", "linkIds": [1]},
+                        {"id": "i-width", "name": "width", "type": "INT", "linkIds": [2]},
+                    ],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["interior default text"],
+                        },
+                        {
+                            "id": 20,
+                            "type": "EmptySD3LatentImage",
+                            "inputs": [{"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 2}],
+                            "outputs": [],
+                            "widgets_values": [1024, 1024, 1],
+                        },
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 10,
+                            "target_slot": 1,
+                            "type": "STRING",
+                        },
+                        {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": 20, "target_slot": 0, "type": "INT"},
+                    ],
+                }
+            ]
+        },
+    }
+    # Minted ONLINE (a replica with a real catalog) building the op.
+    _, op = workflow_ops.set_widget(copy.deepcopy(wf), graph, "1", "width", 800)
+
+    # Replayed OFFLINE on a peer merging without a catalog at all.
+    replayed = workflow_ops.apply_op(copy.deepcopy(wf), op, None)  # must not raise
+
+    inst = _instance(replayed, 1)
+    assert inst["widgets_values"] is not None  # the op applied, degraded or not
 
 
 def test_pending_value_lookup_ignores_malformed_originalentry_shapes():
