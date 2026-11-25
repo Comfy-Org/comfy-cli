@@ -4240,24 +4240,82 @@ _opener = build_http_only_opener(NoRedirectHandler())
 class LoadError(Exception):
     """Failed to load object_info from a source."""
 
-    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None, hint: str | None = None):
         super().__init__(message)
         self.details = details or {}
+        # `hint` rides beside `details` rather than inside it. Raise sites that
+        # already publish `details["hint"]` keep publishing it -- a consumer
+        # reading `error.details.hint` is a contract this cannot break -- while
+        # a long envelope-only hint stays out of `details` and so is never
+        # rendered twice.
+        self.hint = hint
 
 
 def load_error_envelope_fields(e: LoadError, default_hint: str) -> tuple[str, dict[str, Any]]:
     """The ``hint`` and ``details`` a ``cql_no_graph`` envelope should carry for ``e``.
 
-    A ``LoadError`` that knows its own cause states the next step in
-    ``details["hint"]``; everything else falls back to ``default_hint``. The
-    chosen hint is lifted into the envelope's own ``hint`` field, so it is
-    removed from ``details`` here rather than rendered twice in one envelope —
-    these hints are a few hundred characters and every ``cql_no_graph``
-    consumer is an agent paying for both copies.
+    A ``LoadError`` that knows its own cause states the next step -- in
+    ``e.hint`` when that text belongs only in the envelope's ``hint`` field, or
+    in ``details["hint"]`` for the raise sites that have always published it
+    there. Everything else falls back to ``default_hint``.
+
+    ``details`` is returned UNCHANGED. The HTTPError and URLError raise sites
+    below set ``details["hint"]`` ("run ``comfy cloud login``"), and a `nodes`
+    or `validate` consumer reading ``error.details.hint`` has been able to read
+    it for as long as those sites existed; dropping it to avoid rendering a
+    hint twice would silently change that JSON contract for errors this change
+    is not about. The long cause-specific hints avoid the duplicate by never
+    entering ``details`` in the first place.
     """
+    return (e.hint or e.details.get("hint") or default_hint, e.details)
+
+
+def _hint_url(url: str) -> str:
+    """``url`` as safe copy-paste shell text: no credential, no metacharacter.
+
+    Two things make a hint different from ``details["url"]``. It is meant to be
+    pasted into a shell, so an unquoted ``;``, ``&``, ``$(...)`` or backtick in
+    a configured base URL would run as a command, and even a bare IPv6
+    loopback trips shell globbing. And it reaches surfaces ``details`` does
+    not: ``workflow._get_graph`` renders ``hint`` and drops ``details``
+    entirely, so a proxy token riding in a configured URL's userinfo would
+    reach a terminal that was never meant to show it. Userinfo, query and
+    fragment are therefore removed and the remainder is quoted.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:  # urlsplit unwraps IPv6 brackets; a bare v6 host is not a URL
+        host = f"[{host}]"
+    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    return shlex.quote(urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", "")))
+
+
+def _oversize_catalog_hint(url: str, *, is_cloud: bool) -> str:
+    """The next step for a catalog that is over the fetch cap.
+
+    Cloud and local get different text because the same command does not work
+    on both. The fetch that hit the cap on a cloud target only worked because
+    ``target_auth_headers`` attached a Bearer or ``X-API-Key`` header, so an
+    anonymous ``curl`` would save a 401 body as ``object_info.json`` and
+    ``--input`` would then load a bogus catalog without complaint; and
+    ``comfy launch`` is not even a thing a Comfy Cloud user can be told to
+    rule out. Both forms are bounded (``--max-filesize``) and fail loudly
+    (``-f``): the cap exists to stop a hostile or broken endpoint exhausting
+    memory and disk, so a hint that routes around it must not be unbounded.
+    """
+    cap_mib = _MAX_OBJECT_INFO_BYTES // (1024 * 1024)
+    lead = f"this server's object_info is over the {cap_mib} MiB fetch cap, so the server being up is not the problem"
+    if is_cloud:
+        return (
+            f"{lead}; save the catalog and read the file instead — the fetch is authenticated, so "
+            f"the command needs your key too: `curl -fsS --max-filesize 512M "
+            f'-H "X-API-Key: $COMFY_API_KEY" {_hint_url(url)} > object_info.json`, then pass '
+            f"`--input object_info.json` (the file loader has no size cap)"
+        )
     return (
-        e.details.get("hint") or default_hint,
-        {k: v for k, v in e.details.items() if k != "hint"},
+        f"{lead} and `comfy launch` is not the fix; save the catalog and read the file instead — "
+        f"`curl -fsS --max-filesize 512M {_hint_url(url)} > object_info.json`, then pass "
+        f"`--input object_info.json` (the file loader has no size cap)"
     )
 
 
@@ -4302,14 +4360,18 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
                 # No `url` here, unlike the branches below: this one is reached
                 # only for a host the caller configured, and a configured URL is
                 # where a proxy token rides. The message already names the host.
-                details={
-                    "hint": (
-                        "the catalog fetch is loopback-only in local mode; for Comfy Cloud pass "
-                        "`--where cloud`, and for a self-hosted remote save its catalog and read the "
-                        "file: `curl -s http://<remote>:8188/object_info > object_info.json`, then "
-                        "pass `--input object_info.json`"
-                    ),
-                },
+                #
+                # The example is a QUOTED PLACEHOLDER rather than the resolved
+                # URL for the same reason, and that also keeps it from naming a
+                # port: hard-coding 8188 would hand a remote on :9000 a command
+                # that fetches from the wrong endpoint, and an unquoted
+                # `<remote>` is parsed by the shell as input redirection.
+                hint=(
+                    "the catalog fetch is loopback-only in local mode; for Comfy Cloud pass "
+                    "`--where cloud`, and for a self-hosted remote save its catalog and read the "
+                    "file: `curl -fsS --max-filesize 512M 'http://HOST:PORT/object_info' > "
+                    "object_info.json`, then pass `--input object_info.json`"
+                ),
             )
 
     req = urllib.request.Request(url)
@@ -4327,16 +4389,8 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
             if len(raw) > _MAX_OBJECT_INFO_BYTES:
                 raise LoadError(
                     f"response exceeds {_MAX_OBJECT_INFO_BYTES} bytes",
-                    details={
-                        "url": url,
-                        "hint": (
-                            f"this server's object_info is over the "
-                            f"{_MAX_OBJECT_INFO_BYTES // (1024 * 1024)} MiB fetch cap, so the server "
-                            f"being up is not the problem and `comfy launch` is not the fix; save the "
-                            f"catalog and read the file instead — `curl -s {url} > object_info.json`, "
-                            f"then pass `--input object_info.json` (the file loader has no size cap)"
-                        ),
-                    },
+                    details={"url": url},
+                    hint=_oversize_catalog_hint(url, is_cloud=target.is_cloud),
                 )
             return json.loads(raw)
     except urllib.error.HTTPError as e:
