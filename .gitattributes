@@ -1,0 +1,6 @@
+# Every PR adds a bullet under `## [Unreleased]`, so two PRs touching the same
+# section is the normal case here rather than a disagreement. Take both sides
+# instead of stopping the merge. A release cut already folds `[Unreleased]`
+# into the version section (#1189 did it for 1.27.0-1.29.0), which is where a
+# duplicated `### Fixed` heading gets tidied.
+CHANGELOG.md merge=union
