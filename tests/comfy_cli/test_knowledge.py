@@ -1328,6 +1328,52 @@ class TestCli:
         assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
         _validate(data)
 
+    def test_pick_miss_lists_ids_without_descriptions(self, tmp_path, monkeypatch, capsys):
+        """A miss is not a request for the catalog.
+
+        Measured on a production agent turn: one unresolved capability string
+        returned about 43 KB, almost all of it capability descriptions the
+        caller never read. The ids stay so the caller can still choose one; the
+        descriptions go.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "nope"], capsys)
+        caps = env["data"]["capabilities"]
+        assert [c["id"] for c in caps] == ["audio-generation", "lipsync"]
+        assert all("description" not in c for c in caps)
+        _validate(env["data"])
+
+    def test_the_bare_listing_keeps_its_descriptions(self, tmp_path, monkeypatch, capsys):
+        """The other half of the trade: asking for the catalog still gets one."""
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick"], capsys)
+        caps = env["data"]["capabilities"]
+        assert [c["id"] for c in caps] == ["audio-generation", "lipsync"]
+        assert all(c["description"] for c in caps)
+        assert "candidates" not in env["data"]
+        _validate(env["data"])
+
+    def test_pick_miss_with_nothing_close_still_answers(self, tmp_path, monkeypatch, capsys):
+        """No candidate is a valid answer; the nudge falls back to the id list."""
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "nope"], capsys)
+        data = env["data"]
+        assert data["candidates"] == []
+        assert "query one of the listed capability ids" in data["nudge"]
+        _validate(data)
+
+    def test_pick_miss_payload_is_far_smaller_than_the_listing(self, tmp_path, monkeypatch, capsys):
+        """The point of the change, asserted as a size rather than a shape.
+
+        The fixture bundle has two capabilities, so the absolute saving here is
+        small; production has sixty-odd. Pinning the inequality is what stops a
+        later edit quietly putting the descriptions back.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        _, miss = _run(["pick", "nope"], capsys)
+        _, listing = _run(["pick"], capsys)
+        assert len(json.dumps(miss["data"]["capabilities"])) < len(json.dumps(listing["data"]["capabilities"]))
+
     def test_pick_miss_clips_a_long_query(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "x" * 500], capsys)
@@ -1469,6 +1515,54 @@ class TestCli:
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
         assert manifest["files"]["knowledge.json"]["bytes"] == len(raw)
+
+
+class TestCapabilityCandidates:
+    """Ranking behind the miss payload's suggestions.
+
+    `_resolve_tokens` answers only when one capability wins outright, which is
+    right for routing: a tie must not silently become a guess. The cost is that
+    a tie used to produce nothing for the caller to act on. These are the rows
+    that scored at all, so a tie turns into two suggestions.
+    """
+
+    def test_a_scoring_query_is_offered_as_a_candidate(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "talking head video") == ["lipsync"]
+
+    def test_a_query_touching_both_rows_offers_both_most_likely_first(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "audio generation talking head") == [
+            "audio-generation",
+            "lipsync",
+        ]
+
+    def test_a_query_touching_nothing_offers_nothing(self, tmp_path, monkeypatch):
+        """A guess is worse than an empty list; the caller still has the id list."""
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "nope") == []
+
+    def test_the_list_is_bounded(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "audio generation talking head", limit=1) == ["audio-generation"]
+        assert knowledge.capability_candidates(bundle, "audio generation talking head", limit=0) == []
+
+    def test_ranking_shares_one_implementation_with_the_resolver(self, tmp_path, monkeypatch):
+        """The winner, when there is one, must be the candidate list's head.
+
+        Two scoring loops would be free to disagree, and a disagreement here
+        means the suggestion contradicts the routing. One function, asserted.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        for query in ("talking head video", "lip sync a photo", "audio generation talking head"):
+            winner = knowledge._resolve_tokens(bundle, query)
+            if winner is not None:
+                assert knowledge.capability_candidates(bundle, query)[0] == winner
 
 
 class TestPickCheckLocal:

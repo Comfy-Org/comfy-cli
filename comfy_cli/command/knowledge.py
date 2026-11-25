@@ -277,26 +277,55 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
 
     A miss is an answer, not a failure: it reports the same ``zero_hit`` and
     ``nudge`` an enrichment block uses, so one concept keeps one shape.
+
+    A MISS AND A BARE LISTING WANT DIFFERENT SHAPES, which this used to ignore.
+    Both emitted every capability with its full description. For the bare
+    listing that is the request. For a miss it is a catalog dump at the exact
+    moment the caller has the least use for one: measured on a production agent
+    turn (Langfuse ``fd9fe5890241068643aa5237f2a07980``, 2026-11-01), a single
+    unresolved capability string returned about 43 KB, the model read none of it,
+    picked a capability by hand and chose a family that could not serve the
+    request. The descriptions are what carry the weight, so on a miss the list
+    keeps its ids and drops them, and the ranked ``candidates`` carry
+    descriptions for the few rows that actually scored.
     """
+    missed = query is not None
+    candidates = knowledge.capability_candidates(bundle, query) if missed else []
     caps = [
-        {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
+        # Ids only on a miss. The caller that needs a description for one of
+        # these asks for it by id, which is one cheap round trip instead of
+        # sixty-odd descriptions nobody reads.
+        {"id": cid}
+        if missed
+        else {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
         for cid in sorted(bundle.capabilities)
     ]
     payload: dict[str, Any] = {
         "capabilities": caps,
-        "zero_hit": query is not None,
+        "zero_hit": missed,
         "bundle_version": bundle.version,
         "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
-    if query is not None:
+    if missed:
         payload["query"] = query
-        payload["nudge"] = f"no curated knowledge for {query!r}; query one of the listed capability ids"
+        payload["candidates"] = [
+            {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
+            for cid in candidates
+        ]
+        payload["nudge"] = f"no curated knowledge for {query!r}; " + (
+            f"closest capabilities: {', '.join(candidates)}" if candidates else "query one of the listed capability ids"
+        )
     if renderer.is_pretty():
-        if query is not None:
+        if missed:
             rprint(f"[yellow]no curated knowledge for[/yellow] {sanitize_markup(query)}")
+            for cap in payload["candidates"]:
+                tail = f"  {sanitize_markup(cap['description'])}" if cap["description"] else ""
+                rprint(f"[green]?[/green] [bold]{sanitize_markup(cap['id'])}[/bold]{tail}")
         for cap in caps:
-            tail = f"  {sanitize_markup(cap['description'])}" if cap["description"] else ""
+            # `description` is absent on a miss, so read it rather than index it.
+            desc = cap.get("description")
+            tail = f"  {sanitize_markup(desc)}" if desc else ""
             rprint(f"[bold]{sanitize_markup(cap['id'])}[/bold]{tail}")
     renderer.emit(payload, command="knowledge pick")
 
