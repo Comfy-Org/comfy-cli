@@ -798,7 +798,11 @@ def _pending_value_lookup(instance: dict) -> dict[tuple, dict]:
         # this, a malformed record (e.g. a nested list inside
         # ``originalEntry``) builds a tuple with an unhashable element, and
         # using it as a dict key below raises instead of being ignored.
-        if not isinstance(original, list) or len(original) not in (2, 3) or not all(isinstance(x, str) for x in original):
+        if (
+            not isinstance(original, list)
+            or len(original) not in (2, 3)
+            or not all(isinstance(x, str) for x in original)
+        ):
             continue
         out[tuple(original)] = e
     return out
