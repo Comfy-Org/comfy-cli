@@ -26,6 +26,15 @@ history.
 
 ### Changed
 
+- The `comfy-run-on-cloud` skill prepares everything it can without asking,
+  then asks every question in one stop (as question cards where the client has
+  them) and runs to the link without stopping again. It offers changing the
+  workflow or keeping it and making a custom build as one choice, the build
+  from the whole install or from the workflow alone, with the GPU and a cost
+  table; remembers a test-job yes for retries of the same workflow; shows the
+  steps left as a checklist; looks for a missing model's public source and
+  offers same-name variants only as a choice; ends a blocked report with ways
+  to unblock it; and replaces its earlier save with `workflow save --replace`.
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads
   anything, and names the node, its size and the limit. It packages the custom
   nodes before it hashes any model, so the refusal comes before a long model
