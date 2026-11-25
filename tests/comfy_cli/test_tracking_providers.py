@@ -9,6 +9,7 @@ with the standard CLI properties and aliases ``tracing_id`` to
 import importlib
 import importlib.metadata
 import logging
+import textwrap
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -344,6 +345,55 @@ class TestProviderConstruction:
             "Add each to comfy_cli.tracking._POSTHOG_ATEXIT_HOOKS (to bound it under "
             "_flush_all_providers) or to _POSTHOG_ATEXIT_HOOKS_KEPT (if flush() cannot drain what "
             "it carries)."
+        )
+
+    def test_posthog_provider_unregisters_every_hook_a_real_client_actually_registers(self):
+        """The same guard read off BEHAVIOUR rather than off posthog's source text.
+
+        `test_every_posthog_atexit_hook_is_either_unregistered_or_explicitly_kept`
+        greps `posthog.client` for the literal `atexit.register(self.X)`, so it is
+        blind to a hook registered through a wrapper, a `functools.partial`, a
+        lambda, an alias such as `from atexit import register`, a nested attribute
+        such as `self._consumer.join`, or from another posthog module — and blind
+        to one registered lazily rather than in the constructor. This test asks
+        the installed client what it registers by recording the calls, then
+        requires every recorded callable to have been unregistered or to be a
+        deliberate keep. It cannot name a hook it has never seen, which is the
+        whole point: a rename changes the recorded callable, not this assertion.
+
+        `atexit.register` is patched module-wide, so nothing posthog registers
+        here reaches the real exit list and the recorded hooks cannot fire after
+        the test run."""
+        import comfy_cli.tracking as tracking_mod
+
+        registered: list = []
+        unregistered: list = []
+        with (
+            patch("atexit.register", side_effect=registered.append),
+            patch("atexit.unregister", side_effect=unregistered.append),
+        ):
+            provider = PostHogProvider("phc_test", "https://t.comfy.org")
+
+        assert provider.enabled is True
+        assert registered, (
+            "the installed posthog registered no atexit hook during client construction. Either it "
+            "stopped registering one, or it moved to a path this test's patch cannot see -- check "
+            "before deleting, because a hook nobody can find is exactly the failure mode here."
+        )
+
+        def _hook_name(hook) -> str:
+            return getattr(hook, "__name__", repr(hook))
+
+        kept = set(tracking_mod._POSTHOG_ATEXIT_HOOKS_KEPT)
+        still_registered = [hook for hook in registered if hook not in unregistered and _hook_name(hook) not in kept]
+        assert not still_registered, (
+            f"posthog {importlib.metadata.version('posthog')} left atexit hook(s) "
+            f"{[_hook_name(h) for h in still_registered]} registered after PostHogProvider was "
+            "built. atexit runs LIFO and posthog's hook is the later registration, so it runs "
+            "FIRST and closes the delivery lanes inside its own 1s bound before the bounded 5s "
+            "flush gets there -- the queued `command_finished` event goes with them. Add the name "
+            "to comfy_cli.tracking._POSTHOG_ATEXIT_HOOKS, or to _POSTHOG_ATEXIT_HOOKS_KEPT if "
+            "flush() cannot drain what it carries."
         )
 
     def test_posthog_track_skips_when_distinct_id_is_none(self, tracking_with_two_providers):
@@ -780,6 +830,51 @@ class TestLazyProviderConstruction:
 
 
 class TestAtexitFlush:
+    def test_the_bounded_drain_can_still_start_threads_from_an_atexit_hook(self):
+        """`_flush_all_providers` runs as an atexit hook and starts a daemon thread
+        per provider. Both review bots on the PR that added the hook-name fix read
+        CPython gh-104690 as forbidding that from 3.12 on — "can't create new
+        thread at interpreter shutdown" — which would mean the bounded drain never
+        runs and the queued `command_finished` event is lost anyway.
+
+        It is not forbidden. `Py_FinalizeEx` calls `_PyAtExit_Call` BEFORE it sets
+        the finalizing flag that guard reads, so an atexit callback is not yet "at
+        interpreter shutdown": `sys.is_finalizing()` is False inside one, and
+        `Thread.start()` succeeds. Asserted in a subprocess on the interpreter
+        actually running the tests, rather than trusted, so the day a Python
+        release moves that ordering this fails here instead of silently costing
+        every CLI run its last event. `_flush_all_providers` already degrades to a
+        warning if `start()` raises, so the failure mode is loss, not a crash —
+        which is exactly why nothing would notice."""
+        import subprocess
+        import sys
+
+        script = textwrap.dedent(
+            """
+            import atexit, sys, threading
+            ran = []
+            def drain():
+                print("is_finalizing", sys.is_finalizing())
+                t = threading.Thread(target=lambda: ran.append(1), daemon=True)
+                try:
+                    t.start()
+                except RuntimeError as e:
+                    print("start-failed", e)
+                    return
+                t.join(5.0)
+                print("drained", len(ran))
+            atexit.register(drain)
+            """
+        )
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert "start-failed" not in out.stdout, (
+            f"this interpreter refuses to start a thread from an atexit hook, so "
+            f"`_flush_all_providers` cannot drain at exit: {out.stdout!r}"
+        )
+        assert "is_finalizing False" in out.stdout, out.stdout
+        assert "drained 1" in out.stdout, out.stdout
+
     def test_flush_all_providers_calls_each_flush(self):
         """The module registers ``_flush_all_providers`` with ``atexit`` at import
         time. Verify that helper drains every enabled provider so short-lived

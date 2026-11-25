@@ -18,10 +18,10 @@ history.
 ### Fixed
 
 - Telemetry no longer loses the last event of a run when `posthog` resolves to
-  7.4x or newer. The CLI drops PostHog's own exit hook so its own 5-second,
+  7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
   bounded flush is the only shutdown drain, but PostHog renamed that hook from
-  `join` to `_atexit` inside the allowed version range, and removing a hook by
-  the old name silently removes nothing. PostHog's hook then ran first, closed
+  `join` to `_atexit` in 7.38.1, inside the allowed version range, and removing
+  a hook by the old name silently removes nothing. PostHog's hook then ran first, closed
   the delivery consumers against its own 1-second budget, and the queued
   `command_finished` event went with them.
 
