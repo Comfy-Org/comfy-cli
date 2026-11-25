@@ -9,6 +9,7 @@ verified manually.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import io
 import json
@@ -931,6 +932,10 @@ class TestSaveToSidebarFolder:
         assert post["url"] == "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json?overwrite=false"
         # The file's bytes go up as they are on disk; no record-only POST is made.
         assert post["body"] == wf_path.read_bytes()
+        # A new folder replaces nothing; the hash of the bytes written is what a
+        # later `--replace --expected-sha256` takes.
+        assert data["replaced"] is False
+        assert data["sha256"] == hashlib.sha256(post["body"]).hexdigest()
 
     def test_output_keeps_the_record_id_and_version(self, cloud_target, wf_path, monkeypatch, capsys):
         # The record-only save returned workflow_id and latest_version, and
@@ -1406,6 +1411,258 @@ class TestSaveLinksTheWorkflow:
         _patch_cloud(monkeypatch, _sidebar(_LINKS_ON, lookup_after_write=empty))
         env = self._save(wf_path, capsys)
         assert env["data"]["folder_link_reason"] == "record_lookup_failed"
+
+
+# The sidebar file an earlier save made, and the bytes Cloud holds for it.
+_REPLACE_FILENAME = "workflows/flux/flux.json"
+_REPLACE_FILE_URL = "https://cloud.example.com/api/userdata/workflows%2Fflux%2Fflux.json"
+_OLD_BYTES = json.dumps({"nodes": [], "links": [], "version": 0.4}).encode()
+
+
+def _replace_cloud(features=_FLAG_ON, *, files=None, ids=None, read_error=None):
+    """A fake Cloud holding sidebar ``files`` (key under ``workflows/`` -> bytes).
+
+    Each file is mirrored into a live record named after its path, as Cloud
+    does; ``ids`` maps a record name to its id (default ``rec-<name>``). A
+    file write must say ``overwrite=true``, and a file read takes no query.
+    ``read_error``, when set, is raised by the file read.
+    """
+    import urllib.parse
+
+    files = {"flux/flux.json": _OLD_BYTES} if files is None else dict(files)
+    ids = ids or {}
+
+    def handler(method, url, body):
+        parsed = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parsed.query)
+        if parsed.path == "/api/features":
+            return features
+        if parsed.path == "/api/workspaces/current":
+            return _WORKSPACE
+        if parsed.path.startswith("/api/userdata/"):
+            key = urllib.parse.unquote(parsed.path.removeprefix("/api/userdata/")).removeprefix("workflows/")
+            if method == "GET":
+                assert query == {}
+                if read_error is not None:
+                    return read_error
+                return (files[key], 200) if key in files else _http_error(404)
+            if method == "POST":
+                assert query == {"overwrite": ["true"]}
+                files[key] = body
+                return {"path": f"workflows/{key}", "size": len(body), "modified": 1700000000001}
+        if parsed.path == "/api/workflows" and method == "GET":
+            needle = query["name"][0].lower()
+            names = [k.removesuffix(".json") for k in files]
+            rows = [
+                {"id": ids.get(n, f"rec-{n}"), "name": n, "latest_version": 2} for n in names if needle in n.lower()
+            ]
+            return {"data": rows, "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
+        raise AssertionError(f"unexpected {method} {url}")
+
+    return handler
+
+
+class TestSaveReplace:
+    """``--replace`` overwrites the one existing sidebar file it names, and nothing else."""
+
+    @pytest.fixture
+    def wf_path(self, tmp_path):
+        p = tmp_path / "wf.json"
+        p.write_text(json.dumps(_UI_DATA, indent=2))
+        return p
+
+    @staticmethod
+    def _replace(wf_path, capsys, *extra, filename=_REPLACE_FILENAME):
+        return _run(["save", str(wf_path), "--replace", filename, "--where", "cloud", *extra], capsys)
+
+    @pytest.mark.parametrize(
+        ("features", "url", "url_opens"),
+        [
+            pytest.param(
+                _FLAG_ON,
+                "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard",
+                "folder",
+                id="folder-link",
+            ),
+            pytest.param(
+                _LINKS_ON,
+                f"https://cloud.example.com/?workspace=ws_123&workflowId={_WORKFLOW_UUID}&deployment=standard",
+                "workflow",
+                id="workflow-link",
+            ),
+        ],
+    )
+    def test_overwrites_the_named_file_and_links_it(
+        self, cloud_target, wf_path, monkeypatch, capsys, features, url, url_opens
+    ):
+        calls = _patch_cloud(monkeypatch, _replace_cloud(features, ids={"flux/flux": _WORKFLOW_UUID}))
+        env = self._replace(wf_path, capsys)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["replaced"] is True
+        assert data["filename"] == _REPLACE_FILENAME
+        assert data["folder"] == "flux"
+        assert data["name"] == "flux/flux"
+        # Cloud added a version to the record of that name: same id.
+        assert data["workflow_id"] == _WORKFLOW_UUID
+        assert data["latest_version"] == 2
+        assert data["url"] == url
+        assert data["url_opens"] == url_opens
+        assert data["workspace_id"] == "ws_123"
+        assert data["deployment"] == "standard"
+        assert data["sha256"] == hashlib.sha256(wf_path.read_bytes()).hexdigest()
+        assert data["size"] == len(wf_path.read_bytes())
+        assert "warnings" not in data
+        # The file is read first, then written once to the same key with
+        # overwrite=true. No folder is searched, no record-only save is made.
+        userdata = [(c["method"], c["url"]) for c in calls if "/api/userdata" in c["url"]]
+        assert userdata == [("GET", _REPLACE_FILE_URL), ("POST", _REPLACE_FILE_URL + "?overwrite=true")]
+        (post,) = _posts(calls)
+        assert post["body"] == wf_path.read_bytes()
+        assert not any(c["method"] in ("PUT", "DELETE") for c in calls)
+
+    def test_the_workflows_prefix_is_optional(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        env = self._replace(wf_path, capsys, filename="flux/flux.json")
+        assert env["ok"] is True
+        assert env["data"]["filename"] == _REPLACE_FILENAME
+        (post,) = _posts(calls)
+        assert post["url"] == _REPLACE_FILE_URL + "?overwrite=true"
+
+    def test_a_missing_file_is_never_made(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _replace_cloud(files={}))
+        env = self._replace(wf_path, capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_replace_missing"
+        assert env["error"]["details"] == {"filename": _REPLACE_FILENAME}
+        assert "without `--replace`" in env["error"]["hint"]
+        assert _posts(calls) == []
+
+    def test_a_failed_read_writes_nothing(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _replace_cloud(read_error=_http_error(500)))
+        env = self._replace(wf_path, capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] != "workflow_replace_missing"
+        assert _posts(calls) == []
+
+    def test_a_file_edited_since_the_save_is_not_overwritten(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        expected = hashlib.sha256(b"what the caller saved").hexdigest()
+        env = self._replace(wf_path, capsys, "--expected-sha256", expected)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_replace_changed"
+        assert env["error"]["details"] == {
+            "filename": _REPLACE_FILENAME,
+            "current_sha256": hashlib.sha256(_OLD_BYTES).hexdigest(),
+            "expected_sha256": expected,
+        }
+        assert "edited on Cloud" in env["error"]["hint"]
+        assert _posts(calls) == []
+
+    def test_a_matching_sha256_writes(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        # Upper case is the same digest.
+        expected = hashlib.sha256(_OLD_BYTES).hexdigest().upper()
+        env = self._replace(wf_path, capsys, "--expected-sha256", expected)
+        assert env["ok"] is True
+        assert env["data"]["replaced"] is True
+        (post,) = _posts(calls)
+        assert post["url"] == _REPLACE_FILE_URL + "?overwrite=true"
+
+    def test_the_sha256_a_save_returns_guards_the_next_replace(self, cloud_target, wf_path, monkeypatch, capsys):
+        # A save's `data.sha256` is the hash of the bytes Cloud now holds, so
+        # passing it to the next replace goes through.
+        _patch_cloud(monkeypatch, _sidebar())
+        saved = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)["data"]
+        _patch_cloud(monkeypatch, _replace_cloud(files={"flux/flux.json": wf_path.read_bytes()}))
+        env = self._replace(wf_path, capsys, "--expected-sha256", saved["sha256"], filename=saved["filename"])
+        assert env["ok"] is True
+        assert env["data"]["sha256"] == saved["sha256"]
+
+    def test_name_is_ignored_with_a_warning(self, cloud_target, wf_path, monkeypatch, capsys):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        env = self._replace(wf_path, capsys, "--name", "other")
+        assert env["ok"] is True
+        assert env["data"]["filename"] == _REPLACE_FILENAME
+        assert [w["code"] for w in env["data"]["warnings"]] == ["name_ignored"]
+        (post,) = _posts(calls)
+        assert post["url"] == _REPLACE_FILE_URL + "?overwrite=true"
+
+    @pytest.mark.parametrize(
+        "features",
+        [pytest.param(_FLAG_OFF, id="off"), pytest.param({}, id="missing"), pytest.param(_http_error(500), id="err")],
+    )
+    def test_flag_off_refuses_and_writes_nothing(self, cloud_target, wf_path, monkeypatch, capsys, features):
+        calls = _patch_cloud(monkeypatch, _replace_cloud(features))
+        env = self._replace(wf_path, capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_replace_unsupported"
+        assert env["error"]["details"] == {"filename": _REPLACE_FILENAME, "reason": "sidebar_save_off"}
+        assert [c["url"] for c in calls] == ["https://cloud.example.com/api/features"]
+
+    def test_api_format_refuses_and_writes_nothing(self, cloud_target, tmp_path, monkeypatch, capsys):
+        wf_path = tmp_path / "api.json"
+        wf_path.write_text(json.dumps(_WF_DATA))
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        env = self._replace(wf_path, capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_replace_unsupported"
+        assert env["error"]["details"] == {"filename": _REPLACE_FILENAME, "reason": "api_format"}
+        assert [c["url"] for c in calls] == ["https://cloud.example.com/api/features"]
+
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "../x.json",
+            "x.json",
+            "workflows/x.json",
+            "flux/../x.json",
+            "workflows/../flux/x.json",
+            "/workflows/flux/flux.json",
+            "~/flux/flux.json",
+            "flux\\flux.json",
+            "flux//flux.json",
+            "./flux.json",
+            "flux/sub/flux.json",
+            "flux/flux.txt",
+            "flux/.json",
+            "",
+        ],
+    )
+    def test_a_bad_filename_is_refused_before_any_request(self, cloud_target, wf_path, monkeypatch, capsys, filename):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        env = self._replace(wf_path, capsys, filename=filename)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param([], id="neither-name-nor-replace"),
+            pytest.param(["--name", "flux", "--expected-sha256", "a" * 64], id="sha-without-replace"),
+            pytest.param(["--replace", _REPLACE_FILENAME, "--expected-sha256", "abc"], id="sha-not-hex"),
+        ],
+    )
+    def test_bad_option_combinations_are_refused_before_any_request(
+        self, cloud_target, wf_path, monkeypatch, capsys, args
+    ):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        env = _run(["save", str(wf_path), *args, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "args",
+        [pytest.param([], id="no-name"), pytest.param(["--replace", _REPLACE_FILENAME], id="replace")],
+    )
+    def test_local_refuses_replace_and_needs_a_name(self, local_target, wf_path, monkeypatch, capsys, args):
+        calls = _patch_cloud(monkeypatch, _replace_cloud())
+        env = _run(["save", str(wf_path), *args, "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "invalid_argument"
+        assert calls == []
 
 
 class TestSaveFlagOffKeepsTheRecordSave:

@@ -15,6 +15,15 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy workflow save --where cloud --replace <data.filename>` overwrites the
+  Workflows-sidebar file an earlier save made instead of making a new folder
+  (only an existing file; `workflow_replace_missing` otherwise), and
+  `--expected-sha256 <data.sha256>` refuses with `workflow_replace_changed`
+  when it was edited on Cloud since. Sidebar saves now return `replaced` and
+  `sha256`.
+
 ### Changed
 
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads

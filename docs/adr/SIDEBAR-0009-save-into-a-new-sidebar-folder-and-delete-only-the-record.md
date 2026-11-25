@@ -48,6 +48,32 @@ only if it still holds what the CLI last read.
   record's latest version. Any other case, or any failed read, gives the plain
   delete.
 
+### Replace an earlier save (`--replace`)
+
+Amended 2026-11-23, so an agent that saved a workflow can update it instead of
+making a new folder per save.
+
+- Replace is explicit, never automatic. Only `--replace <filename>` writes over
+  a file, and only the one it names: the `data.filename` an earlier sidebar
+  save returned (`workflows/<folder>/<name>.json`, the `workflows/` prefix
+  optional). A plain save still never replaces anything.
+- The CLI first reads that file. A 404 ends the save
+  (`workflow_replace_missing`), so `--replace` never makes a new file. Only
+  then does it write with `overwrite=true` to the same key. Cloud adds a
+  version to the record of that name, so `workflow_id` normally stays the
+  same.
+- Every sidebar save returns `data.sha256`, the hash of the bytes it wrote,
+  and `data.replaced`. `--expected-sha256 <hex>` makes the write conditional
+  on the file still hashing to that value: an edit made in the browser since
+  the caller's save fails with `workflow_replace_changed` and nothing is
+  written.
+- `--replace` needs the sidebar save and an editor-format workflow. With the
+  flag off, or an API-format workflow, it fails with
+  `workflow_replace_unsupported` instead of falling back to a record save.
+- Cloud's file POST takes no condition, so the read-then-write leaves a small
+  race: an edit that lands between the read and the write is lost. The window
+  is one round trip.
+
 ## Alternatives considered
 
 - Keep the record-only save. Rejected because the saved workflow never shows in
@@ -60,7 +86,8 @@ only if it still holds what the CLI last read.
 
 ## What we reject
 
-- Any CLI call that deletes or overwrites a userdata file under `workflows/`.
+- Any CLI call that deletes a userdata file under `workflows/`, or overwrites
+  one other than the existing file `--replace` names.
 - A file write whose `<folder>/<name>` matches a live record.
 - Naming a file in `sidebar_file_kept` on a name match alone.
 
@@ -70,7 +97,8 @@ only if it still holds what the CLI last read.
 
 - A workflow saved from a terminal shows in the sidebar, and the CLI prints a
   link that opens its folder.
-- Neither save nor delete can change or remove an existing workflow.
+- Without `--replace`, neither save nor delete can change or remove an
+  existing workflow; with it, only the named file changes.
 
 ### Negative
 
@@ -84,7 +112,9 @@ only if it still holds what the CLI last read.
 `tests/comfy_cli/command/test_workflow_saved.py` pins each rule:
 `TestSaveFlagOffKeepsTheRecordSave` the flag-off and failed-read paths,
 `TestSaveToSidebarFolder` the `overwrite=false` write and the free-folder rule,
-and `TestDeleteKeepsTheSidebarFile` the record-only delete and the warning rule.
+`TestSaveReplace` the read-before-write, the sha256 guard and the refusals of
+`--replace`, and `TestDeleteKeepsTheSidebarFile` the record-only delete and the
+warning rule.
 The fake Cloud in `TestDeleteKeepsTheSidebarFile` fails any userdata `DELETE`.
 
 ## Revisit triggers
@@ -93,5 +123,7 @@ The fake Cloud in `TestDeleteKeepsTheSidebarFile` fails any userdata `DELETE`.
   until the CLI matches.
 - Cloud's userdata `DELETE` gains a condition on the file's content or version.
   Then `workflow delete` can remove the file safely.
+- Cloud's userdata `POST` gains such a condition. Then `--replace` can send
+  `--expected-sha256` with the write and close its race window.
 - Cloud adds a way to write a file without adding a version to an existing
   record. Then the record search before each write can go.

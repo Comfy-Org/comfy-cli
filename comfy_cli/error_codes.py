@@ -139,6 +139,31 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass a different `--name`",
     ),
     ErrorCode(
+        "workflow_replace_missing",
+        "`comfy workflow save --replace <filename>` on Comfy Cloud read the Workflows-sidebar file it names "
+        "and Cloud has no such file, so nothing was written (`--replace` only overwrites a file that exists; "
+        "it never makes one). `details.filename` is the file asked for.",
+        "save without `--replace` to make a new sidebar folder; nothing was written",
+    ),
+    ErrorCode(
+        "workflow_replace_changed",
+        "`comfy workflow save --replace <filename> --expected-sha256 <hex>` on Comfy Cloud found the "
+        "Workflows-sidebar file's current bytes hash differently from `--expected-sha256`: it was edited on "
+        "Cloud since the caller saved it. Nothing was written. `details` carries `filename`, "
+        "`current_sha256` and `expected_sha256`.",
+        "ask the person, then retry without `--expected-sha256` to replace the file anyway, or save a new copy "
+        "without `--replace`",
+    ),
+    ErrorCode(
+        "workflow_replace_unsupported",
+        "`comfy workflow save --replace` writes a Comfy Cloud Workflows-sidebar file, and this save could not "
+        "go there: the workspace saves workflow records instead (`cli_cloud_save_enabled` is not on, or "
+        "`/api/features` could not be read; `details.reason` is `sidebar_save_off`), or the workflow is API "
+        "format, which the sidebar cannot open (`details.reason` is `api_format`). Nothing was written. "
+        "`details.filename` is the file asked for.",
+        "save without `--replace`; for an API-format workflow, save the editor format (ComfyUI `File > Save`) first",
+    ),
+    ErrorCode(
         "invalid_output_node_ids",
         "`comfy run --output-node-ids` named no ids, a node id that is not in the submitted "
         "API-format workflow (`details.unknown_node_ids`), or a node that is not an output node "
