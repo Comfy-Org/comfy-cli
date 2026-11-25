@@ -17,6 +17,17 @@ history.
 
 ### Changed
 
+- **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
+  longer returns every capability's description. The payload keeps the full
+  id-sorted `capabilities` list but drops `description` from its items on a
+  miss, and adds a bounded `candidates` array carrying the best-scoring
+  capabilities, most likely first, with their descriptions. A bare `comfy
+  knowledge pick` with no argument is unchanged and still carries every
+  description. On the shipped bundle the miss payload goes from 50,437 to
+  6,085 bytes, and for a phrase that scores against several rows the caller
+  now gets the ranked shortlist the resolver computed instead of a catalog it
+  has to search by hand.
+
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads
   anything, and names the node, its size and the limit. It packages the custom
   nodes before it hashes any model, so the refusal comes before a long model
