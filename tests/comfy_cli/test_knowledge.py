@@ -1374,6 +1374,53 @@ class TestCli:
         _, listing = _run(["pick"], capsys)
         assert len(json.dumps(miss["data"]["capabilities"])) < len(json.dumps(listing["data"]["capabilities"]))
 
+    @pytest.mark.parametrize("query", ["generate", "???", "生成视频"])
+    def test_pick_miss_answers_a_query_with_no_scoring_tokens(self, tmp_path, monkeypatch, capsys, query):
+        """The CLI-level half of the scorer's empty-mapping contract.
+
+        `nope` has tokens, so the existing miss test never reached the branch
+        that crashed. These do.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", query], capsys)
+        assert rc == 0
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["zero_hit"] is True
+        assert data["candidates"] == []
+        _validate(data)
+
+    def test_pick_miss_scores_candidates_on_the_unclipped_query(self, tmp_path, monkeypatch, capsys):
+        """Suggestions must be scored on the text the resolver actually missed.
+
+        The echoed ``query`` is clipped to ``MAX_QUERY_CHARS`` and a clip can cut
+        a word in half, so scoring the clip would let the suggestion disagree
+        with the routing that just ran on the full string.
+
+        Asserted on the wiring rather than on an output, because the two strings
+        only diverge past the clip and a long query that still misses is not
+        constructible against this fixture: anything that scores here also wins
+        outright, so it is a hit and never reaches the miss path at all.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        seen: dict[str, str | None] = {}
+        real = knowledge_cmd._emit_capabilities
+
+        def _spy(renderer, bundle, *, query=None, score_query=None):
+            seen["query"] = query
+            seen["score_query"] = score_query
+            return real(renderer, bundle, query=query, score_query=score_query)
+
+        monkeypatch.setattr(knowledge_cmd, "_emit_capabilities", _spy)
+        # Long enough to be clipped, and matching nothing, so it reaches the
+        # miss path instead of resolving outright.
+        long_query = "zzzz " * 120 + "qqqq"
+        assert len(long_query) > knowledge.MAX_QUERY_CHARS
+        _run(["pick", long_query], capsys)
+        assert seen["query"] == long_query[: knowledge.MAX_QUERY_CHARS]
+        assert seen["score_query"] == long_query
+        assert len(seen["score_query"]) > len(seen["query"])
+
     def test_pick_miss_clips_a_long_query(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "x" * 500], capsys)
@@ -1544,6 +1591,20 @@ class TestCapabilityCandidates:
         _env_bundle(tmp_path, monkeypatch)
         bundle = knowledge.load_bundle()
         assert knowledge.capability_candidates(bundle, "nope") == []
+
+    @pytest.mark.parametrize("query", ["generate", "create a", "???", "!!!", "生成视频", " "])
+    def test_a_query_with_no_scoring_tokens_returns_empty_not_none(self, tmp_path, monkeypatch, query):
+        """The scorer's empty-count branch must stay a mapping.
+
+        It used to be `_resolve_tokens`'s own early `return None`, absorbed by
+        that function's `if not scored` guard. Sharing the scorer gave it a
+        second caller with no such guard, so a query made only of filler or
+        punctuation raised `AttributeError` on `.items()` instead of answering.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, query) == []
+        assert knowledge._resolve_tokens(bundle, query) is None
 
     def test_the_list_is_bounded(self, tmp_path, monkeypatch):
         _env_bundle(tmp_path, monkeypatch)

@@ -272,8 +272,16 @@ def resolve_cmd(
     renderer.emit(payload, command="knowledge resolve")
 
 
-def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None = None) -> None:
+def _emit_capabilities(
+    renderer, bundle: knowledge.Bundle, *, query: str | None = None, score_query: str | None = None
+) -> None:
     """The capability list, either as the bare listing or as ``query``'s miss.
+
+    ``query`` is the echoed string, already clipped to ``MAX_QUERY_CHARS``.
+    ``score_query`` is the caller's untruncated text and defaults to ``query``.
+    They differ on a long request, and the suggestions have to be scored on the
+    same text the resolver just failed on, or a clip that cuts a word in half
+    can make the two disagree.
 
     A miss is an answer, not a failure: it reports the same ``zero_hit`` and
     ``nudge`` an enrichment block uses, so one concept keeps one shape.
@@ -290,7 +298,9 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
     descriptions for the few rows that actually scored.
     """
     missed = query is not None
-    candidates = knowledge.capability_candidates(bundle, query) if missed else []
+    candidates = (
+        knowledge.capability_candidates(bundle, score_query if score_query is not None else query) if missed else []
+    )
     caps = [
         # Ids only on a miss. The caller that needs a description for one of
         # these asks for it by id, which is one cheap round trip instead of
@@ -414,7 +424,9 @@ def pick_cmd(
     cap = knowledge.pick(bundle, capability)
     if cap is None:
         knowledge.log_query("knowledge pick", logged, hit_ids=[], zero_hit=True, bundle=bundle)
-        _emit_capabilities(renderer, bundle, query=logged[0])
+        # `knowledge.pick` above routed on the full text, so score the suggestions
+        # on it too; `logged[0]` is the clipped echo and stays the echo.
+        _emit_capabilities(renderer, bundle, query=logged[0], score_query=capability.strip())
         return
     capability_id = _text(cap.get("id")) or capability.strip().lower()
     knowledge.log_query("knowledge pick", logged, hit_ids=[f"cap:{capability_id}"], zero_hit=False, bundle=bundle)

@@ -877,7 +877,12 @@ def _score_capabilities(bundle: Bundle, query: str) -> dict[str, tuple[float, in
     """
     counts = _query_counts(query)
     if not counts:
-        return None
+        # Empty mapping, never None: this used to be `_resolve_tokens`'s own
+        # early return, where the later `if not scored` guard absorbed it. A
+        # second caller does not have that guard, so a query with no scoring
+        # tokens ("generate", "???", non-Latin text) would crash the miss path
+        # instead of answering it.
+        return {}
     words = frozenset(counts)
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
