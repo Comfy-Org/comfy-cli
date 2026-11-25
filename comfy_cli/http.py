@@ -407,6 +407,7 @@ def build_authed_request(
     method: str = "GET",
     data: bytes | None = None,
     content_type: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> urllib.request.Request:
     """Build a urllib Request carrying the target's credential header.
 
@@ -414,7 +415,7 @@ def build_authed_request(
     single ``is_cloud`` gate every other call site goes through, so a local
     Target can't carry a stray credential into this path either.
     """
-    req = urllib.request.Request(url, data=data, method=method)
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     for k, v in target_auth_headers(target).items():
         req.add_header(k, v)
     if content_type:
@@ -429,11 +430,12 @@ def authed_urlopen(
     method: str = "GET",
     data: bytes | None = None,
     content_type: str | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 30.0,
 ):
     """Open an authed request via the no-redirect opener. A 30x raises
     HTTPError instead of replaying credentials at the redirect target."""
-    req = build_authed_request(url, target, method=method, data=data, content_type=content_type)
+    req = build_authed_request(url, target, method=method, data=data, content_type=content_type, headers=headers)
     return _AUTHED_OPENER.open(req, timeout=timeout)
 
 

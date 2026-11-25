@@ -2513,7 +2513,31 @@ def _collect_widget_inputs(
     if not isinstance(widget_values, list):
         return {}
 
-    if any(isinstance(v, dict) for v in widget_values):
+    # The Lora-stack shortcut below is for nodes with NO declared widget slots
+    # of their own (the dynamic Power Lora Loader row list). A node that DOES
+    # declare a widget absorbs its own dict-shaped value through the ordinary
+    # schema walk below instead -- otherwise a drawn curve's own ``{"type":
+    # "linear", "points": [...]}`` gets read as a self-naming Lora entry and
+    # lands under a bogus ``linear`` input while ``curve`` falls back to its
+    # schema default (comfy-cli#1171 review, CurveEditor.curve).
+    pre_absorb_schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
+    # A legacy "no rows yet" save -- e.g. ``[{}, ""]`` -- carries no entry
+    # ``_is_absorbable_dict`` recognizes, since an empty dict names nothing.
+    # Falling through from there sent ``{}``/``""`` down the positional walk,
+    # landing them on real sockets like ``model``/``clip`` instead of being
+    # skipped the same way a non-empty absorbable list skips them.
+    # An all-empty-markers save needs at least one empty DICT to be a "no rows
+    # yet" lora save. A list of bare scalars -- e.g. ``[""]`` with no schema --
+    # is not one: routing it to the absorber emits ``{"➕ Add Lora": ""}`` and
+    # drops the marked widget's value, where the positional fallback keeps it
+    # under its own widget name. So require a dict marker, not merely the
+    # absence of anything else.
+    only_empty_markers = (
+        widget_values
+        and any(isinstance(v, dict) and not v for v in widget_values)
+        and all((isinstance(v, dict) and not v) or v == "" for v in widget_values)
+    )
+    if not pre_absorb_schema_widgets and (any(_is_absorbable_dict(v) for v in widget_values) or only_empty_markers):
         _absorb_dict_widget_values(widget_values, out, link_inputs)
         return out
 
@@ -2562,6 +2586,20 @@ def _collect_widget_inputs(
     return out
 
 
+def _is_absorbable_dict(value: Any) -> bool:
+    """True only for the self-naming dict entries ``_absorb_dict_widget_values`` understands.
+
+    ``type``'s value becomes an input NAME, so it must be a non-empty string --
+    an unhashable value (a list or dict) raises ``TypeError`` at the lookup in
+    ``link_inputs`` and loses the whole node; ``None`` or ``""`` would silently
+    name nothing while still discarding the node's other widgets.
+    """
+    if not isinstance(value, dict) or not value:
+        return False
+    type_value = value.get("type")
+    return (isinstance(type_value, str) and bool(type_value)) or "lora" in value
+
+
 def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], link_inputs: dict[str, list]) -> None:
     lora_counter = 0
     for value in widget_values:
@@ -2570,8 +2608,18 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                 continue
             if "type" in value:
                 name = value.get("type")
-                if name and name not in link_inputs:
+                # The name must be a STRING before it reaches the membership test
+                # below. ``_is_absorbable_dict`` admits the whole list when ANY
+                # entry qualifies, so a list like
+                # ``[{"lora": "a.safetensors"}, {"type": ["bad"], "value": 1}]``
+                # arrives here on the strength of its lora entry and then hands an
+                # unhashable list to ``in link_inputs`` -- a TypeError that escapes
+                # ``_collect_widget_inputs`` and drops the ENTIRE node, valid lora
+                # row included. A malformed name belongs in the warning branch.
+                if isinstance(name, str) and name and name not in link_inputs:
                     out[name] = value
+                else:
+                    logger.warning("Dict-absorb dropped a type-keyed widget value with no usable name: %r", value)
             elif "lora" in value:
                 lora_counter += 1
                 name = f"lora_{lora_counter}"
@@ -2579,9 +2627,16 @@ def _absorb_dict_widget_values(widget_values: list[Any], out: dict[str, Any], li
                     continue
                 clean = {k: v for k, v in value.items() if k != "strengthTwo" or v is not None}
                 out[name] = clean
+            else:
+                # Routing is all-or-nothing: one absorbable entry sends the whole
+                # list here, so a record this function does not understand is
+                # otherwise discarded with nothing to show for it.
+                logger.warning("Dict-absorb dropped a widget value it does not understand: %r", value)
         elif isinstance(value, str) and value == "":
             # Frontend's "Add Lora" button serializes as an empty string trailer.
             out.setdefault("➕ Add Lora", value)
+        else:
+            logger.warning("Dict-absorb dropped a scalar widget value: %r", value)
 
 
 def _saved_widget_names(

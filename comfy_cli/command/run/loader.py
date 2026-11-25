@@ -47,6 +47,25 @@ def is_ui_workflow(workflow) -> bool:
     )
 
 
+def ui_workflow_extra_data(ui_workflow) -> dict | None:
+    """The ``extra_data`` slot that carries a UI-format workflow with its run.
+
+    The editor's Queue button sends the canvas graph as
+    ``extra_data.extra_pnginfo.workflow``. ComfyUI hands ``extra_pnginfo`` to
+    every output node, and save nodes (SaveImage, VHS Video Combine, ...) write
+    it into the file, which is what lets the file drag back onto the canvas as
+    a workflow. Without it the file holds only ``prompt``. Returns None for an
+    API-format input: there is no canvas graph to send.
+
+    Not copied: the converter works on its own deep copy, so the loaded graph
+    is never mutated, and a deep copy here would hit RecursionError on a
+    deeply nested graph before the conversion error handling runs.
+    """
+    if not is_ui_workflow(ui_workflow):
+        return None
+    return {"extra_pnginfo": {"workflow": ui_workflow}}
+
+
 def _classify_api_workflow(workflow):
     """Classify a parsed JSON object as API workflow / empty / invalid.
 

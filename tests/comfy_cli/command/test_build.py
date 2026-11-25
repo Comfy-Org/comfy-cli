@@ -1005,6 +1005,20 @@ def _write_pack(root, name, *, project=None, git=False):
     return d
 
 
+def test_scan_still_reads_a_local_node_over_the_push_size_limit(tmp_path, monkeypatch):
+    # Given
+    node_dir = _write_pack(tmp_path, "pack")
+    node_dir.joinpath("nodes.py").write_bytes(b"NODE")
+    monkeypatch.setattr(build, "_BUILDER_NODE_SIZE_LIMIT_BYTES", 1)
+
+    # When
+    (node,) = build.scan_custom_nodes(node_dir.parent)
+
+    # Then
+    assert node["source"] == "local"
+    assert node["localSizeBytes"] > 1
+
+
 def test_scan_drops_the_git_keys_when_it_records_a_registry_pin(tmp_path, monkeypatch):
     """Exactly one source per node, which the builder enforces. A half-git checkout
     (an origin but no resolvable HEAD) would otherwise carry both, which `create`

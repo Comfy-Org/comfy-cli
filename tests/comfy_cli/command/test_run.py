@@ -271,6 +271,17 @@ class TestWorkflowExecutionAuth:
         body = json.loads(mock_open.call_args[0][0].data)
         assert body["extra_data"] == {"comfy_usage_source": "some-other-surface"}
 
+    def test_queue_sends_extra_pnginfo_in_the_body(self, workflow):
+        """The canvas graph handed in as ``extra_data`` reaches the ``/prompt``
+        body under ``extra_pnginfo.workflow``."""
+        canvas = {"nodes": [{"id": 1}], "links": []}
+        ex = self._make_exec(workflow, extra_data={"extra_pnginfo": {"workflow": canvas}})
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"]["extra_pnginfo"] == {"workflow": canvas}
+
     def test_queue_sends_usage_source_header(self, workflow):
         ex = self._make_exec(workflow)
         with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
@@ -1784,6 +1795,31 @@ class TestExecutePartnerNodePreflight:
             extra = kwargs.get("extra_data") or {}
             assert extra.get("api_key_comfy_org") == "test-key-abc"
 
+    @pytest.mark.parametrize(
+        ("host", "partner_node_token"),
+        [("127.0.0.1", True), ("localhost", True), ("[::1]", True), ("10.0.0.5", False), ("gpu-box.lan", False)],
+    )
+    def test_only_a_loopback_comfyui_gets_a_partner_node_token(self, tmp_path, host, partner_node_token):
+        wf_file = self._wf_file(tmp_path)
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run._fetch_object_info", return_value=self.OBJECT_INFO),
+            patch(
+                "comfy_cli.command.run._resolve_partner_credential",
+                return_value=("auth_token_comfy_org", "partner-node-token"),
+            ) as MockCred,
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+            execute(wf_file, host=host, port=8188, wait=True, timeout=30, allow_spend=True)
+
+        MockCred.assert_called_once_with(partner_node_token=partner_node_token)
+        assert MockExec.call_args.kwargs["extra_data"] == {"auth_token_comfy_org": "partner-node-token"}
+
     def test_non_partner_workflow_skips_preflight(self, workflow_file, monkeypatch):
         """The preflight must not gate ordinary workflows. ``_fetch_object_info``
         is allowed to be skipped when no partner nodes are present (or
@@ -2521,6 +2557,49 @@ class TestExecuteUiWorkflow:
             assert mock_fetch.call_args.args == ("127.0.0.1", 8188, 30)
             assert MockExec.call_args.kwargs["extra_data"]["api_key_comfy_org"] == "sk-test"
 
+    def test_ui_workflow_run_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file):
+        """The editor's Queue button sends the canvas graph as
+        ``extra_data.extra_pnginfo.workflow``; save nodes write it into the
+        output file, which is what lets the file drag back as a workflow. A UI
+        run from the CLI (how the Comfy agent submits) must send the same."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(ui_workflow_file, host="127.0.0.1", port=8188, wait=True, timeout=30, api_key="sk-test")
+
+            extra = MockExec.call_args.kwargs["extra_data"]
+            assert extra["extra_pnginfo"] == {"workflow": self.UI}
+            # The explicit key still rides alongside it.
+            assert extra["api_key_comfy_org"] == "sk-test"
+
+    def test_api_workflow_run_sends_no_extra_pnginfo(self, tmp_path):
+        """An API-format input has no canvas graph to send."""
+        path = tmp_path / "api.json"
+        path.write_text(json.dumps({"1": {"class_type": "PreviewImage", "inputs": {}}}))
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.command.run.fetch_object_info", return_value=self.OBJECT_INFO),
+            patch("comfy_cli.command.run._preflight_validate"),
+            patch("comfy_cli.command.run.ExecutionProgress"),
+            patch("comfy_cli.command.run.WorkflowExecution") as MockExec,
+        ):
+            mock_exec = MagicMock()
+            mock_exec.borrowed_client_id = False
+            MockExec.return_value = mock_exec
+            mock_exec.outputs = []
+
+            execute(str(path), host="127.0.0.1", port=8188, wait=True, timeout=30)
+
+            assert "extra_pnginfo" not in (MockExec.call_args.kwargs["extra_data"] or {})
+
     def test_ui_workflow_exits_when_conversion_yields_nothing(self):
         # All nodes are UI-only (Note/PrimitiveNode/Reroute/GetNode/SetNode) and
         # therefore stripped by the converter → execute() should bail before
@@ -2671,6 +2750,28 @@ class TestExecuteCloudAutoConvert:
         # The CONVERTED workflow was passed to the submit call — not the raw UI form.
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
+
+    def test_ui_workflow_submit_carries_the_canvas_graph_as_extra_pnginfo(self, ui_workflow_file, fake_target):
+        """Cloud path: the API graph is what runs, and the UI graph it
+        came from rides ``extra_data.extra_pnginfo.workflow`` like an editor run."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-png", number=1, node_errors={})
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={"KSampler": {"output_node": True}}),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        submitted_args, submitted_kwargs = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+        assert submitted_kwargs["extra_data"] == {"extra_pnginfo": {"workflow": self.UI_WORKFLOW}}
 
     def test_ui_workflow_conversion_honors_object_info_file_env(
         self, ui_workflow_file, fake_target, tmp_path, monkeypatch
@@ -2953,6 +3054,130 @@ class TestExecuteCloudWait:
         assert envelope["error"]["code"] == "cloud_http_error"
         # The poll budget was actually spent before giving up.
         assert client.get_history.call_count == comfy_client._MAX_POLL_FAILURES
+
+    def _run_wait_on_job_statuses(self, workflow_file, fake_target, statuses, histories=(None,)):
+        """Run --wait with a real wait loop over faked /jobs/<id> and history sequences.
+
+        By default history never reports done, which is what cloud does for a
+        job that fails before it executes. The last status and the last history
+        record repeat for any later poll. Returns (exit code, client); a run
+        that returns normally exits 0.
+        """
+        import itertools
+
+        import typer
+
+        from comfy_cli import comfy_client
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+        from comfy_cli.output import Renderer, set_renderer
+        from comfy_cli.output.renderer import OutputMode
+
+        client = comfy_client.Client(fake_target)
+        client.submit_prompt = MagicMock(return_value=SubmitResult(prompt_id="prompt-ended", number=1, node_errors={}))
+        client.get_history = MagicMock(side_effect=itertools.chain(histories, itertools.repeat(histories[-1])))
+        client.get_job_status = MagicMock(side_effect=itertools.chain(statuses, itertools.repeat(statuses[-1])))
+
+        # Each poll's sleep advances a fake clock, so a wait that misses the
+        # terminal status reaches its silence deadline (cloud_timeout) quickly.
+        clock = [1_000_000.0]
+
+        def _sleep(seconds):
+            clock[0] += seconds
+
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="run"))
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            patch("comfy_cli.comfy_client.Client", return_value=client),
+            patch("comfy_cli.comfy_client.time.sleep", side_effect=_sleep),
+            patch("comfy_cli.comfy_client.time.time", side_effect=lambda: clock[0]),
+        ):
+            try:
+                execute_cloud(workflow_file, wait=True, timeout=600)
+            except typer.Exit as e:
+                return e.exit_code, client
+        return 0, client
+
+    def test_wait_ends_on_failed_job_status_with_its_error(self, api_workflow_file, fake_target, capsys):
+        """A job the jobs endpoint reports failed ends the wait at once with
+        the job's error, instead of waiting out --timeout to cloud_timeout."""
+        from comfy_cli import jobs_state
+
+        failed = {
+            "id": "prompt-ended",
+            "status": "failed",
+            "execution_error": {
+                "node_id": "10",
+                "node_type": "LoadImage",
+                "exception_type": "ImageDownloadError",
+                "exception_message": "Failed to download image missing.png",
+                "traceback": ["frame 1", "frame 2", "frame 3"],
+                "current_inputs": {"image": "missing.png"},
+            },
+        }
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file, fake_target, [{"id": "prompt-ended", "status": "pending"}, failed]
+        )
+
+        assert exit_code == 1
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "execution_error"
+        assert envelope["error"]["message"] == "LoadImage (node 10): Failed to download image missing.png"
+        details = envelope["error"]["details"]
+        assert details["prompt_id"] == "prompt-ended"
+        assert details["exception_type"] == "ImageDownloadError"
+        assert details["node_id"] == "10"
+        assert "current_inputs" not in details
+        # Ended on the second poll, not after 600s of silence.
+        assert client.get_job_status.call_count == 2
+        state = jobs_state.read("prompt-ended")
+        assert state.status == "error"
+        assert state.error["code"] == "execution_error"
+
+    def test_wait_on_completed_job_status_waits_for_the_done_history(self, api_workflow_file, fake_target, capsys):
+        """`/jobs/<id>` can say completed while the history fetched in the same
+        poll is still a running record. The wait must not end on that record:
+        it would report success without the outputs."""
+        from comfy_cli import jobs_state
+
+        running = {"status": {"status_str": "running", "completed": False}, "outputs": {}}
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file,
+            fake_target,
+            [{"id": "prompt-ended", "status": "completed"}],
+            histories=[running, running, self.RECORD],
+        )
+
+        assert exit_code == 0
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is True
+        assert envelope["data"]["outputs_by_node"] == {
+            "9": ["https://cloud.example.com/api/view?filename=a.png&subfolder=&type=output"],
+            "12": ["https://cloud.example.com/api/view?filename=v.mp4&subfolder=&type=output"],
+        }
+        assert client.get_history.call_count == 3
+        assert jobs_state.read("prompt-ended").record == self.RECORD
+
+    def test_wait_ends_on_cancelled_job_status(self, api_workflow_file, fake_target, capsys):
+        from comfy_cli import jobs_state
+
+        exit_code, client = self._run_wait_on_job_statuses(
+            api_workflow_file,
+            fake_target,
+            [{"id": "prompt-ended", "status": "in_progress"}, {"id": "prompt-ended", "status": "cancelled"}],
+        )
+
+        assert exit_code == 130
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        envelope = json.loads(lines[-1])
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "cancelled"
+        assert client.get_job_status.call_count == 2
+        assert jobs_state.read("prompt-ended").status == "cancelled"
 
     def test_wait_envelope_data_validates_against_run_schema(self, api_workflow_file, fake_target, capsys):
         from pathlib import Path

@@ -155,6 +155,22 @@ WIRES = [
         f"{BASE}/v1/deploy-estimate?releaseId=v1&gpuClass=l4&region=US-MO-2",
         args=("v1", "l4", "US-MO-2"),
     ),
+    Wire(
+        "models",
+        "add_deployment_model",
+        "POST",
+        f"{BASE}/v1/deployments/dep-1/models",
+        args=("dep-1", "blob-1", "loras"),
+        body={"blobId": "blob-1", "type": "loras"},
+    ),
+    Wire("models", "list_deployment_models", "GET", f"{BASE}/v1/deployments/dep-1/models", args=("dep-1",)),
+    Wire(
+        "models",
+        "remove_deployment_model",
+        "DELETE",
+        f"{BASE}/v1/deployments/dep-1/models/model-1",
+        args=("dep-1", "model-1"),
+    ),
 ]
 
 

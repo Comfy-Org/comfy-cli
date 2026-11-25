@@ -2539,8 +2539,12 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
             listed = msg[1].get("executed")
         else:
             continue
-        for n in listed or []:
-            nodes.add(str(n))
+        if not isinstance(listed, list):
+            continue
+        # Same null guard as the live `_watch_execution_cached` path: this set
+        # becomes the terminal envelope's completed nodes, and `str(None)`
+        # would seat a fabricated `"None"` node in it.
+        nodes.update(str(n) for n in listed if n is not None)
     outputs = body.get("outputs")
     if isinstance(outputs, dict):
         nodes.update(str(n) for n in outputs)
@@ -2595,17 +2599,29 @@ def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
 
 
 def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
-    nodes = data.get("nodes") or []
+    # ONE event per cached node, matching what `comfy run` emits
+    # (run/execution.py `on_cached`). The two streams are documented as one
+    # dialect, so a consumer counting cached nodes per event must not have to
+    # special-case a list-shaped `nodes` here. `title`/`class_type` are omitted:
+    # watch has no workflow map to resolve them from, and both are optional in
+    # the run dialect's own emission.
+    nodes = data.get("nodes")
+    # A non-list (e.g. the string "34") is not a node list: iterating it
+    # would invent ids from its characters and seat them in completed_nodes.
+    # The /history path already ignores this shape; the live handler must too.
+    if not isinstance(nodes, list):
+        return
     for n in nodes:
         state.completed_nodes.add(str(n))
     renderer = state.renderer
     if renderer.is_pretty():
         renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
-    renderer.event(
-        "execution_cached",
-        nodes=[str(n) for n in nodes],
-        prompt_id=state.prompt_id,
-    )
+    for n in nodes:
+        renderer.event(
+            "execution_cached",
+            node=str(n),
+            prompt_id=state.prompt_id,
+        )
 
 
 def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:
