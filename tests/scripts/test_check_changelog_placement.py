@@ -13,6 +13,7 @@ sys.modules[_SPEC.name] = check_changelog_placement
 _SPEC.loader.exec_module(check_changelog_placement)
 
 added_line_numbers = check_changelog_placement.added_line_numbers
+heading_versions = check_changelog_placement.heading_versions
 enclosing_heading = check_changelog_placement.enclosing_heading
 misplaced = check_changelog_placement.misplaced
 
@@ -134,3 +135,63 @@ def test_a_non_release_level_two_heading_ends_the_release_section() -> None:
     merged = MERGED + ["", "## Earlier releases", "", "[1.27.0]: https://example/compare"]
     diff = f"@@ -{len(MERGED) + 3},0 +{len(MERGED) + 4},1 @@\n+[1.26.0]: https://example/c\n"
     assert misplaced(diff, merged) == {}
+
+
+def test_heading_versions_reads_only_bracketed_headings() -> None:
+    assert heading_versions(MERGED) == {"Unreleased", "1.27.0"}
+    assert heading_versions(["## Earlier releases", "### Fixed", "- x"]) == set()
+
+
+def test_correcting_a_shipped_headings_date_does_not_exempt_its_section() -> None:
+    # The heading line is rewritten, so it arrives as an added line. Reading introduced
+    # sections from the diff alone would call 1.27.0 a section this PR created and let every
+    # insertion below it through -- including the one this check exists to catch.
+    merged = [
+        "# Changelog",
+        "",
+        "## [Unreleased]",
+        "",
+        "## [1.27.0] - 2026-11-19",
+        "",
+        "- a shipped entry",
+        "- and one that should not be here",
+    ]
+    diff = "@@ -5,1 +5,1 @@\n-## [1.27.0] - 2026-11-18\n+## [1.27.0] - 2026-11-19\n@@ -7,0 +8,1 @@\n+- and one that should not be here\n"
+    base = ["# Changelog", "", "## [Unreleased]", "", "## [1.27.0] - 2026-11-18", "", "- a shipped entry"]
+    assert misplaced(diff, merged, base) == {"## [1.27.0] - 2026-11-19": 1}
+    # Without the base the same diff reads as a section the PR introduced, and passes.
+    assert misplaced(diff, merged) == {}
+
+
+def test_a_release_pr_naming_a_genuinely_new_version_keeps_the_exemption() -> None:
+    # The #1189 shape, now with a base: `## [Unreleased]` becomes `## [1.30.0]`, a version the
+    # base does not carry, so the entries rolled under it are still exempt.
+    merged = ["# Changelog", "", "## [1.30.0] - 2026-12-01", "", "- rolled down"]
+    base = ["# Changelog", "", "## [Unreleased]", "", "- rolled down"]
+    diff = "@@ -3,1 +3,1 @@\n-## [Unreleased]\n+## [1.30.0] - 2026-12-01\n@@ -4,0 +5,1 @@\n+- rolled down\n"
+    assert misplaced(diff, merged, base) == {}
+
+
+def test_an_added_release_heading_is_not_counted_against_the_section_above_it() -> None:
+    # A backfilled section inserted below an existing release. The heading's own line sits
+    # under 1.27.0 by `enclosing_heading`, which excludes the line itself, so counting it
+    # would fail a PR for adding a section rather than for misfiling an entry.
+    merged = MERGED + ["", "## [1.26.0] - 2026-11-10", "", "- a backfilled entry"]
+    diff = f"@@ -{len(MERGED)},0 +{len(MERGED) + 1},4 @@\n+\n+## [1.26.0] - 2026-11-10\n+\n+- a backfilled entry\n"
+    base = MERGED
+    assert misplaced(diff, merged, base) == {}
+
+
+def test_the_diff_parser_splits_on_lf_only() -> None:
+    # An added line carrying U+2028 arrives as one git line. splitlines() would break it into
+    # three, and the two pieces beginning with a space would advance the cursor as context --
+    # pushing the next real addition across a heading boundary.
+    diff = "@@ -6,0 +7,2 @@\n+- a note\u2028 continued\u2028 again\n+- the next entry\n"
+    assert added_line_numbers(diff) == [7, 8]
+
+
+def test_a_blank_added_line_is_not_an_entry() -> None:
+    # Found by the test above: the blank separator a backfilled section opens with lands under
+    # the release above it and is not a promise to anyone.
+    merged = MERGED[:12] + [""] + MERGED[12:]
+    assert misplaced("@@ -12,0 +13,1 @@\n+\n", merged) == {}

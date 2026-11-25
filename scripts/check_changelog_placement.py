@@ -27,9 +27,25 @@ Deliberately narrow, so that a failure is always worth acting on:
   and the link-reference footer below it are not part of the last release.
 - **A changelog-only diff is exempt.** It cannot be describing its own code, so it is a
   retroactive correction to notes for something that genuinely shipped, and filing *that* under
-  `## [Unreleased]` would be the misleading option. Known gap: a follow-up adding a forgotten
-  entry for already-merged-but-unreleased code is exempt too, and would pass silently if
-  `[Unreleased]` were folded while it was open.
+  `## [Unreleased]` would be the misleading option.
+- **A heading is not an entry, and neither is a blank line.** A pure insertion that adds a
+  whole release section below an existing one would otherwise be counted against the section
+  above it, because a heading does not sit inside itself -- and so would the blank separator
+  such a block opens with. Neither promises a reader anything.
+- **A heading whose version the base already carries is not an introduced section.** Correcting
+  a shipped heading's date rewrites that line, so without the base comparison the correction
+  would grant its own section the exemption above and hide every insertion below it.
+
+Two gaps are known and deliberate, because closing either one costs more than it buys:
+
+- A follow-up that adds a forgotten entry for already-merged-but-unreleased code is
+  changelog-only, so it is exempt, and would pass silently if `[Unreleased]` were folded while
+  it was open. Checking pure insertions in changelog-only PRs would close it and would fail
+  #1200, a retroactive note fix under a shipped heading, which is the case the exemption exists
+  for. Intent is not in the diff.
+- A `pull_request` event does not fire when `main` moves, so a PR that passed is not re-checked
+  and can merge after `[Unreleased]` is folded underneath it. The complete fix is a repo
+  setting -- require branches up to date, or a merge queue -- not a line in this file.
 """
 
 from __future__ import annotations
@@ -41,6 +57,7 @@ import sys
 CHANGELOG = "CHANGELOG.md"
 HUNK = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,\d+)? @@")
 RELEASE_HEADING = re.compile(r"^## \[(?!Unreleased\])")
+HEADING_VERSION = re.compile(r"^## \[([^\]]+)\]")
 
 
 def added_line_numbers(diff: str, insertions_only: bool = True) -> list[int]:
@@ -60,7 +77,10 @@ def added_line_numbers(diff: str, insertions_only: bool = True) -> list[int]:
     cursor = 0
     in_hunk = False
     counting = False
-    for line in diff.splitlines():
+    # split("\n"), not splitlines(): the latter also breaks on U+2028, U+2029 and \x0b-\x1e,
+    # which git does not. An added line containing one would arrive as several, and the pieces
+    # that happen to start with a space would advance the cursor as if they were context.
+    for line in diff.split("\n"):
         hunk = HUNK.match(line)
         if hunk:
             in_hunk = True
@@ -93,16 +113,53 @@ def enclosing_heading(lines: list[str], line_number: int) -> str | None:
     return heading
 
 
-def misplaced(diff: str, merged: list[str]) -> dict[str, int]:
-    """Added lines per already-released heading. Empty means nothing is misplaced."""
-    added = added_line_numbers(diff)
-    introduced = {
-        merged[number - 1].rstrip()
-        for number in added_line_numbers(diff, insertions_only=False)
-        if 0 < number <= len(merged) and merged[number - 1].startswith("## ")
-    }
+def heading_versions(lines: list[str]) -> set[str]:
+    """The bracketed versions of every `## [x]` heading in a changelog."""
+    return {match.group(1) for line in lines if (match := HEADING_VERSION.match(line))}
+
+
+def introduced_headings(diff: str, merged: list[str], base: list[str]) -> set[str]:
+    """Headings this diff introduces, which are therefore not already-released sections.
+
+    `insertions_only=False` on purpose: a release PR can add `## [X.Y.Z]` inside a replacement
+    hunk that consumes `## [Unreleased]`, and a heading it created is not an already-released
+    section whichever hunk carried it.
+
+    A heading whose version the base already carries is excluded. Rewriting a shipped heading
+    -- fixing its date, say -- adds that line to the diff, and treating it as introduced would
+    grant the section the exemption and hide every insertion below it.
+    """
+    released = heading_versions(base)
+    headings: set[str] = set()
+    for number in added_line_numbers(diff, insertions_only=False):
+        if not 0 < number <= len(merged):
+            continue
+        text = merged[number - 1].rstrip()
+        if not text.startswith("## "):
+            continue
+        version = HEADING_VERSION.match(text)
+        if version is not None and version.group(1) in released:
+            continue
+        headings.add(text)
+    return headings
+
+
+def misplaced(diff: str, merged: list[str], base: list[str] | None = None) -> dict[str, int]:
+    """Added lines per already-released heading. Empty means nothing is misplaced.
+
+    `base` is the changelog as the base commit has it, and `None` means the base has no
+    changelog at all -- a PR that adds the file -- in which case every heading in it is new.
+    """
+    introduced = introduced_headings(diff, merged, base or [])
     counts: dict[str, int] = {}
-    for line_number in added:
+    for line_number in added_line_numbers(diff):
+        text = merged[line_number - 1].rstrip() if 0 < line_number <= len(merged) else ""
+        # A heading is not an entry. It does not sit inside itself, so a pure insertion that
+        # adds a release section below an existing release would otherwise be counted against
+        # the section above it -- and the blank line such a block starts with would be counted
+        # too, which is how this was found. Neither promises a reader anything.
+        if not text.strip() or text.startswith("## "):
+            continue
         heading = enclosing_heading(merged, line_number)
         if not heading or heading in introduced:
             continue
@@ -120,6 +177,16 @@ def _git(*args: str) -> str:
         raise SystemExit(f"git {' '.join(args)} failed ({error.returncode}): {error.stderr.strip()}") from error
 
 
+def _changelog_at(ref: str) -> list[str] | None:
+    """The changelog as `ref` has it, or None if `ref` has no changelog.
+
+    Not `_git`: a PR that adds CHANGELOG.md is legitimate and its base genuinely has no blob,
+    which is a fact about the base rather than a git failure worth exiting on.
+    """
+    result = subprocess.run(("git", "show", f"{ref}:{CHANGELOG}"), capture_output=True, text=True, check=False)
+    return result.stdout.split("\n") if result.returncode == 0 else None
+
+
 def main() -> int:
     base = sys.argv[1] if len(sys.argv) > 1 else "HEAD^1"
     changed = _git("diff", "--name-only", "-z", base, "HEAD").split("\0")
@@ -134,7 +201,7 @@ def main() -> int:
     # split("\n"), not splitlines(): the latter also breaks on U+2028, U+2029 and \x0b-\x1e,
     # which git does not, and any of them would drift this numbering from git's.
     merged = _git("show", f"HEAD:{CHANGELOG}").split("\n")
-    counts = misplaced(diff, merged)
+    counts = misplaced(diff, merged, _changelog_at(base))
     if not counts:
         print(f"{CHANGELOG}: no new entry lands in an already-released section. OK.")
         return 0
