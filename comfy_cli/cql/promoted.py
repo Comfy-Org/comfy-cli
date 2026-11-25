@@ -791,8 +791,16 @@ def _pending_value_lookup(instance: dict) -> dict[tuple, dict]:
         return {}
     out: dict[tuple, dict] = {}
     for e in raw:
-        if isinstance(e, dict) and isinstance(e.get("originalEntry"), list):
-            out[tuple(e["originalEntry"])] = e
+        if not isinstance(e, dict):
+            continue
+        original = e.get("originalEntry")
+        # Same 2/3-STRING-tuple shape ``_proxy_tuples`` enforces: without
+        # this, a malformed record (e.g. a nested list inside
+        # ``originalEntry``) builds a tuple with an unhashable element, and
+        # using it as a dict key below raises instead of being ignored.
+        if not isinstance(original, list) or len(original) not in (2, 3) or not all(isinstance(x, str) for x in original):
+            continue
+        out[tuple(original)] = e
     return out
 
 

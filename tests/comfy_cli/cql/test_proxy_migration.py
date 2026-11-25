@@ -903,6 +903,44 @@ def test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking(graph):
     assert promoted.host_value(inst, by_name["text"]) == "legacy prompt"  # not 640
 
 
+def test_pending_value_lookup_ignores_malformed_originalentry_shapes():
+    """``_pending_value_lookup`` built its ``{originalEntry tuple: record}``
+    map with ``tuple(e["originalEntry"])`` after checking only that
+    ``originalEntry`` was *a* list — not that it had the 2/3-STRING-tuple
+    shape ``_proxy_tuples`` enforces everywhere else. A malformed record
+    (e.g. a nested list inside ``originalEntry``, written by some other
+    process sharing the document) made ``tuple(...)`` produce a tuple
+    containing an unhashable element, and using it as a dict key raised
+    ``TypeError: unhashable type: 'list'`` -- an attacker- or bug-controlled
+    stash entry could crash every subsequent ``plan_proxy_migration`` call
+    on that instance. Validate each entry the same way ``_proxy_tuples``
+    does and skip the ones that don't fit, instead of trusting the stash
+    blindly.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4680810815
+    """
+    instance = {
+        "properties": {
+            promoted.PENDING_VALUE_PROPERTY: [
+                {"originalEntry": ["52", "seed"], "hostValue": 42},  # valid 2-tuple
+                {"originalEntry": ["52", "seed", "x"], "hostValue": 99},  # valid 3-tuple
+                {"originalEntry": ["52", ["nested"]], "hostValue": 1},  # malformed: nested list element
+                {"originalEntry": ["52"], "hostValue": 2},  # malformed: too short
+                {"originalEntry": ["a", "b", "c", "d"], "hostValue": 3},  # malformed: too long
+                {"originalEntry": [1, 2], "hostValue": 4},  # malformed: non-string elements
+                {"originalEntry": "not-a-list", "hostValue": 5},  # malformed: not a list at all
+                "not-a-dict",  # malformed: not a record at all
+            ]
+        }
+    }
+
+    out = promoted._pending_value_lookup(instance)
+
+    assert out == {
+        ("52", "seed"): {"originalEntry": ["52", "seed"], "hostValue": 42},
+        ("52", "seed", "x"): {"originalEntry": ["52", "seed", "x"], "hostValue": 99},
+    }
+
+
 def test_repair_ids_are_stable_across_processes():
     ids = promoted.repair_ids(["56"], "52", "seed", 1)
     again = promoted.repair_ids(["56"], "52", "seed", 1)
