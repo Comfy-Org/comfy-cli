@@ -38,6 +38,16 @@ history.
 
 ### Fixed
 
+- `comfy workflow add-node` now names the successor for a deprecated family
+  split by a format qualifier. Core's audio writers retire as `Save Audio
+  (FLAC|MP3|Opus) (DEPRECATED)` with `Save Audio (Advanced)` as the live
+  successor, so stripping only `(DEPRECATED)` left `save audio (flac)`, matched
+  nothing, and all three reported `"replacement": null` — the caller was told
+  the class was retired but not what to use. The lookup falls back to the name
+  before the qualifier, and only when exactly one live class of the same
+  billing kind answers to it; a tie still reports no replacement rather than
+  guessing.
+
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
