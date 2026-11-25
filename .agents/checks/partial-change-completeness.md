@@ -57,6 +57,10 @@ change until it is unreviewable.
 6. Do not flag scope the author explicitly refused with a reason **and** a
    resolvable artifact per step 2. Refused scope with a reason but no artifact
    is the step-3 case (medium): ask for the artifact, not for the scope to grow.
+   Refused scope with an artifact but no stated reason is also the step-3 case:
+   a tracked follow-up says the remainder is known, not that it was declined on
+   purpose, so ask for the reason rather than inferring intent from the artifact
+   alone.
 7. Where a change is one wave of a documented plan, check it against that plan's
    acceptance for *this* wave only. A wave that meets its own acceptance is
    complete even while later waves are empty.
