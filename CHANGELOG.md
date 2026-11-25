@@ -180,7 +180,8 @@ history.
   downloads before upgrading, since an older version keeps its claims per
   workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
 - `comfy run` and `comfy run --emit-workflow` on a canvas (UI-format)
-  workflow now keep a record-valued widget on its own input. A node that
+  workflow now keep a record-valued widget on its own input, for any node
+  whose schema is readable and declares a widget input of its own. A node that
   saves a record in `widgets_values` — `ImageCropV2`'s `crop_region`, a
   CurveEditor's `curve` — was read as a Power Lora Loader row as soon as any
   one of the node's widget values was a record, so that record was dropped
@@ -194,7 +195,10 @@ history.
   understand is reported in a warning rather than discarded in silence; and a
   malformed `type` key no longer raises a `TypeError` that drops the whole
   node, valid Lora rows included. A legacy "no rows yet" Lora save
-  (`[{}, ""]`) keeps its markers off real sockets such as `model` and `clip`
+  (`[{}, ""]`) keeps its markers off real sockets such as `model` and `clip`.
+  A node whose type is missing from the server's `object_info` has no schema to
+  read, so a self-naming record on such a node still goes down the Lora-row
+  path as before
   ([#1011](https://github.com/Comfy-Org/comfy-cli/issues/1011)).
 
 ## [1.28.0] - 2026-11-18
