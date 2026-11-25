@@ -7,6 +7,7 @@ with the standard CLI properties and aliases ``tracing_id`` to
 """
 
 import importlib
+import importlib.metadata
 import logging
 import threading
 import time
@@ -258,13 +259,15 @@ class TestProviderConstruction:
         adapter = consumer._session.get_adapter("https://api.mixpanel.com")
         assert adapter.max_retries.total == 1
 
-    def test_posthog_unregisters_its_own_atexit_join(self):
-        """Regression guard: Posthog's constructor registers its own
-        ``atexit.register(self.join)``, which flushes synchronously on the main
-        thread at shutdown, unbounded by ``_flush_all_providers``' 5s daemon
-        deadline. Against a blackholed endpoint that join can block ~21s after
-        the terminal envelope. The provider must unregister it so the bounded
-        flush is the only shutdown drain path."""
+    def test_posthog_unregisters_its_own_atexit_hook(self):
+        """Regression guard: Posthog's constructor registers its own atexit hook,
+        which flushes synchronously on the main thread at shutdown, unbounded by
+        ``_flush_all_providers``' 5s daemon deadline. The provider must unregister
+        it so the bounded flush is the only shutdown drain path.
+
+        Asserts the whole SET, not one name. The hook was ``join`` up to posthog
+        7.30.0 and ``_atexit`` from ~7.40.0, both inside ``posthog>=6,<8``, so
+        naming one is version-dependent."""
         import comfy_cli.tracking as tracking_mod
 
         fake_client = MagicMock()
@@ -278,7 +281,70 @@ class TestProviderConstruction:
             provider = PostHogProvider("phc_test", "https://t.comfy.org")
 
         assert provider.enabled is True
-        fake_atexit.unregister.assert_called_once_with(fake_client.join)
+        unregistered = {call.args[0] for call in fake_atexit.unregister.call_args_list}
+        assert unregistered == {fake_client.join, fake_client._atexit}
+        # The feature hooks must be left alone: `flush()` does not drain them.
+        for kept in tracking_mod._POSTHOG_ATEXIT_HOOKS_KEPT:
+            assert getattr(fake_client, kept) not in unregistered
+
+    @pytest.mark.parametrize(
+        ("present", "absent"),
+        [("_atexit", "join"), ("join", "_atexit")],
+    )
+    def test_posthog_unregisters_whichever_hook_the_installed_version_has(self, present, absent):
+        """A real client has ONE of the two names. `spec` makes the mock behave
+        that way, which a bare MagicMock cannot: it answers to every attribute,
+        so the original single-name assertion passed on every posthog ever
+        released while the call it asserted did nothing on half of them."""
+        import comfy_cli.tracking as tracking_mod
+
+        fake_client = MagicMock(spec=[present, "capture", "flush"])
+        with (
+            patch("posthog.Posthog", return_value=fake_client),
+            patch.object(tracking_mod, "atexit") as fake_atexit,
+        ):
+            PostHogProvider("phc_test", "https://t.comfy.org")
+
+        unregistered = {call.args[0] for call in fake_atexit.unregister.call_args_list}
+        assert unregistered == {getattr(fake_client, present)}
+        assert not hasattr(fake_client, absent)
+
+    def test_every_posthog_atexit_hook_is_either_unregistered_or_explicitly_kept(self):
+        """The guard the mock-based tests cannot be, read off the INSTALLED posthog.
+
+        `atexit.unregister` is a no-op against a callable that was never
+        registered, so a rename is silent: the call still happens, the hook stays
+        registered, and because atexit runs LIFO — posthog's hook is registered
+        later than this module's, on the first send — it then runs FIRST and
+        closes the consumers inside its own 1s bound before the 5s drain gets
+        there. That is the bug this test exists to catch, and it is invisible to
+        any test that supplies the client.
+
+        A new hook name fails here rather than being assumed harmless; adding it
+        to `_POSTHOG_ATEXIT_HOOKS` or `_POSTHOG_ATEXIT_HOOKS_KEPT` is then a
+        deliberate decision with a reason next to it."""
+        import inspect
+        import re
+
+        import posthog.client
+
+        import comfy_cli.tracking as tracking_mod
+
+        registered = set(re.findall(r"atexit\.register\(self\.(\w+)\)", inspect.getsource(posthog.client)))
+        assert registered, (
+            "found no `atexit.register(self.X)` in posthog.client: either posthog stopped "
+            "registering an exit hook, or it moved and this test can no longer see it. Check "
+            "before deleting -- a silently-unfound hook is exactly the failure mode here."
+        )
+        handled = set(tracking_mod._POSTHOG_ATEXIT_HOOKS) | set(tracking_mod._POSTHOG_ATEXIT_HOOKS_KEPT)
+        unhandled = registered - handled
+        assert not unhandled, (
+            f"posthog {importlib.metadata.version('posthog')} registers atexit hook(s) "
+            f"{sorted(unhandled)} that PostHogProvider neither unregisters nor deliberately keeps. "
+            "Add each to comfy_cli.tracking._POSTHOG_ATEXIT_HOOKS (to bound it under "
+            "_flush_all_providers) or to _POSTHOG_ATEXIT_HOOKS_KEPT (if flush() cannot drain what "
+            "it carries)."
+        )
 
     def test_posthog_track_skips_when_distinct_id_is_none(self, tracking_with_two_providers):
         tracking_mod, _, ph_provider = tracking_with_two_providers
