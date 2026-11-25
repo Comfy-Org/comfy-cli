@@ -80,10 +80,18 @@ migration itself is not a register.
   description.** Rejected: §8.7/§14.4 are pinned contract text a remote
   replication consumer relies on verbatim: when the flush runs, and what
   `promoted.repair` can contain, are exactly those sections' subject. A
-  consumer coded against the old wording's "only on the legacy write" trigger
-  converges correctly regardless (the new trigger is a superset that still
-  produces the same deterministic, idempotent repair), but the trigger
-  condition itself is contract text, not an implementation detail.
+  consumer still coded against the old wording's "only on the legacy write"
+  trigger stays WIRE-compatible (the payload shape is unchanged:
+  `promoted.repair = {ids}`, no `entry`), but it is not REPLAY-compatible for
+  every delivery order: if that consumer meets the marker-free, higher-
+  stamped write first and the earlier, repair-carrying op second, it still
+  gates the flush on the arriving op's own `repair` field, so the second op
+  loses the LWW gate and the flush never runs there — the exact race
+  r4623941925 describes, left open on that consumer for that one delivery
+  order. Converging on every delivery order needs the revised trigger
+  (recompute `plan_proxy_migration` from live state on every apply), not
+  just the unchanged wire shape; that is why the trigger condition itself is
+  contract text, not an implementation detail.
 
 ## What we reject
 

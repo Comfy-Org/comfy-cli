@@ -4100,7 +4100,9 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
                 # op when carried — replay anywhere yields the same document.
                 # Re-resolved against the current graph: an entry another
                 # replica already repaired is consumed as already linked.
-                _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
+                _engine._isolate_shared_subgraph(
+                    workflow, instance, _engine._subgraph_defs_by_id(workflow), prefer_retainer=True
+                )
             _promoted.flush_proxy_migration(
                 workflow,
                 instance,

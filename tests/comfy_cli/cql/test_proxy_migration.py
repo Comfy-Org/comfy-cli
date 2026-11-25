@@ -815,6 +815,62 @@ def test_apply_slot_does_not_fork_a_shared_definition_for_an_unrepairable_plan(g
     ]
 
 
+def test_isolate_shared_subgraph_forks_the_same_instance_regardless_of_apply_order(graph):
+    """Two instances (56, 156) share FLUX's definition and EACH needs its own
+    legacy proxy repair: 56 keeps its original, repairable ``seed`` entry;
+    156's entry is swapped for an independent, also-repairable ``steps``
+    entry (KSampler node 52's ``steps`` widget, never promoted in the
+    fixture) so neither instance's repair can structurally satisfy the
+    other's — this isolates the ORDER-DEPENDENCE bug from the (separate,
+    intentional) optimization where a sibling with NOTHING left to repair
+    just inherits an already-migrated shared definition (see
+    ``test_shared_definition_is_forked_not_mutated`` in
+    ``test_workflow_edit_legacy_proxy.py``, which pins that behavior for one
+    specific apply order on one replica).
+
+    Before this fix, ``_isolate_shared_subgraph`` forked whichever instance
+    applied its write FIRST (the definition was still shared at that moment),
+    and left the SECOND instance — now the definition's sole remaining
+    sharer — on the original, mutated in place. Reversing the apply order
+    flipped which instance forked, so two replicas receiving the same pair of
+    writes in opposite delivery orders ended up with different definition
+    ids for the SAME hosts: final widget values agreed, but the documents
+    did not converge, violating the invariant this function's own docstring
+    and ADR-OPERATIONS-0018 both document.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4693109354
+    """
+    base = _load(FLUX)
+    sibling = copy.deepcopy(_instance(base, 56))
+    sibling["id"] = 156
+    entries = sibling["properties"]["proxyWidgets"]
+    entries[entries.index(["52", "seed"])] = ["52", "steps"]
+    base["nodes"].append(sibling)
+
+    forward, warnings_f = graph.apply_slots(base, {"56.width": 768, "156.width": 800})
+    backward, warnings_b = graph.apply_slots(base, {"156.width": 800, "56.width": 768})
+
+    assert warnings_f == [] and warnings_b == []
+    # Order independence: each instance ends up on the SAME definition id
+    # whichever order the pair of writes is applied in.
+    assert _instance(forward, 56)["type"] == _instance(backward, 56)["type"]
+    assert _instance(forward, 156)["type"] == _instance(backward, 156)["type"]
+    # The two instances really did end up on two distinct definitions (one
+    # forked off the other) — this isn't two orders converging on a no-op.
+    assert _instance(forward, 56)["type"] != _instance(forward, 156)["type"]
+    # Not just the same id: the same STRUCTURE too (both got their own
+    # repair applied to their own copy, independent of apply order).
+    def_56_fwd = _def_of(forward, _instance(forward, 56))
+    def_56_bwd = _def_of(backward, _instance(backward, 56))
+    assert json.dumps(def_56_fwd, sort_keys=True) == json.dumps(def_56_bwd, sort_keys=True)
+    def_156_fwd = _def_of(forward, _instance(forward, 156))
+    def_156_bwd = _def_of(backward, _instance(backward, 156))
+    assert json.dumps(def_156_fwd, sort_keys=True) == json.dumps(def_156_bwd, sort_keys=True)
+    # Each instance's OWN repair actually landed: 56 still resolves its seed
+    # promotion, 156 resolves its independent steps promotion.
+    assert [i["name"] for i in def_56_fwd["inputs"]][-1] == "seed"
+    assert [i["name"] for i in def_156_fwd["inputs"]][-1] == "steps"
+
+
 def test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking(graph):
     """Before this fix, a plan of only ``alreadyLinked`` entries (no
     ``repairable`` one at all) never flushed, because both ``_apply_set_widget``

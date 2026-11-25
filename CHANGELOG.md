@@ -131,6 +131,9 @@ history.
 
 ### Fixed
 
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
 - Two `comfy model download` runs from different workspaces aimed at the same
   file now refuse each other. Before, each workspace kept its own download
   claims, so both runs wrote the file. This is the default case on Comfy
@@ -176,9 +179,6 @@ history.
   Build picker. It needs no sign-in then, since it reads nothing from the
   builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
   when no Build is named, so it stays a string wherever it appears.
-- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
-  longer shifts the host's other values. Pending proxy migration now runs before
-  the first host write, including when edits are saved in separate calls.
 
 ## [1.26.0] - 2026-11-11
 
