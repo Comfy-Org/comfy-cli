@@ -28,9 +28,20 @@ CAP = engine._MAX_OBJECT_INFO_BYTES
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_where(monkeypatch: pytest.MonkeyPatch):
-    """``--where`` must be the only routing input (see test_error_envelope_where)."""
+def _no_ambient_routing(monkeypatch: pytest.MonkeyPatch):
+    """``--where`` must be the only routing input (see test_error_envelope_where).
+
+    ``COMFY_OBJECT_INFO_FILE`` is cleared and ``COMFY_LOCAL_URL`` is pinned for
+    a sharper reason: ``resilient_load_object_info`` returns the catalog named
+    by that variable BEFORE it fetches, so a developer or CI shell that exports
+    it hands these tests a success envelope and ``_error_block`` fails on a
+    pass. An ambient ``COMFY_LOCAL_URL`` is the same hazard from the other
+    side -- a non-loopback value sends the oversize test into the loopback
+    branch instead.
+    """
     monkeypatch.delenv("COMFY_WHERE", raising=False)
+    monkeypatch.delenv("COMFY_OBJECT_INFO_FILE", raising=False)
+    monkeypatch.setenv("COMFY_LOCAL_URL", "http://127.0.0.1:8188")
 
 
 class _Resp(io.BytesIO):
@@ -77,7 +88,7 @@ def test_non_loopback_local_hint_offers_both_real_routes(monkeypatch: pytest.Mon
 
 
 def test_hint_is_not_rendered_twice_in_one_envelope(monkeypatch: pytest.MonkeyPatch):
-    """It is lifted into ``error.hint``, so it is stripped from ``error.details``."""
+    """A cause-specific hint reaches ``error.hint`` and never ``error.details``."""
     monkeypatch.setattr(engine._opener, "open", lambda req, timeout=None: _Resp(b"x" * (CAP + 1)))
 
     err = _error_block(["--json", "nodes", "ls", "--where", "local"])
@@ -86,6 +97,80 @@ def test_hint_is_not_rendered_twice_in_one_envelope(monkeypatch: pytest.MonkeyPa
     assert "hint" not in (err.get("details") or {})
     # The details a consumer already relied on are untouched.
     assert (err.get("details") or {}).get("url", "").endswith("/object_info")
+
+
+def test_a_raise_site_that_publishes_details_hint_keeps_publishing_it():
+    """``details["hint"]`` is a contract this change does not get to break.
+
+    The HTTPError and URLError sites in ``_load_from_target`` have set
+    ``details["hint"]`` ("run ``comfy cloud login``") for as long as they have
+    existed, and `nodes`/`validate` render ``details`` into the envelope. Had
+    the lift stripped the key, those two envelopes would have lost
+    ``error.details.hint`` -- a different error class than the one this PR is
+    about, silently changed.
+    """
+    hint, details = engine.load_error_envelope_fields(
+        engine.LoadError(
+            "HTTP 401 from http://127.0.0.1:8188/object_info: ",
+            details={"url": "http://127.0.0.1:8188/object_info", "status": 401, "hint": "run `comfy cloud login`"},
+        ),
+        "pass --input <path>, or start the server with `comfy launch`",
+    )
+
+    assert hint == "run `comfy cloud login`"
+    assert details["hint"] == "run `comfy cloud login`"
+
+
+def test_the_oversize_hint_is_credentialed_on_cloud_and_never_tells_a_cloud_user_to_launch():
+    """The fetch that hit the cap was authenticated; the suggested one must be too.
+
+    An anonymous ``curl`` against Comfy Cloud returns 401, and ``-s`` without
+    ``-f`` writes that body to ``object_info.json``, so ``--input`` would load
+    a bogus catalog without complaint.
+    """
+    cloud = engine._oversize_catalog_hint("https://api.comfy.org/api/object_info", is_cloud=True)
+
+    assert "X-API-Key: $COMFY_API_KEY" in cloud
+    assert "comfy launch" not in cloud
+    assert "-fsS" in cloud and "--max-filesize" in cloud
+
+
+def test_the_oversize_hint_is_bounded_so_it_does_not_route_around_the_guard():
+    """The cap stops resource exhaustion; a hint past it must carry its own bound."""
+    local = engine._oversize_catalog_hint("http://127.0.0.1:8188/object_info", is_cloud=False)
+
+    assert "--max-filesize" in local
+    assert "curl -fsS" in local
+    assert "`comfy launch` is not the fix" in local
+
+
+@pytest.mark.parametrize(
+    ("url", "unwanted"),
+    [
+        ("http://user:tok@10.0.0.5:8188/object_info", "tok"),
+        ("http://127.0.0.1:8188/object_info?token=tok", "tok"),
+    ],
+)
+def test_a_credential_in_a_configured_url_never_reaches_the_hint(url: str, unwanted: str):
+    """``workflow._get_graph`` renders ``hint`` and drops ``details`` entirely."""
+    assert unwanted not in engine._oversize_catalog_hint(url, is_cloud=False)
+    assert unwanted not in engine._hint_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8188/object_info;id",
+        "http://127.0.0.1:8188/object_info$(id)",
+        "http://[::1]:8188/object_info",
+    ],
+)
+def test_a_shell_metacharacter_in_a_configured_url_is_quoted_not_executed(url: str):
+    """The hint is copy-paste shell text, so an unquoted URL is a command."""
+    quoted = engine._hint_url(url)
+
+    assert quoted.startswith("'") and quoted.endswith("'")
+    assert quoted in engine._oversize_catalog_hint(url, is_cloud=False)
 
 
 def test_a_causeless_load_error_still_gets_the_command_fallback():
