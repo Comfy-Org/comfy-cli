@@ -6563,19 +6563,28 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
-        if target.repair is not None or any(
-            e.repairable for e in _promoted.plan_proxy_migration(workflow, instance, graph)
-        ):
+        plan = _promoted.plan_proxy_migration(workflow, instance, graph)
+        if target.repair is not None or plan:
             # A legacy ``proxyWidgets`` promotion: run the frontend's forward
-            # migration on this instance first (forking a shared definition,
-            # since the repair mutates it), exactly as the op path does. Only
-            # when something would actually change (a ``createSubgraphInput``
-            # or ``primitiveBypass`` entry pending) — a plan of only
-            # ``alreadyLinked``/``quarantine`` entries leaves the definition
-            # exactly as the flush found it, so forking a shared definition
-            # for it would fork it for nothing.
-            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
-            _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow))
+            # migration on this instance first, exactly as the op path does.
+            # Unconditional over the WHOLE plan — not just a ``repairable``
+            # (``createSubgraphInput``/``primitiveBypass``) entry — because
+            # ``set_host_value`` below writes by DECLARED-order
+            # ``value_index`` into ``widgets_values``, which stays in legacy
+            # PROXY order until a flush runs at least once. A plan of only
+            # ``alreadyLinked``/``quarantine`` entries never flushed here
+            # would leave that array misaligned forever, so a later write
+            # would land in the wrong widget's slot.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+            if target.repair is not None or any(e.repairable for e in plan):
+                # The definition is MUTATED only for a repairable entry, so
+                # the (possibly shared) definition is forked only then — a
+                # plan of only ``alreadyLinked``/``quarantine`` entries
+                # leaves the definition exactly as the flush found it, so
+                # forking a shared definition for it would fork it for
+                # nothing.
+                # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+                _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow))
             _promoted.flush_proxy_migration(workflow, instance, graph, instance_path=list(target.segments))
         _promoted.set_host_value(workflow, instance, target.widget, value, graph)
         return warnings

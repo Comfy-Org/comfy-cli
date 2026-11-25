@@ -777,18 +777,20 @@ def test_apply_slot_does_not_fork_a_shared_definition_for_an_unrepairable_plan(g
     """``_apply_one_slot_impl`` used to fork+flush whenever ANY pending entry
     was not a preview — which includes a plan of only ``alreadyLinked``
     and/or ``quarantine`` entries. ``flush_proxy_migration`` never changes
-    the definition for those, so forking a SHARED definition for one is pure
-    cost: the instance permanently stops sharing definition edits with its
-    sibling, and the quarantine entry is written as final even though
-    nothing needed to run. A write to an unrelated, already-linked widget
-    (``width``) must not trigger either.
+    the DEFINITION for those (only the instance's own ``properties``/
+    ``widgets_values``), so forking a SHARED definition for one is pure cost:
+    the instance permanently stops sharing definition edits with its
+    sibling. A write to an unrelated, already-linked widget (``width``) must
+    not trigger a fork — but the flush itself still must run (see
+    ``test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking``
+    for why skipping it entirely corrupts a sibling widget's value).
     https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
     """
     wf = _load(FLUX)
     inst = _instance(wf, 56)
     # Drop the one repairable entry (``seed``): what's left is only
     # ``alreadyLinked`` entries plus the unrepairable ``control_after_generate``
-    # quarantine — no entry for which the flush would change anything.
+    # quarantine — no entry for which the flush would change the DEFINITION.
     inst["properties"]["proxyWidgets"] = [e for e in inst["properties"]["proxyWidgets"] if e != ["52", "seed"]]
     sibling = copy.deepcopy(inst)
     sibling["id"] = 156
@@ -802,8 +804,103 @@ def test_apply_slot_does_not_fork_a_shared_definition_for_an_unrepairable_plan(g
     assert warnings == []
     assert _instance(wf, 56)["type"] == original_type  # not forked
     assert _instance(wf, 156)["type"] == original_type  # sibling untouched
-    assert _instance(wf, 56)["properties"]["proxyWidgets"] == inst["properties"]["proxyWidgets"]
-    assert "proxyWidgetErrorQuarantine" not in _instance(wf, 56)["properties"]
+    assert _instance(wf, 156)["properties"]["proxyWidgets"]  # sibling's own entries untouched
+    # The written instance's plan DID flush: the alreadyLinked entries are
+    # consumed and the genuinely unrepairable one is now permanently
+    # quarantined — just without forking the (shared, untouched) definition.
+    assert "proxyWidgets" not in _instance(wf, 56)["properties"]
+    assert _instance(wf, 56)["properties"]["proxyWidgetErrorQuarantine"] == [
+        {"originalEntry": ["52", "control_after_generate"], "reason": "missingSubgraphInput", "attemptedAtVersion": 1}
+    ]
+
+
+def test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking(graph):
+    """Before this fix, a plan of only ``alreadyLinked`` entries (no
+    ``repairable`` one at all) never flushed, because both ``_apply_set_widget``
+    and ``_apply_one_slot_impl`` gated the FLUSH ITSELF on ``e.repairable`` —
+    not just the fork. ``widgets_values`` then stayed in legacy ``proxyWidgets``
+    POSITION order forever, while ``set_host_value`` writes by DECLARED-input
+    ``value_index`` — a different order whenever the two orders disagree. A
+    write to ``width`` (declared second, proxy first) landed in the slot
+    DECLARATION order assigns it, silently overwriting ``text``'s own value
+    (declared first, proxy second) with whatever ``width``'s legacy slot held.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+    """
+    outer = "test-outer-alreadylinked-0000-000000000005"
+    wf = {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": outer,
+                "inputs": [],
+                "outputs": [],
+                # proxy order: width, text — the REVERSE of declaration order.
+                "properties": {"proxyWidgets": [["20", "width"], ["10", "text"]]},
+                "widgets_values": [640, "legacy prompt"],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": outer,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 20, "lastLinkId": 2, "lastRerouteId": 0},
+                    # declaration order: text, width
+                    "inputs": [
+                        {"id": "i-text", "name": "text", "type": "STRING", "linkIds": [1]},
+                        {"id": "i-width", "name": "width", "type": "INT", "linkIds": [2]},
+                    ],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["interior default text"],
+                        },
+                        {
+                            "id": 20,
+                            "type": "EmptySD3LatentImage",
+                            "inputs": [{"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 2}],
+                            "outputs": [],
+                            "widgets_values": [1024, 1024, 1],
+                        },
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 10,
+                            "target_slot": 1,
+                            "type": "STRING",
+                        },
+                        {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": 20, "target_slot": 0, "type": "INT"},
+                    ],
+                }
+            ]
+        },
+    }
+    inst = _instance(wf, 1)
+    plan = promoted.plan_proxy_migration(wf, inst, graph)
+    assert [e.plan for e in plan] == ["alreadyLinked", "alreadyLinked"]
+    assert not any(e.repairable for e in plan)
+
+    wf, warnings = graph.apply_slots(wf, {"1.width": 800})
+
+    assert warnings == []
+    inst = _instance(wf, 1)
+    sg = _def_of(wf, inst)
+    by_name = {p.name: p for p in promoted.promoted_inputs(sg, promoted.defs_by_id(wf)) if p.is_widget}
+    assert promoted.host_value(inst, by_name["width"]) == 800
+    assert promoted.host_value(inst, by_name["text"]) == "legacy prompt"  # not 640
 
 
 def test_repair_ids_are_stable_across_processes():

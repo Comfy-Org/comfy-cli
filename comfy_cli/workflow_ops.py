@@ -4071,13 +4071,23 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         # LWW outcome for the VALUE — converges regardless of delivery order.
         # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941925
         plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs_by_id)
-        if any(e.repairable for e in plan):
-            # The definition is MUTATED, so a shared one is forked first
-            # (deterministic fork id), and the input/link ids come from the
-            # op when carried — replay anywhere yields the same document.
-            # Re-resolved against the current graph: an entry another
-            # replica already repaired is consumed as already linked.
-            _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
+        if plan:
+            # Flush whenever ANY entry is pending — including a plan of only
+            # ``alreadyLinked``/``quarantine`` entries, which still needs
+            # consuming: ``set_host_value`` below writes by DECLARED-order
+            # ``value_index`` into ``widgets_values``, which stays in legacy
+            # PROXY order until a flush runs at least once. Gating the flush
+            # itself on ``e.repairable`` (instead of just the fork below)
+            # left an alreadyLinked-only instance's array in proxy order
+            # forever, so a later write landed in the wrong widget's slot.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+            if any(e.repairable for e in plan):
+                # The definition is MUTATED, so a shared one is forked first
+                # (deterministic fork id), and the input/link ids come from the
+                # op when carried — replay anywhere yields the same document.
+                # Re-resolved against the current graph: an entry another
+                # replica already repaired is consumed as already linked.
+                _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
             _promoted.flush_proxy_migration(
                 workflow,
                 instance,
