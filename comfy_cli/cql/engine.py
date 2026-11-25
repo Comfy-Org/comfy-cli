@@ -4299,9 +4299,16 @@ def _oversize_catalog_hint(url: str, *, is_cloud: bool) -> str:
     anonymous ``curl`` would save a 401 body as ``object_info.json`` and
     ``--input`` would then load a bogus catalog without complaint; and
     ``comfy launch`` is not even a thing a Comfy Cloud user can be told to
-    rule out. Both forms are bounded (``--max-filesize``) and fail loudly
-    (``-f``): the cap exists to stop a hostile or broken endpoint exhausting
-    memory and disk, so a hint that routes around it must not be unbounded.
+    rule out.
+
+    Both forms fail loudly (``-f``) and carry ``--max-filesize``, which curl
+    applies only when the response advertises its size up front: on a chunked
+    reply it has no effect, so this is a guard on the ordinary case and not a
+    hard ceiling. It is still worth sending -- the cap this hint routes around
+    exists to stop a hostile or broken endpoint exhausting memory and disk --
+    but nothing here or in the CHANGELOG may describe the download as bounded
+    without that condition, and the condition is not restated per curl
+    version because no inspected source establishes which versions enforce it.
     """
     cap_mib = _MAX_OBJECT_INFO_BYTES // (1024 * 1024)
     lead = f"this server's object_info is over the {cap_mib} MiB fetch cap, so the server being up is not the problem"
