@@ -265,7 +265,9 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
   **Don't fill the gap by writing node code into the build.** A node you author
   is unreviewed code the user never chose; packs the user already has, published
   or local, are fine. Stop before you change the spec, list the classes, and ask
-  the user how to go on.
+  the user how to go on. The advisory line names eight classes at most; when it
+  ends in `(+N more)`, say how many more there are rather than presenting the
+  eight as the whole list.
 
 ## Path C — from a description, a Dockerfile, or a Modal script
 
