@@ -1661,7 +1661,7 @@ selector or count, because the rebuild resets the value but not the stamp
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
 
-## 24. Amendment v1.15 — 2026-11-05 (`capture` reports dropped canvas groups)
+## 24. Amendment v1.15 — 2026-11-05 (`capture` reports the canvas decoration it drops)
 
 **No op kind was added, removed, or re-scoped.** `FROZEN_OPS` /
 `DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables and §§1-8 are untouched.
@@ -1684,6 +1684,37 @@ looked at `groups`. The consumer that feels this is "build one copy of a
 repeated branch, capture it, re-apply once per copy": every copy comes back
 unframed with no signal, and the caller finds out by looking at the canvas.
 
+**`capture` also emits `reroute_dropped`**, for the same reason and with the
+same shape. `_inexpressible_reason` enumerates exactly three structures no
+frozen kind can create — a subgraph definition, a canvas group, a native reroute
+point — and `capture` handled two of them (`RecipeError`, the warning above)
+while never reading `extra` at all. A native reroute is a waypoint in
+`extra.reroutes` bound to a link by `extra.linkExtensions`; it is NOT the
+`Reroute` node §18.2 splices through. Because the link keeps its real source and
+target, the recipe's executable graph is already correct and only the routing a
+user laid out is lost — silently, which is precisely the failure this amendment
+exists to end. `count` is the length of `extra.reroutes`, or `null` when the
+waypoints are known only from `extra.linkExtensions`.
+
+**Both warnings are composed around untrusted text and are escaped on the
+pretty path only.** A group `title` is free-form text from a downloaded
+document, and `repr()` does not escape `[`/`]`, so a group titled `[/yellow]`
+reached Rich as an unmatched closing tag and raised `MarkupError` — the warning
+that reports a dropped group crashing the command instead, after `--out` had
+already written the recipe. The escape (`output.sanitize.sanitize_markup`) sits
+at the pretty print sites, so `data.warnings` stays byte-identical for JSON
+consumers per that module's contract.
+
+**A `groups` field that is not an array is reported, not raised**
+(`group_field_malformed`, carrying `found_type`). `_load_workflow_or_fail`
+validates `nodes`/`links` only, so `{"groups": 1}` reaches `capture`; iterating
+it raised an uncaught `TypeError` out of a command that catches only
+`RecipeError`, and a string or dict iterated into nothing and reported nothing.
+The recipe is built from `nodes`/`links` and is unaffected either way, and a
+file that captured before this amendment must still capture — so the
+malformation is reported (not knowing whether a group was dropped is itself
+worth saying) and the capture proceeds with no groups.
+
 **The underlying gap is unchanged and is deliberately not closed here.** No
 frozen kind creates, moves, retitles or deletes a canvas group, so the group a
 user or a template put on the canvas is reachable by exactly one op —
@@ -1691,4 +1722,6 @@ user or a template put on the canvas is reachable by exactly one op —
 frame nodes already placed. Giving the batch surface a group kind is a real
 amendment with real consequences (geometry ownership above all: a group's
 bounds are frontend-owned layout, not semantic document state) and belongs to
-its own proposal, under §9's rules, not to a warning.
+its own proposal, under §9's rules, not to a warning. The same holds for reroute
+waypoints, with the extra wrinkle that a waypoint is bound to a link id, so any
+future kind has to survive the id remapping a consumer applies.

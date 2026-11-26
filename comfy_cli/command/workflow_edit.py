@@ -29,6 +29,7 @@ from comfy_cli.command.workflow import (
     _parse_value,
 )
 from comfy_cli.output import get_renderer, rprint
+from comfy_cli.output.sanitize import sanitize_markup
 
 # Shared option aliases — the edit commands (add-node/set-widget/connect/
 # delete-node/capture/apply/foreach) all take the same catalog + CRDT-stamping
@@ -132,6 +133,26 @@ def _split_addr(addr: str, renderer) -> tuple[Any, str]:
     return node_id, name.strip()
 
 
+def _warning_text(w: Any) -> str:
+    """Render one warning for a Rich sink — escaped, because the text is untrusted.
+
+    A warning message is composed around values the workflow file chose: a
+    canvas group's ``title``, a node's ``type``. Those are free-form text from
+    a document a user downloaded, and ``repr()`` does not escape ``[``/``]``, so
+    the message reaches Rich with whatever markup the title contained. A group
+    titled ``[/yellow]`` raises ``MarkupError`` — the warning that exists to
+    report a dropped group would instead crash the command, after ``--out`` has
+    already been written. ``[link=...]`` plants a live OSC-8 hyperlink, and a
+    workaday title like ``[w/ controlnet]`` is silently swallowed as an unknown
+    tag.
+
+    Escaping here rather than at the ``capture_recipe`` call site keeps the
+    warning dicts in ``data.warnings`` byte-identical for JSON consumers — per
+    ``output.sanitize``, the escape belongs on the pretty path only.
+    """
+    return sanitize_markup(w.get("message", w) if isinstance(w, dict) else w)
+
+
 def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bool, command: str) -> None:
     """Serialize the mutated workflow (file or stdout) and emit the op envelope.
 
@@ -151,7 +172,7 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
         sys.stdout.write("\n")
         sys.stdout.flush()
         for w in op.get("warnings") or []:
-            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w}")
+            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {_warning_text(w)}")
         return
     wrote: str | None = None
     if not stdout:
@@ -907,12 +928,12 @@ def capture_cmd(
         if wrote:
             rprint(f"[bold green]✓[/bold green] captured {len(recipe['ops'])} ops → [dim]{wrote}[/dim]")
             for w in warnings:
-                rprint(f"  [yellow]warning:[/yellow] {w.get('message', w)}")
+                rprint(f"  [yellow]warning:[/yellow] {_warning_text(w)}")
         else:
             # stdout holds exactly the recipe JSON; warnings would corrupt a
             # redirect, so they go to stderr rather than being dropped.
             for w in warnings:
-                renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w.get('message', w)}")
+                renderer.stderr_console().print(f"[yellow]warning:[/yellow] {_warning_text(w)}")
     renderer.emit(payload, command="workflow capture")
 
 
