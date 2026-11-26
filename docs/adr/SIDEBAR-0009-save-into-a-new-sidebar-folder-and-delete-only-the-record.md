@@ -52,7 +52,9 @@ only if it still holds what the CLI last read.
 ### Replace an earlier save (`--replace`)
 
 Amended 2026-11-23, so an agent that saved a workflow can update it instead of
-making a new folder per save.
+making a new folder per save. The amendment is accepted on merge of the pull
+request that makes it (comfy-cli#1197), after its review; until then the
+Decision above stands as written.
 
 - Replace is explicit, never automatic. Only `--replace <filename>` writes over
   a file, and only the one it names: the `data.filename` an earlier sidebar
@@ -74,10 +76,9 @@ making a new folder per save.
 - Cloud's file POST takes no condition, so the read-then-write leaves a small
   race: an edit that lands between the read and the write is lost. The window
   is one round trip.
-- Cloud answers the write 200 even when its copy into the record fails. A
-  replace links the record (ADR-SIDEBAR-0013) only when the record's latest
-  content equals the bytes written; otherwise the link opens the folder, with
-  `folder_link_reason` `record_stale` and the `workflow_record_stale` warning.
+- Cloud answers the write 200 even when its copy into the record fails, so a
+  replace links the record only when it shows the new content
+  (ADR-SIDEBAR-0013, "A replaced file").
 
 ## Alternatives considered
 
