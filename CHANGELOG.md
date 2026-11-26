@@ -122,6 +122,14 @@ history.
   was created under a forced `caplog` floor rather than that it survived the
   level the CLI runs at; a third test now pins that.
 
+- `comfy download` with no `--out-dir` now resolves the output directory the
+  way it has always documented: the governing `project/1` root's `outputs/`,
+  else the `default_project_dir` config key's `outputs/`, else `./outputs`.
+  The option's default was the literal `./outputs`, which is truthy, so that
+  resolution was unreachable from the command and a download run from a
+  subdirectory of a project wrote to `<cwd>/outputs` instead of the project
+  root's. Passing `--out-dir`/`-o` is unchanged.
+
 ## [1.29.0] - 2026-11-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.
