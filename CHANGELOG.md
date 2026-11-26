@@ -94,6 +94,17 @@ history.
   addressed widget is that name's final occurrence. A duplicated name is left
   alone, because one name-keyed slot belongs to the final occurrence and writing
   an earlier one's value there would be a corrupt read rather than a stale one.
+- `comfy workflow add-node` now names the successor for a deprecated family
+  split by a format qualifier. Core's audio writers retire as `Save Audio
+  (FLAC|MP3|Opus) (DEPRECATED)` with `Save Audio (Advanced)` as the live
+  successor, so stripping only `(DEPRECATED)` left `save audio (flac)`, matched
+  nothing, and all three reported `"replacement": null` — the caller was told
+  the class was retired but not what to use. The lookup falls back to the name
+  before the qualifier, and only when exactly one live class answers to it in
+  the same pack, category and billing kind, the retirement marker was actually
+  removed from the retired name, and the candidate does not announce its own
+  retirement by name; anything else still reports no replacement rather than
+  guessing, because the caller substitutes this class id directly.
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
