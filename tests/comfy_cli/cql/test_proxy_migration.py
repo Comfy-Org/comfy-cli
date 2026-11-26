@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from comfy_cli import workflow_ops
+from comfy_cli.cql import engine as _engine
 from comfy_cli.cql import promoted
 from comfy_cli.cql.engine import Graph
 
@@ -869,6 +870,121 @@ def test_isolate_shared_subgraph_forks_the_same_instance_regardless_of_apply_ord
     # promotion, 156 resolves its independent steps promotion.
     assert [i["name"] for i in def_56_fwd["inputs"]][-1] == "seed"
     assert [i["name"] for i in def_156_fwd["inputs"]][-1] == "steps"
+
+
+def test_isolate_shared_subgraph_scope_qualifies_colliding_nested_local_ids():
+    """Two DIFFERENT parent subgraph definitions (``PA``, ``PB``) each
+    contain a nested host with the SAME bare local id (``2``) instantiating
+    the same shared target definition (``D``). ``definitions.subgraphs`` is
+    a flat, global table, so that collision is unremarkable: a bare local id
+    is only unique within its own immediate container.
+
+    Before scope-qualifying cohort member identity, retainer selection
+    compared bare local ids: both hosts' ``str(id)`` is ``"2"``, so both
+    independently satisfied "I am the retainer" and NEITHER forked. Any
+    later in-place mutation of ``D`` (e.g. one host's own proxy-migration
+    flush) was then visible through BOTH hosts — aliasing two logically
+    independent instances, contradicting ``_isolate_shared_subgraph``'s own
+    docstring rule that an interior write must never alias a sibling
+    instance.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4699160878
+    """
+    target_def, parent_a, parent_b = "def-target", "def-parent-a", "def-parent-b"
+    workflow = {
+        "nodes": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": target_def, "name": "Target", "inputs": [], "outputs": [], "links": [], "nodes": []},
+                {
+                    "id": parent_a,
+                    "name": "ParentA",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+                {
+                    "id": parent_b,
+                    "name": "ParentB",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+            ]
+        },
+    }
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    host_a = _inner(defs_by_id[parent_a], 2)
+    host_b = _inner(defs_by_id[parent_b], 2)
+
+    _engine._isolate_shared_subgraph(workflow, host_a, defs_by_id, prefer_retainer=True)
+
+    # The bug left BOTH hosts on `target_def` (neither forked). Fixed: exactly
+    # one retains it, the other forks onto its own copy.
+    assert host_a["type"] != host_b["type"]
+    assert {host_a["type"], host_b["type"]} != {target_def}
+    retainer_host, forked_host = (host_a, host_b) if host_a["type"] == target_def else (host_b, host_a)
+    assert retainer_host["type"] == target_def
+    assert forked_host["type"] != target_def
+
+    # Simulate the retainer's own flush mutating its (now exclusively-owned)
+    # definition in place — the fork must be a genuinely separate object,
+    # not the same aliased definition under a different dict reference.
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    retained_def = defs_by_id[target_def]
+    forked_def = defs_by_id[forked_host["type"]]
+    assert forked_def is not retained_def
+    retained_def["nodes"].append({"id": 99, "type": "Marker", "inputs": [], "outputs": []})
+    assert forked_def["nodes"] == []
+
+
+def test_isolate_shared_subgraph_scope_qualifies_fork_ids_for_colliding_non_retainers():
+    """Scope-qualifying retainer SELECTION alone is insufficient (CodeRabbit
+    r4699160878): with a third, top-level cohort member (id ``1``, scope
+    ``""``) sorting first and becoming the retainer, the two colliding-id
+    (``2``) non-retainers in ``PA`` and ``PB`` must still fork onto DISTINCT
+    copies. Hashing the bare local id alone for the fork id would make
+    ``_deterministic_fork_id(D, 2)`` identical for both, aliasing them to
+    the SAME forked copy instead of to the original ``D`` — a different
+    shape of the same aliasing bug, one level removed.
+    """
+    target_def, parent_a, parent_b = "def-target", "def-parent-a", "def-parent-b"
+    workflow = {
+        "nodes": [{"id": 1, "type": target_def, "inputs": [], "outputs": []}],
+        "definitions": {
+            "subgraphs": [
+                {"id": target_def, "name": "Target", "inputs": [], "outputs": [], "links": [], "nodes": []},
+                {
+                    "id": parent_a,
+                    "name": "ParentA",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+                {
+                    "id": parent_b,
+                    "name": "ParentB",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+            ]
+        },
+    }
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    host_a = _inner(defs_by_id[parent_a], 2)
+    host_b = _inner(defs_by_id[parent_b], 2)
+
+    _engine._isolate_shared_subgraph(workflow, host_a, defs_by_id, prefer_retainer=True)
+
+    top = next(n for n in workflow["nodes"] if n["id"] == 1)
+    assert top["type"] == target_def  # the top-level node (scope "") sorts first: it's the retainer
+    assert host_a["type"] != target_def
+    assert host_b["type"] != target_def
+    assert host_a["type"] != host_b["type"]  # forked onto DISTINCT copies, not aliased to each other
 
 
 def test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking(graph):

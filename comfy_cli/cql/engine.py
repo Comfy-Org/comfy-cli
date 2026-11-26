@@ -6469,10 +6469,12 @@ def _isolate_shared_subgraph(
     ``prefer_retainer=True`` instead asks ``_shared_definition_cohort`` for
     the full, ORIGINAL set of instances that ever shared ``def_id`` (an
     instance that already forked is still recognized as a cohort member:
-    its current type is ``_deterministic_fork_id(def_id, its own id)``), and
-    always forks every member except the one whose id sorts first (string
-    order) — a decision that depends only on instance identity, never on
-    which of the cohort's members has been applied yet.
+    its current type is ``_deterministic_fork_id(def_id, its own scoped
+    key)`` — see ``_cohort_member_key`` for why the key is scope-qualified
+    rather than a bare local id), and always forks every member except the
+    one whose scoped key sorts first (string order) — a decision that
+    depends only on instance identity, never on which of the cohort's
+    members has been applied yet.
 
     Forking every non-retainer happens EAGERLY, the first time ANY cohort
     member is processed while the definition is still pristine (nobody has
@@ -6502,57 +6504,91 @@ def _isolate_shared_subgraph(
         workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
         instance["type"] = new_id
         return
-    cohort_nodes = _shared_definition_cohort_nodes(workflow, def_id)
-    if len(cohort_nodes) <= 1:
+    cohort = _shared_definition_cohort_nodes(workflow, def_id)
+    if len(cohort) <= 1:
         return
-    retainer = min((str(n.get("id")) for n in cohort_nodes), key=str)
+    retainer_key = min((key for key, _n in cohort), key=str)
     pristine = copy.deepcopy(sg)
-    for n in cohort_nodes:
-        nid = str(n.get("id"))
-        if nid == retainer or str(n.get("type", "")) != def_id:
+    for key, n in cohort:
+        if key == retainer_key or str(n.get("type", "")) != def_id:
             continue  # the retainer, or a member some earlier call already forked
         new_sg = copy.deepcopy(pristine)
-        new_id = _deterministic_fork_id(def_id, n.get("id"))
+        new_id = _deterministic_fork_id(def_id, key)
         new_sg["id"] = new_id
         workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
         n["type"] = new_id
 
 
-def _shared_definition_cohort_nodes(workflow: dict, def_id: str) -> list[dict]:
-    """Nodes (top-level + interior-of-definitions) of every instance that
-    ORIGINALLY shared ``def_id``, independent of how many of them this
-    replica's apply order has already forked away from it.
+def _cohort_member_key(scope: str, local_id: Any) -> str:
+    """Scope-qualify a cohort member's bare local id by the id of its
+    immediately enclosing subgraph definition (``scope == ""`` for a
+    top-level workflow node).
+
+    ``definitions.subgraphs`` is a FLAT, global table — a definition nested
+    ten levels deep sits in the same list, at the same single level, as a
+    top-level one. A bare local node id is only unique WITHIN its own
+    immediate container, not across that whole flat table: two unrelated
+    definitions can each independently contain a node with local id ``"2"``.
+    Without this qualifier, retainer selection and fork-id generation in
+    ``_isolate_shared_subgraph`` compared (and hashed) those bare ids
+    directly, so two such nodes sharing one target definition were
+    indistinguishable from each other — both satisfied "am I the retainer",
+    so neither forked, aliasing two logically independent instances the
+    moment either one's flush mutated the still-shared definition in place.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4699160878
+
+    Top-level workflow nodes (``scope == ""``) have no such ambiguity —
+    ``workflow["nodes"]`` is a single flat list, so their ids are already
+    unique document-wide — so they keep the bare (unqualified) id rather
+    than gaining a vestigial prefix. That preserves the exact fork ids
+    already pinned for the top-level-only case (e.g.
+    ``test_shared_definition_is_forked_not_mutated``), and only changes the
+    id actually used for a nested host.
+    """
+    if not scope:
+        return str(local_id)
+    return f"{scope}\x1f{local_id}"
+
+
+def _shared_definition_cohort_nodes(workflow: dict, def_id: str) -> list[tuple[str, dict]]:
+    """``(scoped_key, node)`` pairs for every instance that ORIGINALLY shared
+    ``def_id`` (top-level + interior-of-definitions), independent of how many
+    of them this replica's apply order has already forked away from it.
+
+    ``scoped_key`` is ``_cohort_member_key(scope, node id)`` — see that
+    function for why a bare local id is not enough to identify a cohort
+    member uniquely.
 
     An instance still pointing at ``def_id`` directly is a cohort member, and
     so is one whose current ``type`` equals ``_deterministic_fork_id(def_id,
-    its own id)`` — the exact marker ``_isolate_shared_subgraph`` leaves
-    behind when it forks that instance off this ``def_id``. Checking for that
-    marker (rather than only counting live sharers of ``def_id``, as
+    its own scoped key)`` — the exact marker ``_isolate_shared_subgraph``
+    leaves behind when it forks that instance off this ``def_id``. Checking
+    for that marker (rather than only counting live sharers of ``def_id``, as
     ``_count_instances`` does) is what makes the cohort — and so the fork/
     retain decision above — the same regardless of which sharing instance is
     processed first. Returning the actual node dicts (not just ids) lets the
     caller repoint a cohort member OTHER than the one it was invoked for.
     """
-    cohort: list[dict] = []
+    cohort: list[tuple[str, dict]] = []
 
-    def _collect(nodes: Any) -> None:
+    def _collect(scope: str, nodes: Any) -> None:
         if not isinstance(nodes, list):
             return
         for n in nodes:
             if not isinstance(n, dict):
                 continue
-            nid = str(n.get("id"))
+            key = _cohort_member_key(scope, n.get("id"))
             t = str(n.get("type", ""))
-            if t == def_id or t == _deterministic_fork_id(def_id, nid):
-                cohort.append(n)
+            if t == def_id or t == _deterministic_fork_id(def_id, key):
+                cohort.append((key, n))
 
-    _collect(workflow.get("nodes"))
+    _collect("", workflow.get("nodes"))
     definitions = workflow.get("definitions")
     subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
     if isinstance(subgraphs, list):
         for sg in subgraphs:
             if isinstance(sg, dict):
-                _collect(sg.get("nodes"))
+                _collect(str(sg.get("id", "")), sg.get("nodes"))
     return cohort
 
 
