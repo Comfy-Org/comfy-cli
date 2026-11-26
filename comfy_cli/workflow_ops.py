@@ -3245,6 +3245,105 @@ def _capture_saved_widget_order(node: dict, graph, node_type: str) -> list[str] 
         raise RecipeError(f"node {node.get('id')}: {exc}") from exc
 
 
+def _dropped_decoration_warnings(workflow: dict) -> list[dict]:
+    """Report the canvas decoration ``capture`` cannot carry into a recipe.
+
+    ``_inexpressible_reason`` enumerates exactly three structures no frozen op
+    kind can create: a subgraph definition, a canvas group, and a native reroute
+    point. ``capture_recipe`` refuses the first outright (``RecipeError``) and
+    rebuilds nothing of the other two — so without this the caller got a clean
+    recipe and found out by looking at the canvas. That is the "build one copy of
+    a repeated branch, capture it, re-apply per copy" path, where every copy
+    comes back unframed and unrouted.
+
+    Neither loss is an error. The recipe is built from ``nodes``/``links`` and is
+    byte-identical with or without this function, so a graph that captured before
+    these warnings existed must still capture — including a malformed one. Hence
+    ``group_field_malformed`` instead of a raise: ``_load_workflow_or_fail``
+    validates ``nodes``/``links`` only, so ``{"groups": 1}`` reaches here and
+    used to raise an uncaught ``TypeError`` out of a ``capture_cmd`` that catches
+    only ``RecipeError``, while a string or dict iterated into nothing and
+    reported nothing at all.
+
+    Every message is composed around text the document chose (a group ``title``),
+    so a Rich sink owes it ``sanitize_markup`` — see ``_warning_text`` in
+    ``command.workflow_edit``. The dicts here stay unescaped for JSON consumers.
+    """
+    warnings: list[dict] = []
+
+    # Presence and type, NOT truthiness: `{"groups": false}` / `0` / `""` / `{}`
+    # are each a present field of the wrong shape, and a truthiness test would
+    # fold them in with an absent one and report nothing — the same silent loss
+    # this function exists to end. An absent field and `[]` stay warning-free,
+    # because both honestly mean "no groups here".
+    groups_field = workflow.get("groups")
+    if "groups" in workflow and not isinstance(groups_field, list):
+        found = type(groups_field).__name__
+        warnings.append(
+            {
+                "code": "group_field_malformed",
+                "found_type": found,
+                "message": (
+                    f"workflow field `groups` is {found}, not an array — capture cannot tell whether any "
+                    "canvas group was dropped; the recipe itself is unaffected"
+                ),
+            }
+        )
+        groups_field = None
+    captured_groups = [g for g in (groups_field or []) if isinstance(g, dict)]
+    if captured_groups:
+        titles = [g.get("title") for g in captured_groups if isinstance(g.get("title"), str)]
+        shown = titles[:3]
+        named = ", ".join(repr(t) for t in shown)
+        # The ellipsis counts `captured_groups`, not `titles`: an untitled group
+        # is still a dropped group, so 5 groups of which 3 are titled must not
+        # print three names and read as the complete list.
+        more = ", …" if len(captured_groups) > len(shown) else ""
+        warnings.append(
+            {
+                "code": "group_dropped",
+                "count": len(captured_groups),
+                "titles": titles,
+                "message": (
+                    f"capture dropped {len(captured_groups)} canvas group(s)"
+                    + (f" ({named}{more})" if named else "")
+                    + " — no op kind creates a group, so a recipe cannot rebuild one and every copy "
+                    "`apply` lays down will be unframed; insert a whole workflow carrying `groups` "
+                    "instead if the frames matter"
+                ),
+            }
+        )
+
+    # A native reroute is NOT the `Reroute` node capture splices through: it is a
+    # waypoint in `extra.reroutes` bound to a link by `extra.linkExtensions`, and
+    # capture never reads `extra`. Because the link keeps its real source and
+    # target, the rebuilt graph already executes identically — only the routing a
+    # user laid out disappears. `extra` is as unvalidated as `groups`, so count
+    # what is countable and report the loss either way.
+    extra = workflow.get("extra")
+    reroutes = extra.get("reroutes") if isinstance(extra, dict) else None
+    link_extensions = extra.get("linkExtensions") if isinstance(extra, dict) else None
+    if reroutes or link_extensions:
+        count = len(reroutes) if isinstance(reroutes, list) else None
+        headline = (
+            f"capture dropped {count} native reroute point(s)"
+            if count is not None
+            else "capture dropped the workflow's native reroute points"
+        )
+        warnings.append(
+            {
+                "code": "reroute_dropped",
+                "count": count,
+                "message": (
+                    headline + " — no op kind creates one, so the links a recipe rebuilds run straight from "
+                    "source to target and every copy `apply` lays down will be unrouted; the executable "
+                    "graph is unchanged, only the waypoints are gone"
+                ),
+            }
+        )
+    return warnings
+
+
 def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | None = None) -> tuple[dict, list[dict]]:
     """Project a UI-format graph into a recipe — the op-batch that rebuilds it
     (add_node + non-default set_widget + connect). The inverse of `apply`:
@@ -3264,7 +3363,12 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
 
     Each skipped node (and any link that could not be spliced) is reported in
     ``warnings`` — the recipe rebuilds the executable graph, not the canvas
-    decoration.
+    decoration. Canvas groups and native reroute points are dropped for the same
+    reason and reported as ``group_dropped`` / ``reroute_dropped``: no frozen op
+    kind creates either, so the copies a recipe lays down are unframed and
+    unrouted. A ``groups`` field that is not an array is reported as
+    ``group_field_malformed`` rather than raising — the recipe comes from
+    ``nodes``/``links`` and is unaffected by it.
 
     `lift` maps `(node_id, widget_name) -> param_name`: those widgets become
     `${param_name}` holes (with a `params` header entry defaulting to the current
@@ -3324,7 +3428,7 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             if any(e.name == widget for e in group_entries.get(node_id, [])):
                 raise RecipeError(f"--param target {node_id}.{widget!r}: no saved DynamicGroup value to lift")
 
-    warnings: list[dict] = []
+    warnings: list[dict] = _dropped_decoration_warnings(workflow)
     for n in ui_nodes:
         warnings.append(
             {

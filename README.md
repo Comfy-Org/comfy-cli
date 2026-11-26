@@ -19,7 +19,7 @@ workflows, and call hosted partner image models, all from your terminal.
 ## Features
 
 - 🚀 One-command ComfyUI install and launch
-- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Reve, Gemini/nano-banana, Kling, Luma, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
+- 🎨 Direct calls to partner image and video nodes (Flux, Ideogram, DALL·E, Recraft, Reve, Gemini/nano-banana, Kling, Runway, Pika, Vidu, Hailuo, Seedance, …) via `comfy generate`, no workflow JSON required
 - 🔧 Custom node management — install, update, snapshot, bisect
 - 📦 Fast dependency resolution with `uv` (`--fast-deps`, `--uv-compile`)
 - 🗄️ Model downloads from CivitAI, Hugging Face, and direct URLs
@@ -503,6 +503,7 @@ Notes:
 - `comfy run --prompt "<text>"` (no `--workflow`) runs a bundled default text2img graph. **That graph loads the SD1.5 checkpoint `v1-5-pruned-emaonly.ckpt`, which comfy-cli does not download for you** — install it into `models/checkpoints`, or point the graph at a checkpoint you do have with `comfy run --prompt "…" --set checkpoint=<name>`. The same applies on cloud, where the checkpoint must exist in your cloud assets.
 - `comfy download` also reads a `prompt_id` from piped stdin, so `comfy run ... --where cloud | comfy download --where cloud` works.
 - Models and custom nodes must exist on the cloud side. `comfy models search --where cloud` lists the cloud asset catalog, and `comfy nodes ls --where cloud` lists the node classes cloud can run.
+- `comfy run` against a ComfyUI on this machine, signed in with `comfy cloud login`, gives ComfyUI a partner-node token when Comfy Cloud allows comfy-cli to mint one, and ComfyUI 0.43.0 or later renews it during a long run. Otherwise the run gets the sign-in token as before, refreshed when possible; it lasts fifteen minutes and is not renewed, so a longer run can still stop. After a refused or failed mint, comfy-cli asks again only after 10 minutes, or after a new `comfy cloud login`. `comfy cloud logout` revokes every partner-node session of the sign-in, which also ends token renewal for Cloud jobs submitted with it; a new `comfy cloud login` revokes only the cached token.
 - Sign out with `comfy cloud logout`. If a run fails with `cloud_unauthorized`, your session expired — re-run `comfy cloud login`. Re-login is also required after Comfy Cloud adds permissions: a session from before the change fails with a `cloud_unauthorized` that says it predates a permission change, and refreshing cannot fix it.
 
 ### Calling partner nodes (`comfy generate`)
@@ -512,7 +513,7 @@ local ComfyUI or workflow JSON required. It hits the same hosted partner nodes
 you'd otherwise wire into a ComfyUI workflow, but as one-shot CLI calls. Image
 models (Flux, Ideogram, DALL·E, Recraft, Runway, Reve, xAI Grok, Google
 Gemini Flash Image aka **nano-banana**, …) and video models (Kling,
-Luma, Runway Gen-3, Pika, Vidu, Moonvalley, Hailuo, Grok video, ByteDance
+Runway Gen-3, Pika, Vidu, Moonvalley, Hailuo, Grok video, ByteDance
 **Seedance**) are all covered; video jobs run async and the CLI polls until
 the result is ready.
 
@@ -552,9 +553,9 @@ with `comfy generate resume <model> <job_id>`. Examples:
 comfy generate kling --prompt "a paper boat drifting on a river at dusk" \
     --duration 5 --download boat.mp4
 
-comfy generate luma --prompt "..." --aspect_ratio 16:9 --async
+comfy generate vidu --prompt "..." --async
 # → prints job id; resume with:
-comfy generate resume luma <job_id> --download out.mp4
+comfy generate resume vidu <job_id> --download out.mp4
 ```
 
 **Gemini Flash Image (nano-banana)** — text-to-image and image edits in one

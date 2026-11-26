@@ -23,8 +23,97 @@ history.
   or a new UUID. The CLI checks envelope shape and JSON-serializability only:
   semantic validation, replay and conflict resolution for a definition belong
   to the server, so `comfy workflow apply` and `comfy workflow foreach` refuse
-  to persist the op locally. New frozen op kind, documented as amendment v1.15
+  to persist the op locally. New frozen op kind, documented as amendment v1.16
   of `docs/op-vocabulary-v1.md`.
+
+### Fixed
+
+- Telemetry no longer loses the last event of a run when `posthog` resolves to
+  7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
+  bounded flush is the only shutdown drain, but PostHog renamed that hook from
+  `join` to `_atexit` in 7.38.1, inside the allowed version range, and removing
+  a hook by the old name silently removes nothing. PostHog's hook then ran first, closed
+  the delivery consumers against its own 1-second budget, and the queued
+  `command_finished` event went with them.
+
+### Changed
+
+- **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
+  longer returns every capability's description. The payload keeps the full
+  id-sorted `capabilities` list but drops `description` from its items on a
+  miss, and adds a bounded `candidates` array carrying the best-scoring
+  capabilities, most likely first, with their descriptions. A bare `comfy
+  knowledge pick` with no argument is unchanged and still carries every
+  description. On the shipped bundle the miss payload goes from 50,437 to
+  6,085 bytes, and for a phrase that scores against several rows the caller
+  now gets the ranked shortlist the resolver computed instead of a catalog it
+  has to search by hand.
+
+- `comfy build push` refuses a local custom node over 2 GiB before it uploads
+  anything, and names the node, its size and the limit. It packages the custom
+  nodes before it hashes any model, so the refusal comes before a long model
+  hash. `--dry-run` refuses it the same way. The builder cannot use a node that
+  large, so a push used to upload it and the release's build then failed.
+  `build pull`, `build init`, `build update` and `build status` still read such
+  a node, so a pull can drop it from the spec.
+
+### Removed
+
+- `comfy generate` drops three model aliases whose cloud routes are retired, so
+  every submit was already refused: `kling-extend` (Kling retired the V1.x
+  models the video-extend route accepts), and `luma` and `luma-i2v` (Luma
+  retired its Ray video models and shut Photon down). Submitting one now
+  returns the usual unknown-model error with suggestions rather than failing at
+  the proxy. `comfy generate resume <alias> <job_id>` still accepts all three,
+  since the proxy still serves the routes a job is fetched from, so a job
+  submitted before the retirement can still be collected.
+
+### Fixed
+
+- `comfy generate seedance` with a Seedance 2.x model (`--model
+  dreamina-seedance-2-*`) now polls the job on
+  `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
+  `/proxy/byteplus/...`, which answers 404 `ResourceNotFound` for them, so the
+  run failed after the job was submitted and billed. `--async` prints the
+  resume command with `--model <id>` for every Seedance job, and `comfy generate
+  resume seedance <job_id> --model <id>` polls the matching route (without `--model`,
+  resume uses the model a submit without `--model` would send). Seedance 1.x
+  jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
+  now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
+  the timeout.
+
+## [1.29.0] - 2026-11-24
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
+- `comfy deploy models add <deployment> <file> --type <folder>`, `comfy deploy
+  models ls <deployment>` and `comfy deploy models rm <deployment> <name>` add a
+  model file straight to a deployment with no new release, list those files, and
+  remove one. `add` uploads in pieces, 8 at a time, adds the file before its
+  bytes land, and waits until it is ready (`--no-wait` returns once sent), for
+  up to 30 minutes: past that, or after a minute of reads the deploy API does
+  not answer, it exits 75 with `deploy_model_wait_timeout`, and a file whose
+  removal starts while it is being added exits 1 with `deploy_model_removed`
+  (add it again once `ls` no longer lists it); a send that fails after the file
+  was added takes it off the deployment again only where the upload definitely
+  failed (a piece not sent, the builder refusing the join), or its hint names
+  the `rm` to run where that fails; Ctrl-C removes nothing, so it stops at once,
+  and prints the `comfy deploy models rm <deployment> <id>` to run; where the
+  builder's join went unanswered (a timeout, a dropped connection, a 5xx) the
+  builder may have stored the file, so the entry stays and the hint says it may
+  still be adding and to check it with `ls`: remove it by id only if `ls` shows
+  it failed, or to cancel it, since copying can run well past 30 minutes;
+  where adding models is not on it exits 1 with `deploy_models_unavailable`
+  before sending the pieces. A builder that cannot take pieces gets one PUT, and
+  the file is added once it ends, so there the whole file is sent before that
+  refusal. The builder refusing the upload is `build_builder_error` with its own
+  sentence. `comfy deploy run` reports a job naming a file still being added as
+  `deploy_model_not_ready` and one naming a failed file as
+  `deploy_model_failed`, without retrying. `comfy assets library upload` and
+  `comfy model upload` now say first how to add a model to a deployment (`comfy
+  deploy models add <deployment> <file> --type <folder>`).
 - `comfy extension list`, `comfy extension disable <folder>` and
   `comfy extension enable <folder>` turn a custom node pack's frontend code off
   or on through the running local ComfyUI's `Comfy.Extension.DisabledPacks`
@@ -46,6 +135,110 @@ history.
   turn off: code at module top level and CSS aimed at the whole page, plus an
   extension name with no `agent.` prefix or provenance. Findings never fail
   validation.
+
+### Changed
+
+- **Breaking:** `comfy generate --emit-workflow` / `--emit-ops` with two or
+  more `--image` files no longer builds a chain of the deprecated `ImageBatch`
+  node. The images now go into one `BatchImagesNode` (one slot per image, in
+  `--image` order), so the emitted graph has no node marked deprecated in
+  ComfyUI. N images now give one batch node instead of N-1, so the emitted node
+  classes and ids differ, and the graph loads only on a ComfyUI that has
+  `BatchImagesNode`. More than 50 files for one image flag, the node's limit,
+  now fails with an emit error; the old chain took any number.
+- **Breaking:** stream-dialect conformance: `comfy jobs watch` now emits one
+  `execution_cached` event **per cached node** (`{"node": "<id>", …}`), the same
+  shape `comfy run` has always emitted, instead of the single list-shaped
+  `{"nodes": [...]}` event that shipped in 1.16.0. `docs/json-output.md`
+  promises the run stream and the watch stream speak one dialect, so a consumer
+  written against the documented run dialect was undercounting every cached node
+  beyond the first on a watch stream. Consumers written to the documented shape
+  are unaffected or fixed by this; the `nodes` array remains accepted by the
+  published event schema so a stream captured from 1.16.0 still validates.
+- The Run on Cloud skill asks before submitting one paid test job, including
+  validation and preflight runs. Declining still saves the prepared workflow
+  and returns its Cloud link with execution marked unverified. Upload, build,
+  and deployment approvals remain separate from job consent.
+
+### Fixed
+
+- `comfy templates ls --model` (and `templates get --where model=`) find a template asked for by base model plus variant. The gallery lists the base model in `models` ("Seedream 5.0", "Krea 2") and names the variant only in the title, tags or template name, so `--model "Seedream 5.0 Lite"`, `--model "krea 2 turbo"` and `--model "Qwen Image ControlNet"` found nothing. A template now also matches when the first word is a word of one of its model names and every other word is a whole word of that model name, the title, the tags or the template name; a number outside the model name counts only in the title. A query that matched before matches the same templates.
+- Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
+  `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
+  the ComfyUI canvas as a workflow. The run sends the canvas graph as
+  `extra_data.extra_pnginfo.workflow`, the same as the editor's Queue button,
+  so save nodes (SaveImage, VHS Video Combine and others) write `workflow`
+  next to `prompt`. Before, the files carried only `prompt` and dropped in as a
+  plain image or video. Applies to local and `--where cloud` runs; API-format
+  inputs are unchanged.
+- A long partner-node run on a local ComfyUI, signed in with `comfy cloud
+  login`, no longer stops with "Unauthorized: Please login first" after the
+  provider task was created, wherever Comfy Cloud issues partner-node tokens
+  to comfy-cli. `comfy run` against a loopback ComfyUI now gives it a
+  partner-node token in place of the fifteen-minute sign-in token. It lasts
+  about 90 minutes, and ComfyUI 0.43.0 or later renews it during the run.
+  comfy-cli caches one token per sign-in, renews it before a run when it has
+  less than 45 minutes left, and mints a new one only when renewal is refused
+  or cannot help. When Comfy Cloud refuses the mint, the run gets the sign-in
+  token as before, refreshed when possible, and a run longer than that token
+  can still stop. `comfy cloud logout` clears the sign-in, then revokes every
+  partner-node session of it; that also ends token renewal for Cloud jobs
+  submitted with the sign-in, which matters only when their API node runs more
+  than 90 minutes after submit. Its envelope reports
+  `partner_node_revocation`: `sign_in` for every session of the sign-in,
+  `token` for the cached token's own, `failed`, or `null` for an environment
+  without partner-node tokens. A new `comfy cloud login` revokes only the
+  cached token's own session, so Cloud jobs keep renewing, and warns when it
+  cannot. API keys, `COMFY_CLOUD_AUTH_TOKEN`, `comfy deploy run` and a ComfyUI
+  on another host (which gets no partner-node credential, as before) are
+  unchanged.
+- A local `comfy run` signed in with `comfy cloud login` no longer asks Comfy
+  Cloud for a partner-node token on every run once a mint has failed (Comfy
+  Cloud refused it, was unreachable or did not answer). comfy-cli remembers
+  the failure for that sign-in and environment for 10 minutes. Meanwhile runs
+  make no mint request and get the sign-in token, refreshed unless it is under
+  a minute old. A hanging mint is tried once per 10 minutes, not on every run;
+  only the runs that start while it hangs wait for it. A new
+  `comfy cloud login` or `comfy setup` sign-in, `comfy cloud logout`, a
+  successful mint, and a successful renewal that the session's end does not
+  cut short end the wait. Renewal of a cached partner-node token is
+  unchanged.
+- Two `comfy model download` runs from different workspaces aimed at the same
+  file now refuse each other. Before, each workspace kept its own download
+  claims, so both runs wrote the file. This is the default case on Comfy
+  Desktop, where every install saves into one shared model library. Claims
+  now live in `download-claims/` in comfy-cli's config directory, or inside
+  the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
+  downloads before upgrading, since an older version keeps its claims per
+  workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- `comfy run` and `comfy run --emit-workflow` on a canvas (UI-format)
+  workflow now keep a record-valued widget on its own input, for any node
+  whose schema is readable and declares a widget input of its own. A node that
+  saves a record in `widgets_values` — `ImageCropV2`'s `crop_region`, a
+  CurveEditor's `curve` — was read as a Power Lora Loader row as soon as any
+  one of the node's widget values was a record, so that record was dropped
+  and the input was filled from the node's schema default instead. Nothing
+  warned and the job still ran: in the bundled `3d_pixal3d_multi_views`
+  template all four crops became the same 512x512 corner of the input image,
+  the four views fed to the conditioning node were identical, and the mesh
+  came out radially symmetric — while the same workflow queued from the
+  ComfyUI canvas was correct. The Lora-row shortcut now applies only to a
+  node that declares no widget slots of its own; a record it does not
+  understand is reported in a warning rather than discarded in silence; and a
+  malformed `type` key no longer raises a `TypeError` that drops the whole
+  node, valid Lora rows included. A legacy "no rows yet" Lora save
+  (`[{}, ""]`) keeps its markers off real sockets such as `model` and `clip`.
+  A node whose type is missing from the server's `object_info` has no schema to
+  read, so a self-naming record on such a node still goes down the Lora-row
+  path as before
+  ([#1011](https://github.com/Comfy-Org/comfy-cli/issues/1011)).
+
+## [1.28.0] - 2026-11-18
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.28.0) · 2 commits since v1.27.0.
+
+### Added
+
 - `comfy jobs watch --where cloud` and `comfy jobs status --where cloud` check a
   finished `comfy run --output-node-ids` job the way `comfy run --wait` does:
   `data.warnings` reports `partial_execution` for a target that returned
@@ -53,6 +246,13 @@ history.
   nodes outside the targets. An async targeted run records its targets on the
   job state file, and its `queued` envelope carries a `data.note` naming the
   watch command.
+
+## [1.27.0] - 2026-11-18
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.27.0) · 24 commits since v1.26.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
 - `comfy templates ls --local-only` drops partner-API templates from the
   index (a name starting with `api_`, or an API tag) with no network
   beyond the index. `--runnable` implies `--local-only`, then checks
@@ -108,10 +308,6 @@ history.
 
 ### Changed
 
-- The Run on Cloud skill asks before submitting one paid test job, including
-  validation and preflight runs. Declining still saves the prepared workflow
-  and returns its Cloud link with execution marked unverified. Upload, build,
-  and deployment approvals remain separate from job consent.
 - **Breaking:** a bad `--where` (or `COMFY_WHERE` / a top-level
   `--where`) on `comfy nodes` and `comfy jobs` now emits the shared
   `where_invalid` envelope and a non-zero exit. Before, `comfy --json
@@ -139,14 +335,6 @@ history.
 
 ### Fixed
 
-- Two `comfy model download` runs from different workspaces aimed at the same
-  file now refuse each other. Before, each workspace kept its own download
-  claims, so both runs wrote the file. This is the default case on Comfy
-  Desktop, where every install saves into one shared model library. Claims
-  now live in `download-claims/` in comfy-cli's config directory, or inside
-  the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
-  downloads before upgrading, since an older version keeps its claims per
-  workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
 - A failed `comfy run` or `comfy jobs watch` no longer prints the failing
   node's inputs, which can hold an API key: `comfy run` drops them from its
   error dump and `execution_error` stream event, and `jobs watch` from its
@@ -1688,7 +1876,10 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.29.0...HEAD
+[1.29.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.28.0...v1.29.0
+[1.28.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.27.0...v1.28.0
+[1.27.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.24.0...v1.25.0
 [1.24.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...v1.24.0

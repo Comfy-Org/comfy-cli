@@ -83,28 +83,32 @@ def lock_path() -> Path:
     return p.with_name(p.name + ".lock")
 
 
-_EMPTY: dict[str, Any] = {"providers": {}, "cloud_session": None}
+_EMPTY: dict[str, Any] = {"providers": {}, "cloud_session": None, "partner_node_token": None}
 
 
 def _read_all(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"providers": {}, "cloud_session": None}
+        return dict(_EMPTY, providers={})
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
-        return {"providers": {}, "cloud_session": None}
+        return dict(_EMPTY, providers={})
     if not raw.strip():
-        return {"providers": {}, "cloud_session": None}
+        return dict(_EMPTY, providers={})
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         # Don't blow up on a corrupt store; return empty and let `set` rewrite.
-        return {"providers": {}, "cloud_session": None}
-    providers = data.get("providers") if isinstance(data, dict) else None
-    cloud_session = data.get("cloud_session") if isinstance(data, dict) else None
+        return dict(_EMPTY, providers={})
+    if not isinstance(data, dict):
+        data = {}
+    providers = data.get("providers")
+    cloud_session = data.get("cloud_session")
+    partner_node_token = data.get("partner_node_token")
     return {
         "providers": providers if isinstance(providers, dict) else {},
         "cloud_session": cloud_session if isinstance(cloud_session, dict) else None,
+        "partner_node_token": partner_node_token if isinstance(partner_node_token, dict) else None,
     }
 
 
@@ -302,6 +306,7 @@ def save_cloud_session(
     refresh_token: str | None,
     token_type: str,
     expires_at: int | None,
+    keep_partner_node_token: bool = False,
 ) -> CloudSession:
     if not access_token:
         raise ValueError("access_token cannot be empty")
@@ -323,6 +328,8 @@ def save_cloud_session(
     with locking.file_lock(lock_path()):
         data = _read_all(path)
         data["cloud_session"] = payload
+        if not keep_partner_node_token:
+            data["partner_node_token"] = None
         _write_all(path, data)
     return CloudSession(
         base_url=base_url,
@@ -344,5 +351,26 @@ def clear_cloud_session() -> bool:
         if data.get("cloud_session") is None:
             return False
         data["cloud_session"] = None
+        data["partner_node_token"] = None
         _write_all(path, data)
     return True
+
+
+def get_partner_node_token() -> dict[str, Any] | None:
+    with locking.file_lock(lock_path()):
+        return _read_all(secrets_path())["partner_node_token"]
+
+
+def save_partner_node_token(record: dict[str, Any] | None) -> None:
+    path = secrets_path()
+    with locking.file_lock(lock_path()):
+        data = _read_all(path)
+        data["partner_node_token"] = record
+        _write_all(path, data)
+
+
+def rewrite() -> None:
+    """Write the store back as it is; ``OSError`` when it cannot be written."""
+    path = secrets_path()
+    with locking.file_lock(lock_path()):
+        _write_all(path, _read_all(path))

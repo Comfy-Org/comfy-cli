@@ -1689,7 +1689,75 @@ selector or count, because the rebuild resets the value but not the stamp
 **No change to §§3-5, 7, or §8 beyond §8.2.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
 
-## 24. Amendment v1.15 — 2026-11-19 (`define_subgraph`: the tenth kind, and what "Batchable" means for a deferred kind)
+## 24. Amendment v1.15 — 2026-11-05 (`capture` reports the canvas decoration it drops)
+
+**No op kind was added, removed, or re-scoped.** `FROZEN_OPS` /
+`DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables and §§1-8 are untouched.
+This amendment records one reporting change in `capture`, which §18.2 last
+described, and states the gap it makes visible.
+
+**`capture` now emits a `group_dropped` warning** when the source workflow
+carries canvas groups, alongside the existing `ui_only_node_skipped` /
+`ui_only_link_dropped`. The warning carries `count` and `titles`. Behaviour is
+otherwise unchanged: groups were already absent from every recipe `capture` has
+ever produced, so a recipe captured before this amendment and one captured after
+are byte-identical. Only the envelope's `warnings` array differs.
+
+*Why now*: the loss was silent in the one place it matters most. §8.8's bulk
+writers already refuse a graph carrying a canvas group outright
+(`NotExpressibleError` → `ops_skipped` — one of the three structures behind the
+447-of-735 refusal rate §21 measures across the gallery), and a
+subgraph raises `RecipeError` — but `capture` simply read `nodes` and never
+looked at `groups`. The consumer that feels this is "build one copy of a
+repeated branch, capture it, re-apply once per copy": every copy comes back
+unframed with no signal, and the caller finds out by looking at the canvas.
+
+**`capture` also emits `reroute_dropped`**, for the same reason and with the
+same shape. `_inexpressible_reason` enumerates exactly three structures no
+frozen kind can create — a subgraph definition, a canvas group, a native reroute
+point — and `capture` handled two of them (`RecipeError`, the warning above)
+while never reading `extra` at all. A native reroute is a waypoint in
+`extra.reroutes` bound to a link by `extra.linkExtensions`; it is NOT the
+`Reroute` node §18.2 splices through. Because the link keeps its real source and
+target, the recipe's executable graph is already correct and only the routing a
+user laid out is lost — silently, which is precisely the failure this amendment
+exists to end. `count` is the length of `extra.reroutes`, or `null` when the
+waypoints are known only from `extra.linkExtensions`.
+
+**Both warnings are composed around untrusted text and are escaped on the
+pretty path only.** A group `title` is free-form text from a downloaded
+document, and `repr()` does not escape `[`/`]`, so a group titled `[/yellow]`
+reached Rich as an unmatched closing tag and raised `MarkupError` — the warning
+that reports a dropped group crashing the command instead, after `--out` had
+already written the recipe. The escape (`output.sanitize.sanitize_markup`) sits
+at the pretty print sites, so `data.warnings` stays byte-identical for JSON
+consumers per that module's contract.
+
+**A `groups` field that is present and not an array is reported, not raised**
+(`group_field_malformed`, carrying `found_type`). `_load_workflow_or_fail`
+validates `nodes`/`links` only, so `{"groups": 1}` reaches `capture`; iterating
+it raised an uncaught `TypeError` out of a command that catches only
+`RecipeError`, and a string or dict iterated into nothing and reported nothing.
+The test is **presence and type, not truthiness**: `false`, `0`, `""` and `{}`
+are each a present field of the wrong shape and are reported as such, while an
+absent field and `[]` stay warning-free because both honestly mean "no groups".
+The recipe is built from `nodes`/`links` and is unaffected either way, and a
+file that captured before this amendment must still capture — so the
+malformation is reported (not knowing whether a group was dropped is itself
+worth saying) and the capture proceeds with no groups.
+
+**The underlying gap is unchanged and is deliberately not closed here.** No
+frozen kind creates, moves, retitles or deletes a canvas group, so the group a
+user or a template put on the canvas is reachable by exactly one op —
+`insert_workflow` (§1.7), which merges a whole authored workflow and cannot
+frame nodes already placed. Giving the batch surface a group kind is a real
+amendment with real consequences (geometry ownership above all: a group's
+bounds are frontend-owned layout, not semantic document state) and belongs to
+its own proposal, under §9's rules, not to a warning. The same holds for reroute
+waypoints, with the extra wrinkle that a waypoint is bound to a link id, so any
+future kind has to survive the id remapping a consumer applies.
+
+## 25. Amendment v1.16 — 2026-11-19 (`define_subgraph`: the tenth kind, and what "Batchable" means for a deferred kind)
 
 **Why this section exists.** §9 requires a versioned amendment for any
 post-freeze change, and adding an op kind is the case it names explicitly
@@ -1732,5 +1800,6 @@ deferred guard: `insert_workflow` inside a `foreach` recipe returned
 with the hint naming `comfy workflow insert-workflow`, matching `apply` and
 matching what §1.7 promises.
 
-**No other section changes.** §§2-8 and amendments v1.1-v1.14 are untouched, and
+**No other section changes.** §§2-8 and amendments v1.1-v1.15 are untouched, and
 no existing kind is removed or re-scoped.
+

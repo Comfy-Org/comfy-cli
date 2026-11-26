@@ -66,8 +66,10 @@ def upload_command(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Upload without asking.")] = False,
     where: Annotated[str | None, typer.Option("--where", show_default=False)] = None,
 ):
-    from comfy_cli.command.assets_library import run_upload
+    from comfy_cli.command.assets_library import DEPLOYMENT_POINTER, run_upload
+    from comfy_cli.output.renderer import get_renderer
 
+    get_renderer().info(DEPLOYMENT_POINTER)
     run_upload(
         file,
         folder,

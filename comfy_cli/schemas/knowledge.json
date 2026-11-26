@@ -32,7 +32,18 @@
     "capability": { "type": "string", "description": "Capability id (pick)." },
     "capabilities": {
       "type": "array",
-      "description": "Every capability in the bundle, id-sorted (pick with no argument).",
+      "description": "Every capability in the bundle, id-sorted. Carries descriptions for the bare listing (pick with no argument); ids only on a query miss, where `candidates` carries the descriptions worth reading.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "description": "Best-scoring capabilities for a query that resolved to none, most likely first (pick miss). Bounded by design: the miss payload stops short of a catalog dump.",
       "items": {
         "type": "object",
         "properties": {
