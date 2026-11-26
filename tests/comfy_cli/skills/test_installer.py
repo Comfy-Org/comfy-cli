@@ -578,7 +578,9 @@ def test_run_on_cloud_skill_saves_without_running_when_consent_is_declined_or_pe
 
 def _run_on_cloud_custom_build_section() -> str:
     text = skill_content("comfy-run-on-cloud")
-    return " ".join(text[text.index("### A custom build") : text.index("**Making a swap.**")].split())
+    start, end = "### A custom build", "**Making a swap.**"
+    assert start in text and end in text, f"custom-build section markers changed: {start!r} / {end!r}"
+    return " ".join(text[text.index(start) : text.index(end)].split())
 
 
 def test_run_on_cloud_skill_asks_before_changing_nodes():
@@ -1835,18 +1837,20 @@ def test_run_on_cloud_skill_asks_once_then_runs_to_the_end():
 
 def test_run_on_cloud_skill_remembers_a_test_job_yes():
     """A yes to a test job is recorded and not asked again for a retry; one
-    from an earlier session counts only for the same workflow, target, GPU and
-    unchanged file. A new target or unnamed partner node needs a new yes, a no
+    from an earlier session counts only for the same workflow, server, ComfyUI
+    user, target, GPU, quoted price and unchanged file. A new target or unnamed partner node needs a new yes, a no
     is not remembered, and nothing resubmits on its own."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "Right after the person says yes, write `<work>/consent.json`" in text
     assert '"sha256": "<shasum -a 256 of the file the test runs>"' in text
+    assert '"user": "<ComfyUI user or empty>"' in text
     assert "do not ask again for a retry they ask for" in text
     assert "run the test and say it ran on their earlier yes" in text
     assert "that yes is the ask the prompt requires" in text
     assert (
-        "A `consent.json` from an earlier session counts the same only when its `workflow`, `server`, `target` "
-        "and `gpu` match this run and the file the test runs still has its `sha256`" in text
+        "A `consent.json` from an earlier session counts the same only when its `workflow`, `server`, `user`, "
+        "`target`, `gpu` and `price` match this run (the price you would quote now) and the file the test runs "
+        "still has its `sha256`" in text
     )
     assert "ask again when the target moves to another deployment or GPU" in text
     assert "A no is not remembered" in text
@@ -1913,15 +1917,16 @@ def test_run_on_cloud_skill_stops_cleanly_when_the_cli_rejects_a_private_upload(
 
 def test_run_on_cloud_skill_keeps_state_files_to_their_own_workflow():
     """The work folder comes from the whole path, and saved.json and
-    consent.json name the workflow and server, so one workflow never reuses
-    another's paid-test yes or save. A record-only save is not replaced."""
+    consent.json name the workflow, server and ComfyUI user, so one workflow
+    (or one user's copy of it) never reuses another's paid-test yes or save. A record-only save is not replaced."""
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "plus the workflow's path after `workflows/` (subfolders included, no `.json`)" in text
     assert "`team/My flow (2)` gives `run-on-cloud/team-My-flow--2-`" in text
-    assert "ignore either file when they differ from this run's" in text
+    assert "the ComfyUI `user` (empty without a `ComfyUI user:` line)" in text
+    assert "ignore either file when any of them differs from this run's" in text
     assert "a save with no `filename` (record-only) is replaced by a plain save" in text
     assert "`--expected-sha256` goes only with a `sha256` that is set" in text
-    assert "plus the `workflow` path, the `server` URL and `saved_at`" in text
+    assert "plus the `workflow` path, the `server` URL, the ComfyUI `user` and `saved_at`" in text
 
 
 def test_run_on_cloud_skill_quotes_every_file_placeholder():
