@@ -1822,9 +1822,9 @@ degradation site in `workflow_ops.py` — rather than raising, since
 
 **Renumbered from v1.16 on 2026-11-26.** This amendment was written as v1.16 (§25) on
 2026-11-19; the promoted `set_widget` proxy-flush amendment took that number by landing
-first. Nothing in the content changed. Amendment numbers here are hand-picked, so two
-branches written in the same week collide by construction rather than by mistake — that
-mechanism is BE-27610, and this is an instance of it.
+first. Nothing in the content changed. Amendment numbers here are hand-picked from a
+single shared document, so two branches written in the same week pick the same one and
+collide on the heading by construction rather than by mistake.
 
 
 **Why this section exists.** §9 requires a versioned amendment for any
