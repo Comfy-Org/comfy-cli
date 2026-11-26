@@ -94,7 +94,9 @@ history.
   instead of falling through and saving the page. A `/blob/` link — Hugging
   Face's HTML file viewer, and the second form the hint names — now downloads
   its `/resolve/` sibling, so following the hint cannot land the viewer page
-  where the model belongs. Plain file URLs on every other host are unchanged.
+  where the model belongs. That holds for every Hugging Face URL shape,
+  including a dataset's, a space's and a legacy repo's, so the hint is true
+  wherever it is shown. Plain file URLs on every other host are unchanged.
 
 ## [1.29.0] - 2026-11-24
 

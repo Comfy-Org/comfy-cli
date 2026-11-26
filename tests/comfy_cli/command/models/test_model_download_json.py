@@ -747,3 +747,80 @@ def test_hf_blob_url_downloads_the_resolve_sibling(tmp_path):
     download.assert_called_once()
     sent = download.call_args.args[0] if download.call_args.args else download.call_args.kwargs["url"]
     assert sent == "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/model.safetensors"
+
+
+def test_hf_dataset_blob_url_downloads_the_resolve_sibling(tmp_path):
+    """The hole the first `/blob/` rewrite left open — a SUCCESS that was a lie.
+
+    The rewrite ran only inside the `check_huggingface_url` branch, and that
+    parser rejects `/datasets/<org>/<repo>/blob/<branch>/<file>` (its third path
+    segment is the repo, not `blob`). The URL is not a page either, because it
+    carries a file marker. So it reached the generic direct-URL branch
+    unrewritten, `download_file` fetched Hugging Face's HTML file viewer, and the
+    command wrote that page to `models/checkpoints/` and reported `Done` — the
+    exact defect `hf_not_a_file` refuses a repo page for, reached by following
+    this command's own hint that "a `/blob/` link works too".
+
+    Red before the rewrite moved ahead of the branch selection: `sent` was the
+    `/blob/` URL.
+    """
+    download = Mock()
+    result = _invoke(
+        [
+            "--url",
+            "https://huggingface.co/datasets/org/weights/blob/main/inswapper_128.onnx",
+            "--relative-path",
+            "models/insightface",
+            "--filename",
+            "inswapper_128.onnx",
+        ],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, _stdout() + "\n" + result.output
+    download.assert_called_once()
+    sent = download.call_args.args[0] if download.call_args.args else download.call_args.kwargs["url"]
+    assert sent == "https://huggingface.co/datasets/org/weights/resolve/main/inswapper_128.onnx"
+
+
+def test_hf_legacy_repo_blob_url_downloads_the_resolve_sibling(tmp_path):
+    """Same hole, reached through the unnamespaced legacy form
+    (`/gpt2/blob/main/<file>`), which `check_huggingface_url` also rejects."""
+    download = Mock()
+    result = _invoke(
+        ["--url", "https://huggingface.co/gpt2/blob/main/model.safetensors", "--filename", "model.safetensors"],
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, _stdout() + "\n" + result.output
+    download.assert_called_once()
+    sent = download.call_args.args[0] if download.call_args.args else download.call_args.kwargs["url"]
+    assert sent == "https://huggingface.co/gpt2/resolve/main/model.safetensors"
+
+
+def test_hf_resolve_url_under_a_repo_named_blob_is_not_rewritten(tmp_path):
+    """`blob` is a legal repo name, and this URL already names the bytes.
+
+    A left-to-right scan for the word rewrote the repo segment, so this working
+    download started requesting `/org/resolve/resolve/main/model.safetensors`.
+    """
+    download = Mock()
+    result = _invoke(
+        [
+            "--url",
+            "https://huggingface.co/org/blob/resolve/main/model.safetensors",
+            "--filename",
+            "model.safetensors",
+        ],
+        check_huggingface_url={"return_value": (True, "org/blob", "model.safetensors", None, "main")},
+        check_unauthorized={"return_value": False},
+        get_workspace={"return_value": tmp_path},
+        download_file={"new": download},
+    )
+
+    assert result.exit_code == 0, _stdout() + "\n" + result.output
+    download.assert_called_once()
+    sent = download.call_args.args[0] if download.call_args.args else download.call_args.kwargs["url"]
+    assert sent == "https://huggingface.co/org/blob/resolve/main/model.safetensors"

@@ -469,6 +469,96 @@ def test_blob_rewrite_leaves_a_file_named_blob_and_other_hosts_alone():
         assert _huggingface_blob_to_resolve(url) == url, url
 
 
+def test_blob_rewrite_touches_only_the_marker_not_a_repo_or_directory_named_blob():
+    """`resolve`, `blob` and `raw` are legal repo, branch and directory names.
+
+    A left-to-right scan for the word `blob` rewrote the FIRST one with two
+    segments after it, so these two WORKING `/resolve/` URLs came back pointing
+    at a file that does not exist — a URL that downloaded before being broken by
+    the fix. The marker is found by position in Hugging Face's grammar instead.
+    """
+    for url in [
+        # Repo named `blob`: the scan rewrote the repo segment, giving
+        # `/org/resolve/resolve/main/model.safetensors`.
+        "https://huggingface.co/org/blob/resolve/main/model.safetensors",
+        # Directory named `blob`, two segments deep so it cleared the length
+        # test: `/org/repo/resolve/main/resolve/sub/model.safetensors`.
+        "https://huggingface.co/org/repo/resolve/main/blob/sub/model.safetensors",
+        # Branch named `blob`.
+        "https://huggingface.co/org/repo/resolve/blob/model.safetensors",
+    ]:
+        assert _huggingface_blob_to_resolve(url) == url, url
+
+    # And the viewer URL of a repo named `blob` still rewrites — at the marker,
+    # which here is the second `blob`, not the first.
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/org/blob/blob/main/model.safetensors")
+        == "https://huggingface.co/org/blob/resolve/main/model.safetensors"
+    )
+
+
+def test_blob_rewrite_covers_every_hf_url_shape_not_only_hub_parseable_ones():
+    """The hole the first cut left open, and the one `hf_not_a_file`'s hint
+    walked users into.
+
+    The rewrite used to run only inside the `check_huggingface_url` branch, and
+    that parser accepts only `/<org>/<repo>/{resolve,blob}/<branch>/<path>`. So
+    a dataset's, a space's or a legacy unnamespaced repo's `/blob/` link was
+    neither rewritten nor refused: it reached the generic direct-URL branch and
+    saved Hugging Face's HTML file viewer as the model, reporting `Done`.
+    """
+    for blob_url, resolve_url in [
+        (
+            "https://huggingface.co/datasets/org/weights/blob/main/inswapper_128.onnx",
+            "https://huggingface.co/datasets/org/weights/resolve/main/inswapper_128.onnx",
+        ),
+        (
+            "https://huggingface.co/spaces/org/demo/blob/main/model.safetensors",
+            "https://huggingface.co/spaces/org/demo/resolve/main/model.safetensors",
+        ),
+        (
+            "https://huggingface.co/gpt2/blob/main/model.safetensors",
+            "https://huggingface.co/gpt2/resolve/main/model.safetensors",
+        ),
+        # Legacy single-segment dataset repo: the repo-type prefix is present
+        # but the namespace is not, so the marker falls to the second candidate.
+        (
+            "https://huggingface.co/datasets/squad/blob/main/train.json",
+            "https://huggingface.co/datasets/squad/resolve/main/train.json",
+        ),
+        # `/datasets/<x>/blob/<branch>/<file>` reads two ways — a legacy
+        # dataset repo named `<x>`, or an ORG named `datasets` with repo `<x>`.
+        # The ambiguity is harmless because both readings put the marker in the
+        # same place, which is why the second candidate index is enough and no
+        # repo-type lookup is needed.
+        (
+            "https://huggingface.co/datasets/repo/blob/main/x.safetensors",
+            "https://huggingface.co/datasets/repo/resolve/main/x.safetensors",
+        ),
+    ]:
+        assert _huggingface_blob_to_resolve(blob_url) == resolve_url, blob_url
+        # `/resolve/` is where the bytes are, so none of these is a page.
+        assert is_huggingface_page_url(resolve_url) is False, resolve_url
+
+
+def test_blob_rewrite_preserves_the_rest_of_the_path_verbatim():
+    """Only the marker segment changes: a trailing slash, a doubled separator
+    and the query string all come back as they went in."""
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/org/repo/blob/main//x.safetensors?download=true")
+        == "https://huggingface.co/org/repo/resolve/main//x.safetensors?download=true"
+    )
+
+
+def test_a_directory_named_like_a_marker_under_a_tree_listing_is_still_a_page():
+    """`/tree/` is a web page whatever is under it.
+
+    The scan read the `blob` DIRECTORY as a file marker and called this URL a
+    file, so it reached the generic branch and saved the listing page.
+    """
+    assert is_huggingface_page_url("https://huggingface.co/org/repo/tree/main/blob/sub/weights") is True
+
+
 def test_huggingface_url_with_com_domain():
     url = "https://huggingface.com/CompVis/stable-diffusion-v1-4/resolve/main/sd-v1-4.ckpt"
     assert check_huggingface_url(url) == (True, "CompVis/stable-diffusion-v1-4", "sd-v1-4.ckpt", None, "main")

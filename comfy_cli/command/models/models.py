@@ -395,11 +395,59 @@ HUGGINGFACE_HOSTS = frozenset(
 # the generic direct-URL path, so it must not be mistaken for a page.
 HUGGINGFACE_FILE_MARKERS = frozenset({"resolve", "blob", "raw"})
 
+# Hugging Face's repo-type prefixes. A model repo is addressed bare
+# (`/<org>/<repo>/...`); a dataset or space carries its type first
+# (`/datasets/<org>/<repo>/...`). That one segment is the whole difference
+# between the two grammars, and it is why the marker cannot live at a fixed
+# index.
+HUGGINGFACE_REPO_TYPE_PREFIXES = frozenset({"datasets", "spaces", "models"})
+
 
 def is_huggingface_host(url: str) -> bool:
     """True when *url*'s host is one of Hugging Face's own."""
     host = (urlparse(url).hostname or "").lower().rstrip(".")
     return host in HUGGINGFACE_HOSTS
+
+
+def _huggingface_file_marker_index(path_parts: list[str]) -> int | None:
+    """Index in *path_parts* of the file marker, or ``None`` for a page URL.
+
+    *path_parts* is the URL path split on ``/`` with empty segments dropped.
+
+    **The marker is found by POSITION, not by scanning for the word.** Hugging
+    Face's file URL is ``<repo-id>/<marker>/<branch>/<path...>``, so the marker
+    sits at a small, known index — and every segment that is not that one is
+    free-form user text. ``resolve``, ``blob`` and ``raw`` are all legal repo
+    names, branch names, directory names and file names, so a left-to-right
+    scan for the word mistakes:
+
+    * a repo named ``blob`` — ``/org/blob/resolve/main/model.safetensors``
+      matches at the repo, so the rewrite below produced
+      ``/org/resolve/resolve/main/...`` and a URL that WORKED stopped working;
+    * a directory named ``blob`` — ``/org/repo/resolve/main/blob/sub/f`` the
+      same way;
+    * a ``tree`` listing under one — ``/org/repo/tree/main/blob/sub/f`` is a
+      web page, and a scan reads the directory's name as a file marker.
+
+    The candidate indices are the two the grammar allows, tried in order:
+    ``3`` then ``2`` after a repo-type prefix, ``2`` then ``1`` without one. The
+    second candidate is the unnamespaced legacy form (``/gpt2/resolve/main/f``,
+    ``/datasets/squad/resolve/main/f``), and having it also makes
+    :data:`HUGGINGFACE_REPO_TYPE_PREFIXES` safe against an *org* that happens to
+    be named ``datasets``: ``/datasets/repo/blob/main/f`` misses at ``3`` and
+    hits at ``2``.
+
+    The ``len > index + 2`` test is what keeps ``/org/repo/resolve/main`` — a
+    branch listing with no file after it — a page.
+    """
+    if not path_parts:
+        return None
+
+    candidates = (3, 2) if path_parts[0] in HUGGINGFACE_REPO_TYPE_PREFIXES else (2, 1)
+    for index in candidates:
+        if index < len(path_parts) and path_parts[index] in HUGGINGFACE_FILE_MARKERS and len(path_parts) > index + 2:
+            return index
+    return None
 
 
 def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str | None, str | None]:
@@ -480,35 +528,44 @@ def is_huggingface_page_url(url: str) -> bool:
         return False
 
     path_parts = [p for p in urlparse(url).path.split("/") if p]
-
-    for index, part in enumerate(path_parts):
-        # `<marker>/<branch>/<at least one path segment>`. The length test is
-        # what keeps `/<org>/<repo>/resolve/<branch>` — a branch listing with no
-        # file after it — a page.
-        if part in HUGGINGFACE_FILE_MARKERS and len(path_parts) > index + 2:
-            return False
-
-    return True
+    return _huggingface_file_marker_index(path_parts) is None
 
 
 def _huggingface_blob_to_resolve(url: str) -> str:
     """Rewrite a Hugging Face ``/blob/`` file URL to its ``/resolve/`` sibling.
 
-    ``/blob/`` serves the HTML file viewer; ``/resolve/`` serves the bytes. Only
-    the one path segment that :data:`HUGGINGFACE_FILE_MARKERS` matched is
-    touched, and only on an HF host, so a file or repo legitimately NAMED
-    ``blob`` elsewhere in the path is left alone.
+    ``/blob/`` serves the HTML file viewer; ``/resolve/`` serves the bytes. So a
+    ``/blob/`` link downloads a web page and saves it as the model — the same
+    defect ``hf_not_a_file`` refuses a repo page for, and the reason that
+    refusal's hint can honestly name ``/blob/`` as a form that works.
+
+    Only the one segment :func:`_huggingface_file_marker_index` identifies as
+    the marker is touched, and only on an HF host, so a repo, branch, directory
+    or file legitimately NAMED ``blob`` is left alone.
+
+    This runs on **every** HF URL before the download branch is chosen, not
+    inside the HF-hub branch. ``check_huggingface_url`` parses only
+    ``/<org>/<repo>/{resolve,blob}/<branch>/<path>``, so gating the rewrite on it
+    left every other shape of ``/blob/`` link — a dataset's, a space's, a legacy
+    unnamespaced repo's — reaching the generic direct-URL branch unrewritten and
+    saving the viewer page as the model.
     """
     if not is_huggingface_host(url):
         return url
 
     split = urlsplit(url)
-    path_parts = split.path.split("/")
-    for index, part in enumerate(path_parts):
-        if part == "blob" and len(path_parts) > index + 2:
-            path_parts[index] = "resolve"
-            return urlunsplit(split._replace(path="/".join(path_parts)))
-    return url
+    raw_parts = split.path.split("/")
+    # `_huggingface_file_marker_index` indexes the NON-empty segments, which is
+    # the only way to state the grammar once for both recognizers. Rewrite
+    # against the raw split anyway, so the rest of the path — a leading slash, a
+    # trailing one, an empty `//` run — comes back out byte-identical.
+    positions = [position for position, part in enumerate(raw_parts) if part]
+    index = _huggingface_file_marker_index([raw_parts[position] for position in positions])
+    if index is None or raw_parts[positions[index]] != "blob":
+        return url
+
+    raw_parts[positions[index]] = "resolve"
+    return urlunsplit(split._replace(path="/".join(raw_parts)))
 
 
 def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
@@ -706,6 +763,14 @@ def download(
 
     resolved_downloader = downloader or config_manager.get(constants.CONFIG_KEY_DEFAULT_DOWNLOADER) or "httpx"
 
+    # Before the branch is chosen, not inside one: `/blob/` is Hugging Face's
+    # HTML file VIEWER, and every branch below that can receive a `/blob/` URL
+    # would otherwise save that page as the model. Rewriting it here is also
+    # what makes `hf_not_a_file`'s hint ("a `/blob/` link works too") true for
+    # every HF URL shape rather than only the two `check_huggingface_url`
+    # parses. A no-op on every other host.
+    url = _huggingface_blob_to_resolve(url)
+
     is_civitai_model_url, is_civitai_api_url, model_id, version_id = check_civitai_url(url)
     is_huggingface_url, repo_id, hf_filename, hf_folder_name, hf_branch_name = check_huggingface_url(url)
 
@@ -743,15 +808,6 @@ def download(
 
             relative_path = _default_destination(model_path, basemodel)
     elif is_huggingface_url:
-        # `/blob/<branch>/<file>` is Hugging Face's HTML file VIEWER, not the
-        # bytes. `check_huggingface_url` accepts it, and on a public repo
-        # `needs_hf_auth` stays False and the raw `url` goes to `download_file`
-        # unchanged — so a `/blob/` link saved the viewer page as the model, the
-        # same failure `hf_not_a_file` refuses a repo page for. Rewriting it to
-        # the `/resolve/` sibling is what makes the refusal's hint ("a `/blob/`
-        # link works too") true rather than a pointer back into the bug.
-        url = _huggingface_blob_to_resolve(url)
-
         model_id = "/".join(url.split("/")[-2:])
 
         local_filename = potentially_strip_param_url(url.split("/")[-1])
