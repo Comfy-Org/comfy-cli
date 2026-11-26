@@ -6504,7 +6504,9 @@ def _count_instances(workflow: dict, def_id: str) -> int:
     return count
 
 
-def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[str, dict]) -> None:
+def _isolate_shared_subgraph(
+    workflow: dict, instance: dict, defs_by_id: dict[str, dict], *, prefer_retainer: bool = False
+) -> None:
     """If ``instance``'s subgraph definition is shared with another instance,
     deep-copy it under a fresh id and repoint ``instance`` so an interior write
     can't alias sibling instances. No-op when the instance already owns its def.
@@ -6513,16 +6515,151 @@ def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[st
     — never a random UUID — so two replicas replaying the same op produce
     byte-identical graphs (a convergence requirement of the op model in
     :mod:`comfy_cli.workflow_ops`).
+
+    ``prefer_retainer=False`` (the default, used by every interior-WRITE
+    caller via ``_resolve_node_path``) keeps the original rule: fork whenever
+    ``def_id`` is CURRENTLY shared by more than one instance, else mutate it
+    in place. That rule is correct there because an interior write always
+    targets exactly one instance per call — the sibling, if any, is never
+    itself the subject of a concurrent decision in the same apply, so "am I
+    currently alone" is a stable question.
+
+    ``prefer_retainer=True`` (the two legacy-proxy-migration call sites in
+    this module and in ``workflow_ops.py``) is for the case CodeRabbit flagged
+    on comfy-cli#1168 (discussion r4693109354): TWO instances sharing one
+    definition can EACH independently need their own repair, so each one's
+    fork-or-retain decision is itself part of the same cross-replica
+    convergence question. There, the LIVE share count is the wrong signal:
+    whichever instance is applied FIRST sees the definition still shared and
+    forks; the other is then applied against what looks like a now-unshared
+    definition and keeps the original id, mutating it in place. Reversing
+    the apply order flips which of the two instances ends up on which id —
+    same final widget values, different documents.
+
+    ``prefer_retainer=True`` instead asks ``_shared_definition_cohort`` for
+    the full, ORIGINAL set of instances that ever shared ``def_id`` (an
+    instance that already forked is still recognized as a cohort member:
+    its current type is ``_deterministic_fork_id(def_id, its own scoped
+    key)`` — see ``_cohort_member_key`` for why the key is scope-qualified
+    rather than a bare local id), and always forks every member except the
+    one whose scoped key sorts first (string order) — a decision that
+    depends only on instance identity, never on which of the cohort's
+    members has been applied yet.
+
+    Forking every non-retainer happens EAGERLY, the first time ANY cohort
+    member is processed while the definition is still pristine (nobody has
+    forked yet) — not lazily, one at a time as each member's own write
+    happens to come up. Forking lazily would let the retainer's own flush
+    mutate the STILL-SHARED original in place before an unprocessed
+    non-retainer sibling gets a turn; that sibling's later fork would then
+    deep-copy the retainer's already-mutated original, baking the
+    retainer's unrelated repair into a definition the sibling never asked
+    for — a structural difference an opposite apply order would not
+    produce (the non-retainer would have forked a still-pristine original
+    instead). Forking every non-retainer up front, before either of them
+    has run its own flush, means both the retainer's in-place mutation and
+    every non-retainer's own fork always start from the same pristine
+    content regardless of apply order.
     """
     def_id = str(instance.get("type", ""))
     sg = defs_by_id.get(def_id)
-    if sg is None or _count_instances(workflow, def_id) <= 1:
+    if sg is None:
         return
-    new_sg = copy.deepcopy(sg)
-    new_id = _deterministic_fork_id(def_id, instance.get("id"))
-    new_sg["id"] = new_id
-    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
-    instance["type"] = new_id
+    if not prefer_retainer:
+        if _count_instances(workflow, def_id) <= 1:
+            return
+        new_sg = copy.deepcopy(sg)
+        new_id = _deterministic_fork_id(def_id, instance.get("id"))
+        new_sg["id"] = new_id
+        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
+        instance["type"] = new_id
+        return
+    cohort = _shared_definition_cohort_nodes(workflow, def_id)
+    if len(cohort) <= 1:
+        return
+    retainer_key = min((key for key, _n in cohort), key=str)
+    pristine = copy.deepcopy(sg)
+    for key, n in cohort:
+        if key == retainer_key or str(n.get("type", "")) != def_id:
+            continue  # the retainer, or a member some earlier call already forked
+        new_sg = copy.deepcopy(pristine)
+        new_id = _deterministic_fork_id(def_id, key)
+        new_sg["id"] = new_id
+        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
+        n["type"] = new_id
+
+
+def _cohort_member_key(scope: str, local_id: Any) -> str:
+    """Scope-qualify a cohort member's bare local id by the id of its
+    immediately enclosing subgraph definition (``scope == ""`` for a
+    top-level workflow node).
+
+    ``definitions.subgraphs`` is a FLAT, global table — a definition nested
+    ten levels deep sits in the same list, at the same single level, as a
+    top-level one. A bare local node id is only unique WITHIN its own
+    immediate container, not across that whole flat table: two unrelated
+    definitions can each independently contain a node with local id ``"2"``.
+    Without this qualifier, retainer selection and fork-id generation in
+    ``_isolate_shared_subgraph`` compared (and hashed) those bare ids
+    directly, so two such nodes sharing one target definition were
+    indistinguishable from each other — both satisfied "am I the retainer",
+    so neither forked, aliasing two logically independent instances the
+    moment either one's flush mutated the still-shared definition in place.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4699160878
+
+    Top-level workflow nodes (``scope == ""``) have no such ambiguity —
+    ``workflow["nodes"]`` is a single flat list, so their ids are already
+    unique document-wide — so they keep the bare (unqualified) id rather
+    than gaining a vestigial prefix. That preserves the exact fork ids
+    already pinned for the top-level-only case (e.g.
+    ``test_shared_definition_is_forked_not_mutated``), and only changes the
+    id actually used for a nested host.
+    """
+    if not scope:
+        return str(local_id)
+    return f"{scope}\x1f{local_id}"
+
+
+def _shared_definition_cohort_nodes(workflow: dict, def_id: str) -> list[tuple[str, dict]]:
+    """``(scoped_key, node)`` pairs for every instance that ORIGINALLY shared
+    ``def_id`` (top-level + interior-of-definitions), independent of how many
+    of them this replica's apply order has already forked away from it.
+
+    ``scoped_key`` is ``_cohort_member_key(scope, node id)`` — see that
+    function for why a bare local id is not enough to identify a cohort
+    member uniquely.
+
+    An instance still pointing at ``def_id`` directly is a cohort member, and
+    so is one whose current ``type`` equals ``_deterministic_fork_id(def_id,
+    its own scoped key)`` — the exact marker ``_isolate_shared_subgraph``
+    leaves behind when it forks that instance off this ``def_id``. Checking
+    for that marker (rather than only counting live sharers of ``def_id``, as
+    ``_count_instances`` does) is what makes the cohort — and so the fork/
+    retain decision above — the same regardless of which sharing instance is
+    processed first. Returning the actual node dicts (not just ids) lets the
+    caller repoint a cohort member OTHER than the one it was invoked for.
+    """
+    cohort: list[tuple[str, dict]] = []
+
+    def _collect(scope: str, nodes: Any) -> None:
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            key = _cohort_member_key(scope, n.get("id"))
+            t = str(n.get("type", ""))
+            if t == def_id or t == _deterministic_fork_id(def_id, key):
+                cohort.append((key, n))
+
+    _collect("", workflow.get("nodes"))
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                _collect(str(sg.get("id", "")), sg.get("nodes"))
+    return cohort
 
 
 def _deterministic_fork_id(def_id: str, instance_id: Any) -> str:
@@ -6633,11 +6770,28 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
-        if target.repair is not None:
+        plan = _promoted.plan_proxy_migration(workflow, instance, graph)
+        if target.repair is not None or plan:
             # A legacy ``proxyWidgets`` promotion: run the frontend's forward
-            # migration on this instance first (forking a shared definition,
-            # since the repair mutates it), exactly as the op path does.
-            _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow))
+            # migration on this instance first, exactly as the op path does.
+            # Unconditional over the WHOLE plan — not just a ``repairable``
+            # (``createSubgraphInput``/``primitiveBypass``) entry — because
+            # ``set_host_value`` below writes by DECLARED-order
+            # ``value_index`` into ``widgets_values``, which stays in legacy
+            # PROXY order until a flush runs at least once. A plan of only
+            # ``alreadyLinked``/``quarantine`` entries never flushed here
+            # would leave that array misaligned forever, so a later write
+            # would land in the wrong widget's slot.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+            if target.repair is not None or any(e.repairable for e in plan):
+                # The definition is MUTATED only for a repairable entry, so
+                # the (possibly shared) definition is forked only then — a
+                # plan of only ``alreadyLinked``/``quarantine`` entries
+                # leaves the definition exactly as the flush found it, so
+                # forking a shared definition for it would fork it for
+                # nothing.
+                # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+                _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow), prefer_retainer=True)
             _promoted.flush_proxy_migration(workflow, instance, graph, instance_path=list(target.segments))
         _promoted.set_host_value(workflow, instance, target.widget, value, graph)
         return warnings
