@@ -71,6 +71,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy deploy delete": "deploy_delete",
     "comfy deploy run": "deploy_run",
     "comfy deploy refs compute": "deploy_refs_compute",
+    "comfy deploy models add": "deploy_models",
+    "comfy deploy models ls": "deploy_models",
+    "comfy deploy models rm": "deploy_models",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
@@ -113,6 +116,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow delete-node": "workflow",
     "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
+    "comfy workflow define-subgraph": "workflow",
     # Whole-document edits: same `_finish` op envelope as the primitives above.
     "comfy workflow clear": "workflow",
     "comfy workflow reset-doc": "workflow",
@@ -239,6 +243,7 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy build push": "build_push_event",
     "comfy assets library upload": "build_push_event",
     "comfy model upload": "build_push_event",
+    "comfy deploy models add": "build_push_event",
     # the deployment coming up; same rule about stderr
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",

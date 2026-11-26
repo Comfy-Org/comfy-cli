@@ -262,6 +262,12 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
 - **`unresolvedClasses` is the list to take to the user.** Those node classes are
   ones nothing installable provides, so the graph will not run. Cutting anyway
   ships an environment that cannot execute the workflow it was built for.
+  **Don't fill the gap by writing node code into the build.** A node you author
+  is unreviewed code the user never chose; packs the user already has, published
+  or local, are fine. Stop before you change the spec, list the classes, and ask
+  the user how to go on. The advisory line names eight classes at most; when it
+  ends in `(+N more)`, say how many more there are rather than presenting the
+  eight as the whole list.
 
 ## Path C — from a description, a Dockerfile, or a Modal script
 
@@ -308,7 +314,10 @@ naming them on stderr and in a `skipped_symlinks` payload key — read those,
 because a pack that vendors its dependencies through a symlink packages to a
 near-empty archive whose digest the spec then commits. Packaging fails outright
 if the node root is a symlink, if any file cannot be read, or if a file changes
-size while being read.
+size while being read. `push` and `push --dry-run` also refuse a local node over
+2 GiB (`build_spec_invalid`, `a custom node can be at most 2 GiB`) before they
+upload anything, because the builder cannot use a node that large. Move large
+files such as model weights out of the node folder, then push again.
 
 **Push is resumable and conflict-checked.** It rewrites the spec after every blob
 lands, so an interrupted push resumes instead of re-uploading. It refuses with

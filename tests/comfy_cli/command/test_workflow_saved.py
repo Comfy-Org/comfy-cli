@@ -384,6 +384,7 @@ class TestLocalGet:
 
 class TestLocalSave:
     def test_posts_file_bytes_and_appends_json_ext(self, local_target, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_WORKFLOW_SOURCE", "run_on_cloud")
         wf = tmp_path / "src.json"
         wf.write_text(json.dumps(_LOCAL_WORKFLOW))
         stored = {"path": "flux.json", "size": 120, "modified": 1700000002000, "created": 1700000000000}
@@ -396,6 +397,7 @@ class TestLocalSave:
         assert "workflows%2Fflux.json" in calls[0]["url"]
         assert "overwrite=true" in calls[0]["url"]
         assert json.loads(calls[0]["body"]) == _LOCAL_WORKFLOW
+        assert "Comfy-workflow-source" not in calls[0]["headers"]
 
     def test_description_ignored_with_warning(self, local_target, tmp_path, monkeypatch, capsys):
         wf = tmp_path / "src.json"
@@ -881,6 +883,27 @@ def _sidebar(
 
 def _posts(calls):
     return [c for c in calls if c["method"] == "POST"]
+
+
+@pytest.mark.parametrize("features, endpoint", [(_FLAG_ON, "/api/userdata/"), (_FLAG_OFF, "/api/workflows")])
+@pytest.mark.parametrize("source, expected", [(None, None), ("run_on_cloud", "run_on_cloud"), ("unknown", None)])
+def test_cloud_save_source(cloud_target, tmp_path, monkeypatch, capsys, features, endpoint, source, expected):
+    if source is None:
+        monkeypatch.delenv("COMFY_WORKFLOW_SOURCE", raising=False)
+    else:
+        monkeypatch.setenv("COMFY_WORKFLOW_SOURCE", source)
+    wf_path = tmp_path / "wf.json"
+    wf_path.write_text(json.dumps(_UI_DATA))
+    calls = _patch_cloud(monkeypatch, _sidebar(features=features))
+
+    result = _run(["save", str(wf_path), "--name", "flux", "--where", "cloud"], capsys)
+
+    assert result["ok"] is True
+    (post,) = _posts(calls)
+    assert post["url"].startswith(f"https://cloud.example.com{endpoint}")
+    assert post["headers"].get("Comfy-workflow-source") == expected
+    assert post["headers"]["X-api-key"] == "test-key"
+    assert all("Comfy-workflow-source" not in call["headers"] for call in calls if call["method"] != "POST")
 
 
 class TestSaveToSidebarFolder:

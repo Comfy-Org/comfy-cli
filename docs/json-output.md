@@ -96,6 +96,21 @@ frames only for the value under this key. Earlier builds of this branch put it
 at `data.details.error` (live path) and `data.error` (terminal path); neither is
 published any more.
 
+The per-node events `jobs watch` streams carry the **same shape** as the `comfy
+run` ones — one event per node, keyed by `node`. ComfyUI's websocket delivers
+`execution_cached` as a single message listing every cached node, and `jobs
+watch` fans that out into one `execution_cached` event per node, exactly as
+`comfy run` does, so a consumer written against the run dialect counts cached
+nodes correctly on either stream. `jobs watch` has no workflow graph in hand,
+so it omits the optional `title` / `class_type` fields that `comfy run`
+attaches to `executing`, `execution_cached` and `executed`; it also does not
+carry the `outputs` array on `executed`, reporting each artifact as its own
+`output` event instead. *(Changed since 1.16.0, whose `jobs watch` emitted one
+`execution_cached` carrying a `nodes` array — a run-dialect consumer counting
+cached nodes per event undercounted every cached node beyond the first. The
+`nodes` array form is still accepted by the published event schema so a stream
+captured from 1.16.0 keeps validating, but nothing emits it.)*
+
 ## Overview
 
 When `--json` is passed, `comfy run` switches into a strict
@@ -275,14 +290,22 @@ that a missing target may not be an output node:
 
 ### `partial_execution_targets_ignored` warning
 
-On a `--output-node-ids` cloud `--wait` run, a node outside the targets and
-the nodes they depend on that still produced outputs means the server ran
-more than was asked for, most likely because it does not support
+On a `--output-node-ids` cloud `--wait` run, an **output node** outside the
+targets and the nodes they depend on that still produced outputs means the
+server ran more than was asked for, most likely because it does not support
 `partial_execution_targets` and ran the whole graph:
 
 ```json
 {"code": "partial_execution_targets_ignored", "message": "ran with --output-node-ids but node(s) outside the targets also produced outputs: 9; the server likely ignored partial_execution_targets and ran the whole graph", "untargeted_output_node_ids": ["9"]}
 ```
+
+Only output-class nodes count. At the end of a run ComfyUI can replay the
+cached previews of intermediate-output nodes (Crop Image, Painter, ...), so a
+run that did exactly what was asked can show outputs outside the targets
+without the targets having been ignored. The submitted graph's output-node ids
+are needed to tell the two apart, and they come from the node catalog: when it
+was not available, the warning falls back to counting every producing node
+outside the targets.
 
 A local run has no `data.warnings`; compare `data.executed_node_ids` with the
 targets to check the same thing.
@@ -291,11 +314,13 @@ A cloud `--output-node-ids` run without `--wait` cannot check anything at
 submit time. Its `queued` envelope carries a `data.note` naming the
 `comfy jobs watch <prompt_id> --where cloud` command, and the job's state file
 records the targets (`output_node_ids`, `run_graph_node_ids`,
-`output_node_ids_checked`). Once the job completes, `comfy jobs watch --where
-cloud` and `comfy jobs status --where cloud` run the same check and carry the
-same entries in `data.warnings`; `comfy jobs wait` copies them onto the job's
-row. That key is present only for a targeted job. If the cloud has not
-returned the job's outputs yet, the one entry is `output_node_ids_unchecked`:
+`output_node_ids_checked`) and the submitted graph's output nodes
+(`graph_output_node_ids`, null when the catalog was unavailable). Once the job
+completes, `comfy jobs watch --where cloud` and `comfy jobs status --where
+cloud` run the same check and carry the same entries in `data.warnings`;
+`comfy jobs wait` copies them onto the job's row. That key is present only for
+a targeted job. If the cloud has not returned the job's outputs yet, the one
+entry is `output_node_ids_unchecked`:
 run `comfy jobs status <prompt_id> --where cloud` again.
 
 ## Event reference
@@ -406,9 +431,19 @@ closing the previous one.
 ### `execution_cached`
 
 One event per node whose outputs were retrieved from the execution cache
-(from ComfyUI's `execution_cached` websocket message). Same fields as
+(from ComfyUI's `execution_cached` websocket message, which lists every
+cached node in one frame and is fanned out here). Same fields as
 `executing`. A cached output-bearing node (e.g., a cached `SaveImage`)
 may emit both `execution_cached` AND `executed`.
+
+```json
+{"schema": "event/1", "type": "execution_cached", "node": "1", "title": "Latent", "class_type": "EmptyLatentImage", "prompt_id": "9b1c…"}
+```
+
+`comfy jobs watch` emits the same per-node event without `title` /
+`class_type` (see [`jobs watch` attaches as the submitting
+session](#jobs-watch-attaches-as-the-submitting-session)). It never emits a
+list-shaped `nodes` field on this event.
 
 ### `progress`
 
@@ -501,9 +536,10 @@ time. If the callback never arrives, the terminal envelope is an
 ### `upload_plan`, `upload_progress`, `upload_complete`, `upload_storing`
 
 Emitted by `comfy build push` while it uploads model files and packaged custom
-nodes, and by `comfy model upload` and `comfy assets library upload` while they
-upload one model file. They are part of the upload, not the `run` stream, and
-validate against `build_push_event.json`.
+nodes, by `comfy model upload` and `comfy assets library upload` while they
+upload one model file, and by `comfy deploy models add` while it sends one.
+They are part of the upload, not the `run` stream, and validate against
+`build_push_event.json`.
 
 Where they go depends on the mode. Under `--json-stream` they are on stdout,
 ahead of the envelope, like every other event. Under plain `--json` (which is

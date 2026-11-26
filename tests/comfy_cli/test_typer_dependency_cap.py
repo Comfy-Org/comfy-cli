@@ -1,10 +1,10 @@
 """The typer requirement must exclude releases whose parameters have no click type.
 
 typer 0.29 dropped ``Parameter.type`` from ``TyperOption``/``TyperArgument``.
-``comfy --help --json`` (``comfy_cli/help_json.py``) reads ``param.type`` for every
-option, so a fresh ``pip install comfy-cli`` that resolves typer 0.29 crashes
-discovery with ``AttributeError: 'TyperOption' object has no attribute 'type'``.
-CI installs from ``uv.lock`` and never sees it, so the bound is checked here.
+``comfy --help --json`` (``comfy_cli/help_json.py``) falls back to typer 0.29's
+``type_descriptor``, but the supported range stays below 0.29 until that path is
+proven; the non-required newest-typer CI lane exercises it. CI's ``build`` job
+installs from ``uv.lock`` and never sees a new typer, so the bound is checked here.
 """
 
 from pathlib import Path

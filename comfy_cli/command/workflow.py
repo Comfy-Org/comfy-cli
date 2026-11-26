@@ -21,6 +21,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import unicodedata
@@ -98,7 +99,7 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     ``on_stale``, if provided, is fired when a stale-cache fallback occurs:
     ``on_stale(host_key, error_str)``.
     """
-    from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.cql.engine import Graph, LoadError, load_error_envelope_fields
 
     renderer = get_renderer()
     try:
@@ -132,10 +133,11 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         graph._try_default_annotations()
         return graph
     except LoadError as e:
+        hint, _ = load_error_envelope_fields(e, "pass --input <path>, or start the server with `comfy launch`")
         renderer.error(
             code="cql_no_graph",
             message=str(e),
-            hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
+            hint=hint,
         )
         raise typer.Exit(code=1) from e
 
@@ -974,6 +976,7 @@ def _userdata_request(
     method: str = "GET",
     data: bytes | None = None,
     content_type: str | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 30.0,
 ) -> tuple[int, bytes]:
     """Authed HTTP call to a ComfyUI ``/userdata`` endpoint returning (status, raw_bytes).
@@ -984,7 +987,9 @@ def _userdata_request(
     """
     from comfy_cli.http import authed_urlopen
 
-    with authed_urlopen(url, target, method=method, data=data, content_type=content_type, timeout=timeout) as resp:
+    with authed_urlopen(
+        url, target, method=method, data=data, content_type=content_type, headers=headers, timeout=timeout
+    ) as resp:
         status = resp.status
         # Read one byte past the cap so we can tell a full body from a truncated one.
         raw = resp.read(_USERDATA_MAX_BYTES + 1)
@@ -1064,7 +1069,13 @@ def _userdata_file_url(target, key: str, query: dict | None = None) -> str:
 
 
 def _http_request(
-    url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
+    url: str,
+    target,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
 ) -> tuple[int, dict | list | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
     urllib errors verbatim so callers can surface the right error code, and
@@ -1074,7 +1085,9 @@ def _http_request(
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
     ct = "application/json" if data is not None else None
-    with authed_urlopen(url, target, method=method, data=data, content_type=ct, timeout=timeout) as resp:
+    with authed_urlopen(
+        url, target, method=method, data=data, content_type=ct, headers=headers, timeout=timeout
+    ) as resp:
         status = resp.status
         # Read one byte past the cap so we can tell a full body from a truncated one.
         raw = resp.read(_HTTP_MAX_BYTES + 1)
@@ -1656,6 +1669,7 @@ def _cloud_folder_save(
     description: str | None,
     deployment: str | None,
     workflow_links: bool,
+    headers: dict[str, str] | None,
 ) -> None:
     """Write the workflow as ``workflows/<new folder>/<name>.json`` and print its link.
 
@@ -1684,6 +1698,7 @@ def _cloud_folder_save(
                 method="POST",
                 data=text.encode("utf-8"),
                 content_type="application/json",
+                headers=headers,
             )
         except urllib.error.HTTPError as e:
             if e.code == 409:
@@ -2141,6 +2156,9 @@ def save_cmd(
         )
         raise typer.Exit(code=1)
 
+    headers = (
+        {"Comfy-Workflow-Source": "run_on_cloud"} if os.environ.get("COMFY_WORKFLOW_SOURCE") == "run_on_cloud" else None
+    )
     # The sidebar opens a file as an editor graph, which builds nodes only from
     # ``nodes[]``; an API-format file there would open empty. So only a
     # frontend-format workflow goes into a folder, and an API-format one keeps
@@ -2157,6 +2175,7 @@ def save_cmd(
             description=description,
             deployment=deployment,
             workflow_links=features.get(_WORKFLOW_LINKS_FLAG) is True,
+            headers=headers,
         )
 
     body: dict[str, Any] = {"name": name, "workflow_json": workflow_json}
@@ -2164,7 +2183,7 @@ def save_cmd(
         body["description"] = description
     url = target.url("workflows")
     try:
-        _, resp = _http_request(url, target, method="POST", body=body)
+        _, resp = _http_request(url, target, method="POST", body=body, headers=headers)
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
@@ -2342,7 +2361,7 @@ def validate_api_workflow(
     from comfy_cli import where as where_module
     from comfy_cli.command.run import is_ui_workflow
     from comfy_cli.command.run.preflight import _detect_partner_nodes
-    from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.cql.engine import Graph, LoadError, load_error_envelope_fields
     from comfy_cli.env_checker import _bracket_host, _unbracket_host
     from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
@@ -2453,12 +2472,13 @@ def validate_api_workflow(
         graph = Graph.from_object_info(raw)
         graph._try_default_annotations()
     except LoadError as e:
+        hint, details = load_error_envelope_fields(e, "pass --input <object_info.json>, or start the server")
         renderer.error(
             command=command,
             code="cql_no_graph",
             message=str(e),
-            hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
-            details=e.details,
+            hint=hint,
+            details=details,
         )
         raise typer.Exit(code=1) from e
 
@@ -2792,6 +2812,9 @@ app.add_typer(_wfrag.fragment_app, name="fragment")
 
 from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
 
+app.command("define-subgraph", help="Create a subgraph definition; emits one define_subgraph op.")(
+    _wedit.define_subgraph_cmd
+)
 app.command("insert-workflow", help="Insert a complete workflow; emits one insert_workflow op.")(
     _wedit.insert_workflow_cmd
 )

@@ -2386,13 +2386,14 @@ def test_cloud_status_snapshot_without_item_map_emits_empty_by_item(monkeypatch)
     assert snap["outputs_by_item"] == {}
 
 
-def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True):
+def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True, graph_outputs=None):
     from comfy_cli import jobs_state
 
     state = jobs_state.new(prompt_id=prompt_id, client_id="c", workflow="w", where="cloud")
     state.output_node_ids = targets
     state.run_graph_node_ids = run_graph
     state.output_node_ids_checked = checked
+    state.graph_output_node_ids = graph_outputs
     jobs_state.write(state)
 
 
@@ -2407,6 +2408,16 @@ def test_cloud_status_snapshot_warns_when_a_targeted_job_ran_untargeted_nodes(mo
     [warning] = snap["warnings"]
     assert warning["code"] == "partial_execution_targets_ignored"
     assert warning["untargeted_output_node_ids"] == ["12"]
+
+
+def test_cloud_status_snapshot_ignores_a_replayed_preview_from_a_non_output_node(monkeypatch):
+    """Node 12 is outside the run graph but its class is not an output node
+    (recorded at submit), so its output is a replayed cached preview, not a
+    sign the server ran the whole graph."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-preview", targets=["9"], run_graph=["9", "4"], graph_outputs=["9"])
+
+    assert jobs_mod._cloud_status_snapshot("pid-preview")["warnings"] == []
 
 
 def test_cloud_status_snapshot_warns_when_a_target_returned_nothing(monkeypatch):
@@ -3961,7 +3972,58 @@ def test_watch_execution_cached_accumulates_completed_nodes():
     st, r = _watch_state()
     jobs_mod._watch_execution_cached(st, {"nodes": [1, 2]})
     assert st.completed_nodes == {"1", "2"}
-    assert r.events == [("execution_cached", {"nodes": ["1", "2"], "prompt_id": "pid"})]
+    assert r.events == [
+        ("execution_cached", {"node": "1", "prompt_id": "pid"}),
+        ("execution_cached", {"node": "2", "prompt_id": "pid"}),
+    ]
+
+
+def test_watch_execution_cached_emits_one_event_per_node():
+    """`comfy run` emits one `execution_cached` per cached node, and
+    `docs/json-output.md` promises the two streams speak one dialect. A single
+    list-shaped event made a run-dialect consumer undercount every cached node
+    beyond the first."""
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": ["7", 8, "9"]})
+
+    assert len(r.events) == 3
+    assert [name for name, _ in r.events] == ["execution_cached"] * 3
+    assert [kw["node"] for _, kw in r.events] == ["7", "8", "9"]
+    # The list shape is gone — no event carries `nodes`.
+    assert all("nodes" not in kw for _, kw in r.events)
+    # Accumulation is unchanged: every cached node still lands in the envelope.
+    assert st.completed_nodes == {"7", "8", "9"}
+
+
+def test_watch_execution_cached_events_validate_against_the_run_event_schema():
+    """`comfy jobs watch` publishes the `run_event` schema (discovery.py), so
+    each emitted event must validate against it in the per-node shape."""
+    import jsonschema
+
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": ["1", "2", "3"]})
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "run_event.json"
+    validator = jsonschema.Draft202012Validator(json.loads(schema_path.read_text()))
+    for name, kw in r.events:
+        validator.validate({"schema": "event/1", "type": name, **kw})
+
+
+def test_watch_execution_cached_empty_list_emits_nothing():
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": []})
+    assert r.events == []
+    assert st.completed_nodes == set()
+    jobs_mod._watch_execution_cached(st, {})
+    assert r.events == []
+
+
+def test_watch_execution_cached_ignores_a_non_list_nodes_value():
+    """A string like "34" must not be walked as node ids "3" and "4"."""
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": "34"})
+    assert r.events == []
+    assert st.completed_nodes == set()
 
 
 def test_watch_progress_uses_throttled_event():
@@ -4206,6 +4268,29 @@ def test_history_completed_nodes_tolerates_junk(monkeypatch):
     assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
     monkeypatch.setattr(jobs_mod, "_http_get_json", lambda url, **kw: (_ for _ in ()).throw(RuntimeError("down")))
     assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
+
+
+def test_history_completed_nodes_skips_nulls_and_non_list_node_fields(monkeypatch):
+    """`/history` feeds the same `completed_nodes` set the live stream does, so
+    it needs the same guards: a null id would seat a fabricated `"None"` node in
+    the terminal envelope, and a non-list `nodes` would be walked per character."""
+
+    def fake_get(url, **kw):
+        return {
+            "pid-n": {
+                "status": {
+                    "messages": [
+                        ["execution_cached", {"nodes": [None, "1"]}],
+                        ["execution_interrupted", {"executed": [None, "2"]}],
+                        ["execution_cached", {"nodes": "34"}],
+                    ],
+                },
+                "outputs": {},
+            }
+        }
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-n") == {"1", "2"}
 
 
 class _ScriptedWS:
@@ -4504,6 +4589,42 @@ def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, cap
 
     schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "jobs.json"
     jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(lines[-1]["data"])
+
+
+def test_watch_stream_fans_execution_cached_out_per_node(monkeypatch, capsys):
+    """End to end: a WS `execution_cached` naming 3 nodes must reach the NDJSON
+    stream as 3 run-dialect events, each validating against the published
+    `run_event` schema."""
+    import jsonschema
+
+    from comfy_cli import jobs_state
+
+    jobs_state.write(jobs_state.new(prompt_id="pid-w", client_id="cid-sub", workflow="w", where="local"))
+    monkeypatch.setattr(
+        jobs_mod,
+        "_snapshot",
+        lambda h, p, pid, *, deadline=None: {"prompt_id": pid, "status": "running", "outputs": []},
+    )
+    monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
+
+    messages = [
+        {"type": "execution_cached", "data": {"prompt_id": "pid-w", "nodes": ["4", "5", "6"]}},
+        {"type": "execution_success", "data": {"prompt_id": "pid-w"}},
+    ]
+    result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
+    assert result.exit_code == 0, result.output
+
+    cached = [ln for ln in lines if ln.get("type") == "execution_cached"]
+    assert [ln["node"] for ln in cached] == ["4", "5", "6"]
+    assert all("nodes" not in ln for ln in cached)
+
+    schema_path = Path(jobs_mod.__file__).parent.parent / "schemas" / "run_event.json"
+    validator = jsonschema.Draft202012Validator(json.loads(schema_path.read_text()))
+    for ln in cached:
+        validator.validate(ln)
+
+    # Every cached node still reaches the terminal envelope.
+    assert lines[-1]["data"]["completed_nodes"] == ["4", "5", "6"]
 
 
 def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):

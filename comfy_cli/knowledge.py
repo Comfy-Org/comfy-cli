@@ -49,6 +49,9 @@ MAX_MODELS = 3
 MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
+# Suggestions offered when a capability query matches nothing outright. Small on
+# purpose: the point of the miss payload is to stop being a catalog dump.
+MAX_CANDIDATES = 5
 # best_for items per pick. Bounds item count, not bytes: with today's bundle, 1
 # keeps every capability's `knowledge pick` envelope under the 4096 bytes the
 # cloud agent admits verbatim (2, or not_for alongside, sends image-edit over),
@@ -852,12 +855,13 @@ def _key_counter(count_items: tuple[tuple[str, int], ...]) -> Counter:
     return Counter(dict(count_items))
 
 
-def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
-    """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
+def _score_capabilities(bundle: Bundle, query: str) -> dict[str, tuple[float, int, int, int]]:
+    """Every capability ``query`` touches at all, keyed to its match score.
 
-    Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
-    on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
-    only strips punctuation, so the exact path misses everything phrased.
+    Split out of :func:`_resolve_tokens` so the ranking has exactly one
+    implementation. That function needs only the unambiguous winner and throws
+    the rest away; :func:`capability_candidates` needs the runners-up, and a
+    second scoring loop would be free to drift from this one.
 
     Each key scores by the share of its words the query contains. A full match
     always counts. A partial one counts only when the query shares more words
@@ -870,13 +874,15 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     Repeated words in a key count only when that key is literally present in the
     query. Otherwise each query word contributes at most once, so a phrase that
     happens to repeat a generic noun cannot satisfy a repeated-word alias.
-
-    Ambiguity resolves to nothing rather than to a guess, matching
-    :func:`_normalized_map`: a tie between two capabilities is not an answer.
     """
     counts = _query_counts(query)
     if not counts:
-        return None
+        # Empty mapping, never None: this used to be `_resolve_tokens`'s own
+        # early return, where the later `if not scored` guard absorbed it. A
+        # second caller does not have that guard, so a query with no scoring
+        # tokens ("generate", "???", non-Latin text) would crash the miss path
+        # instead of answering it.
+        return {}
     words = frozenset(counts)
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
@@ -903,11 +909,42 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
         score = (hit / (hit + missing), len(overlap), len(key_norm) if literal_hit else 0, context)
         if score > scored.get(cid, (0.0, 0, 0, 0)):
             scored[cid] = score
+    return scored
+
+
+def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
+    """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
+
+    Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
+    on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
+    only strips punctuation, so the exact path misses everything phrased.
+
+    Ambiguity resolves to nothing rather than to a guess, matching
+    :func:`_normalized_map`: a tie between two capabilities is not an answer.
+    """
+    scored = _score_capabilities(bundle, query)
     if not scored:
         return None
     best = max(scored.values())
     winners = [cid for cid, score in scored.items() if score == best]
     return winners[0] if len(winners) == 1 else None
+
+
+def capability_candidates(bundle: Bundle, query: str, limit: int = MAX_CANDIDATES) -> list[str]:
+    """Best-scoring capability ids for ``query``, most likely first.
+
+    :func:`_resolve_tokens` answers only when one capability wins outright, which
+    is right for routing: a tie must not become a guess. But a caller that got no
+    answer still has to be told something, and "here is the whole catalog" is not
+    it. These are the rows that scored at all, so a tie becomes two suggestions
+    instead of silence.
+
+    Ordering is the full score tuple descending, then id ascending so the list is
+    stable for the same bundle and query.
+    """
+    scored = _score_capabilities(bundle, query)
+    ranked = sorted(scored.items(), key=lambda kv: (tuple(-part for part in kv[1]), kv[0]))
+    return [cid for cid, _ in ranked[: max(0, limit)]]
 
 
 def _text(value: Any) -> str | None:

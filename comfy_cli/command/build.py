@@ -2113,6 +2113,9 @@ def _require_public_pins(renderer, client, public_nodes: list[dict], spec_file: 
         raise typer.Exit(code=1)
 
 
+_BUILDER_NODE_SIZE_LIMIT_BYTES: Final = 2 * 1024 * 1024 * 1024
+
+
 @app.command("push", help="Push the local comfy-build spec to the builder.")
 @tracking.track_command("build")
 def push_cmd(
@@ -2223,7 +2226,13 @@ def push_cmd(
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
             validate_local_build_spec(spec, paths, model_directories=directories)
-            preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
+            preparation = prepare_push(
+                spec,
+                paths,
+                ModelDigestCache(_sha256_file),
+                package_dir=Path(package_dir),
+                node_size_limit=_BUILDER_NODE_SIZE_LIMIT_BYTES,
+            )
             validate_kept_links(preparation.definition)
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)

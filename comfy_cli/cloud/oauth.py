@@ -97,6 +97,10 @@ class OAuthTimeout(OAuthError):
     code = "oauth_timeout"
 
 
+class SessionNotSaved(OSError):
+    """A refresh succeeded but its tokens could not be stored, so the stored refresh token is spent."""
+
+
 class SessionReplaced(Exception):
     """The stored sign-in is not the one ``ensure_fresh_session(expect=...)`` was asked to refresh.
 
@@ -636,6 +640,7 @@ _REFRESH_RETRY_MIN_ATTEMPT_S = 5.0
 # peer) we fall back to whatever is persisted rather than racing an in-flight
 # refresh.
 _REFRESH_LOCK_TIMEOUT_S = 90.0
+_SAVE_RETRY_DELAY_S = 0.25
 
 # OAuth2 token-endpoint error codes that mean the refresh-token *family* is
 # truly dead — only a fresh ``comfy cloud login`` can recover, so we clear the
@@ -972,16 +977,25 @@ def _locked_refresh(
     # fresh access token and degrades to a clean re-login when it expires,
     # rather than tripping reuse-detection mid-use.
     _last_fatal.reason = None  # success — drop any reason from an earlier attempt
-    return auth_store.save_cloud_session(
-        base_url=session.base_url,
-        resource=session.resource,
-        client_id=session.client_id,
-        scope=session.scope,
-        access_token=new_tokens.access_token,
-        refresh_token=new_tokens.refresh_token,
-        token_type=new_tokens.token_type,
-        expires_at=new_tokens.expires_at,
-    )
+    rotated = {
+        "base_url": session.base_url,
+        "resource": session.resource,
+        "client_id": session.client_id,
+        "scope": session.scope,
+        "access_token": new_tokens.access_token,
+        "refresh_token": new_tokens.refresh_token,
+        "token_type": new_tokens.token_type,
+        "expires_at": new_tokens.expires_at,
+        "keep_partner_node_token": True,
+    }
+    try:
+        return auth_store.save_cloud_session(**rotated)
+    except OSError:
+        time.sleep(_SAVE_RETRY_DELAY_S)
+    try:
+        return auth_store.save_cloud_session(**rotated)
+    except OSError as error:
+        raise SessionNotSaved(str(error)) from error
 
 
 # ---------------------------------------------------------------------------
