@@ -45,7 +45,8 @@ From a snapshot or a scan:
 From a workflow, six more:
 
 - **`unresolvedClasses`** — node classes nothing installable provides. The graph
-  will not run without them, so this is the list to take to the user.
+  will not run without them, so this is the list to take to the user. Don't write
+  node code into the build to stand in for them.
 - **`unknownClasses`** — the same classes with the closest pack the registry could
   name, rendered as `ClassName (maybe pack-id)`. A lead, not an answer.
 - **`uncheckedClasses`** — the registry never answered, so these packs are not in

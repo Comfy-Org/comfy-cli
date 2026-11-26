@@ -1603,6 +1603,22 @@ class TestApplyBatch:
         assert env["error"]["code"] == "workflow_edit_invalid"
         assert path.read_text() == before, "failed batch must not write a partial graph"
 
+    def test_deferred_op_batch_is_not_persisted_locally(self, patched_graph, tmp_path, capsys):
+        path = self._empty(tmp_path)
+        before = path.read_text()
+        ops_path = tmp_path / "ops.json"
+        ops_path.write_text(
+            json.dumps(
+                [{"op": "define_subgraph", "subgraph_definition": {"id": "12345678-1234-4123-8123-123456789abc"}}]
+            )
+        )
+
+        env = _run(["apply", str(path), "--ops", str(ops_path)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert path.read_text() == before
+
     def test_typed_batch_failure_keeps_summary_receipt(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _base_workflow())
         before = path.read_text()
@@ -1876,6 +1892,81 @@ class TestForeach:
         assert env["ok"] is False
         assert "positive" in env["error"]["message"]
 
+    def test_foreach_rejects_deferred_ops_before_writing(self, patched_graph, tmp_path, capsys):
+        rp = tmp_path / "deferred.json"
+        rp.write_text(
+            json.dumps(
+                {
+                    "ops": [
+                        {"op": "define_subgraph", "subgraph_definition": {"id": "12345678-1234-4123-8123-123456789abc"}}
+                    ]
+                }
+            )
+        )
+        params = tmp_path / "sets.json"
+        params.write_text("[{}]")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert not list(out.glob("*.json"))
+
+    def test_foreach_gives_insert_workflow_its_registered_not_batchable_code(self, patched_graph, tmp_path, capsys):
+        """`insert_workflow` is deferred AND standalone-only. The deferred guard
+        must not swallow it into the generic `workflow_edit_invalid`: §1.7 of
+        `docs/op-vocabulary-v1.md` promises the registered
+        `workflow_insert_workflow_not_batchable` code and a hint naming the
+        standalone command, which is what `apply` already returns."""
+        rp = tmp_path / "insert.json"
+        rp.write_text(
+            json.dumps({"ops": [{"op": "insert_workflow", "template": str(tmp_path / "t.json")}]}),
+            encoding="utf-8",
+        )
+        params = tmp_path / "sets.json"
+        params.write_text("[{}]", encoding="utf-8")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_insert_workflow_not_batchable"
+        assert "comfy workflow insert-workflow" in env["error"]["hint"]
+        assert "deferred operation" not in env["error"]["message"]
+        assert not list(out.glob("*.json"))
+
+    def test_foreach_rejects_deferred_op_kind_that_only_appears_after_substitution(
+        self, patched_graph, tmp_path, capsys
+    ):
+        """The op kind itself may be a `${param}`. The up-front deferred check sees
+        only the template, so a param-set that resolves the kind to a deferred op
+        must still be refused as a deferred operation (not fall through to the
+        generic `unknown op` failure), and the earlier, valid set stays reported."""
+        rp = tmp_path / "kind.json"
+        rp.write_text(
+            json.dumps(
+                {
+                    "params": {"kind": {"type": "string"}},
+                    "ops": [
+                        {"op": "${kind}", "class_type": "KSampler", "as": "ks"},
+                    ],
+                }
+            )
+        )
+        params = tmp_path / "sets.jsonl"
+        params.write_text('{"kind":"add_node"}\n{"kind":"define_subgraph"}\n', encoding="utf-8")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert "define_subgraph" in env["error"]["message"]
+        assert "unknown op" not in env["error"]["message"]
+        written = env["error"]["details"]["written"]
+        assert len(written) == 1 and written[0].endswith("_000.json")
+
     def test_foreach_surfaces_partial_writes_on_mid_batch_failure(self, patched_graph, tmp_path, capsys):
         """foreach writes per param-set; a mid-batch failure leaves earlier files
         on disk, so the error must surface them (not leave the caller blind)."""
@@ -2022,6 +2113,159 @@ class TestCaptureUiOnlyNodes:
         rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
         assert sorted(n["type"] for n in rebuilt["nodes"]) == ["EmptyLatentImage", "KSampler"]
         assert len(rebuilt["links"]) == 1
+
+    def test_capture_reports_dropped_canvas_groups(self, patched_graph, tmp_path, capsys):
+        """A captured branch that was framed comes back unframed, and says so.
+
+        No frozen op kind creates a canvas group, so the recipe cannot rebuild
+        one — which is exactly the "build one branch, capture it, re-apply per
+        copy" path. The loss used to be silent.
+        """
+        wf = _base_workflow()
+        wf["groups"] = [
+            {"title": "Sampling", "bounding": [0, 0, 400, 300]},
+            {"title": "Latent", "bounding": [0, 320, 400, 200]},
+        ]
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        warns = cap["data"]["warnings"]
+        dropped = [w for w in warns if w["code"] == "group_dropped"]
+        assert len(dropped) == 1, warns
+        assert dropped[0]["count"] == 2
+        assert dropped[0]["titles"] == ["Sampling", "Latent"]
+        # The recipe itself carries no group, and still round-trips.
+        recipe = cap["data"]["recipe_doc"]
+        assert "groups" not in recipe
+        assert not any("group" in str(o.get("op", "")) for o in recipe["ops"])
+        rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
+        assert sorted(n["type"] for n in rebuilt["nodes"]) == ["EmptyLatentImage", "KSampler"]
+        assert not rebuilt.get("groups")
+
+    def test_capture_without_groups_warns_nothing(self, patched_graph, tmp_path, capsys):
+        cap = _run(["capture", str(_write(tmp_path, _base_workflow()))], capsys)
+        assert cap["ok"] is True, cap
+        assert not [w for w in cap["data"].get("warnings", []) if w["code"] == "group_dropped"]
+
+    def test_group_title_with_rich_markup_does_not_crash_pretty(self, patched_graph, tmp_path, capsys):
+        """A group title is untrusted text, and the warning prints through Rich.
+
+        `[/yellow]` is an unmatched closing tag: unescaped it raises MarkupError
+        from inside the warning that exists to report the dropped group — after
+        `--out` has already been written, so the recipe is on disk and the
+        command still fails.
+        """
+        wf = _base_workflow()
+        wf["groups"] = [{"title": "[/yellow]", "bounding": [0, 0, 400, 300]}]
+        src = _write(tmp_path, wf)
+        out_path = tmp_path / "recipe.json"
+        out, err, result = _invoke_raw(["capture", str(src), "--out", str(out_path)], capsys, _force_pretty_renderer)
+        assert result.exit_code == 0, (result.exception, out, err)
+        assert out_path.exists()
+        # The title survives verbatim rather than being swallowed as a tag.
+        assert "[/yellow]" in out + err
+
+    def test_group_title_markup_escaped_on_the_stderr_path_too(self, patched_graph, tmp_path, capsys):
+        """Same title, no `--out`: warnings go to stderr so stdout stays pure JSON."""
+        wf = _base_workflow()
+        wf["groups"] = [{"title": "[link=http://evil]x[/link]", "bounding": [0, 0, 4, 3]}]
+        out, err, result = _invoke_raw(["capture", str(_write(tmp_path, wf))], capsys, _force_pretty_renderer)
+        assert result.exit_code == 0, (result.exception, out, err)
+        # CliRunner installs its own stderr, so the warning lands in
+        # result.stderr rather than in capsys.
+        assert "[link=http://evil]" in result.stderr
+        # stdout is the recipe JSON and nothing else.
+        assert json.loads(out)["recipe"]
+
+    def test_capture_reports_malformed_groups_field_without_raising(self, patched_graph, tmp_path, capsys):
+        """`groups` is unvalidated on the way in, so capture must not trip over it.
+
+        `_load_workflow_or_fail` checks `nodes`/`links` only, and `capture_cmd`
+        catches `RecipeError` alone — so iterating a non-list `groups` surfaced
+        as a traceback on a file that used to capture clean.
+        """
+        # The falsy half (`False`, `0`, `""`, `{}`) is the interesting half: a
+        # truthiness test folds those in with an absent field and reports
+        # nothing at all, which is the silent loss this warning exists to end.
+        bad_values = (1, True, "Sampling", {"title": "Sampling"}, False, 0, "", {}, None)
+        for i, bad in enumerate(bad_values):
+            wf = _base_workflow()
+            wf["groups"] = bad
+            cap = _run(["capture", str(_write(tmp_path, wf, f"wf-bad-{i}.json"))], capsys)
+            assert cap["ok"] is True, (bad, cap)
+            warns = cap["data"]["warnings"]
+            malformed = [w for w in warns if w["code"] == "group_field_malformed"]
+            assert len(malformed) == 1, (bad, warns)
+            assert malformed[0]["found_type"] == type(bad).__name__
+            # Not reported as a dropped group — we do not know that it was one.
+            assert not [w for w in warns if w["code"] == "group_dropped"]
+            assert cap["data"]["recipe_doc"]["ops"]
+
+    def test_absent_and_empty_groups_are_not_reported_as_malformed(self, patched_graph, tmp_path, capsys):
+        """The other side of the presence/type check: both honestly mean "no groups"."""
+        for i, wf in enumerate((_base_workflow(), {**_base_workflow(), "groups": []})):
+            cap = _run(["capture", str(_write(tmp_path, wf, f"wf-ok-{i}.json"))], capsys)
+            assert cap["ok"] is True, cap
+            assert not [w for w in cap["data"].get("warnings", []) if w["code"].startswith("group_")]
+
+    def test_group_warning_ellipsis_counts_untitled_groups(self, patched_graph, tmp_path, capsys):
+        """Five groups, three titled: three names must not read as the whole list."""
+        wf = _base_workflow()
+        wf["groups"] = [
+            {"title": "A", "bounding": [0, 0, 1, 1]},
+            {"title": "B", "bounding": [0, 0, 1, 1]},
+            {"title": "C", "bounding": [0, 0, 1, 1]},
+            {"bounding": [0, 0, 1, 1]},
+            {"bounding": [0, 0, 1, 1]},
+        ]
+        cap = _run(["capture", str(_write(tmp_path, wf))], capsys)
+        dropped = [w for w in cap["data"]["warnings"] if w["code"] == "group_dropped"][0]
+        assert dropped["count"] == 5
+        assert "…" in dropped["message"], dropped["message"]
+
+    def test_group_warning_has_no_ellipsis_when_the_names_are_complete(self, patched_graph, tmp_path, capsys):
+        wf = _base_workflow()
+        wf["groups"] = [{"title": "A", "bounding": [0, 0, 1, 1]}, {"title": "B", "bounding": [0, 0, 1, 1]}]
+        cap = _run(["capture", str(_write(tmp_path, wf))], capsys)
+        dropped = [w for w in cap["data"]["warnings"] if w["code"] == "group_dropped"][0]
+        assert "…" not in dropped["message"], dropped["message"]
+
+    def test_capture_reports_dropped_native_reroute_points(self, patched_graph, tmp_path, capsys):
+        """The third unexpressible structure, dropped as silently as groups were.
+
+        A native reroute is a waypoint in `extra.reroutes` bound to a link by
+        `extra.linkExtensions` — not a `Reroute` node. The link keeps its real
+        source and target, so the rebuilt graph executes identically and only
+        the routing the user laid out disappears.
+        """
+        wf = _base_workflow()
+        wf["extra"] = {
+            "reroutes": [{"id": 1, "pos": [200, 100]}, {"id": 2, "pos": [250, 140]}],
+            "linkExtensions": [{"id": 1, "parentId": 1}],
+        }
+        cap = _run(["capture", str(_write(tmp_path, wf))], capsys)
+        assert cap["ok"] is True, cap
+        dropped = [w for w in cap["data"]["warnings"] if w["code"] == "reroute_dropped"]
+        assert len(dropped) == 1, cap["data"]["warnings"]
+        assert dropped[0]["count"] == 2
+        # The executable graph is untouched by the loss.
+        rebuilt = self._apply_on_empty(cap["data"]["recipe_doc"], tmp_path, capsys)
+        assert sorted(n["type"] for n in rebuilt["nodes"]) == ["EmptyLatentImage", "KSampler"]
+        assert len(rebuilt["links"]) == 1
+
+    def test_capture_reports_reroutes_known_only_from_link_extensions(self, patched_graph, tmp_path, capsys):
+        """`extra` is unvalidated too, so an uncountable waypoint set still reports."""
+        wf = _base_workflow()
+        wf["extra"] = {"linkExtensions": [{"id": 1, "parentId": 7}]}
+        cap = _run(["capture", str(_write(tmp_path, wf))], capsys)
+        assert cap["ok"] is True, cap
+        dropped = [w for w in cap["data"]["warnings"] if w["code"] == "reroute_dropped"][0]
+        assert dropped["count"] is None
+        assert "native reroute points" in dropped["message"]
+
+    def test_capture_without_extra_reports_no_reroute_warning(self, patched_graph, tmp_path, capsys):
+        cap = _run(["capture", str(_write(tmp_path, _base_workflow()))], capsys)
+        assert not [w for w in cap["data"].get("warnings", []) if w["code"] == "reroute_dropped"]
 
     def test_capture_splices_links_through_reroute(self, patched_graph, tmp_path, capsys):
         """EmptyLatentImage → Reroute → KSampler must capture as a direct

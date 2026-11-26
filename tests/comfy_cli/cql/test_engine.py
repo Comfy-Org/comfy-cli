@@ -3017,6 +3017,31 @@ class TestDirectModeSlots:
         assert above_max["value"] == 99999
         assert "bound" in above_max
 
+    def test_legacy_primitive_write_mirrors_a_present_widgets_values_named(self, graph: Graph):
+        """jaeone94's review on #1106 (comment-6734369598): the
+        ``legacy_primitive`` branch of ``_apply_one_slot_impl`` wrote
+        ``widgets_values`` positionally but never touched a present
+        ``widgets_values_named``, leaving it stale. A legacy ``PrimitiveNode``
+        has no catalog entry, so its register key is the frontend's fixed
+        ``"value"`` name (``cql.promoted._PRIMITIVE_WIDGET_ORDER``) regardless
+        of which alias (``value`` or the fed widget's own name) addressed the
+        write."""
+        wf = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PrimitiveNode",
+                    "widgets_values": ["old prompt"],
+                    "widgets_values_named": {"value": "old prompt"},
+                }
+            ],
+            "links": [],
+        }
+        _apply_one_slot(wf, "1.value", "new prompt", graph)
+        node = wf["nodes"][0]
+        assert node["widgets_values"] == ["new prompt"]
+        assert node["widgets_values_named"] == {"value": "new prompt"}
+
 
 class TestSlotSuggestionOnNotFound:
     """A not-found address is enriched with the real address that carries the

@@ -503,6 +503,31 @@ class MixpanelProvider:
                 self._drained.wait(timeout=min(remaining, 0.1))
 
 
+# Every name posthog has used for its event-delivery atexit hook. Both are
+# unregistered unconditionally: `atexit.unregister` is a no-op for a callable that
+# was never registered, so covering a name the installed version lacks is free,
+# while covering only the name it has is version-dependent and silently wrong.
+_POSTHOG_ATEXIT_HOOKS = ("join", "_atexit")
+
+# Posthog's OTHER atexit hooks, deliberately left registered. They drain the spans
+# and metrics-autocapture features, which this provider does not use and which
+# `PostHogProvider.flush` would therefore not drain either — so unregistering them
+# would lose whatever they carry rather than bound it. Listed rather than ignored so
+# a NEW hook name shows up as unhandled in
+# `test_every_posthog_atexit_hook_is_either_unregistered_or_explicitly_kept`
+# instead of being silently treated as one of these.
+#
+# NEITHER NAME EXISTS IN THE RANGE THIS PROJECT PINS. `posthog>=6,<8` registers
+# exactly one atexit hook from `posthog/client.py` — `self.join` up to 7.38.0,
+# `self._atexit` from 7.38.1 — and greps clean for both names below. They appear
+# first in posthog 8.x (8.2.5: `_atexit_metrics_autocapture` in the constructor,
+# `_atexit_spans` registered lazily when tracing is used), so this tuple is
+# forward-looking at the next major bump and cannot affect shutdown today. That
+# also answers the live question about them: an installed version in range enables
+# neither feature by default, because neither hook is there to enable.
+_POSTHOG_ATEXIT_HOOKS_KEPT = ("_atexit_spans", "_atexit_metrics_autocapture")
+
+
 class PostHogProvider:
     _STANDARD_PROPERTIES = {
         "environment": "cli",
@@ -525,13 +550,53 @@ class PostHogProvider:
         # can't linger on a blackholed endpoint after the terminal envelope is
         # already on stdout.
         self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
-        # Posthog's constructor registers its own atexit.register(self.join),
-        # which runs self.join() synchronously on the main thread at shutdown —
-        # independently of _flush_all_providers and NOT bounded by its daemon
-        # deadline. Against a blackholed endpoint that join can still block ~21s
-        # after the terminal envelope is on stdout, defeating this change. Drop it
-        # so our bounded flush is the only shutdown drain path.
-        atexit.unregister(self.client.join)
+        # Posthog's constructor registers its own atexit hook, which runs
+        # synchronously on the main thread at shutdown — independently of
+        # _flush_all_providers and NOT bounded by its daemon deadline. Against a
+        # blackholed endpoint it can block after the terminal envelope is already
+        # on stdout, defeating this change. Drop it so our bounded flush is the
+        # only shutdown drain path.
+        #
+        # The hook's NAME IS NOT STABLE across the versions this project's pin
+        # permits, and `atexit.unregister` against a callable that was never
+        # registered silently does nothing. posthog 6.0.0 through 7.38.0 register
+        # `self.join`; 7.38.1 (2026-08-12) renamed it to `self._atexit`, which
+        # closes every delivery lane against a 1.0s process-global deadline
+        # (`_ATEXIT_FLUSH_TIMEOUT_SECONDS`). Both are inside `posthog>=6,<8`, so
+        # a fresh install resolving to 7.38.1+ gets the new name while uv.lock
+        # pins 7.18.1 and gets the old one — which is why this held in CI and not
+        # on PyPI. The boundary is read off the wheels: 7.38.0's `client.py` has
+        # `atexit.register(self.join)`, 7.38.1's has
+        # `atexit.register(self._atexit)`.
+        #
+        # Order makes it matter rather than merely waste a call: atexit runs LIFO,
+        # this module registers `_flush_all_providers` at import, and the client
+        # is built lazily on the first send, so posthog's hook is always the LATER
+        # registration and therefore runs FIRST. With the unregister dead, its 1s
+        # bound closes the consumers and our 5s drain then flushes a stopped
+        # client — the queued `command_finished` event is the one that goes.
+        #
+        # So read the names off the client with getattr rather than naming one.
+        # Unregistering a name the installed version does not have costs nothing;
+        # naming only the one it does have is the bug this replaces.
+        #
+        # THERE IS NO RUNTIME CHECK THAT THIS REMOVED ANYTHING, and the obvious one
+        # does not work: `atexit._ncallbacks()` counts registered SLOTS, and
+        # `atexit.unregister` NULLs a slot without decrementing. Measured on
+        # CPython 3.12.3 with two lines — register one bound method, unregister the
+        # same bound method, count goes 0 -> 1 -> 1 — while the hook provably stops
+        # running. So a before/after count cannot distinguish a removal from a
+        # no-op, in any version, and there is no public API that enumerates the
+        # callbacks. The guard is therefore a test, not an assertion here:
+        # `test_posthog_provider_unregisters_every_hook_a_real_client_actually_registers`
+        # records what the INSTALLED client registers and requires each one to be
+        # unregistered or deliberately kept. That test only ever sees the pinned
+        # version, so a fresh install resolving past the pin is covered instead by
+        # `_POSTHOG_ATEXIT_HOOKS` carrying every name posthog has used.
+        for hook_name in _POSTHOG_ATEXIT_HOOKS:
+            hook = getattr(self.client, hook_name, None)
+            if hook is not None:
+                atexit.unregister(hook)
         self.enabled = True
 
     def track(self, event_name: str, distinct_id: str | None, properties: dict[str, Any]) -> None:

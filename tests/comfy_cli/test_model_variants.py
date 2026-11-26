@@ -295,6 +295,43 @@ class TestResolveWorkflowModels:
             ("model_unavailable", 3, "trellis_2_shape_vae_bf16.safetensors")
         ]
 
+    def test_mirrors_the_substitution_in_a_present_widgets_values_named(self, graph):
+        """jaeone94's review on #1106 (comment-6734369598): the substitution
+        wrote `widgets_values` positionally but left a present
+        `widgets_values_named` naming the model the server just proved it does
+        not have. A23 requires that register to stay correct or be left
+        untouched (gate 2: a name it never carried stays untouched), never to
+        go stale while present."""
+        wf = _template()
+        interior = wf["definitions"]["subgraphs"][0]["nodes"][1]
+        interior["widgets_values_named"] = {
+            "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors",
+        }
+
+        resolve_workflow_models(wf, graph)
+
+        interior = wf["definitions"]["subgraphs"][0]["nodes"][1]
+        assert interior["widgets_values_named"] == {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}
+
+    def test_leaves_widgets_values_named_untouched_when_it_never_carried_the_name(self, graph):
+        wf = _template()
+        interior = wf["definitions"]["subgraphs"][0]["nodes"][1]
+        interior["widgets_values_named"] = {"other_field": "unrelated"}
+
+        resolve_workflow_models(wf, graph)
+
+        interior = wf["definitions"]["subgraphs"][0]["nodes"][1]
+        assert interior["widgets_values_named"] == {"other_field": "unrelated"}
+
+    def test_leaves_widgets_values_named_untouched_when_no_sibling_is_found(self, graph):
+        wf = _template()
+        node = wf["nodes"][1]
+        node["widgets_values_named"] = {"vae_name": "trellis_2_shape_vae_bf16.safetensors"}
+
+        resolve_workflow_models(wf, graph)
+
+        assert node["widgets_values_named"] == {"vae_name": "trellis_2_shape_vae_bf16.safetensors"}
+
     def test_only_instances_of_the_changed_definition_follow(self, graph):
         wf = _template()
         missing = "minimax_h3_video_vae_int8_convrot.safetensors"

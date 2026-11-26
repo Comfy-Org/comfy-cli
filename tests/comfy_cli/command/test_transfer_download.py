@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from comfy_cli import comfy_client, jobs_state
+from comfy_cli import cmdline, comfy_client, jobs_state
 from comfy_cli.comfy_client import extract_output_entries, extract_text_outputs
 from comfy_cli.command import transfer
 from comfy_cli.output import Renderer, set_renderer
@@ -1270,6 +1270,58 @@ class TestDefaultOutDir:
 
         monkeypatch.setattr(config_manager, "ConfigManager", _FakeCM)
         assert transfer._default_out_dir() == "./outputs"
+
+
+class TestDownloadCommandReachesDefaultOutDir:
+    """`comfy download` with no `-o` must actually reach `_default_out_dir()`.
+
+    The option's typer default was the literal `"./outputs"`, which is truthy,
+    so `execute_download`'s `out_dir or _default_out_dir()` never fell through
+    on any real invocation: inside a governing project/1 the files landed in
+    `<cwd>/outputs` instead of the project root's `outputs/` that the
+    convention — and `_default_out_dir`'s own docstring — promise. The three
+    `TestDefaultOutDir` cases above are why the gap survived: they cover the
+    resolver, and nothing covered the command layer that is supposed to call
+    it. These assert the wiring, from the only caller that exists.
+    """
+
+    def _download(self, fake_target, capsys, **kwargs):
+        set_renderer(Renderer(mode=OutputMode.NDJSON, command="download"))
+        with (
+            patch("comfy_cli.command.transfer.resolve_target", return_value=fake_target),
+            patch.object(transfer._DOWNLOAD_OPENER, "open", side_effect=lambda req, timeout=None: _FakeResp()),
+        ):
+            cmdline.download(prompt_id=PROMPT_ID, where="local", **kwargs)
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+        return json.loads(lines[-1])["data"]
+
+    def test_no_out_dir_lands_in_the_project_root_not_the_cwd(self, fake_target, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        (proj / "sub" / "deeper").mkdir(parents=True)
+        (proj / "comfy.yaml").write_text("schema: project/1\n")
+        monkeypatch.chdir(proj / "sub" / "deeper")
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+
+        data = self._download(fake_target, capsys)
+
+        assert data["out_dir"] == str((proj / "outputs").resolve())
+        # The bug's signature: files under the cwd rather than the project root.
+        assert not (proj / "sub" / "deeper" / "outputs").exists()
+        for saved in data["files"]:
+            assert Path(saved["path"]).is_file()
+
+    def test_explicit_out_dir_still_wins(self, fake_target, tmp_path, monkeypatch, capsys):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (proj / "comfy.yaml").write_text("schema: project/1\n")
+        monkeypatch.chdir(proj)
+        _write_state(fake_target, record=RECORD, item_map=ITEM_MAP)
+        chosen = tmp_path / "chosen"
+
+        data = self._download(fake_target, capsys, out_dir=str(chosen))
+
+        assert data["out_dir"] == str(chosen.resolve())
+        assert not (proj / "outputs").exists()
 
 
 class TestDownloadExtensionSanitized:

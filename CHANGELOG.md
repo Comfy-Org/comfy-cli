@@ -15,7 +15,52 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`
+  emits one `define_subgraph` op for the cloud merge consumer without touching
+  the local workflow file. The id comes from `--id`, the definition's own `id`,
+  or a new UUID. The CLI checks envelope shape and JSON-serializability only:
+  semantic validation, replay and conflict resolution for a definition belong
+  to the server, so `comfy workflow apply` and `comfy workflow foreach` refuse
+  to persist the op locally. New frozen op kind, documented as amendment v1.17
+  of `docs/op-vocabulary-v1.md`.
+
+### Fixed
+
+- Telemetry no longer loses the last event of a run when `posthog` resolves to
+  7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
+  bounded flush is the only shutdown drain, but PostHog renamed that hook from
+  `join` to `_atexit` in 7.38.1, inside the allowed version range, and removing
+  a hook by the old name silently removes nothing. PostHog's hook then ran first, closed
+  the delivery consumers against its own 1-second budget, and the queued
+  `command_finished` event went with them.
+
+- A cloud `comfy run --output-node-ids` (and `comfy jobs watch` / `jobs status`
+  on such a job) no longer warns `partial_execution_targets_ignored` when the
+  only output outside the targets is a cached preview from an intermediate
+  node such as Crop Image or Painter, which ComfyUI can replay at the end of a
+  run. Only output nodes outside the targets count. The submitted graph's
+  output nodes are kept on the job record, since `jobs watch` has no node
+  catalog; older records and runs without the catalog keep the old check.
+
 ### Changed
+
+- The `comfy-build` skill now tells an agent not to write node code into a
+  build for node classes nothing installable provides (`unresolvedClasses`). It
+  stops before changing the spec, lists the classes, and asks the user how to go
+  on. `comfy-build-failures` says the same where it lists `unresolvedClasses`.
+
+- **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
+  longer returns every capability's description. The payload keeps the full
+  id-sorted `capabilities` list but drops `description` from its items on a
+  miss, and adds a bounded `candidates` array carrying the best-scoring
+  capabilities, most likely first, with their descriptions. A bare `comfy
+  knowledge pick` with no argument is unchanged and still carries every
+  description. On the shipped bundle the miss payload goes from 50,437 to
+  6,085 bytes, and for a phrase that scores against several rows the caller
+  now gets the ranked shortlist the resolver computed instead of a catalog it
+  has to search by hand.
 
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads
   anything, and names the node, its size and the limit. It packages the custom
@@ -38,6 +83,17 @@ history.
 
 ### Fixed
 
+- A `comfy workflow set-widget` edit keeps the frontend's name-keyed
+  `widgets_values_named` register coherent, not just on DynamicGroup nodes.
+  Editing any ordinary node published the new value positionally and left the
+  pre-edit value in that register, so a consumer restoring values by name
+  reverted the write — the frontend writes the register on every save and
+  prefers it when restoring. This implements Amendment A23 of the multiplayer
+  schema, which already specified the behaviour: update only a register that is
+  already a name-keyed object and already carries the name, and only when the
+  addressed widget is that name's final occurrence. A duplicated name is left
+  alone, because one name-keyed slot belongs to the final occurrence and writing
+  an earlier one's value there would be a corrupt read rather than a stale one.
 - `comfy workflow add-node` now names the successor for a deprecated family
   split by a format qualifier. Core's audio writers retire as `Save Audio
   (FLAC|MP3|Opus) (DEPRECATED)` with `Save Audio (Advanced)` as the live
@@ -47,7 +103,6 @@ history.
   before the qualifier, and only when exactly one live class of the same
   billing kind answers to it; a tie still reports no replacement rather than
   guessing.
-
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
@@ -59,6 +114,30 @@ history.
   jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
   now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
   the timeout.
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
+
+- The two dynamic-combo mismatch reports in UI→API conversion are logged at
+  ERROR, so the CLI's default `LOG_LEVEL` no longer drops them. A saved
+  `COMFY_DYNAMICCOMBO_V3` selector that names no option in the current schema
+  (a partner model renamed or removed server-side) leaves its sub-input slots
+  unconsumed and shifts every later widget — on a Seedance text-to-video graph
+  the prompt string lands in `seed` and a resolution string in `watermark`.
+  The converter cannot recover that alignment and reported it so the corruption
+  would not be silent, but the report was a WARNING and `setup_logging`
+  defaults the level to ERROR, so nothing was printed. The same applied to a
+  nesting chain past the expansion depth limit. Both tests asserted the record
+  was created under a forced `caplog` floor rather than that it survived the
+  level the CLI runs at; a third test now pins that.
+
+- `comfy download` with no `--out-dir` now resolves the output directory the
+  way it has always documented: the governing `project/1` root's `outputs/`,
+  else the `default_project_dir` config key's `outputs/`, else `./outputs`.
+  The option's default was the literal `./outputs`, which is truthy, so that
+  resolution was unreachable from the command and a download run from a
+  subdirectory of a project wrote to `<cwd>/outputs` instead of the project
+  root's. Passing `--out-dir`/`-o` is unchanged.
 
 ## [1.29.0] - 2026-11-24
 
@@ -189,6 +268,27 @@ history.
   the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
   downloads before upgrading, since an older version keeps its claims per
   workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- `comfy run` and `comfy run --emit-workflow` on a canvas (UI-format)
+  workflow now keep a record-valued widget on its own input, for any node
+  whose schema is readable and declares a widget input of its own. A node that
+  saves a record in `widgets_values` — `ImageCropV2`'s `crop_region`, a
+  CurveEditor's `curve` — was read as a Power Lora Loader row as soon as any
+  one of the node's widget values was a record, so that record was dropped
+  and the input was filled from the node's schema default instead. Nothing
+  warned and the job still ran: in the bundled `3d_pixal3d_multi_views`
+  template all four crops became the same 512x512 corner of the input image,
+  the four views fed to the conditioning node were identical, and the mesh
+  came out radially symmetric — while the same workflow queued from the
+  ComfyUI canvas was correct. The Lora-row shortcut now applies only to a
+  node that declares no widget slots of its own; a record it does not
+  understand is reported in a warning rather than discarded in silence; and a
+  malformed `type` key no longer raises a `TypeError` that drops the whole
+  node, valid Lora rows included. A legacy "no rows yet" Lora save
+  (`[{}, ""]`) keeps its markers off real sockets such as `model` and `clip`.
+  A node whose type is missing from the server's `object_info` has no schema to
+  read, so a self-naming record on such a node still goes down the Lora-row
+  path as before
+  ([#1011](https://github.com/Comfy-Org/comfy-cli/issues/1011)).
 
 ## [1.28.0] - 2026-11-18
 
@@ -329,6 +429,20 @@ history.
   Build picker. It needs no sign-in then, since it reads nothing from the
   builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
   when no Build is named, so it stays a string wherever it appears.
+- A `nodes` or `validate` command that cannot read `object_info` now names the
+  reason it actually hit instead of telling you to start a server that is
+  already running. Over the 64 MiB fetch cap, the hint says so and points at
+  the route that works — save the catalog and pass `--input` (the file loader
+  has no cap). The command it gives you is one you can paste: loud on failure
+  (`-f`, so a 401 body is never saved as a catalog), size-capped by
+  `--max-filesize` where the server states the size up front, and on a Comfy
+  Cloud target it carries the API key the fetch needs, since an anonymous one
+  cannot work there. For a non-loopback host in local
+  mode it names both real routes, `--where cloud` for Comfy Cloud and a saved
+  catalog for a self-hosted remote. The generic "pass `--input <path>`, or
+  start the server" hint is unchanged for every other load failure, and so is
+  that failure's `error.details`
+  ([comfy-mcp#252](https://github.com/Comfy-Org/comfy-mcp/issues/252)).
 
 ## [1.26.0] - 2026-11-11
 

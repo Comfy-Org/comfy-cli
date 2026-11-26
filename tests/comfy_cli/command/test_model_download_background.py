@@ -136,20 +136,26 @@ class TestStatePersistence:
 _OLD_S = download_state.PRUNE_MAX_AGE_S + 3600
 
 
-def _stamp(seconds_ago: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat(timespec="seconds")
+def _stamp(seconds_ago: float, base: datetime | None = None) -> str:
+    return ((base or datetime.now(timezone.utc)) - timedelta(seconds=seconds_ago)).isoformat(timespec="seconds")
 
 
-def _record(workspace, *, status="completed", age_s=0.0, dest=None):
+def _record(workspace, *, status="completed", age_s=0.0, dest=None, base=None):
     """Persist a state file with an exact age.
 
     Written by hand rather than through ``write()``, which stamps ``updated_at``
     with *now* and so can't produce the stale records prune is about.
+
+    ``base`` fixes the instant the age is measured from. A caller writing several
+    records whose *relative* order matters must pass one, because ``_stamp`` has
+    one-second resolution: without it each record is aged from its own ``now``,
+    so a loop that crosses a wall-clock second gives two records the same
+    ``started_at``, and ``_sort_key`` then falls through to the random id.
     """
     dest = Path(dest) if dest is not None else workspace / "m.safetensors"
     state = download_state.new(url="https://example.com/m.safetensors", dest=str(dest))
     state.status = status
-    state.started_at = state.updated_at = _stamp(age_s)
+    state.started_at = state.updated_at = _stamp(age_s, base)
     path = download_state.state_path(workspace, state.id)
     path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
     return state
@@ -238,8 +244,12 @@ class TestPrune:
 
     def test_the_cap_keeps_the_newest_records_and_evicts_oldest_first(self, workspace):
         cap = download_state.PRUNE_MAX_TERMINAL_RECORDS
+        # One base for every record: this test asserts the exact kept set at the
+        # cap boundary, so the records on either side of it must not be able to
+        # tie on `started_at`.
+        base = datetime.now(timezone.utc)
         # All well inside the 7-day window, so only the cap can remove them.
-        states = [_record(workspace, status="completed", age_s=i) for i in range(cap + 5)]
+        states = [_record(workspace, status="completed", age_s=i, base=base) for i in range(cap + 5)]
         newest = {s.id for s in states[:cap]}
 
         assert download_state.prune(workspace) == 5
