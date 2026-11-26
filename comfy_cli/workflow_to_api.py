@@ -2111,12 +2111,25 @@ def _schema_widget_pairs(
                     return
                 short = True
                 return
-            # A positional slot exists for this widget -- it is still consumed
-            # either way, so the walk's slot arithmetic (dynamic-combo/group
-            # expansion, companion-marker skipping) is unaffected by which
-            # value ends up in the pair. Only the VALUE prefers the named map,
-            # per widget, when the name is present there.
-            if use_named is not None and name in use_named:
+            # A positional slot exists for this widget and is consumed either
+            # way, so the named map changes only the VALUE in the pair, per
+            # widget, when the name is present there.
+            #
+            # EXCEPT where the value is not just a value: a dynamic group's
+            # value is its ROW COUNT and a dynamic combo's is its SELECTOR, and
+            # both decide how many further slots the walk consumes below. Those
+            # two stay positional, because the slot arithmetic is a statement
+            # about ``widgets_values`` and a map that disagrees with it there
+            # does not merely report a different value -- it desynchronises the
+            # walk from the array it is walking. Measured on
+            # ``dynamic_group.json``'s ``populated`` case: a map whose ``loras``
+            # read 1 against an array holding 2 rows put ``C.safetensors`` into
+            # the node's trailing ``after`` STRING input, and one reading 3
+            # raised ``DynamicGroup row count does not match the saved widget
+            # values`` on a workflow that converts cleanly. Neither is a value
+            # disagreement the map can legitimately express.
+            structural = spec[0] == "COMFY_DYNAMICGROUP_V3" or is_dynamic
+            if use_named is not None and not structural and name in use_named:
                 value = use_named[name]
             else:
                 value = widget_values[vidx]

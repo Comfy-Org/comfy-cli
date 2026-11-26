@@ -17,6 +17,10 @@ Mirrors ``@comfyorg/api-to-workflow``'s ``usableNamedValues``/``mapPositionalWid
 
 from __future__ import annotations
 
+import copy
+import json
+import pathlib
+
 import pytest
 
 from comfy_cli.workflow_to_api import _usable_named_values, convert_ui_to_api
@@ -200,3 +204,84 @@ def test_an_extra_name_in_the_map_is_ignored(object_info):
     inputs = _convert(node, object_info)
     assert inputs == {"width": 1024, "height": 768, "batch_size": 4}
     assert "unrelated_name" not in inputs
+
+
+# --------------------------------------------------------------------------- #
+# A-2, structural widgets: a dynamic group's row COUNT and a dynamic combo's
+# SELECTOR decide how many further slots the walk consumes, so they are read
+# from ``widgets_values`` even when the map covers them.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def dynamic_group_fixture() -> dict:
+    path = pathlib.Path(__file__).parent / "fixtures" / "dynamic_group.json"
+    return json.loads(path.read_text())
+
+
+def _group_case(dynamic_group_fixture: dict) -> tuple[dict, dict]:
+    """The ``populated`` case: 2 LoRA rows between a ``before`` and an ``after``
+    STRING, with a ``widgets_values_named`` map the frontend wrote in lockstep.
+    """
+    return (
+        copy.deepcopy(dynamic_group_fixture["cases"]["populated"]["workflow"]),
+        dynamic_group_fixture["object_info"],
+    )
+
+
+def test_a_disagreeing_group_count_does_not_shift_the_widgets_after_it(dynamic_group_fixture):
+    """The corruption a map-sourced row count causes, and the reason the count
+    is excluded from the named read.
+
+    Every name the positional walk sources from a real slot must be in the map
+    for it to be used at all — but a slot holding ``None`` is excluded from that
+    requirement, so ``after`` can legitimately be absent from the map and fall
+    back to its own positional slot. Let the map's ``loras`` (1) override the
+    array's row count (2) and the walk expands one row while the array holds
+    two, so ``after`` falls back to a slot that is no longer its own: the node's
+    trailing STRING input came out holding ``C.safetensors``, a LoRA filename.
+
+    The row count is a statement about ``widgets_values``. A map that disagrees
+    with it is not reporting a different value, it is desynchronising the walk
+    from the array it is walking.
+    """
+    workflow, object_info = _group_case(dynamic_group_fixture)
+    node = workflow["nodes"][0]
+    node["widgets_values"][-1] = None  # `after`'s slot is a hole...
+    node["widgets_values_named"].pop("after")  # ...so the map need not carry it
+    node["widgets_values_named"]["loras"] = 1  # ...and now disagrees on the count
+
+    inputs = convert_ui_to_api(workflow, object_info)["1"]["inputs"]
+
+    assert inputs["after"] is None
+    # Both rows the ARRAY holds are still there.
+    assert inputs["loras.1.lora_name"] == "C.safetensors"
+    assert inputs["loras.1.strength"] == 0.5
+
+
+def test_a_group_count_only_the_map_could_satisfy_does_not_fail_the_conversion(dynamic_group_fixture):
+    """Same exclusion, the other direction: a map-sourced count ABOVE the
+    array's made ``_dynamic_group_row_count`` reject the node outright —
+    ``DynamicGroup row count does not match the saved widget values`` — on a
+    workflow that converts cleanly without the map."""
+    workflow, object_info = _group_case(dynamic_group_fixture)
+    workflow["nodes"][0]["widgets_values_named"]["loras"] = 3
+
+    inputs = convert_ui_to_api(workflow, object_info)["1"]["inputs"]
+
+    assert inputs["before"] == "head"
+    assert inputs["after"] == "tail"
+    assert "loras.2.lora_name" not in inputs
+
+
+def test_a_groups_own_field_values_are_still_read_from_the_map(dynamic_group_fixture):
+    """The exclusion is the count, not the group. A row's own fields are
+    ordinary widgets and keep A-2's per-widget named read."""
+    workflow, object_info = _group_case(dynamic_group_fixture)
+    workflow["nodes"][0]["widgets_values_named"]["loras.1.strength"] = 0.25
+
+    inputs = convert_ui_to_api(workflow, object_info)["1"]["inputs"]
+
+    assert inputs["loras.1.strength"] == 0.25
+    assert inputs["loras.0.strength"] == 1
+    assert inputs["after"] == "tail"
