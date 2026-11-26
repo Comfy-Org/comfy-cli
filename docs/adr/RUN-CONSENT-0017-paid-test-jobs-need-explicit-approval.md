@@ -23,8 +23,8 @@ from successful execution. A timeout watches the original job, and the agent
 never submits a second job on its own. A yes covers the retries of that test the
 person asks for in the same conversation. The skill records it in
 `<work>/consent.json`, and a record from an earlier session counts only when the
-workflow, server, ComfyUI user, target, GPU, quoted price and the tested file's
-sha256 all match. A new target, GPU, price or unnamed partner node needs a new
+workflow, server, ComfyUI user, paying Cloud workspace, target, GPU, quoted
+price and the tested file's sha256 all match. A new target, GPU, price or unnamed partner node needs a new
 yes; a no is not remembered.
 
 ## Alternatives and consequences

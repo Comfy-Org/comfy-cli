@@ -1846,13 +1846,14 @@ def test_run_on_cloud_skill_remembers_a_test_job_yes():
     assert "Right after the person says yes, write `<work>/consent.json`" in text
     assert '"sha256": "<shasum -a 256 of the file the test runs>"' in text
     assert '"user": "<ComfyUI user or empty>"' in text
+    assert '"workspace": "<cloud_workspace.id>"' in text
     assert "do not ask again for a retry they ask for" in text
     assert "run the test and say it ran on their earlier yes" in text
     assert "that yes is the ask the prompt requires" in text
     assert (
         "A `consent.json` from an earlier session counts the same only when its `workflow`, `server`, `user`, "
-        "`target`, `gpu` and `price` match this run (the price you would quote now) and the file the test runs "
-        "still has its `sha256`" in text
+        "`workspace`, `target`, `gpu` and `price` match this run (the price you would quote now) and the file "
+        "the test runs still has its `sha256`" in text
     )
     assert "ask again when the target moves to another deployment or GPU" in text
     assert "A no is not remembered" in text
@@ -1924,11 +1925,13 @@ def test_run_on_cloud_skill_keeps_state_files_to_their_own_workflow():
     text = " ".join(skill_content("comfy-run-on-cloud").split())
     assert "plus the workflow's path after `workflows/` (subfolders included, no `.json`)" in text
     assert "`team/My flow (2)` gives `run-on-cloud/team-My-flow--2-`" in text
-    assert "the ComfyUI `user` (empty without a `ComfyUI user:` line)" in text
+    assert (
+        "the ComfyUI `user` (empty without a `ComfyUI user:` line) and the `workspace` (`cloud_workspace.id`)" in text
+    )
     assert "ignore either file when any of them differs from this run's" in text
     assert "a save with no `filename` (record-only) is replaced by a plain save" in text
     assert "`--expected-sha256` goes only with a `sha256` that is set" in text
-    assert "plus the `workflow` path, the `server` URL, the ComfyUI `user` and `saved_at`" in text
+    assert "plus the `workflow` path, the `server` URL, the ComfyUI `user`, the `workspace` and `saved_at`" in text
 
 
 def test_run_on_cloud_skill_quotes_every_file_placeholder():

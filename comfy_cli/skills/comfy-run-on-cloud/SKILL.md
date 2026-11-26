@@ -110,8 +110,9 @@ Work in one folder, `<work>`: `run-on-cloud/` plus the workflow's path after
 letter, digit, `-` or `_` turned into `-` (`team/My flow (2)` gives
 `run-on-cloud/team-My-flow--2-`). Two workflows can still map to one folder, so
 `saved.json` and `consent.json` (steps 6 and 7) record the `workflow` path, the
-`server` URL and the ComfyUI `user` (empty without a `ComfyUI user:` line);
-ignore either file when any of them differs from this run's. Quote
+`server` URL, the ComfyUI `user` (empty without a `ComfyUI user:` line) and the
+`workspace` (`cloud_workspace.id`); ignore either file when any of them differs
+from this run's. Quote
 every path. Put each name that comes from the workflow, the server or the disk
 in single quotes, writing a `'` inside it as `'\''`: inside double quotes the
 shell still runs `$(...)` and backticks.
@@ -462,15 +463,15 @@ and go to step 7.
 
 **A yes stands.** Right after the person says yes, write `<work>/consent.json`:
 `{"test_job": true, "workflow": "<path>", "server": "<url>", "user": "<ComfyUI
-user or empty>", "target": "<standard
+user or empty>", "workspace": "<cloud_workspace.id>", "target": "<standard
 or deployment id>", "gpu": "<GPU or null>", "price": "<what you quoted>",
 "sha256": "<shasum -a 256 of the file the test runs>", "partner_nodes": [...],
 "approved_at": "<date -u +%Y-%m-%dT%H:%M:%SZ>"}`. When they said yes earlier in
 this conversation, do not ask again for a retry they ask for: run the test and
 say it ran on their earlier yes; that yes is the ask the prompt requires. A
 `consent.json` from an earlier session counts the same only when its
-`workflow`, `server`, `user`, `target`, `gpu` and `price` match this run (the
-price you would quote now) and the file the test runs still has its `sha256`. Either way, ask again when the target moves to
+`workflow`, `server`, `user`, `workspace`, `target`, `gpu` and `price` match
+this run (the price you would quote now) and the file the test runs still has its `sha256`. Either way, ask again when the target moves to
 another deployment or GPU, or the workflow runs partner-API nodes the yes did
 not name. A no is not remembered.
 
@@ -586,7 +587,7 @@ Right after every save that succeeds, a replace or record-only save included
 (null for any field the envelope lacks), and before you reply, write
 `<work>/saved.json` with that envelope's `filename`, `workflow_id`, `sha256`,
 `url` and `deployment`, plus the `workflow` path, the `server` URL, the ComfyUI
-`user` and `saved_at` from `date -u +%Y-%m-%dT%H:%M:%SZ`. A
+`user`, the `workspace` and `saved_at` from `date -u +%Y-%m-%dT%H:%M:%SZ`. A
 stale `sha256` there makes the next replace fail.
 
 | replace error | what to do |

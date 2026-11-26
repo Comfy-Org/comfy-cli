@@ -1076,15 +1076,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "find the record with `comfy --json workflow list --name <data.name>`",
     ),
     ErrorCode(
-        "workflow_record_stale",
-        "`comfy workflow save --replace` wrote the Comfy Cloud Workflows-sidebar file, but Cloud's workflow "
-        "record of its name does not show the new content (Cloud's copy into the record can fail while the "
-        "file write succeeds), so `data.url` opens the folder with `data.folder_link_reason` `record_stale` "
-        "instead of a workflow link the editor would refuse. Surfaced in `data.warnings[]` (not as an error "
-        "envelope) because the file itself was saved.",
-        "open the folder link; the replaced file is there",
-    ),
-    ErrorCode(
         "api_format_saved_as_record",
         "`comfy workflow save` on a Comfy Cloud workspace that saves into Workflows-sidebar folders was given "
         "an API-format workflow. The sidebar opens files as editor graphs and would show it empty, so it was "
