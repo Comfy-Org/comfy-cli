@@ -2093,10 +2093,14 @@ class TestCaptureUiOnlyNodes:
         catches `RecipeError` alone — so iterating a non-list `groups` surfaced
         as a traceback on a file that used to capture clean.
         """
-        for bad in (1, True, "Sampling", {"title": "Sampling"}):
+        # The falsy half (`False`, `0`, `""`, `{}`) is the interesting half: a
+        # truthiness test folds those in with an absent field and reports
+        # nothing at all, which is the silent loss this warning exists to end.
+        bad_values = (1, True, "Sampling", {"title": "Sampling"}, False, 0, "", {}, None)
+        for i, bad in enumerate(bad_values):
             wf = _base_workflow()
             wf["groups"] = bad
-            cap = _run(["capture", str(_write(tmp_path, wf, f"wf-{type(bad).__name__}.json"))], capsys)
+            cap = _run(["capture", str(_write(tmp_path, wf, f"wf-bad-{i}.json"))], capsys)
             assert cap["ok"] is True, (bad, cap)
             warns = cap["data"]["warnings"]
             malformed = [w for w in warns if w["code"] == "group_field_malformed"]
@@ -2105,6 +2109,13 @@ class TestCaptureUiOnlyNodes:
             # Not reported as a dropped group — we do not know that it was one.
             assert not [w for w in warns if w["code"] == "group_dropped"]
             assert cap["data"]["recipe_doc"]["ops"]
+
+    def test_absent_and_empty_groups_are_not_reported_as_malformed(self, patched_graph, tmp_path, capsys):
+        """The other side of the presence/type check: both honestly mean "no groups"."""
+        for i, wf in enumerate((_base_workflow(), {**_base_workflow(), "groups": []})):
+            cap = _run(["capture", str(_write(tmp_path, wf, f"wf-ok-{i}.json"))], capsys)
+            assert cap["ok"] is True, cap
+            assert not [w for w in cap["data"].get("warnings", []) if w["code"].startswith("group_")]
 
     def test_group_warning_ellipsis_counts_untitled_groups(self, patched_graph, tmp_path, capsys):
         """Five groups, three titled: three names must not read as the whole list."""

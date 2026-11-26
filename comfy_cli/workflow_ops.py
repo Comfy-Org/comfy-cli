@@ -3265,8 +3265,13 @@ def _dropped_decoration_warnings(workflow: dict) -> list[dict]:
     """
     warnings: list[dict] = []
 
+    # Presence and type, NOT truthiness: `{"groups": false}` / `0` / `""` / `{}`
+    # are each a present field of the wrong shape, and a truthiness test would
+    # fold them in with an absent one and report nothing — the same silent loss
+    # this function exists to end. An absent field and `[]` stay warning-free,
+    # because both honestly mean "no groups here".
     groups_field = workflow.get("groups")
-    if groups_field and not isinstance(groups_field, list):
+    if "groups" in workflow and not isinstance(groups_field, list):
         found = type(groups_field).__name__
         warnings.append(
             {

@@ -1705,11 +1705,14 @@ already written the recipe. The escape (`output.sanitize.sanitize_markup`) sits
 at the pretty print sites, so `data.warnings` stays byte-identical for JSON
 consumers per that module's contract.
 
-**A `groups` field that is not an array is reported, not raised**
+**A `groups` field that is present and not an array is reported, not raised**
 (`group_field_malformed`, carrying `found_type`). `_load_workflow_or_fail`
 validates `nodes`/`links` only, so `{"groups": 1}` reaches `capture`; iterating
 it raised an uncaught `TypeError` out of a command that catches only
 `RecipeError`, and a string or dict iterated into nothing and reported nothing.
+The test is **presence and type, not truthiness**: `false`, `0`, `""` and `{}`
+are each a present field of the wrong shape and are reported as such, while an
+absent field and `[]` stay warning-free because both honestly mean "no groups".
 The recipe is built from `nodes`/`links` and is unaffected either way, and a
 file that captured before this amendment must still capture — so the
 malformation is reported (not knowing whether a group was dropped is itself
