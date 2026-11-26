@@ -69,6 +69,27 @@ history.
   large, so a push used to upload it and the release's build then failed.
   `build pull`, `build init`, `build update` and `build status` still read such
   a node, so a pull can drop it from the spec.
+- `comfy skills install --target` takes the names people type: `claude` for
+  `claude-code` and `AGENTS.md` for `agents-md`. Matching ignores case and
+  surrounding spaces, and passing two spellings of one target writes it once.
+  `--scope` is matched the same way. A refused value now says which mistake it
+  looks like — a flag the option swallowed, a path that is one of our own
+  destinations (pointed back at that target's name), a path meant for `--skill`,
+  or a name with no target — and both `--target` options' help names the three
+  choices, which it never did. `codex`, `aider` and the bare `agents` are
+  refused on purpose, each naming the reason: Codex reads `~/.codex/AGENTS.md`
+  rather than the `~/AGENTS.md` that `agents-md` writes at the default scope,
+  Aider loads a conventions file only when one is passed to it, and `agents` is
+  ambiguous with a `.agents/` directory. The follow-up notice an `agents-md`
+  install prints now matches the scope it wrote at: it said to run Codex "from
+  inside this directory", which is the answer at `--scope project` and no answer
+  at the default `--scope user`, where the file is `~/AGENTS.md` and Codex reads
+  it from nowhere — so it now points a user-scope install at `--scope project`
+  instead. Two paths that are not destinations no longer get pointed at one:
+  an `AGENTS.md` inside a tool's own dot-directory (`~/.codex/AGENTS.md`) is a
+  file this command does not write at any scope and now says so, and a skill
+  DIRECTORY under a destination (`~/.claude/skills/my-skill`) goes to `--skill`
+  like its `SKILL.md` already did.
 
 ### Removed
 

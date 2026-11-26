@@ -3223,7 +3223,7 @@ _RootGroup.lazy_subcommands = {
     ),
     "skills": LazySubcommand(
         "comfy_cli.skills.command",
-        help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
+        help="Install the comfy agent skills into Claude Code, Cursor, or an AGENTS.md other agents can read.",
     ),
     # Keep the singular alias for backward compat
     "skill": LazySubcommand("comfy_cli.skills.command", hidden=True),
