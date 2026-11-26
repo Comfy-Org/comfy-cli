@@ -139,6 +139,81 @@ def _object_info_with_deprecated() -> dict[str, Any]:
             "display_name": f"Export Image ({fmt})",
             "python_module": "nodes",
         }
+    # Flagged retired but NOT renamed: nothing was stripped, so there is no
+    # retirement rename to fall back along and the sibling variant below must
+    # not be offered.
+    info["VariantA"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": [],
+        "output_name": [],
+        "category": "image/variant",
+        "display_name": "Tint Image (Variant A)",
+        "deprecated": True,
+        "python_module": "nodes",
+    }
+    info["VariantB"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": [],
+        "output_name": [],
+        "category": "image/variant",
+        "display_name": "Tint Image (Variant B)",
+        "python_module": "nodes",
+    }
+    # A retired family whose only base-name sibling is live by FLAG but marked
+    # retired by NAME, plus the real successor. Offering the "(Legacy)" one, or
+    # letting it tie and hide the real one, are both wrong.
+    info["CropOld"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": [],
+        "output_name": [],
+        "category": "image/crop",
+        "display_name": "Crop Image (Box) (DEPRECATED)",
+        "deprecated": True,
+        "python_module": "nodes",
+    }
+    info["CropLegacyName"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": [],
+        "output_name": [],
+        "category": "image/crop",
+        "display_name": "Crop Image (Legacy)",
+        "python_module": "nodes",
+    }
+    info["CropAdvanced"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": [],
+        "output_name": [],
+        "category": "image/crop",
+        "display_name": "Crop Image (Advanced)",
+        "python_module": "nodes",
+    }
+    # A retired family whose only base-name sibling sits in a different pack
+    # and category: a same-base name elsewhere in the tree is a coincidence,
+    # not a successor.
+    info["MaskOld"] = {
+        "input": {"required": {"mask": "MASK"}},
+        "input_order": {"required": ["mask"]},
+        "output": [],
+        "output_name": [],
+        "category": "mask",
+        "display_name": "Blur Mask (Fast) (DEPRECATED)",
+        "deprecated": True,
+        "python_module": "nodes",
+    }
+    info["MaskOtherPack"] = {
+        "input": {"required": {"mask": "MASK"}},
+        "input_order": {"required": ["mask"]},
+        "output": [],
+        "output_name": [],
+        "category": "thirdparty/mask",
+        "display_name": "Blur Mask (Soft)",
+        "python_module": "custom_nodes.somebody_elses_pack",
+    }
     return info
 
 
@@ -222,6 +297,45 @@ class TestAddNode:
         assert env["error"]["code"] == "node_deprecated"
         assert env["error"]["details"]["replacement"] is None
         assert "nodes search" in env["error"]["hint"]
+
+    def test_a_flag_without_a_retirement_rename_offers_nothing(self, patched_graph, tmp_path, capsys):
+        """The fallback follows a retirement RENAME, and there is none here.
+
+        ``Tint Image (Variant A)`` is flagged ``deprecated: true`` but keeps its
+        own name, so nothing is stripped and no successor was ever registered
+        under a barer one. Falling back on the qualifier anyway offered the
+        unrelated sibling ``Tint Image (Variant B)`` — the bare-name guard
+        (``base == want``) cannot catch it, because a parenthetical name never
+        trips it.
+        """
+        path = _write(tmp_path, _base_workflow())
+        env = _run(workflow_cmd.app, ["add-node", str(path), "VariantA"], capsys)
+        assert env["error"]["code"] == "node_deprecated"
+        assert env["error"]["details"]["replacement"] is None
+
+    def test_a_candidate_retired_by_name_neither_answers_nor_hides_the_successor(self, patched_graph, tmp_path, capsys):
+        """Candidates are filtered on the ``deprecated`` FLAG, and a name can
+        say retired while the flag does not.
+
+        ``Crop Image (Legacy)`` is live by flag, so it reduced to base ``crop
+        image`` alongside the real successor ``Crop Image (Advanced)`` — two
+        matches, so the uniqueness check reported no replacement at all and hid
+        the successor behind a class that announces its own retirement.
+        """
+        path = _write(tmp_path, _base_workflow())
+        env = _run(workflow_cmd.app, ["add-node", str(path), "CropOld"], capsys)
+        assert env["error"]["code"] == "node_deprecated"
+        assert env["error"]["details"]["replacement"] == "CropAdvanced"
+
+    def test_a_same_base_name_in_another_pack_is_not_a_successor(self, patched_graph, tmp_path, capsys):
+        """Display names are not namespaced, so a third-party pack can hold a
+        class whose base name matches a retired core one by coincidence. The
+        caller substitutes ``replacement`` directly, so naming it would point
+        at a different author's node."""
+        path = _write(tmp_path, _base_workflow())
+        env = _run(workflow_cmd.app, ["add-node", str(path), "MaskOld"], capsys)
+        assert env["error"]["code"] == "node_deprecated"
+        assert env["error"]["details"]["replacement"] is None
 
     def test_no_replacement_across_billing_class(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _base_workflow())

@@ -100,9 +100,11 @@ history.
   successor, so stripping only `(DEPRECATED)` left `save audio (flac)`, matched
   nothing, and all three reported `"replacement": null` — the caller was told
   the class was retired but not what to use. The lookup falls back to the name
-  before the qualifier, and only when exactly one live class of the same
-  billing kind answers to it; a tie still reports no replacement rather than
-  guessing.
+  before the qualifier, and only when exactly one live class answers to it in
+  the same pack, category and billing kind, the retirement marker was actually
+  removed from the retired name, and the candidate does not announce its own
+  retirement by name; anything else still reports no replacement rather than
+  guessing, because the caller substitutes this class id directly.
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled

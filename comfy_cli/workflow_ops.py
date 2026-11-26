@@ -695,13 +695,38 @@ def _deprecated_replacement(graph, m) -> str | None:
     # class is retired and not what to use instead. Measured in production
     # 2026-11-23: an agent was refused SaveAudio with `"replacement": null`.
     #
-    # So fall back to the name before the qualifier, and only when exactly one
-    # live class answers to it. A tie stays None rather than becoming a guess,
-    # the same discipline the exact path already keeps for billing class.
+    # So fall back to the name before the qualifier — under four conditions,
+    # because "the only live class sharing a base display name" is not by itself
+    # a successor and a wrong `replacement` is worse than none. Callers
+    # substitute this id directly.
+    #
+    # 1. The retirement marker was actually REMOVED from this class's name. A
+    #    class flagged `deprecated: true` but merely NAMED `Foo (Variant A)`
+    #    leaves `want` untouched, so there is no retirement rename to follow and
+    #    `Foo (Variant B)` must not be offered.
+    # 2. A qualifier remains after it, so there is a family to fall back within.
+    # 3. The candidate is in the same pack and category — a same-base name in
+    #    another pack, or another part of the tree, is a coincidence.
+    # 4. The candidate is not itself marked retired BY NAME. `same_class`
+    #    filters on the `deprecated` FLAG, so a live-flagged `Save Audio
+    #    (Legacy)` would otherwise either be offered as the successor or tie
+    #    with `Save Audio (Advanced)` and hide it behind the uniqueness check.
+    #
+    # Then it answers only when exactly one candidate qualifies. A tie stays
+    # None rather than becoming a guess.
+    if want == m.display_name.strip().lower():
+        return None
     base = _display_base(want)
     if not base or base == want:
         return None
-    matches = {n.id for n in same_class if _display_base(n.display_name) == base}
+    matches = {
+        n.id
+        for n in same_class
+        if n.pack == m.pack
+        and n.category == m.category
+        and not _DEPRECATED_DISPLAY_SUFFIX.search(n.display_name)
+        and _display_base(n.display_name) == base
+    }
     return next(iter(matches)) if len(matches) == 1 else None
 
 
