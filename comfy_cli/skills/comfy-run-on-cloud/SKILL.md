@@ -471,8 +471,10 @@ this conversation, do not ask again for a retry they ask for: run the test and
 say it ran on their earlier yes; that yes is the ask the prompt requires. A
 `consent.json` from an earlier session counts the same only when its
 `workflow`, `server`, `user`, `workspace`, `target`, `gpu` and `price` match
-this run (the price you would quote now) and the file the test runs still has its `sha256`. Either way, ask again when the target moves to
-another deployment or GPU, or the workflow runs partner-API nodes the yes did
+this run (the price you would quote now) and `shasum -a 256` of the file the
+test runs, taken right before you submit it, still equals its `sha256`;
+otherwise ask again. Either way, ask again when the target moves to another
+deployment or GPU, or the workflow runs partner-API nodes the yes did
 not name. A no is not remembered.
 
 Otherwise ask in the first stop, once for whichever route they pick: "Would you like

@@ -1852,8 +1852,9 @@ def test_run_on_cloud_skill_remembers_a_test_job_yes():
     assert "that yes is the ask the prompt requires" in text
     assert (
         "A `consent.json` from an earlier session counts the same only when its `workflow`, `server`, `user`, "
-        "`workspace`, `target`, `gpu` and `price` match this run (the price you would quote now) and the file "
-        "the test runs still has its `sha256`" in text
+        "`workspace`, `target`, `gpu` and `price` match this run (the price you would quote now) and "
+        "`shasum -a 256` of the file the test runs, taken right before you submit it, still equals its "
+        "`sha256`; otherwise ask again" in text
     )
     assert "ask again when the target moves to another deployment or GPU" in text
     assert "A no is not remembered" in text
