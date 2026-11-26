@@ -3115,6 +3115,30 @@ class TestOutputNodeIdsCloud:
         assert ignored["code"] == "partial_execution_targets_ignored"
         assert ignored["untargeted_output_node_ids"] == ["2"]
 
+    def test_cached_preview_from_an_untargeted_intermediate_node_is_not_a_whole_graph_run(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """At the end of a run ComfyUI replays cached previews of
+        intermediate-output nodes (Crop Image, Painter, ...) even outside the
+        targets' subgraph. Those nodes are not output nodes, so their preview
+        does not mean the server ran the whole graph."""
+        wf = {
+            "1": {"class_type": "EmptyLatentImage", "inputs": {"width": 64, "height": 64, "batch_size": 1}},
+            "2": {"class_type": "ImageCrop", "inputs": {"image": ["1", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "b", "images": ["1", 0]}},
+        }
+        path = tmp_path / "intermediate.json"
+        path.write_text(json.dumps(wf))
+        object_info = {**_TARGET_OBJECT_INFO, "ImageCrop": {"category": "image", "output_node": False}}
+        record = {
+            "status": {"status_str": "success"},
+            "outputs": {"2": {"images": [{"filename": "crop.png"}]}, "3": {"images": [{"filename": "b.png"}]}},
+        }
+        _install_cloud_stubs(monkeypatch, client_cls=_recording_client(record), object_info=object_info)
+        lines, exit_code = _cloud_capture(capsys, str(path), wait=True, timeout=5, output_node_ids=["3"])
+        assert exit_code == 0
+        assert _envelope(lines)["data"]["warnings"] == []
+
     def test_async_run_records_targets_for_a_later_watch(self, monkeypatch, two_output_workflow_file, capsys):
         """Without --wait nothing checks the returned outputs at submit time,
         so the job record keeps the targets and their subgraph for
@@ -3134,6 +3158,9 @@ class TestOutputNodeIdsCloud:
         # Target 3 and the latent it reads; node 2 is outside the run graph.
         assert sorted(state.run_graph_node_ids) == ["1", "3"]
         assert state.output_node_ids_checked is True
+        # Output-class nodes of the whole graph, so `jobs watch` (no node
+        # catalog) can tell an extra output from a replayed intermediate preview.
+        assert sorted(state.graph_output_node_ids) == ["2", "3"]
         data = _envelope(lines)["data"]
         assert data["status"] == "queued"
         assert "comfy jobs watch cloud-pid --where cloud" in data["note"]

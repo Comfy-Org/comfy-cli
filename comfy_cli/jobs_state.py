@@ -29,6 +29,7 @@ State-file contract (the same shape across local and cloud):
       "output_node_ids": ["9", ...] | null,
       "run_graph_node_ids": ["9", "4", ...] | null,
       "output_node_ids_checked": true | false,
+      "graph_output_node_ids": ["9", "12", ...] | null,
       "client_id_borrowed": true | false
     }
 
@@ -40,7 +41,10 @@ files and local runs — readers must tolerate their absence.
 ``output_node_ids`` / ``run_graph_node_ids`` are written at submit by a cloud
 ``comfy run --output-node-ids``: the targets, and the node ids of the subgraph
 they run. ``output_node_ids_checked`` says whether the targets' classes were
-checked against the node catalog. ``comfy jobs status`` / ``jobs watch`` read
+checked against the node catalog. ``graph_output_node_ids`` lists the
+output-class nodes of the whole submitted graph (null when the catalog was not
+available), so a watcher can tell an extra output node from a replayed cached
+preview of an intermediate node. ``comfy jobs status`` / ``jobs watch`` read
 them to judge a finished targeted job the way ``comfy run --wait`` does. Null
 (and false) for untargeted runs and older files.
 
@@ -171,6 +175,9 @@ class JobState:
     output_node_ids: list[str] | None = None
     run_graph_node_ids: list[str] | None = None
     output_node_ids_checked: bool = False
+    # Output-class node ids of the whole submitted graph, or None when the
+    # node catalog was unavailable at submit (then every producer counts).
+    graph_output_node_ids: list[str] | None = None
     # True when `client_id` was borrowed from a live client via
     # `comfy run --client-id` rather than minted for this run. Re-attaching to a
     # borrowed id would evict that client's socket, so watchers must not.
