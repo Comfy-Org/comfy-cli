@@ -1496,6 +1496,13 @@ def test_unset_host_value_feeds_the_socket_the_interior_source_value(object_info
     sg = wf["definitions"]["subgraphs"][0]
     interior = next(n for n in sg["nodes"] if n["id"] == 500)
     interior["widgets_values"][0] = "interior prompt"
+    # Keep ``widgets_values_named`` in lockstep with the positional edit above --
+    # a real save always writes both together (comfy-cli#1106 mirrors this on
+    # every widget write); leaving the map at its old value here would make
+    # this fixture a hand-edited, internally-disagreeing file instead of the
+    # self-consistent save this test means to construct, and the converter now
+    # reads the (disagreeing) map by design (plan.md Item A, A-2).
+    interior["widgets_values_named"]["prompt"] = "interior prompt"
 
     api = convert_ui_to_api(wf, object_info)
 
@@ -1622,7 +1629,11 @@ def test_known_divergence_unset_host_value_fans_out_the_processed_dynamic_prompt
     wf = _load("image_qwen_image_2_1_image_edit.json")
     next(n for n in wf["nodes"] if n["id"] == 459)["widgets_values"] = []
     sg = wf["definitions"]["subgraphs"][0]
-    next(n for n in sg["nodes"] if n["id"] == 500)["widgets_values"][0] = "a {red|red} cat // note"
+    interior = next(n for n in sg["nodes"] if n["id"] == 500)
+    interior["widgets_values"][0] = "a {red|red} cat // note"
+    # See the lockstep comment above: keep the named map agreeing with the
+    # positional edit so this stays a self-consistent save.
+    interior["widgets_values_named"]["prompt"] = "a {red|red} cat // note"
 
     api = convert_ui_to_api(wf, object_info)
 

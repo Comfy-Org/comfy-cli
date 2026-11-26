@@ -1939,6 +1939,29 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
     return [option.get("key") for option in options if isinstance(option, dict)]
 
 
+def _usable_named_values(node: dict | None) -> dict[str, Any] | None:
+    """A node's ``widgets_values_named`` map when it is usable, else ``None``.
+
+    Ports ``usableNamedValues`` from ``@comfyorg/api-to-workflow``
+    (``src/converter/widgetMapper.ts`` in ``Comfy-Org/comfy-cloud-mcp-server``,
+    the package ``cql/engine.py``'s A23 write-side mirroring already follows).
+    A non-object or an array both read as absent -- ``isinstance(named, dict)``
+    covers both in Python, where a list is never a dict.
+
+    An EMPTY map is absent too. ``serialize()`` writes ``{}`` only when the node
+    has no widget it serializes at all, so an empty map carries no widget value
+    by construction, while treating it as present would be enough to make the
+    walk below run against a named map for a node whose ``widgets_values`` is
+    missing entirely -- fabricating values for widgets the file never mentioned.
+    """
+    if not isinstance(node, dict):
+        return None
+    named = node.get("widgets_values_named")
+    if not isinstance(named, dict) or not named:
+        return None
+    return named
+
+
 def _schema_widget_pairs(
     schema: Any,
     widget_values: list[Any],
@@ -2025,7 +2048,9 @@ def _schema_widget_pairs(
             names = listed + [n for n in names if n not in listed]
         ordered.extend((n, section_def[n]) for n in names)
 
-    def walk(strict: bool, saved_node: dict | None = node) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+    def walk(
+        strict: bool, saved_node: dict | None = node, use_named: dict[str, Any] | None = None
+    ) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
         # ``saved_node`` is the node whose recorded widget order sub-inputs are
         # expanded in; ``None`` means "ignore the save, use the catalog order".
         # ``strict`` assumes the current frontend's slot layout: every exact
@@ -2033,6 +2058,15 @@ def _schema_widget_pairs(
         # control keyword there is always consumed. Returns the pairs and
         # whether the walk used every value with no widget left short, plus
         # the warnings it would log (only the chosen walk's are emitted).
+        #
+        # ``use_named`` resolves each widget's value by name against
+        # ``widgets_values_named`` INSIDE this same walk, with a per-widget
+        # positional fallback -- not post-hoc substitution over the pairs this
+        # walk returns, which cannot work: a slot the array ran out of never
+        # gets a pair appended at all (see ``short`` below), so there would be
+        # nothing to substitute into. ``None`` leaves every widget positional,
+        # which is how the layout-selection calls below establish the
+        # candidate test's basis before any named lookup is attempted.
         pairs: list[tuple[str, Any]] = []
         warnings: list[tuple[Any, ...]] = []
         vidx = 0
@@ -2077,7 +2111,28 @@ def _schema_widget_pairs(
                     return
                 short = True
                 return
-            value = widget_values[vidx]
+            # A positional slot exists for this widget and is consumed either
+            # way, so the named map changes only the VALUE in the pair, per
+            # widget, when the name is present there.
+            #
+            # EXCEPT where the value is not just a value: a dynamic group's
+            # value is its ROW COUNT and a dynamic combo's is its SELECTOR, and
+            # both decide how many further slots the walk consumes below. Those
+            # two stay positional, because the slot arithmetic is a statement
+            # about ``widgets_values`` and a map that disagrees with it there
+            # does not merely report a different value -- it desynchronises the
+            # walk from the array it is walking. Measured on
+            # ``dynamic_group.json``'s ``populated`` case: a map whose ``loras``
+            # read 1 against an array holding 2 rows put ``C.safetensors`` into
+            # the node's trailing ``after`` STRING input, and one reading 3
+            # raised ``DynamicGroup row count does not match the saved widget
+            # values`` on a workflow that converts cleanly. Neither is a value
+            # disagreement the map can legitimately express.
+            structural = spec[0] == "COMFY_DYNAMICGROUP_V3" or is_dynamic
+            if use_named is not None and not structural and name in use_named:
+                value = use_named[name]
+            else:
+                value = widget_values[vidx]
             vidx += 1
             if spec[0] == "COMFY_DYNAMICGROUP_V3":
                 template = spec[1].get("template", {})
@@ -2140,8 +2195,11 @@ def _schema_widget_pairs(
     # the current layout first and keep it only when it accounts for every
     # value exactly; otherwise fall back to the lenient walk, which refuses to
     # take a keyword the next COMBO lists.
+    chosen_strict = True
+    chosen_saved_node = node
     pairs, exact, warnings = walk(strict=True)
     if not exact:
+        chosen_strict = False
         pairs, exact, warnings = walk(strict=False)
     if not exact and node is not None:
         # Neither stream shape accounts for the array under the SAVED sub-order.
@@ -2165,8 +2223,51 @@ def _schema_widget_pairs(
         for catalog_strict in (True, False):
             catalog_pairs, catalog_exact, catalog_warnings = walk(strict=catalog_strict, saved_node=None)
             if catalog_exact:
-                pairs, warnings = catalog_pairs, catalog_warnings
+                pairs, exact, warnings = catalog_pairs, catalog_exact, catalog_warnings
+                chosen_strict, chosen_saved_node = catalog_strict, None
                 break
+
+    # Candidate test for ``widgets_values_named``, applied against the layout
+    # this walk already chose above (purely from the positional structure,
+    # unaffected by any named lookup). Mirrors the package's basis
+    # (``widgetMapper.ts:1660-1664``): every widget this positional-only pass
+    # sourced from a REAL (non-``None``) slot must be present, and non-``None``,
+    # in the map. Vacuously true (and so usable) when the positional pass
+    # produced no such name, same as an empty ``every`` in the reference
+    # implementation.
+    #
+    # Two slots are excluded from the requirement, and they are NOT symmetric:
+    #
+    # * A widget with no slot at all stays short and takes its schema default,
+    #   here and in the named walk alike. ``widgets_values``'s LENGTH is what
+    #   decides which widgets the save addressed, so a map naming a widget the
+    #   array never reached does not materialise it -- the map supplies values
+    #   for widgets, not the set of widgets.
+    # * A ``None`` slot -- what ``serialize()`` leaves for a widget it does not
+    #   serialize -- is excluded so a map need not carry it, which is what makes
+    #   the per-widget fallback work. The map MAY still name it, and then the
+    #   named walk emits that value in place of the ``None``. So the two
+    #   readings do not agree here; the map wins, consistent with preferring it
+    #   everywhere else.
+    named = _usable_named_values(node)
+    if named is not None:
+        positional_names = {name for name, value in pairs if value is not None}
+        if all(name in named and named[name] is not None for name in positional_names):
+            named_pairs, named_exact, named_warnings = walk(
+                strict=chosen_strict, saved_node=chosen_saved_node, use_named=named
+            )
+            # Adopt the named walk only when it walked the SAME STRUCTURE: as
+            # exact as the chosen positional walk, over the same widget names in
+            # the same order. Keeping the group row count and the dynamic-combo
+            # selector positional above should already make that identity hold
+            # by construction, since nothing else in ``consume`` derives slot
+            # consumption from the value -- this enforces it instead of relying
+            # on that staying true. A named walk that diverges is not a
+            # different set of values, it is a walk desynchronised from the
+            # array, and the positional result is the one to keep.
+            if named_exact == exact and [name for name, _ in named_pairs] == [name for name, _ in pairs]:
+                pairs, warnings = named_pairs, named_warnings
+
     for warning in warnings:
         # ERROR, not WARNING, for the same reason `tracking.py` gives for its
         # own: the CLI's default LOG_LEVEL is ERROR (see
