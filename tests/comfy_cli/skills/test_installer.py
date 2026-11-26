@@ -904,6 +904,8 @@ def test_run_on_cloud_skill_explains_workflow_and_folder_links():
         "`record_ambiguous`",
         "`record_lookup_failed`",
         "`workflow_record_unknown`",
+        "`record_stale`",
+        "`workflow_record_stale`",
         "Cloud checks the link against the saved file when it opens",
         "not listed here as `folder`",
         "`data.filename`",

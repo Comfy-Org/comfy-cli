@@ -604,7 +604,9 @@ workflow in the new folder
 `data.folder_link_reason` saying why: `workflow_links_off`, or
 `record_not_found`, `record_ambiguous` or `record_lookup_failed` (the save could
 not tell which workflow Cloud made; `data.warnings[]` carries
-`workflow_record_unknown`). Read any value not listed here as `folder`.
+`workflow_record_unknown`), or `record_stale` (a replace whose workflow record
+Cloud did not update; `workflow_record_stale`). Read any value not listed here
+as `folder`.
 
 No `data.url` but `data.filename`: the file is in the sidebar but the CLI could
 not build a link; give `data.filename`. Neither: the save is a record only,

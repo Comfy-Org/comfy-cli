@@ -1419,13 +1419,16 @@ _REPLACE_FILE_URL = "https://cloud.example.com/api/userdata/workflows%2Fflux%2Ff
 _OLD_BYTES = json.dumps({"nodes": [], "links": [], "version": 0.4}).encode()
 
 
-def _replace_cloud(features=_FLAG_ON, *, files=None, ids=None, read_error=None):
+def _replace_cloud(features=_FLAG_ON, *, files=None, ids=None, read_error=None, record_content=None):
     """A fake Cloud holding sidebar ``files`` (key under ``workflows/`` -> bytes).
 
     Each file is mirrored into a live record named after its path, as Cloud
     does; ``ids`` maps a record name to its id (default ``rec-<name>``). A
-    file write must say ``overwrite=true``, and a file read takes no query.
-    ``read_error``, when set, is raised by the file read.
+    record's content is its file's, unless ``record_content`` is set: then
+    every record answers that (a dict, or an error to raise), as when Cloud's
+    copy into the record failed. A file write must say ``overwrite=true``,
+    and a file read takes no query. ``read_error``, when set, is raised by
+    the file read.
     """
     import urllib.parse
 
@@ -1457,6 +1460,15 @@ def _replace_cloud(features=_FLAG_ON, *, files=None, ids=None, read_error=None):
                 {"id": ids.get(n, f"rec-{n}"), "name": n, "latest_version": 2} for n in names if needle in n.lower()
             ]
             return {"data": rows, "pagination": {"total": len(rows), "limit": 100, "offset": 0}}
+        if parsed.path.startswith("/api/workflows/") and parsed.path.endswith("/content") and method == "GET":
+            if record_content is not None:
+                return record_content
+            record_id = urllib.parse.unquote(parsed.path.removeprefix("/api/workflows/").removesuffix("/content"))
+            for key, raw in files.items():
+                name = key.removesuffix(".json")
+                if ids.get(name, f"rec-{name}") == record_id:
+                    return {"version": 2, "workflow_json": json.loads(raw)}
+            return _http_error(404)
         raise AssertionError(f"unexpected {method} {url}")
 
     return handler
@@ -1520,6 +1532,32 @@ class TestSaveReplace:
         (post,) = _posts(calls)
         assert post["body"] == wf_path.read_bytes()
         assert not any(c["method"] in ("PUT", "DELETE") for c in calls)
+
+    @pytest.mark.parametrize(
+        "record_content",
+        [
+            pytest.param({"version": 1, "workflow_json": json.loads(_OLD_BYTES)}, id="record-kept-the-old-content"),
+            pytest.param(_http_error(500), id="record-read-failed"),
+        ],
+    )
+    def test_links_the_folder_when_the_record_does_not_show_the_replace(
+        self, cloud_target, wf_path, monkeypatch, capsys, record_content
+    ):
+        # Cloud answers the file write 200 even when its copy into the record
+        # fails; the editor would refuse a workflowId link to that record.
+        _patch_cloud(
+            monkeypatch,
+            _replace_cloud(_LINKS_ON, ids={"flux/flux": _WORKFLOW_UUID}, record_content=record_content),
+        )
+        env = self._replace(wf_path, capsys)
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["replaced"] is True
+        assert data["workflow_id"] == _WORKFLOW_UUID
+        assert data["url"] == "https://cloud.example.com/?workspace=ws_123&workflows=flux&deployment=standard"
+        assert data["url_opens"] == "folder"
+        assert data["folder_link_reason"] == "record_stale"
+        assert [w["code"] for w in data["warnings"]] == ["workflow_record_stale"]
 
     def test_the_workflows_prefix_is_optional(self, cloud_target, wf_path, monkeypatch, capsys):
         calls = _patch_cloud(monkeypatch, _replace_cloud())

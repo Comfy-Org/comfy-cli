@@ -250,6 +250,7 @@ LEGACY_WARNING_REGISTRATIONS = frozenset(
         "ui_only_link_dropped",
         "ui_only_node_skipped",
         "workflow_content_not_json",
+        "workflow_record_stale",
         "workflow_record_unknown",
         "workspace_unknown",
     }

@@ -1627,6 +1627,22 @@ def _cloud_saved_record(target, name: str) -> tuple[dict | None, str | None]:
     return rows[0], None
 
 
+def _cloud_record_holds(target, workflow_id: str, data: bytes) -> bool:
+    """Whether the record's latest version is the workflow ``data`` holds.
+
+    Cloud answers a file write 200 even when its copy into the record of the
+    file's name fails, and the editor refuses a ``workflowId`` link whose record
+    differs from the file. A failed or odd read answers False.
+    """
+    import urllib.parse
+
+    try:
+        _, content = _http_request(target.url("workflows", urllib.parse.quote(workflow_id, safe=""), "content"), target)
+        return isinstance(content, dict) and content.get("workflow_json") == json.loads(data)
+    except (*_request_errors(), RecursionError):
+        return False
+
+
 def _cloud_link_id(value: Any) -> str | None:
     return value if isinstance(value, str) and _LINK_ID_PATTERN.fullmatch(value) else None
 
@@ -1909,6 +1925,11 @@ def _emit_cloud_sidebar_save(
     latest_version = record.get("latest_version") if record else None
     workspace_id = _cloud_workspace_id(target)
     link_workflow_id = workflow_id if workflow_links else None
+    # A replace adds a version to a record that already exists, and Cloud's copy
+    # into it can fail behind a 200: link the record only once it shows the bytes.
+    record_stale = bool(replaced and link_workflow_id and not _cloud_record_holds(target, link_workflow_id, data))
+    if record_stale:
+        link_workflow_id = None
     url = _cloud_save_link(
         target,
         workspace_id=workspace_id,
@@ -1919,7 +1940,10 @@ def _emit_cloud_sidebar_save(
     url_opens = None if url is None else ("workflow" if link_workflow_id else "folder")
     folder_link_reason = None
     if url_opens == "folder":
-        folder_link_reason = record_unknown if workflow_links else "workflow_links_off"
+        if record_stale:
+            folder_link_reason = "record_stale"
+        else:
+            folder_link_reason = record_unknown if workflow_links else "workflow_links_off"
     # ``workflow_id``, ``name``, ``latest_version`` and ``source`` keep their
     # record-save meaning: the id is the record Cloud mirrored the file into,
     # which `workflow get` and `workflow delete` take.
@@ -1955,6 +1979,14 @@ def _emit_cloud_sidebar_save(
                 "code": "workspace_unknown",
                 "message": f"Cloud did not say which workspace the save went to, so the link opens the {url_opens} "
                 "in the browser's current workspace",
+            }
+        )
+    if record_stale:
+        warnings.append(
+            {
+                "code": "workflow_record_stale",
+                "message": "the file is replaced, but Cloud's workflow record of its name does not show the new "
+                "content, so the link opens the folder",
             }
         )
     if workflow_id is None:

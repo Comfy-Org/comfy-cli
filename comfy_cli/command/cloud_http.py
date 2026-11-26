@@ -65,6 +65,7 @@ def http_request(
     body: dict | None = None,
     timeout: float = 30.0,
     strict_json: bool = False,
+    follow_redirects: bool = True,
 ) -> tuple[int, dict | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
     urllib errors verbatim so callers can surface the right error code.
@@ -81,6 +82,11 @@ def http_request(
 
     A body longer than ``_MAX_BODY_BYTES``, chunked or not, is never parsed; it
     gets the decode-failure outcome, since the bytes read are not the whole answer.
+
+    The default opener follows a redirect with the credential header copied onto
+    it, whatever host it points at. ``follow_redirects=False`` sends the request
+    through the shared no-redirect opener instead: a 30x raises ``HTTPError``, and
+    a credential goes only to an https or loopback URL.
     """
     import http.client
     import urllib.request
@@ -88,7 +94,15 @@ def http_request(
     data = json.dumps(body).encode("utf-8") if body is not None else None
     ct = "application/json" if data is not None else None
     req = _authed_request(url, target, method=method, data=data, content_type=ct)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    if follow_redirects:
+        opener = urllib.request.urlopen
+    else:
+        from comfy_cli.http import assert_safe_url, no_redirect_urlopen
+
+        if target.api_key or target.auth_token:
+            assert_safe_url(url)
+        opener = no_redirect_urlopen
+    with opener(req, timeout=timeout) as resp:
         status = resp.status
         # One byte past the cap tells a body longer than the cap apart from one
         # exactly the cap, with or without a Content-Length.

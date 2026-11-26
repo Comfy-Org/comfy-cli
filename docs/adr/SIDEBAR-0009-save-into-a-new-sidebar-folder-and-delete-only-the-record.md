@@ -36,7 +36,8 @@ only if it still holds what the CLI last read.
   installed CLI back to the record save without a release.
 - With the flag on, an editor-format workflow (one with `nodes[]`) is written as
   `workflows/<folder>/<name>.json` with `POST /api/userdata/...?overwrite=false`.
-  No existing file is ever replaced. An API-format workflow keeps the record
+  A plain save never replaces an existing file (`--replace`, below, is the one
+  explicit exception). An API-format workflow keeps the record
   save, since the sidebar opens a file as an editor graph.
 - A folder is used only when it holds no file at any depth and no live record
   is named `<folder>/<name>`. Otherwise the CLI moves on to `<name> (2)`, up to
@@ -73,6 +74,10 @@ making a new folder per save.
 - Cloud's file POST takes no condition, so the read-then-write leaves a small
   race: an edit that lands between the read and the write is lost. The window
   is one round trip.
+- Cloud answers the write 200 even when its copy into the record fails. A
+  replace links the record (ADR-SIDEBAR-0013) only when the record's latest
+  content equals the bytes written; otherwise the link opens the folder, with
+  `folder_link_reason` `record_stale` and the `workflow_record_stale` warning.
 
 ## Alternatives considered
 

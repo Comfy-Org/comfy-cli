@@ -22,7 +22,9 @@ history.
   (only an existing file; `workflow_replace_missing` otherwise), and
   `--expected-sha256 <data.sha256>` refuses with `workflow_replace_changed`
   when it was edited on Cloud since. Sidebar saves now return `replaced` and
-  `sha256`.
+  `sha256`. A replace links the workflow only when Cloud's record of it shows
+  the new content; otherwise the link opens the folder (`record_stale`, with a
+  `workflow_record_stale` warning).
 
 ### Changed
 
@@ -67,7 +69,9 @@ history.
   A model nobody holds is still refused, and the hint now says what the library
   said: no such model, the upload's name when it sits under another folder, or
   that the library could not be read. A workflow that names only Cloud's own
-  models makes no extra request.
+  models makes no extra request. The library lookup, `comfy workflow check`'s
+  included, refuses a redirect instead of following it with the Cloud
+  credentials attached.
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
