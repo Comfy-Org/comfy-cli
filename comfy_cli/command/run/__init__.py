@@ -966,7 +966,8 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair,
     whose second element is None when the write could not land.
 
-    ``targets`` is the ``(output_node_ids, run_graph, ids_checked)`` triple of
+    ``targets`` is the ``(output_node_ids, run_graph, ids_checked,
+    graph_output_node_ids)`` tuple of
     a cloud ``--output-node-ids`` run, recorded so ``comfy jobs watch`` can
     judge the finished job; see :func:`_record_targets`.
 
@@ -995,14 +996,19 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     return state, state_file
 
 
-def _record_targets(state, output_node_ids, run_graph: dict, ids_checked: bool) -> None:
+def _record_targets(
+    state, output_node_ids, run_graph: dict, ids_checked: bool, graph_output_node_ids: list[str] | None = None
+) -> None:
     """Stamp a ``--output-node-ids`` run's targets on its job record. A no-op
-    for an untargeted run, so its record keeps the null defaults."""
+    for an untargeted run, so its record keeps the null defaults.
+    ``graph_output_node_ids`` (output-class nodes of the whole graph) is kept
+    because ``comfy jobs watch`` has no node catalog to tell them apart."""
     if not output_node_ids:
         return
     state.output_node_ids = list(output_node_ids)
     state.run_graph_node_ids = [str(nid) for nid in run_graph]
     state.output_node_ids_checked = bool(ids_checked)
+    state.graph_output_node_ids = list(graph_output_node_ids) if graph_output_node_ids is not None else None
 
 
 def _announce_async_queued(
@@ -1092,6 +1098,21 @@ def _count_output_nodes(workflow: dict, object_info: dict) -> int | None:
         if isinstance(spec, dict) and spec.get("output_node") is True:
             count += 1
     return count
+
+
+def _output_class_node_ids(workflow: dict, object_info: dict) -> list[str] | None:
+    """Ids of the nodes in ``workflow`` whose class is an output node, per
+    ``object_info``. None when object_info is empty/unknown, so callers can
+    tell "no output nodes" from "could not check"."""
+    if not object_info:
+        return None
+    ids = []
+    for nid, node in workflow.items():
+        ct = node.get("class_type") if isinstance(node, dict) else None
+        spec = object_info.get(ct) if isinstance(ct, str) else None
+        if isinstance(spec, dict) and spec.get("output_node") is True:
+            ids.append(str(nid))
+    return ids
 
 
 def parse_output_node_ids(raw: str | list[str]) -> list[str]:
@@ -1185,7 +1206,13 @@ def _nodes_with_outputs(record: dict) -> list[str]:
     ]
 
 
-def _targeted_run_warnings(record: dict, output_node_ids: list[str], run_graph: dict, ids_checked: bool) -> list[dict]:
+def _targeted_run_warnings(
+    record: dict,
+    output_node_ids: list[str],
+    run_graph: dict,
+    ids_checked: bool,
+    graph_output_node_ids: list[str] | None = None,
+) -> list[dict]:
     """Warnings for a ``--output-node-ids`` cloud run, judged on its targets.
 
     ``partial_execution`` when a target produced nothing: the rest of the graph
@@ -1197,7 +1224,11 @@ def _targeted_run_warnings(record: dict, output_node_ids: list[str], run_graph: 
     ``partial_execution_targets_ignored`` when a node outside the targets'
     subgraph produced outputs: the server ran more than was asked for (one
     that predates ``partial_execution_targets`` drops it and runs the whole
-    graph, including any branch the user meant to skip)."""
+    graph, including any branch the user meant to skip). Only output-class
+    nodes count when ``graph_output_node_ids`` is known: at the end of a run
+    ComfyUI replays the cached previews of intermediate-output nodes (Crop
+    Image, Painter, ...) outside the targets too, and those alone do not mean
+    the whole graph ran. Without the node catalog every producing node counts."""
     produced = _nodes_with_outputs(record)
     missing = [nid for nid in output_node_ids if nid not in produced]
     warnings: list[dict] = []
@@ -1221,6 +1252,9 @@ def _targeted_run_warnings(record: dict, output_node_ids: list[str], run_graph: 
             }
         )
     untargeted = [nid for nid in produced if nid not in run_graph]
+    if graph_output_node_ids is not None:
+        output_class = set(graph_output_node_ids)
+        untargeted = [nid for nid in untargeted if nid in output_class]
     if untargeted:
         warnings.append(
             {
@@ -1559,7 +1593,12 @@ def execute_cloud(
             workflow_name,
             where="cloud",
             compose_meta=compose_meta,
-            targets=(output_node_ids, run_graph, bool(cloud_object_info)),
+            targets=(
+                output_node_ids,
+                run_graph,
+                bool(cloud_object_info),
+                _output_class_node_ids(parsed_workflow, cloud_object_info),
+            ),
             base_url=target.base_url,
         )
         _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1609,7 +1648,13 @@ def execute_cloud(
         base_url=target.base_url,
     )
     state.item_map = (compose_meta or {}).get("items")
-    _record_targets(state, output_node_ids, run_graph, bool(cloud_object_info))
+    _record_targets(
+        state,
+        output_node_ids,
+        run_graph,
+        bool(cloud_object_info),
+        _output_class_node_ids(parsed_workflow, cloud_object_info),
+    )
     jobs_state.stamp_watcher_identity(state)
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")
@@ -1776,7 +1821,15 @@ def execute_cloud(
         # vanished branch surfaces instead of passing as a clean success.
         warnings: list[dict] = []
         if output_node_ids:
-            warnings.extend(_targeted_run_warnings(record, output_node_ids, run_graph, bool(cloud_object_info)))
+            warnings.extend(
+                _targeted_run_warnings(
+                    record,
+                    output_node_ids,
+                    run_graph,
+                    bool(cloud_object_info),
+                    _output_class_node_ids(parsed_workflow, cloud_object_info),
+                )
+            )
         else:
             submitted_outputs = _count_output_nodes(parsed_workflow, cloud_object_info)
             returned_outputs = _returned_output_node_count(record)

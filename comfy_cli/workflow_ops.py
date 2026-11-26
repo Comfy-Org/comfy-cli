@@ -78,6 +78,7 @@ from comfy_cli.cql.engine import (
     DynamicGroupBindingError,
     SavedWidgetLayoutError,
     _dynamic_group_widgets,
+    _update_named_widget_value,
     _validate_dynamic_group_layout,
     _widgets_as_positional,
     frontend_injected_widget_error,
@@ -1738,7 +1739,39 @@ def _set_widget_impl(
         else:
             pi = _promoted.find_promoted(sg, defs, widget)
             promoted_meta["value_index"] = pi.value_index
-            old = _promoted.effective_value(workflow, instance, widget, graph)
+            # Materializing declared-order values while legacy tuples remain
+            # makes a later migration reinterpret them in proxy order.
+            plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs)
+            # While this widget's own legacy tuple is still pending (an
+            # ``alreadyLinked`` entry: the definition already declares the
+            # input, but the instance's ``widgets_values`` is still laid out
+            # in proxyWidgets order because nothing has flushed it yet), a
+            # declaration-order read (``effective_value`` -> ``host_value``
+            # indexing by ``pi.value_index``) can land on a different widget's
+            # slot than the legacy array actually holds. Read the previous
+            # value from the plan's own record of that legacy slot instead —
+            # it was read positionally by the ORIGINAL proxyWidgets order —
+            # falling back to the interior source when that slot is a hole.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941919
+            pending_link = next((e for e in plan if e.plan == _promoted.PLAN_ALREADY_LINKED and e.name == widget), None)
+            if pending_link is not None:
+                old = pending_link.host_value
+                if old is _promoted.UNSET:
+                    old = _promoted.source_value(workflow, sg, pi, graph, defs)
+            else:
+                old = _promoted.effective_value(workflow, instance, widget, graph)
+            # Fork + flush only when something would actually CHANGE: a plan
+            # of only ``alreadyLinked``/``quarantine`` entries leaves the
+            # definition exactly as ``flush_proxy_migration`` found it, so
+            # forcing ``_isolate_shared_subgraph`` to fork the (possibly
+            # shared) definition for it forks it for nothing — the instance
+            # permanently stops sharing definition edits with its siblings
+            # over an op that would not have written anything structural.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+            if any(e.repairable for e in plan):
+                promoted_meta["repair"] = {
+                    "ids": _promoted.plan_repair_ids(list(target.segments), plan),
+                }
         inner_type, port = _engine.promoted_source_port(sg, pi, defs, graph)
         value, norm_note = _normalize_combo(graph, inner_type, port.name if port else widget, value)
         warnings: list[dict] = []
@@ -4148,10 +4181,6 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
-    # Last-writer-wins: a lower-stamped concurrent write to this target is
-    # dropped, so the surviving value is the same in any apply order.
-    if not _lww_gate(workflow, op):
-        return
     promoted_write = op.get("promoted")
     if promoted_write:
         # Host-owned value of a promoted subgraph input (cql.promoted). The
@@ -4163,21 +4192,90 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
         instance_path = [str(s) for s in promoted_write.get("instance_path") or [str(op["node_id"])]]
         if _find_by_str(workflow, instance_path[0]) is None:
             return  # instance concurrently deleted => no-op (delete wins)
+        # Validate the WHOLE path against the current definition before the
+        # mutating resolver below forks shared ancestors along it. A nested
+        # host (``instance_path`` longer than one segment) is reached by
+        # forking every non-terminal hop en route — unconditionally, before
+        # the final segment is even looked up — so a concurrently-deleted
+        # interior host made ``_resolve_node_path`` raise ValueError only
+        # AFTER it had already forked every ancestor's shared definition,
+        # and ``apply_op``'s rollback does not undo a definition fork: the
+        # fork leaked on every concurrent-delete race. Only the top-level
+        # segment had this guard; extend it the same way the plain interior
+        # write branch below already guards its own path.
+        # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514882
+        if len(instance_path) > 1:
+            try:
+                _navigate_subgraph_path(workflow, instance_path)
+            except ValueError:
+                if _interior_path_deleted(workflow, instance_path):
+                    return  # interior host concurrently deleted => no-op (delete wins)
+                raise
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
-        repair = promoted_write.get("repair")
-        if repair:
-            # Legacy ``proxyWidgets`` promotion: repair the instance's
-            # definition (the frontend's forward migration) before the host
-            # write. The definition is MUTATED, so a shared one is forked
-            # first (deterministic fork id), and the input/link ids come from
-            # the op — replay anywhere yields the same document. Re-resolved
-            # against the current graph: an entry another replica already
-            # repaired is consumed as already linked.
-            _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
+        # Legacy ``proxyWidgets`` promotion: repair the instance's definition
+        # (the frontend's forward migration) before the host write, the same
+        # way the op's own creation decided to. Recomputed from the CURRENT
+        # document rather than trusting ``promoted_write.get("repair")`` —
+        # only the first write that ever observed the pending migration on
+        # its originating replica carries that payload; a later write to the
+        # same widget on that replica no longer does, because by then the
+        # migration had already run locally. If that later (higher-stamped)
+        # op is the one a peer replica meets FIRST, gating the flush on the
+        # op's own ``repair`` field would skip it there, and the earlier,
+        # repair-carrying op can then lose the LWW gate below and never run
+        # it either — leaving that replica permanently unmigrated while
+        # others converge. The repair itself is deterministic and idempotent
+        # (derived ids, a no-op once already flushed), so running it from
+        # live document state on every apply — independent of this op's own
+        # LWW outcome for the VALUE — converges regardless of delivery order.
+        # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941925
+        plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs_by_id)
+        # Without a catalog ``flush_proxy_migration`` cannot resolve any
+        # interior widget, so it raises rather than quarantine everything
+        # (see its own docstring) -- correct when something actually asked
+        # it to run the repair, but the flush below now also runs for an
+        # ORDINARY declared-widget write whenever any legacy entry merely
+        # sits pending. Before this file started flushing on any pending
+        # plan (not just a repairable one), only a write to the legacy
+        # widget itself reached this far offline. Every other offline-
+        # degradation site in this module (``_apply_inputcount_bump``,
+        # ``_autogrow_group_port``) no-ops instead of raising when ``graph``
+        # is unavailable; match that instead of crashing an offline merge
+        # over a write that would have applied fine before this change.
+        # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941930
+        if plan and graph is not None:
+            # Flush whenever ANY entry is pending — including a plan of only
+            # ``alreadyLinked``/``quarantine`` entries, which still needs
+            # consuming: ``set_host_value`` below writes by DECLARED-order
+            # ``value_index`` into ``widgets_values``, which stays in legacy
+            # PROXY order until a flush runs at least once. Gating the flush
+            # itself on ``e.repairable`` (instead of just the fork below)
+            # left an alreadyLinked-only instance's array in proxy order
+            # forever, so a later write landed in the wrong widget's slot.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+            if any(e.repairable for e in plan):
+                # The definition is MUTATED, so a shared one is forked first
+                # (deterministic fork id), and the input/link ids come from the
+                # op when carried — replay anywhere yields the same document.
+                # Re-resolved against the current graph: an entry another
+                # replica already repaired is consumed as already linked.
+                _engine._isolate_shared_subgraph(
+                    workflow, instance, _engine._subgraph_defs_by_id(workflow), prefer_retainer=True
+                )
             _promoted.flush_proxy_migration(
-                workflow, instance, graph, ids=repair.get("ids") or None, instance_path=instance_path
+                workflow,
+                instance,
+                graph,
+                ids=(promoted_write.get("repair") or {}).get("ids") or None,
+                instance_path=instance_path,
             )
+        # Last-writer-wins: a lower-stamped concurrent write to this target is
+        # dropped, so the surviving value is the same in any apply order. The
+        # migration above already ran unconditionally — only the VALUE write
+        # is gated.
+        if not _lww_gate(workflow, op):
+            return
         if _engine._subgraph_defs_by_id(workflow).get(str(instance.get("type", ""))) is not None:
             _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
         else:
@@ -4185,6 +4283,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> bool | None:
             # positional write, aligned from the op's materialized array.
             _apply_positional_write(instance, promoted_write, op["value"])
         _lww_commit(workflow, op)
+        return
+    # Last-writer-wins: a lower-stamped concurrent write to this target is
+    # dropped, so the surviving value is the same in any apply order.
+    if not _lww_gate(workflow, op):
         return
     if op.get("legacy_primitive"):
         # Pre-payload shape (no ``promoted`` block): widgets_values[0].
@@ -4286,6 +4388,18 @@ def _apply_positional_write(node: dict, positional: dict, value: Any) -> None:
         values.append(None)
     values[idx] = value
     node["widgets_values"] = values
+    # A23: both callers of this function write a legacy PrimitiveNode's single
+    # widget — a frontend-only node with no catalog entry, so its layout is
+    # the frontend's own fixed order (cql.promoted._PRIMITIVE_WIDGET_ORDER:
+    # ``value``, then an optional ``control_after_generate``), not something
+    # `_write_widget`'s catalog-driven order resolves. Mirror a present
+    # register under that fixed name through the same gates every other
+    # writer uses (foreign/non-dict register, name never carried, duplicated
+    # name) so a replayed op leaves it correct or untouched, never stale.
+    from comfy_cli.cql.promoted import _PRIMITIVE_WIDGET_ORDER
+
+    if idx < len(_PRIMITIVE_WIDGET_ORDER):
+        _update_named_widget_value(node, list(_PRIMITIVE_WIDGET_ORDER), _PRIMITIVE_WIDGET_ORDER[idx], value)
 
 
 def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: str, value: Any) -> None:

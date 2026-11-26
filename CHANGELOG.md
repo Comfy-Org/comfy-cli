@@ -23,7 +23,7 @@ history.
   or a new UUID. The CLI checks envelope shape and JSON-serializability only:
   semantic validation, replay and conflict resolution for a definition belong
   to the server, so `comfy workflow apply` and `comfy workflow foreach` refuse
-  to persist the op locally. New frozen op kind, documented as amendment v1.16
+  to persist the op locally. New frozen op kind, documented as amendment v1.17
   of `docs/op-vocabulary-v1.md`.
 
 ### Fixed
@@ -35,6 +35,14 @@ history.
   a hook by the old name silently removes nothing. PostHog's hook then ran first, closed
   the delivery consumers against its own 1-second budget, and the queued
   `command_finished` event went with them.
+
+- A cloud `comfy run --output-node-ids` (and `comfy jobs watch` / `jobs status`
+  on such a job) no longer warns `partial_execution_targets_ignored` when the
+  only output outside the targets is a cached preview from an intermediate
+  node such as Crop Image or Painter, which ComfyUI can replay at the end of a
+  run. Only output nodes outside the targets count. The submitted graph's
+  output nodes are kept on the job record, since `jobs watch` has no node
+  catalog; older records and runs without the catalog keep the old check.
 
 ### Changed
 
@@ -70,6 +78,17 @@ history.
 
 ### Fixed
 
+- A `comfy workflow set-widget` edit keeps the frontend's name-keyed
+  `widgets_values_named` register coherent, not just on DynamicGroup nodes.
+  Editing any ordinary node published the new value positionally and left the
+  pre-edit value in that register, so a consumer restoring values by name
+  reverted the write — the frontend writes the register on every save and
+  prefers it when restoring. This implements Amendment A23 of the multiplayer
+  schema, which already specified the behaviour: update only a register that is
+  already a name-keyed object and already carries the name, and only when the
+  addressed widget is that name's final occurrence. A duplicated name is left
+  alone, because one name-keyed slot belongs to the final occurrence and writing
+  an earlier one's value there would be a corrupt read rather than a stale one.
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
@@ -81,6 +100,9 @@ history.
   jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
   now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
   the timeout.
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
 
 ## [1.29.0] - 2026-11-24
 
@@ -372,6 +394,20 @@ history.
   Build picker. It needs no sign-in then, since it reads nothing from the
   builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
   when no Build is named, so it stays a string wherever it appears.
+- A `nodes` or `validate` command that cannot read `object_info` now names the
+  reason it actually hit instead of telling you to start a server that is
+  already running. Over the 64 MiB fetch cap, the hint says so and points at
+  the route that works — save the catalog and pass `--input` (the file loader
+  has no cap). The command it gives you is one you can paste: loud on failure
+  (`-f`, so a 401 body is never saved as a catalog), size-capped by
+  `--max-filesize` where the server states the size up front, and on a Comfy
+  Cloud target it carries the API key the fetch needs, since an anonymous one
+  cannot work there. For a non-loopback host in local
+  mode it names both real routes, `--where cloud` for Comfy Cloud and a saved
+  catalog for a self-hosted remote. The generic "pass `--input <path>`, or
+  start the server" hint is unchanged for every other load failure, and so is
+  that failure's `error.details`
+  ([comfy-mcp#252](https://github.com/Comfy-Org/comfy-mcp/issues/252)).
 
 ## [1.26.0] - 2026-11-11
 

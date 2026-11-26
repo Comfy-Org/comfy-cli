@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from comfy_cli import workflow_ops
+from comfy_cli.cql import engine as _engine
 from comfy_cli.cql import promoted
 from comfy_cli.cql.engine import Graph
 
@@ -596,6 +598,607 @@ def test_flush_consumes_an_entry_a_previous_repair_already_linked(graph):
     assert report.created == []
     assert report.consumed == [["52", "seed"]]
     assert [i["name"] for i in _def_of(wf, inst)["inputs"]].count("seed") == 1
+
+
+# --------------------------------------------------------------------------- #
+# flush: a catalog gap is not a final quarantine
+# --------------------------------------------------------------------------- #
+
+
+_UNKNOWN_SOURCE_OUTER = "0f6b0a4e-unknown-0000-0000-000000000003"
+
+
+def _unknown_node_legacy_workflow(host_value: float = 2.0) -> dict:
+    """Synthetic: a legacy promotion whose source is an interior node of a
+    type the (local) catalog has never heard of — an uninstalled custom node.
+    ``_resolve_source_widget`` cannot enumerate its widgets at all (``graph``
+    has no entry for the type), which is indistinguishable, from inside
+    ``plan_proxy_migration`` alone, from a genuine name mismatch. Only
+    ``_source_widget_resolution_is_catalog_gap`` tells them apart."""
+    return {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": _UNKNOWN_SOURCE_OUTER,
+                "inputs": [],
+                "outputs": [],
+                "properties": {"proxyWidgets": [["5", "scale"]]},
+                "widgets_values": [host_value],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": _UNKNOWN_SOURCE_OUTER,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 5, "lastLinkId": 0, "lastRerouteId": 0},
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 5,
+                            "type": "CustomNodeNotInstalled",
+                            "inputs": [],
+                            "outputs": [],
+                            "widgets_values": [host_value],
+                        }
+                    ],
+                    "links": [],
+                }
+            ]
+        },
+    }
+
+
+def test_plan_marks_a_missing_source_widget_as_a_catalog_gap_only_when_the_type_is_unknown(graph):
+    wf = _unknown_node_legacy_workflow()
+    entry = _plans(wf, 1, graph)[("5", "scale")]
+    assert entry.plan == "quarantine" and entry.reason == "missingSourceWidget"
+    assert entry.catalog_unresolvable is True
+
+
+def test_flush_leaves_a_catalog_gap_quarantine_pending_instead_of_permanent(graph):
+    """Before this fix every ``missingSourceWidget`` quarantine — including one
+    that exists only because THIS replica's catalog doesn't know the source
+    node's type — was moved into ``proxyWidgetErrorQuarantine`` and dropped
+    from ``proxyWidgets`` for good. A replica with that custom node installed
+    could still have migrated it, so the entry must stay pending instead.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941923
+    """
+    wf = _unknown_node_legacy_workflow()
+    inst = _instance(wf, 1)
+    report = promoted.flush_proxy_migration(wf, inst, graph)
+    assert report.created == [] and report.quarantined == []
+    assert inst["properties"]["proxyWidgets"] == [["5", "scale"]]
+    assert "proxyWidgetErrorQuarantine" not in inst["properties"]
+
+
+def test_flush_still_permanently_quarantines_a_known_node_missing_widget(graph):
+    """A genuine name mismatch on a node type the catalog DOES know (the FLUX
+    fixture's ``control_after_generate``, a real frontend-only widget with no
+    backing input slot) is not a catalog gap, and still quarantines for
+    good — the fix narrows, it does not widen, what stays pending."""
+    wf = _load(FLUX)
+    inst = _instance(wf, 56)
+    inst["properties"]["proxyWidgets"] = [["52", "control_after_generate"]]
+    entry = _plans(wf, 56, graph)[("52", "control_after_generate")]
+    assert entry.reason == "missingSubgraphInput"
+    assert entry.catalog_unresolvable is False
+    promoted.flush_proxy_migration(wf, inst, graph)
+    assert "proxyWidgets" not in inst["properties"]
+    assert inst["properties"]["proxyWidgetErrorQuarantine"] == [
+        {"originalEntry": ["52", "control_after_generate"], "reason": "missingSubgraphInput", "attemptedAtVersion": 1}
+    ]
+
+
+_MIXED_GAP_OUTER = "0f6b0a4e-mixedgap-0000-000000000004"
+
+
+def _mixed_catalog_gap_and_create_workflow(scale_value: float = 2.0, width_value: int = 768) -> dict:
+    """Synthetic: TWO legacy entries in one ``proxyWidgets`` — ``scale``
+    backed by an uninstalled custom node (a catalog gap, left pending) and
+    ``width`` backed by a known node (migrated in this same flush)."""
+    return {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": _MIXED_GAP_OUTER,
+                "inputs": [],
+                "outputs": [],
+                "properties": {"proxyWidgets": [["5", "scale"], ["6", "width"]]},
+                "widgets_values": [scale_value, width_value],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": _MIXED_GAP_OUTER,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 6, "lastLinkId": 0, "lastRerouteId": 0},
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 5,
+                            "type": "CustomNodeNotInstalled",
+                            "inputs": [],
+                            "outputs": [],
+                            "widgets_values": [scale_value],
+                        },
+                        {
+                            "id": 6,
+                            "type": "EmptySD3LatentImage",
+                            "inputs": [],
+                            "outputs": [],
+                            "widgets_values": [width_value, 1024, 1],
+                        },
+                    ],
+                    "links": [],
+                }
+            ]
+        },
+    }
+
+
+def test_flush_preserves_a_retained_catalog_gaps_value_when_a_sibling_migrates(graph):
+    """Before this fix, flushing an instance with BOTH a catalog-gap entry
+    (left pending in ``proxyWidgets``) and a repairable sibling dropped the
+    pending entry's own saved value: the final ``widgets_values`` rebuild is
+    positional over DECLARED widget inputs only, which has no slot left for
+    an entry still sitting in ``proxyWidgets``. A LATER
+    ``plan_proxy_migration`` call then read the pending entry's host value
+    off the rebuilt array by its (now unrelated) position, landing on the
+    migrated sibling's value instead of its own.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514857
+    """
+    wf = _mixed_catalog_gap_and_create_workflow(scale_value=2, width_value=768)
+    inst = _instance(wf, 1)
+    report = promoted.flush_proxy_migration(wf, inst, graph)
+
+    assert report.created == ["width"]
+    assert inst["properties"]["proxyWidgets"] == [["5", "scale"]]
+    assert inst["widgets_values"] == [768]  # only the migrated widget is declared now
+
+    later = promoted.plan_proxy_migration(wf, inst, graph)
+    scale = next(e for e in later if e.original == ["5", "scale"])
+    assert scale.host_value == 2  # not 768 — the sibling's value a positional re-read would grab
+
+
+# --------------------------------------------------------------------------- #
+# apply: the repair gate at the engine's own write site (``apply_slots``)
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_slot_does_not_fork_a_shared_definition_for_an_unrepairable_plan(graph):
+    """``_apply_one_slot_impl`` used to fork+flush whenever ANY pending entry
+    was not a preview — which includes a plan of only ``alreadyLinked``
+    and/or ``quarantine`` entries. ``flush_proxy_migration`` never changes
+    the DEFINITION for those (only the instance's own ``properties``/
+    ``widgets_values``), so forking a SHARED definition for one is pure cost:
+    the instance permanently stops sharing definition edits with its
+    sibling. A write to an unrelated, already-linked widget (``width``) must
+    not trigger a fork — but the flush itself still must run (see
+    ``test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking``
+    for why skipping it entirely corrupts a sibling widget's value).
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+    """
+    wf = _load(FLUX)
+    inst = _instance(wf, 56)
+    # Drop the one repairable entry (``seed``): what's left is only
+    # ``alreadyLinked`` entries plus the unrepairable ``control_after_generate``
+    # quarantine — no entry for which the flush would change the DEFINITION.
+    inst["properties"]["proxyWidgets"] = [e for e in inst["properties"]["proxyWidgets"] if e != ["52", "seed"]]
+    sibling = copy.deepcopy(inst)
+    sibling["id"] = 156
+    wf["nodes"].append(sibling)
+    plan = promoted.plan_proxy_migration(wf, inst, graph)
+    assert plan and not any(e.repairable for e in plan)
+    original_type = inst["type"]
+
+    wf, warnings = graph.apply_slots(wf, {"56.width": 768})
+
+    assert warnings == []
+    assert _instance(wf, 56)["type"] == original_type  # not forked
+    assert _instance(wf, 156)["type"] == original_type  # sibling untouched
+    assert _instance(wf, 156)["properties"]["proxyWidgets"]  # sibling's own entries untouched
+    # The written instance's plan DID flush: the alreadyLinked entries are
+    # consumed and the genuinely unrepairable one is now permanently
+    # quarantined — just without forking the (shared, untouched) definition.
+    assert "proxyWidgets" not in _instance(wf, 56)["properties"]
+    assert _instance(wf, 56)["properties"]["proxyWidgetErrorQuarantine"] == [
+        {"originalEntry": ["52", "control_after_generate"], "reason": "missingSubgraphInput", "attemptedAtVersion": 1}
+    ]
+
+
+def test_isolate_shared_subgraph_forks_the_same_instance_regardless_of_apply_order(graph):
+    """Two instances (56, 156) share FLUX's definition and EACH needs its own
+    legacy proxy repair: 56 keeps its original, repairable ``seed`` entry;
+    156's entry is swapped for an independent, also-repairable ``steps``
+    entry (KSampler node 52's ``steps`` widget, never promoted in the
+    fixture) so neither instance's repair can structurally satisfy the
+    other's — this isolates the ORDER-DEPENDENCE bug from the (separate,
+    intentional) optimization where a sibling with NOTHING left to repair
+    just inherits an already-migrated shared definition (see
+    ``test_shared_definition_is_forked_not_mutated`` in
+    ``test_workflow_edit_legacy_proxy.py``, which pins that behavior for one
+    specific apply order on one replica).
+
+    Before this fix, ``_isolate_shared_subgraph`` forked whichever instance
+    applied its write FIRST (the definition was still shared at that moment),
+    and left the SECOND instance — now the definition's sole remaining
+    sharer — on the original, mutated in place. Reversing the apply order
+    flipped which instance forked, so two replicas receiving the same pair of
+    writes in opposite delivery orders ended up with different definition
+    ids for the SAME hosts: final widget values agreed, but the documents
+    did not converge, violating the invariant this function's own docstring
+    and ADR-OPERATIONS-0018 both document.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4693109354
+    """
+    base = _load(FLUX)
+    sibling = copy.deepcopy(_instance(base, 56))
+    sibling["id"] = 156
+    entries = sibling["properties"]["proxyWidgets"]
+    entries[entries.index(["52", "seed"])] = ["52", "steps"]
+    base["nodes"].append(sibling)
+
+    forward, warnings_f = graph.apply_slots(base, {"56.width": 768, "156.width": 800})
+    backward, warnings_b = graph.apply_slots(base, {"156.width": 800, "56.width": 768})
+
+    assert warnings_f == [] and warnings_b == []
+    # Order independence: each instance ends up on the SAME definition id
+    # whichever order the pair of writes is applied in.
+    assert _instance(forward, 56)["type"] == _instance(backward, 56)["type"]
+    assert _instance(forward, 156)["type"] == _instance(backward, 156)["type"]
+    # The two instances really did end up on two distinct definitions (one
+    # forked off the other) — this isn't two orders converging on a no-op.
+    assert _instance(forward, 56)["type"] != _instance(forward, 156)["type"]
+    # Not just the same id: the same STRUCTURE too (both got their own
+    # repair applied to their own copy, independent of apply order).
+    def_56_fwd = _def_of(forward, _instance(forward, 56))
+    def_56_bwd = _def_of(backward, _instance(backward, 56))
+    assert json.dumps(def_56_fwd, sort_keys=True) == json.dumps(def_56_bwd, sort_keys=True)
+    def_156_fwd = _def_of(forward, _instance(forward, 156))
+    def_156_bwd = _def_of(backward, _instance(backward, 156))
+    assert json.dumps(def_156_fwd, sort_keys=True) == json.dumps(def_156_bwd, sort_keys=True)
+    # Each instance's OWN repair actually landed: 56 still resolves its seed
+    # promotion, 156 resolves its independent steps promotion.
+    assert [i["name"] for i in def_56_fwd["inputs"]][-1] == "seed"
+    assert [i["name"] for i in def_156_fwd["inputs"]][-1] == "steps"
+
+
+def test_isolate_shared_subgraph_scope_qualifies_colliding_nested_local_ids():
+    """Two DIFFERENT parent subgraph definitions (``PA``, ``PB``) each
+    contain a nested host with the SAME bare local id (``2``) instantiating
+    the same shared target definition (``D``). ``definitions.subgraphs`` is
+    a flat, global table, so that collision is unremarkable: a bare local id
+    is only unique within its own immediate container.
+
+    Before scope-qualifying cohort member identity, retainer selection
+    compared bare local ids: both hosts' ``str(id)`` is ``"2"``, so both
+    independently satisfied "I am the retainer" and NEITHER forked. Any
+    later in-place mutation of ``D`` (e.g. one host's own proxy-migration
+    flush) was then visible through BOTH hosts — aliasing two logically
+    independent instances, contradicting ``_isolate_shared_subgraph``'s own
+    docstring rule that an interior write must never alias a sibling
+    instance.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4699160878
+    """
+    target_def, parent_a, parent_b = "def-target", "def-parent-a", "def-parent-b"
+    workflow = {
+        "nodes": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": target_def, "name": "Target", "inputs": [], "outputs": [], "links": [], "nodes": []},
+                {
+                    "id": parent_a,
+                    "name": "ParentA",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+                {
+                    "id": parent_b,
+                    "name": "ParentB",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+            ]
+        },
+    }
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    host_a = _inner(defs_by_id[parent_a], 2)
+    host_b = _inner(defs_by_id[parent_b], 2)
+
+    _engine._isolate_shared_subgraph(workflow, host_a, defs_by_id, prefer_retainer=True)
+
+    # The bug left BOTH hosts on `target_def` (neither forked). Fixed: exactly
+    # one retains it, the other forks onto its own copy.
+    assert host_a["type"] != host_b["type"]
+    assert {host_a["type"], host_b["type"]} != {target_def}
+    retainer_host, forked_host = (host_a, host_b) if host_a["type"] == target_def else (host_b, host_a)
+    assert retainer_host["type"] == target_def
+    assert forked_host["type"] != target_def
+
+    # Simulate the retainer's own flush mutating its (now exclusively-owned)
+    # definition in place — the fork must be a genuinely separate object,
+    # not the same aliased definition under a different dict reference.
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    retained_def = defs_by_id[target_def]
+    forked_def = defs_by_id[forked_host["type"]]
+    assert forked_def is not retained_def
+    retained_def["nodes"].append({"id": 99, "type": "Marker", "inputs": [], "outputs": []})
+    assert forked_def["nodes"] == []
+
+
+def test_isolate_shared_subgraph_scope_qualifies_fork_ids_for_colliding_non_retainers():
+    """Scope-qualifying retainer SELECTION alone is insufficient (CodeRabbit
+    r4699160878): with a third, top-level cohort member (id ``1``, scope
+    ``""``) sorting first and becoming the retainer, the two colliding-id
+    (``2``) non-retainers in ``PA`` and ``PB`` must still fork onto DISTINCT
+    copies. Hashing the bare local id alone for the fork id would make
+    ``_deterministic_fork_id(D, 2)`` identical for both, aliasing them to
+    the SAME forked copy instead of to the original ``D`` — a different
+    shape of the same aliasing bug, one level removed.
+    """
+    target_def, parent_a, parent_b = "def-target", "def-parent-a", "def-parent-b"
+    workflow = {
+        "nodes": [{"id": 1, "type": target_def, "inputs": [], "outputs": []}],
+        "definitions": {
+            "subgraphs": [
+                {"id": target_def, "name": "Target", "inputs": [], "outputs": [], "links": [], "nodes": []},
+                {
+                    "id": parent_a,
+                    "name": "ParentA",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+                {
+                    "id": parent_b,
+                    "name": "ParentB",
+                    "inputs": [],
+                    "outputs": [],
+                    "links": [],
+                    "nodes": [{"id": 2, "type": target_def, "inputs": [], "outputs": [], "widgets_values": []}],
+                },
+            ]
+        },
+    }
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    host_a = _inner(defs_by_id[parent_a], 2)
+    host_b = _inner(defs_by_id[parent_b], 2)
+
+    _engine._isolate_shared_subgraph(workflow, host_a, defs_by_id, prefer_retainer=True)
+
+    top = next(n for n in workflow["nodes"] if n["id"] == 1)
+    assert top["type"] == target_def  # the top-level node (scope "") sorts first: it's the retainer
+    assert host_a["type"] != target_def
+    assert host_b["type"] != target_def
+    assert host_a["type"] != host_b["type"]  # forked onto DISTINCT copies, not aliased to each other
+
+
+def test_apply_slot_flushes_an_alreadylinked_only_plan_without_forking(graph):
+    """Before this fix, a plan of only ``alreadyLinked`` entries (no
+    ``repairable`` one at all) never flushed, because both ``_apply_set_widget``
+    and ``_apply_one_slot_impl`` gated the FLUSH ITSELF on ``e.repairable`` —
+    not just the fork. ``widgets_values`` then stayed in legacy ``proxyWidgets``
+    POSITION order forever, while ``set_host_value`` writes by DECLARED-input
+    ``value_index`` — a different order whenever the two orders disagree. A
+    write to ``width`` (declared second, proxy first) landed in the slot
+    DECLARATION order assigns it, silently overwriting ``text``'s own value
+    (declared first, proxy second) with whatever ``width``'s legacy slot held.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+    """
+    outer = "test-outer-alreadylinked-0000-000000000005"
+    wf = {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": outer,
+                "inputs": [],
+                "outputs": [],
+                # proxy order: width, text — the REVERSE of declaration order.
+                "properties": {"proxyWidgets": [["20", "width"], ["10", "text"]]},
+                "widgets_values": [640, "legacy prompt"],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": outer,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 20, "lastLinkId": 2, "lastRerouteId": 0},
+                    # declaration order: text, width
+                    "inputs": [
+                        {"id": "i-text", "name": "text", "type": "STRING", "linkIds": [1]},
+                        {"id": "i-width", "name": "width", "type": "INT", "linkIds": [2]},
+                    ],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["interior default text"],
+                        },
+                        {
+                            "id": 20,
+                            "type": "EmptySD3LatentImage",
+                            "inputs": [{"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 2}],
+                            "outputs": [],
+                            "widgets_values": [1024, 1024, 1],
+                        },
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 10,
+                            "target_slot": 1,
+                            "type": "STRING",
+                        },
+                        {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": 20, "target_slot": 0, "type": "INT"},
+                    ],
+                }
+            ]
+        },
+    }
+    inst = _instance(wf, 1)
+    plan = promoted.plan_proxy_migration(wf, inst, graph)
+    assert [e.plan for e in plan] == ["alreadyLinked", "alreadyLinked"]
+    assert not any(e.repairable for e in plan)
+
+    wf, warnings = graph.apply_slots(wf, {"1.width": 800})
+
+    assert warnings == []
+    inst = _instance(wf, 1)
+    sg = _def_of(wf, inst)
+    by_name = {p.name: p for p in promoted.promoted_inputs(sg, promoted.defs_by_id(wf)) if p.is_widget}
+    assert promoted.host_value(inst, by_name["width"]) == 800
+    assert promoted.host_value(inst, by_name["text"]) == "legacy prompt"  # not 640
+
+
+def test_apply_op_replays_a_pending_alreadylinked_write_offline_without_crashing(graph):
+    """A write to a declared widget while an ``alreadyLinked`` entry is still
+    pending now always runs ``flush_proxy_migration`` (see the fix above), to
+    keep ``widgets_values`` from staying stuck in legacy proxy order. That
+    flush raises ``ValueError`` ("needs the node catalog") when ``graph`` is
+    ``None`` -- the honest answer when it actually can't resolve anything.
+    But offline merge replay (no catalog available at all) now reaches that
+    raise for an ORDINARY declared-widget write, not just a write to the
+    legacy widget itself: before this fix, only the latter hit this path at
+    all. Every other offline-degradation site in ``workflow_ops``
+    (``_apply_inputcount_bump``, ``_autogrow_group_port``) no-ops instead of
+    raising when ``graph`` is unavailable; applying this op during an offline
+    merge must do the same instead of crashing the merge.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941930
+    """
+    outer = "test-outer-alreadylinked-offline-0000000006"
+    wf = {
+        "last_node_id": 1,
+        "last_link_id": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": outer,
+                "inputs": [],
+                "outputs": [],
+                # proxy order: width, text — the REVERSE of declaration order.
+                "properties": {"proxyWidgets": [["20", "width"], ["10", "text"]]},
+                "widgets_values": [640, "legacy prompt"],
+            }
+        ],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": outer,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 20, "lastLinkId": 2, "lastRerouteId": 0},
+                    # declaration order: text, width
+                    "inputs": [
+                        {"id": "i-text", "name": "text", "type": "STRING", "linkIds": [1]},
+                        {"id": "i-width", "name": "width", "type": "INT", "linkIds": [2]},
+                    ],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 10,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                            ],
+                            "outputs": [],
+                            "widgets_values": ["interior default text"],
+                        },
+                        {
+                            "id": 20,
+                            "type": "EmptySD3LatentImage",
+                            "inputs": [{"name": "width", "type": "INT", "widget": {"name": "width"}, "link": 2}],
+                            "outputs": [],
+                            "widgets_values": [1024, 1024, 1],
+                        },
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 10,
+                            "target_slot": 1,
+                            "type": "STRING",
+                        },
+                        {"id": 2, "origin_id": -10, "origin_slot": 1, "target_id": 20, "target_slot": 0, "type": "INT"},
+                    ],
+                }
+            ]
+        },
+    }
+    # Minted ONLINE (a replica with a real catalog) building the op.
+    _, op = workflow_ops.set_widget(copy.deepcopy(wf), graph, "1", "width", 800)
+
+    # Replayed OFFLINE on a peer merging without a catalog at all.
+    replayed = workflow_ops.apply_op(copy.deepcopy(wf), op, None)  # must not raise
+
+    inst = _instance(replayed, 1)
+    assert inst["widgets_values"] is not None  # the op applied, degraded or not
+
+
+def test_pending_value_lookup_ignores_malformed_originalentry_shapes():
+    """``_pending_value_lookup`` built its ``{originalEntry tuple: record}``
+    map with ``tuple(e["originalEntry"])`` after checking only that
+    ``originalEntry`` was *a* list — not that it had the 2/3-STRING-tuple
+    shape ``_proxy_tuples`` enforces everywhere else. A malformed record
+    (e.g. a nested list inside ``originalEntry``, written by some other
+    process sharing the document) made ``tuple(...)`` produce a tuple
+    containing an unhashable element, and using it as a dict key raised
+    ``TypeError: unhashable type: 'list'`` -- an attacker- or bug-controlled
+    stash entry could crash every subsequent ``plan_proxy_migration`` call
+    on that instance. Validate each entry the same way ``_proxy_tuples``
+    does and skip the ones that don't fit, instead of trusting the stash
+    blindly.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4680810815
+    """
+    instance = {
+        "properties": {
+            promoted.PENDING_VALUE_PROPERTY: [
+                {"originalEntry": ["52", "seed"], "hostValue": 42},  # valid 2-tuple
+                {"originalEntry": ["52", "seed", "x"], "hostValue": 99},  # valid 3-tuple
+                {"originalEntry": ["52", ["nested"]], "hostValue": 1},  # malformed: nested list element
+                {"originalEntry": ["52"], "hostValue": 2},  # malformed: too short
+                {"originalEntry": ["a", "b", "c", "d"], "hostValue": 3},  # malformed: too long
+                {"originalEntry": [1, 2], "hostValue": 4},  # malformed: non-string elements
+                {"originalEntry": "not-a-list", "hostValue": 5},  # malformed: not a list at all
+                "not-a-dict",  # malformed: not a record at all
+            ]
+        }
+    }
+
+    out = promoted._pending_value_lookup(instance)
+
+    assert out == {
+        ("52", "seed"): {"originalEntry": ["52", "seed"], "hostValue": 42},
+        ("52", "seed", "x"): {"originalEntry": ["52", "seed", "x"], "hostValue": 99},
+    }
 
 
 def test_repair_ids_are_stable_across_processes():

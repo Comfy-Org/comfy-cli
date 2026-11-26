@@ -2386,13 +2386,14 @@ def test_cloud_status_snapshot_without_item_map_emits_empty_by_item(monkeypatch)
     assert snap["outputs_by_item"] == {}
 
 
-def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True):
+def _targeted_cloud_job(prompt_id, *, targets, run_graph, checked=True, graph_outputs=None):
     from comfy_cli import jobs_state
 
     state = jobs_state.new(prompt_id=prompt_id, client_id="c", workflow="w", where="cloud")
     state.output_node_ids = targets
     state.run_graph_node_ids = run_graph
     state.output_node_ids_checked = checked
+    state.graph_output_node_ids = graph_outputs
     jobs_state.write(state)
 
 
@@ -2407,6 +2408,16 @@ def test_cloud_status_snapshot_warns_when_a_targeted_job_ran_untargeted_nodes(mo
     [warning] = snap["warnings"]
     assert warning["code"] == "partial_execution_targets_ignored"
     assert warning["untargeted_output_node_ids"] == ["12"]
+
+
+def test_cloud_status_snapshot_ignores_a_replayed_preview_from_a_non_output_node(monkeypatch):
+    """Node 12 is outside the run graph but its class is not an output node
+    (recorded at submit), so its output is a replayed cached preview, not a
+    sign the server ran the whole graph."""
+    monkeypatch.setattr(jobs_mod, "_cloud_client", lambda: _CompletedCloudClient())
+    _targeted_cloud_job("pid-preview", targets=["9"], run_graph=["9", "4"], graph_outputs=["9"])
+
+    assert jobs_mod._cloud_status_snapshot("pid-preview")["warnings"] == []
 
 
 def test_cloud_status_snapshot_warns_when_a_target_returned_nothing(monkeypatch):
