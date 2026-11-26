@@ -222,6 +222,46 @@ def test_a_declared_widgets_own_type_keyed_record_is_not_absorbed():
     assert "linear" not in api["5"]["inputs"]
 
 
+def test_an_image_combo_with_a_trailing_record_keeps_the_saved_filename():
+    """The highest-severity case this guard closes: roadmap.md W2.2.
+
+    Before ``pre_absorb_schema_widgets``, ANY dict anywhere in ``widgets_values``
+    routed the whole node through ``_absorb_dict_widget_values`` -- including a
+    node like ``LoadImage`` whose own widget is a plain COMBO with no dict of its
+    own. A legacy or malformed trailing record (the frontend's upload button is
+    ``serialize: false`` today, but older saves and other DOM-widget nodes are not
+    guaranteed to be) made the shortcut swallow the whole node and fall back to
+    ``_collect_default_inputs``, which filled ``image`` from the schema default --
+    the combo's FIRST option, not the file the user actually saved. That is a
+    silently wrong input image, not a missing one.
+    """
+    object_info = dict(_OBJECT_INFO)
+    object_info["LoadImage"] = {
+        "input": {"required": {"image": [["red.png", "green.png"], {"image_upload": True}]}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE", "MASK"],
+        "output_name": ["IMAGE", "MASK"],
+    }
+    wf = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "LoadImage",
+                # A ``type``-keyed trailing record is exactly the shape
+                # ``_is_absorbable_dict`` recognizes, so this is the one shape
+                # that actually reached the shortcut before this guard existed
+                # (confirmed by reverting it: this assertion then fails and
+                # ``image`` reads back "red.png", the combo's first option).
+                "widgets_values": ["green.png", {"type": "legacy-upload-marker"}],
+            }
+        ],
+        "links": [],
+        "version": 0.4,
+    }
+    api = convert_ui_to_api(wf, object_info)
+    assert api["1"]["inputs"] == {"image": "green.png"}
+
+
 def test_a_lora_entry_mixed_with_a_record_still_takes_the_lora_path():
     """Deliberate, and stated: one absorbable entry still routes the whole node.
 
