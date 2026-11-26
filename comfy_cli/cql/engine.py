@@ -6329,6 +6329,11 @@ def _write_dynamic_combo_selector(
             widgets.extend([None] * (widget_idx + 1 - len(widgets)))
         widgets[widget_idx] = value
         node["widgets_values"] = {**raw_values, input_name: value} if preserve_named else widgets
+        # Not gated on DynamicGroup: the frontend writes this register for every
+        # node, so a plain node's selector edit left the PRE-OP option sitting in
+        # the name register. The roster is unchanged here, so the entries' own
+        # names are already the post-write layout.
+        _update_named_widget_value(node, [entry.name for entry in entries], input_name, value)
         return []
 
     # Sub-entries owned (directly or via nesting) by this combo sit contiguously
@@ -6355,19 +6360,38 @@ def _write_dynamic_combo_selector(
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
     _clear_dynamic_combo_widget_markers(node, input_name)
-    if any(entry.port and entry.port.is_dynamic_group for entry in entries):
-        if "widgets_values_form" in node:
-            node["widgets_values_form"]["order"] = (
-                [entry.name for entry in entries[: widget_idx + 1]]
-                + new_names
-                + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
-            )
-        if "widgets_values_named" in node:
-            named = node["widgets_values_named"]
-            for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
-                named.pop(entry.name, None)
+    new_order = (
+        [entry.name for entry in entries[: widget_idx + 1]]
+        + new_names
+        + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
+    )
+    has_dynamic_group = any(entry.port and entry.port.is_dynamic_group for entry in entries)
+    if has_dynamic_group and "widgets_values_form" in node:
+        node["widgets_values_form"]["order"] = new_order
+    if isinstance(node.get("widgets_values_named"), dict):
+        named = node["widgets_values_named"]
+        # The removed sub-entries' names no longer exist in `new_order` either
+        # way, so drop them regardless of which branch below repopulates it.
+        for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
+            named.pop(entry.name, None)
+        if has_dynamic_group:
+            # A DynamicGroup node's composite form owns the whole roster, so
+            # its register entries are (re)written unconditionally — this is
+            # the pre-existing, form-specific (A24) behavior, not A23's gates.
             named[input_name] = value
             named.update(zip(new_names, new_subs))
+        else:
+            # Not gated on DynamicGroup: the frontend writes this register for
+            # every node, so a plain node's roster rebuild left the OLD
+            # selector value sitting in the name register.
+            # `_update_named_widget_value` applies A23's gates (dict-shaped,
+            # already carries the name, exactly one occurrence) to the
+            # selector and to each freshly defaulted sub-widget, same as every
+            # other writer — a name the register never held is left
+            # uninvented rather than published.
+            _update_named_widget_value(node, new_order, input_name, value)
+            for name, sub_value in zip(new_names, new_subs):
+                _update_named_widget_value(node, new_order, name, sub_value)
     return [
         {
             "code": "dynamic_combo_roster_rebuilt",

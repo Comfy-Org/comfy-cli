@@ -139,3 +139,91 @@ def test_an_unusable_register_does_not_refuse_the_edit(graph: Graph, unusable: A
     _write_widget(node, "width", 1024, graph, extend=False)
     assert node["widgets_values"] == [1024, 512, 1]
     assert node["widgets_values_named"] == unusable
+
+
+# --------------------------------------------------------------------------- #
+# `_write_dynamic_combo_selector` returns before reaching the `_write_widget`
+# tail that calls `_update_named_widget_value`, so it had its own (narrower)
+# gate: it only kept `widgets_values_named` coherent for DynamicGroup nodes.
+# A plain dynamic-combo node's selector edit left the PRE-OP value in the
+# register either way — same A23 regression, different code path.
+# --------------------------------------------------------------------------- #
+
+
+def _dynamic_combo_object_info() -> dict:
+    """A plain (non-DynamicGroup) COMFY_DYNAMICCOMBO_V3 node: switching `model`
+    from `alpha` to `beta` drops `width` and gains `height`."""
+    return {
+        "DynNode": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {"key": "alpha", "inputs": {"required": {"width": ["INT", {"default": 512}]}}},
+                                {"key": "beta", "inputs": {"required": {"height": ["INT", {"default": 768}]}}},
+                            ]
+                        },
+                    ],
+                    "seed": ["INT", {"default": 0}],
+                },
+            },
+            "input_order": {"required": ["model", "seed"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "DynNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+@pytest.fixture
+def dyn_graph() -> Graph:
+    return Graph.from_object_info(_dynamic_combo_object_info())
+
+
+def test_dynamic_combo_roster_rebuild_updates_the_register_on_a_plain_node(dyn_graph: Graph) -> None:
+    """Switching the selector rebuilds the sub-widget roster (`model.width` drops
+    out, `model.height` takes its place), dotted under the selector per the
+    dynamic-combo addressing.
+
+    Before the fix this branch only synced `widgets_values_named` when the node
+    had a DynamicGroup entry, so on a plain node the register kept `model:
+    "alpha"` — the PRE-OP value — after the write.
+    """
+    node = {
+        "id": 1,
+        "type": "DynNode",
+        "widgets_values": ["alpha", 512, 7],
+        "widgets_values_named": {"model": "alpha", "model.width": 512, "seed": 7},
+        "inputs": [],
+    }
+    _write_widget(node, "model", "beta", dyn_graph, extend=False)
+    assert node["widgets_values"] == ["beta", 768, 7]
+    # `model.width` no longer exists in the roster and is dropped; `model` is
+    # synced to the new selector; `seed` (untouched by the rebuild) is
+    # unchanged. `model.height` is a name the register never held, so A23 gate
+    # 2 leaves it uninvented — same as every other writer.
+    assert node["widgets_values_named"] == {"model": "beta", "seed": 7}
+
+
+def test_dynamic_combo_same_option_write_updates_the_register_on_a_plain_node(dyn_graph: Graph) -> None:
+    """The same-option branch (roster unchanged) wrote only `widgets_values` and
+    never touched `widgets_values_named` at all, on any node.
+
+    Simulates a register that had already gone stale relative to
+    `widgets_values` (e.g. from an earlier untouched write): re-selecting the
+    CURRENT option must still resync the register to the written value.
+    """
+    node = {
+        "id": 1,
+        "type": "DynNode",
+        "widgets_values": ["alpha", 512, 7],
+        "widgets_values_named": {"model": "stale", "model.width": 512, "seed": 7},
+        "inputs": [],
+    }
+    _write_widget(node, "model", "alpha", dyn_graph, extend=False)
+    assert node["widgets_values"] == ["alpha", 512, 7]
+    assert node["widgets_values_named"] == {"model": "alpha", "model.width": 512, "seed": 7}
