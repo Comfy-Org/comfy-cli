@@ -26,10 +26,10 @@ change until it is unreviewable.
    context, and left unflagged rather than guessed at otherwise.
 2. Find the boundary. A partial change must say where it stops. Accept any of:
    a named follow-up issue or PR, a `## Revisit triggers` section (the ADR
-   convention, `docs/adr/`) or exception entry (`program/exceptions.md`), a
-   test that pins the unfixed case as currently-expected behaviour, a comment
-   at the code site naming what is still wrong, or a documented plan that
-   enumerates the later waves (see step 7). Each of these must be
+   convention, `docs/adr/`), a test that pins the unfixed case as
+   currently-expected behaviour, a comment at the code site naming what is
+   still wrong, or a documented plan that enumerates the later waves (see
+   step 7). Each of these must be
    a resolvable artifact — a real issue/PR number, an existing file section, or
    a test that runs — not prose alone; a sentence like "deliberately not doing
    X" without one of these does not satisfy this step.
