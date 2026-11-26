@@ -285,3 +285,123 @@ def test_a_groups_own_field_values_are_still_read_from_the_map(dynamic_group_fix
     assert inputs["loras.1.strength"] == 0.25
     assert inputs["loras.0.strength"] == 1
     assert inputs["after"] == "tail"
+
+
+# --------------------------------------------------------------------------- #
+# What the map does NOT decide: which widgets the save addressed at all.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_map_does_not_materialise_a_widget_the_array_never_reached(object_info):
+    """``widgets_values``'s length decides which widgets the save addressed.
+
+    A truncated array leaves the widgets past its end short, and they take
+    their schema defaults here exactly as they did before this read existed,
+    even when the map names them. The map supplies values FOR widgets, not the
+    set of widgets: honouring it past the end of the array would let a map
+    naming a widget the save never serialized conjure a value for it.
+
+    The candidate test does not constrain those names, because a widget with no
+    slot gets no pair, so this is reachable rather than theoretical.
+    """
+    node = _node([1024], {"width": 1024, "height": 768, "batch_size": 4})
+    inputs = _convert(node, object_info)
+    assert inputs == {"width": 1024, "height": 512, "batch_size": 1}  # 512/1 are the schema defaults
+
+
+def test_a_map_may_fill_a_none_hole_the_array_left(object_info):
+    """A ``None`` slot is excluded from the candidate test's requirement, so the
+    map need not carry it. When it does, the map wins.
+
+    This is the asymmetry with the case above, and it is deliberate: a ``None``
+    slot EXISTS, so the save addressed that widget and simply did not serialize
+    a value into it. Preferring the map there is the same preference applied
+    everywhere else; the truncated case has no slot to prefer anything for.
+    """
+    node = _node([1024, None, 4], {"width": 1024, "height": 768, "batch_size": 4})
+    inputs = _convert(node, object_info)
+    assert inputs["height"] == 768
+
+
+# --------------------------------------------------------------------------- #
+# Preferring the map makes every writer that does not maintain it a data-loss
+# path. This is the one that was left.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_connect_that_grows_a_slot_survives_conversion():
+    """``comfy workflow connect`` on a frontend-saved node must not be undone.
+
+    ``_apply_inputcount_bump`` grows a kijai ``inputcount``-family widget as
+    part of applying a connect, and it published the new count POSITIONALLY
+    only. A frontend-saved node carries ``widgets_values_named``, and this read
+    prefers it, so the array went to 3 while the register kept 2 and the
+    conversion emitted 2 -- the grown input dropped from the prompt by the very
+    edit that added it. #1106 made ``set_widget`` mirror the register under
+    Amendment A23; this was the write path it missed.
+    """
+    from comfy_cli import workflow_ops
+    from comfy_cli.cql.engine import Graph
+
+    object_info = {
+        "MultiIn": {
+            "input": {"required": {"inputcount": ["INT", {"default": 2}]}},
+            "input_order": {"required": ["inputcount"]},
+            "output": [],
+            "output_name": [],
+            "category": "test",
+            "display_name": "MultiIn",
+            "python_module": "nodes",
+        }
+    }
+    graph = Graph.from_object_info(object_info)
+    node = {
+        "id": 9,
+        "type": "MultiIn",
+        "inputs": [],
+        "outputs": [],
+        "mode": 0,
+        "widgets_values": [2],
+        "widgets_values_named": {"inputcount": 2},
+    }
+    workflow = {"nodes": [node], "links": []}
+    op = workflow_ops._new_op("connect", "agent", 1, link_id=901, from_node=1, from_slot=0, to_node=9, to_slot=None)
+
+    workflow_ops._apply_inputcount_bump(workflow, node, op, graph, "inputcount", 3)
+
+    assert node["widgets_values"] == [3]
+    assert node["widgets_values_named"] == {"inputcount": 3}
+    assert convert_ui_to_api(workflow, object_info)["9"]["inputs"] == {"inputcount": 3}
+
+
+def test_the_mirror_respects_a23s_gates():
+    """A23 updates a register that is already a name-keyed object already
+    carrying the name, and otherwise leaves it alone rather than inventing an
+    entry. An absent, empty or foreign-shaped register is untouched, and the
+    conversion then reads the array, which is correct for all three."""
+    from comfy_cli import workflow_ops
+    from comfy_cli.cql.engine import Graph
+
+    object_info = {
+        "MultiIn": {
+            "input": {"required": {"inputcount": ["INT", {"default": 2}]}},
+            "input_order": {"required": ["inputcount"]},
+            "output": [],
+            "output_name": [],
+            "category": "test",
+            "display_name": "MultiIn",
+            "python_module": "nodes",
+        }
+    }
+    graph = Graph.from_object_info(object_info)
+    for register in ({}, ["inputcount"], None):
+        node = {"id": 9, "type": "MultiIn", "inputs": [], "outputs": [], "mode": 0, "widgets_values": [2]}
+        if register is not None:
+            node["widgets_values_named"] = register
+        workflow = {"nodes": [node], "links": []}
+        op = workflow_ops._new_op("connect", "agent", 1, link_id=901, from_node=1, from_slot=0, to_node=9, to_slot=None)
+
+        workflow_ops._apply_inputcount_bump(workflow, node, op, graph, "inputcount", 3)
+
+        assert node.get("widgets_values_named") == register, register
+        assert convert_ui_to_api(workflow, object_info)["9"]["inputs"] == {"inputcount": 3}, register

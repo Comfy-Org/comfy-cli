@@ -2223,7 +2223,7 @@ def _schema_widget_pairs(
         for catalog_strict in (True, False):
             catalog_pairs, catalog_exact, catalog_warnings = walk(strict=catalog_strict, saved_node=None)
             if catalog_exact:
-                pairs, warnings = catalog_pairs, catalog_warnings
+                pairs, exact, warnings = catalog_pairs, catalog_exact, catalog_warnings
                 chosen_strict, chosen_saved_node = catalog_strict, None
                 break
 
@@ -2232,15 +2232,41 @@ def _schema_widget_pairs(
     # unaffected by any named lookup). Mirrors the package's basis
     # (``widgetMapper.ts:1660-1664``): every widget this positional-only pass
     # sourced from a REAL (non-``None``) slot must be present, and non-``None``,
-    # in the map. A slot that was ``None`` or never existed is excluded from the
-    # requirement -- both readings already agree there. Vacuously true (and so
-    # usable) when the positional pass produced no such name, same as an empty
-    # ``every`` in the reference implementation.
+    # in the map. Vacuously true (and so usable) when the positional pass
+    # produced no such name, same as an empty ``every`` in the reference
+    # implementation.
+    #
+    # Two slots are excluded from the requirement, and they are NOT symmetric:
+    #
+    # * A widget with no slot at all stays short and takes its schema default,
+    #   here and in the named walk alike. ``widgets_values``'s LENGTH is what
+    #   decides which widgets the save addressed, so a map naming a widget the
+    #   array never reached does not materialise it -- the map supplies values
+    #   for widgets, not the set of widgets.
+    # * A ``None`` slot -- what ``serialize()`` leaves for a widget it does not
+    #   serialize -- is excluded so a map need not carry it, which is what makes
+    #   the per-widget fallback work. The map MAY still name it, and then the
+    #   named walk emits that value in place of the ``None``. So the two
+    #   readings do not agree here; the map wins, consistent with preferring it
+    #   everywhere else.
     named = _usable_named_values(node)
     if named is not None:
         positional_names = {name for name, value in pairs if value is not None}
         if all(name in named and named[name] is not None for name in positional_names):
-            pairs, _exact, warnings = walk(strict=chosen_strict, saved_node=chosen_saved_node, use_named=named)
+            named_pairs, named_exact, named_warnings = walk(
+                strict=chosen_strict, saved_node=chosen_saved_node, use_named=named
+            )
+            # Adopt the named walk only when it walked the SAME STRUCTURE: as
+            # exact as the chosen positional walk, over the same widget names in
+            # the same order. Keeping the group row count and the dynamic-combo
+            # selector positional above should already make that identity hold
+            # by construction, since nothing else in ``consume`` derives slot
+            # consumption from the value -- this enforces it instead of relying
+            # on that staying true. A named walk that diverges is not a
+            # different set of values, it is a walk desynchronised from the
+            # array, and the positional result is the one to keep.
+            if named_exact == exact and [name for name, _ in named_pairs] == [name for name, _ in pairs]:
+                pairs, warnings = named_pairs, named_warnings
 
     for warning in warnings:
         logger.warning(*warning)

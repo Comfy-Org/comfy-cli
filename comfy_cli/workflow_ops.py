@@ -4381,6 +4381,16 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = value
+    # Mirror the name register, the same A23 write ``_apply_set_widget`` does.
+    # This is a widget write like any other, and it was the one left publishing
+    # positionally only: a frontend-saved node carries
+    # ``widgets_values_named``, conversion prefers it, so a connect that grew a
+    # numbered slot bumped the array to 3 and converted with the register's
+    # stale 2 — the grown input dropped from the prompt, by the edit that was
+    # meant to add it.
+    saved_names = _engine.saved_widget_order(dst, graph, dst.get("type", ""))
+    order = graph.widget_order_for_node(dst.get("type", ""), widgets, saved_names)
+    _update_named_widget_value(dst, order, widget, value)
     _lww_commit(workflow, widget_op)
 
 
