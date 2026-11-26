@@ -1,0 +1,35 @@
+name: CHANGELOG placement
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  placement:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 2 so HEAD^1 exists. On a pull_request event the checked-out HEAD is
+      # refs/pull/N/merge and its first parent is the base commit that merge was computed
+      # against, which is the comparison this check needs: the placement that matters is the
+      # one in the merge result, not the one on the branch head. Deliberately not origin/main
+      # -- GitHub recomputes the merge ref lazily, so a moved main makes its own new files
+      # read as deletions by this PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: true
+          python-version: "3.10"
+      - name: Install dependencies
+        run: uv sync --extra dev --locked
+      - name: Check CHANGELOG entry placement
+        run: uv run --locked --extra dev python scripts/check_changelog_placement.py
+      - name: Test the placement checker
+        run: uv run --locked --extra dev pytest tests/scripts/test_check_changelog_placement.py
