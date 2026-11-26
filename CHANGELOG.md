@@ -15,7 +15,28 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- Telemetry no longer loses the last event of a run when `posthog` resolves to
+  7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
+  bounded flush is the only shutdown drain, but PostHog renamed that hook from
+  `join` to `_atexit` in 7.38.1, inside the allowed version range, and removing
+  a hook by the old name silently removes nothing. PostHog's hook then ran first, closed
+  the delivery consumers against its own 1-second budget, and the queued
+  `command_finished` event went with them.
+
 ### Changed
+
+- **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
+  longer returns every capability's description. The payload keeps the full
+  id-sorted `capabilities` list but drops `description` from its items on a
+  miss, and adds a bounded `candidates` array carrying the best-scoring
+  capabilities, most likely first, with their descriptions. A bare `comfy
+  knowledge pick` with no argument is unchanged and still carries every
+  description. On the shipped bundle the miss payload goes from 50,437 to
+  6,085 bytes, and for a phrase that scores against several rows the caller
+  now gets the ranked shortlist the resolver computed instead of a catalog it
+  has to search by hand.
 
 - `comfy build push` refuses a local custom node over 2 GiB before it uploads
   anything, and names the node, its size and the limit. It packages the custom
@@ -49,6 +70,9 @@ history.
   jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
   now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
   the timeout.
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
 
 ## [1.29.0] - 2026-11-24
 
@@ -130,9 +154,6 @@ history.
 
 ### Fixed
 
-- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
-  longer shifts the host's other values. Pending proxy migration now runs before
-  the first host write, including when edits are saved in separate calls.
 - `comfy templates ls --model` (and `templates get --where model=`) find a template asked for by base model plus variant. The gallery lists the base model in `models` ("Seedream 5.0", "Krea 2") and names the variant only in the title, tags or template name, so `--model "Seedream 5.0 Lite"`, `--model "krea 2 turbo"` and `--model "Qwen Image ControlNet"` found nothing. A template now also matches when the first word is a word of one of its model names and every other word is a whole word of that model name, the title, the tags or the template name; a number outside the model name counts only in the title. A query that matched before matches the same templates.
 - Outputs from `comfy run` on a UI-format workflow (the canvas `nodes` +
   `links` shape, which is how the Comfy agent runs a canvas) now drag back onto
@@ -182,6 +203,27 @@ history.
   the absolute directory `COMFY_DOWNLOAD_CLAIMS_DIR` names. Finish running
   downloads before upgrading, since an older version keeps its claims per
   workspace ([#1095](https://github.com/Comfy-Org/comfy-cli/issues/1095)).
+- `comfy run` and `comfy run --emit-workflow` on a canvas (UI-format)
+  workflow now keep a record-valued widget on its own input, for any node
+  whose schema is readable and declares a widget input of its own. A node that
+  saves a record in `widgets_values` — `ImageCropV2`'s `crop_region`, a
+  CurveEditor's `curve` — was read as a Power Lora Loader row as soon as any
+  one of the node's widget values was a record, so that record was dropped
+  and the input was filled from the node's schema default instead. Nothing
+  warned and the job still ran: in the bundled `3d_pixal3d_multi_views`
+  template all four crops became the same 512x512 corner of the input image,
+  the four views fed to the conditioning node were identical, and the mesh
+  came out radially symmetric — while the same workflow queued from the
+  ComfyUI canvas was correct. The Lora-row shortcut now applies only to a
+  node that declares no widget slots of its own; a record it does not
+  understand is reported in a warning rather than discarded in silence; and a
+  malformed `type` key no longer raises a `TypeError` that drops the whole
+  node, valid Lora rows included. A legacy "no rows yet" Lora save
+  (`[{}, ""]`) keeps its markers off real sockets such as `model` and `clip`.
+  A node whose type is missing from the server's `object_info` has no schema to
+  read, so a self-naming record on such a node still goes down the Lora-row
+  path as before
+  ([#1011](https://github.com/Comfy-Org/comfy-cli/issues/1011)).
 
 ## [1.28.0] - 2026-11-18
 

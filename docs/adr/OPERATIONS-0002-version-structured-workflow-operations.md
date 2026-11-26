@@ -33,7 +33,7 @@ existing subgraph definition with an exact reused-host schema contract and
 explicit conflict metadata. It does not add an operation kind or weaken this
 ADR's versioning and fail-closed requirements.
 
-Amendment v1.15, recorded in
+Amendment v1.16, recorded in
 [ADR-OPERATIONS-0018](OPERATIONS-0018-flush-legacy-proxy-migration-before-the-lww-gate-for-promoted-writes.md),
 changes WHEN the deterministic legacy-proxy repair runs relative to the LWW
 gate for a promoted `set_widget` host write, and the `promoted.repair`

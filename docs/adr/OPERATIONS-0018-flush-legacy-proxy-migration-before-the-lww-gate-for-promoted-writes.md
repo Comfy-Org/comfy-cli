@@ -8,7 +8,7 @@ Proposed
 
 Relation: Amends [ADR-OPERATIONS-0002](OPERATIONS-0002-version-structured-workflow-operations.md).
 No operation kind is added, removed, or re-scoped; `FROZEN_OPS` / `DEFERRED_OPS`
-/ `BATCHABLE_OPS` are untouched. This records Amendment v1.15 in
+/ `BATCHABLE_OPS` are untouched. This records Amendment v1.16 in
 [`op-vocabulary-v1.md`](../op-vocabulary-v1.md), which states the full rule and
 the wire-shape detail.
 

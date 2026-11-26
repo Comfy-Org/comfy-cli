@@ -1328,6 +1328,99 @@ class TestCli:
         assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
         _validate(data)
 
+    def test_pick_miss_lists_ids_without_descriptions(self, tmp_path, monkeypatch, capsys):
+        """A miss is not a request for the catalog.
+
+        Measured on a production agent turn: one unresolved capability string
+        returned about 43 KB, almost all of it capability descriptions the
+        caller never read. The ids stay so the caller can still choose one; the
+        descriptions go.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "nope"], capsys)
+        caps = env["data"]["capabilities"]
+        assert [c["id"] for c in caps] == ["audio-generation", "lipsync"]
+        assert all("description" not in c for c in caps)
+        _validate(env["data"])
+
+    def test_the_bare_listing_keeps_its_descriptions(self, tmp_path, monkeypatch, capsys):
+        """The other half of the trade: asking for the catalog still gets one."""
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick"], capsys)
+        caps = env["data"]["capabilities"]
+        assert [c["id"] for c in caps] == ["audio-generation", "lipsync"]
+        assert all(c["description"] for c in caps)
+        assert "candidates" not in env["data"]
+        _validate(env["data"])
+
+    def test_pick_miss_with_nothing_close_still_answers(self, tmp_path, monkeypatch, capsys):
+        """No candidate is a valid answer; the nudge falls back to the id list."""
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "nope"], capsys)
+        data = env["data"]
+        assert data["candidates"] == []
+        assert "query one of the listed capability ids" in data["nudge"]
+        _validate(data)
+
+    def test_pick_miss_payload_is_far_smaller_than_the_listing(self, tmp_path, monkeypatch, capsys):
+        """The point of the change, asserted as a size rather than a shape.
+
+        The fixture bundle has two capabilities, so the absolute saving here is
+        small; production has sixty-odd. Pinning the inequality is what stops a
+        later edit quietly putting the descriptions back.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        _, miss = _run(["pick", "nope"], capsys)
+        _, listing = _run(["pick"], capsys)
+        assert len(json.dumps(miss["data"]["capabilities"])) < len(json.dumps(listing["data"]["capabilities"]))
+
+    @pytest.mark.parametrize("query", ["generate", "???", "生成视频"])
+    def test_pick_miss_answers_a_query_with_no_scoring_tokens(self, tmp_path, monkeypatch, capsys, query):
+        """The CLI-level half of the scorer's empty-mapping contract.
+
+        `nope` has tokens, so the existing miss test never reached the branch
+        that crashed. These do.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", query], capsys)
+        assert rc == 0
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["zero_hit"] is True
+        assert data["candidates"] == []
+        _validate(data)
+
+    def test_pick_miss_scores_candidates_on_the_unclipped_query(self, tmp_path, monkeypatch, capsys):
+        """Suggestions must be scored on the text the resolver actually missed.
+
+        The echoed ``query`` is clipped to ``MAX_QUERY_CHARS`` and a clip can cut
+        a word in half, so scoring the clip would let the suggestion disagree
+        with the routing that just ran on the full string.
+
+        Asserted on the wiring rather than on an output, because the two strings
+        only diverge past the clip and a long query that still misses is not
+        constructible against this fixture: anything that scores here also wins
+        outright, so it is a hit and never reaches the miss path at all.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        seen: dict[str, str | None] = {}
+        real = knowledge_cmd._emit_capabilities
+
+        def _spy(renderer, bundle, *, query=None, score_query=None):
+            seen["query"] = query
+            seen["score_query"] = score_query
+            return real(renderer, bundle, query=query, score_query=score_query)
+
+        monkeypatch.setattr(knowledge_cmd, "_emit_capabilities", _spy)
+        # Long enough to be clipped, and matching nothing, so it reaches the
+        # miss path instead of resolving outright.
+        long_query = "zzzz " * 120 + "qqqq"
+        assert len(long_query) > knowledge.MAX_QUERY_CHARS
+        _run(["pick", long_query], capsys)
+        assert seen["query"] == long_query[: knowledge.MAX_QUERY_CHARS]
+        assert seen["score_query"] == long_query
+        assert len(seen["score_query"]) > len(seen["query"])
+
     def test_pick_miss_clips_a_long_query(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "x" * 500], capsys)
@@ -1469,6 +1562,68 @@ class TestCli:
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
         assert manifest["files"]["knowledge.json"]["bytes"] == len(raw)
+
+
+class TestCapabilityCandidates:
+    """Ranking behind the miss payload's suggestions.
+
+    `_resolve_tokens` answers only when one capability wins outright, which is
+    right for routing: a tie must not silently become a guess. The cost is that
+    a tie used to produce nothing for the caller to act on. These are the rows
+    that scored at all, so a tie turns into two suggestions.
+    """
+
+    def test_a_scoring_query_is_offered_as_a_candidate(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "talking head video") == ["lipsync"]
+
+    def test_a_query_touching_both_rows_offers_both_most_likely_first(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "audio generation talking head") == [
+            "audio-generation",
+            "lipsync",
+        ]
+
+    def test_a_query_touching_nothing_offers_nothing(self, tmp_path, monkeypatch):
+        """A guess is worse than an empty list; the caller still has the id list."""
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "nope") == []
+
+    @pytest.mark.parametrize("query", ["generate", "create a", "???", "!!!", "生成视频", " "])
+    def test_a_query_with_no_scoring_tokens_returns_empty_not_none(self, tmp_path, monkeypatch, query):
+        """The scorer's empty-count branch must stay a mapping.
+
+        It used to be `_resolve_tokens`'s own early `return None`, absorbed by
+        that function's `if not scored` guard. Sharing the scorer gave it a
+        second caller with no such guard, so a query made only of filler or
+        punctuation raised `AttributeError` on `.items()` instead of answering.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, query) == []
+        assert knowledge._resolve_tokens(bundle, query) is None
+
+    def test_the_list_is_bounded(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        assert knowledge.capability_candidates(bundle, "audio generation talking head", limit=1) == ["audio-generation"]
+        assert knowledge.capability_candidates(bundle, "audio generation talking head", limit=0) == []
+
+    def test_ranking_shares_one_implementation_with_the_resolver(self, tmp_path, monkeypatch):
+        """The winner, when there is one, must be the candidate list's head.
+
+        Two scoring loops would be free to disagree, and a disagreement here
+        means the suggestion contradicts the routing. One function, asserted.
+        """
+        _env_bundle(tmp_path, monkeypatch)
+        bundle = knowledge.load_bundle()
+        for query in ("talking head video", "lip sync a photo", "audio generation talking head"):
+            winner = knowledge._resolve_tokens(bundle, query)
+            if winner is not None:
+                assert knowledge.capability_candidates(bundle, query)[0] == winner
 
 
 class TestPickCheckLocal:
