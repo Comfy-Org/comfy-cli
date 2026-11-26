@@ -1939,6 +1939,29 @@ def _dynamic_combo_option_keys(input_spec: Any) -> list[Any]:
     return [option.get("key") for option in options if isinstance(option, dict)]
 
 
+def _usable_named_values(node: dict | None) -> dict[str, Any] | None:
+    """A node's ``widgets_values_named`` map when it is usable, else ``None``.
+
+    Ports ``usableNamedValues`` from ``@comfyorg/api-to-workflow``
+    (``src/converter/widgetMapper.ts`` in ``Comfy-Org/comfy-cloud-mcp-server``,
+    the package ``cql/engine.py``'s A23 write-side mirroring already follows).
+    A non-object or an array both read as absent -- ``isinstance(named, dict)``
+    covers both in Python, where a list is never a dict.
+
+    An EMPTY map is absent too. ``serialize()`` writes ``{}`` only when the node
+    has no widget it serializes at all, so an empty map carries no widget value
+    by construction, while treating it as present would be enough to make the
+    walk below run against a named map for a node whose ``widgets_values`` is
+    missing entirely -- fabricating values for widgets the file never mentioned.
+    """
+    if not isinstance(node, dict):
+        return None
+    named = node.get("widgets_values_named")
+    if not isinstance(named, dict) or not named:
+        return None
+    return named
+
+
 def _schema_widget_pairs(
     schema: Any,
     widget_values: list[Any],
@@ -2025,7 +2048,9 @@ def _schema_widget_pairs(
             names = listed + [n for n in names if n not in listed]
         ordered.extend((n, section_def[n]) for n in names)
 
-    def walk(strict: bool, saved_node: dict | None = node) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+    def walk(
+        strict: bool, saved_node: dict | None = node, use_named: dict[str, Any] | None = None
+    ) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
         # ``saved_node`` is the node whose recorded widget order sub-inputs are
         # expanded in; ``None`` means "ignore the save, use the catalog order".
         # ``strict`` assumes the current frontend's slot layout: every exact
@@ -2033,6 +2058,15 @@ def _schema_widget_pairs(
         # control keyword there is always consumed. Returns the pairs and
         # whether the walk used every value with no widget left short, plus
         # the warnings it would log (only the chosen walk's are emitted).
+        #
+        # ``use_named`` resolves each widget's value by name against
+        # ``widgets_values_named`` INSIDE this same walk, with a per-widget
+        # positional fallback -- not post-hoc substitution over the pairs this
+        # walk returns, which cannot work: a slot the array ran out of never
+        # gets a pair appended at all (see ``short`` below), so there would be
+        # nothing to substitute into. ``None`` leaves every widget positional,
+        # which is how the layout-selection calls below establish the
+        # candidate test's basis before any named lookup is attempted.
         pairs: list[tuple[str, Any]] = []
         warnings: list[tuple[Any, ...]] = []
         vidx = 0
@@ -2077,7 +2111,15 @@ def _schema_widget_pairs(
                     return
                 short = True
                 return
-            value = widget_values[vidx]
+            # A positional slot exists for this widget -- it is still consumed
+            # either way, so the walk's slot arithmetic (dynamic-combo/group
+            # expansion, companion-marker skipping) is unaffected by which
+            # value ends up in the pair. Only the VALUE prefers the named map,
+            # per widget, when the name is present there.
+            if use_named is not None and name in use_named:
+                value = use_named[name]
+            else:
+                value = widget_values[vidx]
             vidx += 1
             if spec[0] == "COMFY_DYNAMICGROUP_V3":
                 template = spec[1].get("template", {})
@@ -2140,8 +2182,11 @@ def _schema_widget_pairs(
     # the current layout first and keep it only when it accounts for every
     # value exactly; otherwise fall back to the lenient walk, which refuses to
     # take a keyword the next COMBO lists.
+    chosen_strict = True
+    chosen_saved_node = node
     pairs, exact, warnings = walk(strict=True)
     if not exact:
+        chosen_strict = False
         pairs, exact, warnings = walk(strict=False)
     if not exact and node is not None:
         # Neither stream shape accounts for the array under the SAVED sub-order.
@@ -2166,7 +2211,24 @@ def _schema_widget_pairs(
             catalog_pairs, catalog_exact, catalog_warnings = walk(strict=catalog_strict, saved_node=None)
             if catalog_exact:
                 pairs, warnings = catalog_pairs, catalog_warnings
+                chosen_strict, chosen_saved_node = catalog_strict, None
                 break
+
+    # Candidate test for ``widgets_values_named``, applied against the layout
+    # this walk already chose above (purely from the positional structure,
+    # unaffected by any named lookup). Mirrors the package's basis
+    # (``widgetMapper.ts:1660-1664``): every widget this positional-only pass
+    # sourced from a REAL (non-``None``) slot must be present, and non-``None``,
+    # in the map. A slot that was ``None`` or never existed is excluded from the
+    # requirement -- both readings already agree there. Vacuously true (and so
+    # usable) when the positional pass produced no such name, same as an empty
+    # ``every`` in the reference implementation.
+    named = _usable_named_values(node)
+    if named is not None:
+        positional_names = {name for name, value in pairs if value is not None}
+        if all(name in named and named[name] is not None for name in positional_names):
+            pairs, _exact, warnings = walk(strict=chosen_strict, saved_node=chosen_saved_node, use_named=named)
+
     for warning in warnings:
         logger.warning(*warning)
     return pairs
