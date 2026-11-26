@@ -220,6 +220,7 @@ comfy workflow clear
 comfy workflow compose
 comfy workflow connect
 comfy workflow decompose
+comfy workflow define-subgraph
 comfy workflow delete
 comfy workflow delete-node
 comfy workflow delete-nodes

@@ -19,11 +19,11 @@ contains the contract version a consumer implements.
 
 ## 1. Frozen op kinds
 
-Nine kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
+Ten kinds as of amendment v1.8 — `disconnect` is the ninth and arrives with
 that amendment; see §1.2.1. `set_node_field` is the eighth and is **PROPOSED**,
-not yet ratified; see §1.8 and §15. No other kind is valid in v1: `apply_op`
-rejects an unknown kind with `ValueError("unknown op ...")` — it never ignores
-one.
+not yet ratified; see §1.8 and §15. `define_subgraph` is the tenth; see §1.9.
+No other kind is valid in v1: `apply_op` rejects an unknown kind with
+`ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
@@ -35,6 +35,7 @@ one.
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
+| `define_subgraph` | yes | `comfy workflow define-subgraph` | Create one subgraph definition |
 | `insert_workflow` | no | `comfy workflow insert-workflow` | Merge a complete workflow template in one transaction |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
@@ -353,6 +354,33 @@ collision-free. A future reconciliation pass (once this amendment is
 ratified) should confirm comfy-multi-player's applier accepts an op that
 omits `node_incarnation` rather than requiring one only because its own
 local model can need it.
+
+### 1.9 `define_subgraph`
+
+Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
+The command performs envelope shape and JSON-serialization checks, assigns its
+id from `--id`, the definition's `id`, or a new UUID, and emits exactly one
+stamped op without modifying the local workflow:
+
+```json
+{
+  "op": "define_subgraph",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "subgraph_id": "<uuid>",
+  "subgraph_definition": {"id": "<uuid>", "nodes": [], "links": []}
+}
+```
+
+Only this op may carry `subgraph_id` or `subgraph_definition`; `definitions`
+is accepted only here and on `insert_workflow`. The CLI does not
+semantically validate, apply, replay, project, or resolve conflicts for the
+definition. cmp owns those operations: reusing an id with different content
+returns `definition_conflict`, and references to unknown ids follow cmp's
+unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
+interior edits use the existing id-addressed op scopes.
 
 ## 2. Idempotency and identity
 
@@ -1790,3 +1818,56 @@ Offline replay (no catalog) of a write that would otherwise reach the flush
 now skips it and applies the write as-is — matching every other offline-
 degradation site in `workflow_ops.py` — rather than raising, since
 `flush_proxy_migration` itself refuses to run without a catalog.
+## 26. Amendment v1.17 — 2026-11-19 (`define_subgraph`: the tenth kind, and what "Batchable" means for a deferred kind)
+
+**Renumbered from v1.16 on 2026-11-26.** This amendment was written as v1.16 (§25) on
+2026-11-19; the promoted `set_widget` proxy-flush amendment took that number by landing
+first. Nothing in the content changed. Amendment numbers here are hand-picked from a
+single shared document, so two branches written in the same week pick the same one and
+collide on the heading by construction rather than by mistake.
+
+
+**Why this section exists.** §9 requires a versioned amendment for any
+post-freeze change, and adding an op kind is the case it names explicitly
+("Adding, removing, or re-scoping an op kind requires updating `FROZEN_OPS` /
+`DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables, and this document in one
+commit"). `tests/comfy_cli/test_op_vocabulary_contract.py` pins the frozen table
+against the code but does not check for the amendment, so nothing automated
+would have caught its absence.
+
+**`define_subgraph` is added** as the tenth frozen kind: §1.9 has the envelope
+and the ownership boundary, the §1 table has its row, and
+`comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]` is its
+standalone command. It is in `FROZEN_OPS`, in `BATCHABLE_OPS`, and in
+`DEFERRED_OPS`. §1.7's "Only `define_subgraph` and `insert_workflow` may carry
+`definitions`" sentence predates this amendment and had no kind to refer to
+until now.
+
+**What `Batchable = yes` does and does not promise for it.** §1's definition of
+Batchable is acceptance by `apply_specs`, and that is what the column states:
+`apply_specs` dispatches `define_subgraph`, so a server-side batch replay
+carries it like any other batchable kind. The two **local** batch commands are a
+separate matter and both refuse it:
+
+| surface | `define_subgraph` in a batch | `insert_workflow` in a batch |
+|---|---|---|
+| `apply_specs` (library) | dispatched | `NotBatchableError` |
+| `comfy workflow apply` | refused, `workflow_edit_invalid`, "local apply cannot persist deferred operation(s)" | `workflow_insert_workflow_not_batchable` (§1.7) |
+| `comfy workflow foreach` | refused, `workflow_edit_invalid`, "local foreach cannot persist deferred operation(s)" | `workflow_insert_workflow_not_batchable` (§1.7) |
+
+The refusal is the `DEFERRED_OPS` boundary, not a batch rule: both local
+commands **persist** their result, and this kind's validation, replay and
+conflict resolution are cmp's (§1.9). A deferred-and-batchable kind is therefore
+the one combination where the Batchable column and the CLI's behaviour differ,
+and the difference is deliberate. Any future kind in both sets inherits it.
+
+**Both local commands now intersect the two sets**, so a deferred kind that is
+*not* batchable keeps its own registered code instead of being swallowed by the
+deferred guard: `insert_workflow` inside a `foreach` recipe returned
+`workflow_edit_invalid` and now returns `workflow_insert_workflow_not_batchable`
+with the hint naming `comfy workflow insert-workflow`, matching `apply` and
+matching what §1.7 promises.
+
+**No other section changes.** §§2-8 and amendments v1.1-v1.15 are untouched, and
+no existing kind is removed or re-scoped.
+

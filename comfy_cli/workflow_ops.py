@@ -68,6 +68,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -89,6 +90,7 @@ from comfy_cli.cql.engine import (
 # bit 40 (and set bit 41), so bit 40 is the cross-actor discriminator. Agent ids
 # may also have bit 41 set. Random draws within this actor range can still collide.
 _ID_FLOOR = 1 << 40
+_SUBGRAPH_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 
 # Mirrored EXACTLY from comfy-multi-player's `src/limits.ts` at
 # 221b2b2e470c79afaface24b1edcb53cdafc8922 (`MAX_PAYLOAD_DEPTH` 64,
@@ -441,6 +443,7 @@ FROZEN_OPS: tuple[str, ...] = (
     "delete_node",
     "clear",
     "reset_doc",
+    "define_subgraph",
     "insert_workflow",
 )
 
@@ -453,9 +456,10 @@ FROZEN_OPS: tuple[str, ...] = (
 WRITABLE_NODE_FIELDS: tuple[str, ...] = ("title", "mode", "flags.collapsed", "flags.pinned")
 
 #: Kinds frozen in the contract whose replay is not implemented in the CLI.
-#: ``insert_workflow`` is emitted for cmp to validate and apply; the CLI must
-#: keep rejecting local replay to preserve that ownership boundary.
-DEFERRED_OPS: tuple[str, ...] = ("insert_workflow",)
+#: ``define_subgraph`` and ``insert_workflow`` are emitted for cmp to validate
+#: and apply; the CLI must keep rejecting local replay to preserve that
+#: ownership boundary.
+DEFERRED_OPS: tuple[str, ...] = ("define_subgraph", "insert_workflow")
 
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
@@ -467,6 +471,7 @@ BATCHABLE_OPS: tuple[str, ...] = (
     "set_widget",
     "set_node_field",
     "delete_node",
+    "define_subgraph",
 )
 
 #: Per-kind rendering for :class:`NotBatchableError` — the registered error code
@@ -2877,20 +2882,21 @@ class NotExpressibleError(ValueError):
 def _inexpressible_reason(workflow: dict) -> str | None:
     """Why ``workflow`` cannot be rebuilt from add_node/connect ops, or None.
 
-    The frozen vocabulary has four batchable kinds and none of them can create a
-    subgraph definition, a canvas group, or a reroute point — so a graph that
-    carries any of those is not reconstructible from ops, full stop. Enumerated
+    The frozen vocabulary cannot create a canvas group or a reroute point, so a
+    graph that carries either is not reconstructible from ops. Enumerated
     positively (a closed list of things we know we CAN'T do) rather than by
     trying and checking, so an unexpressible template fails before it has
     written anything.
     """
     if not isinstance(workflow, dict) or not isinstance(workflow.get("nodes"), list):
         return "not a frontend-format workflow (no `nodes` list) — only the save/UI format can be op-ified"
-    definitions = workflow.get("definitions")
-    if isinstance(definitions, dict) and definitions.get("subgraphs"):
-        return "the workflow contains a subgraph definition, which no frozen op kind can create"
     if workflow.get("groups"):
         return "the workflow contains canvas groups, which no frozen op kind can create"
+    definitions = workflow.get("definitions")
+    if definitions is not None and not isinstance(definitions, dict):
+        return "the workflow's `definitions` is not an object, so it is not a frontend-format workflow"
+    if definitions and definitions.get("subgraphs"):
+        return "the workflow contains subgraph definitions, which only cmp can project into ops"
     extra = workflow.get("extra")
     if isinstance(extra, dict) and (extra.get("reroutes") or extra.get("linkExtensions")):
         return "the workflow contains reroute points, which no frozen op kind can create"
@@ -3846,6 +3852,14 @@ def apply_specs(
                     workflow, op = delete_node(
                         workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
                     )
+                elif kind == "define_subgraph":
+                    workflow, op = define_subgraph(
+                        workflow,
+                        spec["subgraph_definition"],
+                        subgraph_id=spec.get("subgraph_id"),
+                        actor=actor,
+                        base_version=base_version,
+                    )
                 elif kind in _NOT_BATCHABLE:
                     # In the frozen vocabulary but standalone-only — surfaced with
                     # its own registered code so the caller learns the standalone
@@ -4002,7 +4016,9 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # that arrived without a ledger is never left carrying an empty one by a
     # rejected op".
     kind = op["op"]
-    if kind != "insert_workflow" and "definitions" in op:
+    if kind != "define_subgraph" and any(key in op for key in ("subgraph_id", "subgraph_definition")):
+        raise ValueError(f"malformed_op: {kind} cannot carry a subgraph definition")
+    if kind not in ("define_subgraph", "insert_workflow") and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
     had_applied_ops = "_applied_ops" in workflow
     workflow.setdefault("_applied_ops", [])
@@ -4070,6 +4086,45 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     if kind == "set_widget":
         _retry_deferred_widget_ops(workflow, graph)
     return workflow
+
+
+def define_subgraph(
+    workflow: dict,
+    definition: dict,
+    *,
+    subgraph_id: str | None = None,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Emit a definition op; cmp owns semantic validation and application."""
+    if not isinstance(definition, dict):
+        raise ValueError("subgraph definition must be a JSON object")
+    definition = copy.deepcopy(definition)
+    if subgraph_id is not None:
+        definition_id = subgraph_id
+    elif "id" in definition:
+        definition_id = definition["id"]
+    else:
+        definition_id = str(uuid.uuid4())
+    if not isinstance(definition_id, str) or not definition_id:
+        raise ValueError("subgraph definition requires a non-empty string id")
+    if not _SUBGRAPH_UUID_RE.fullmatch(definition_id):
+        raise ValueError("subgraph definition id must be a valid UUID")
+    if "id" in definition and definition["id"] != definition_id:
+        raise ValueError("subgraph definition id must match --id")
+    definition["id"] = definition_id
+    try:
+        json.dumps(definition, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ValueError("subgraph definition must be JSON-serializable") from error
+    op = _new_op(
+        "define_subgraph",
+        actor,
+        base_version,
+        subgraph_id=definition_id,
+        subgraph_definition=definition,
+    )
+    return workflow, op
 
 
 def _retry_deferred_widget_ops(workflow: dict, graph) -> None:
@@ -4954,6 +5009,8 @@ def _write_target(op: dict) -> tuple:
             # top-level node 2011.
             return ("input", tuple(str(seg) for seg in op["path"]), str(op["to_node"]), op["to_slot"])
         return ("input", str(op["to_node"]), op["to_slot"])
+    if kind == "define_subgraph":
+        return ("subgraph", str(op["subgraph_id"]))
     return (kind,)
 
 

@@ -15,6 +15,17 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`
+  emits one `define_subgraph` op for the cloud merge consumer without touching
+  the local workflow file. The id comes from `--id`, the definition's own `id`,
+  or a new UUID. The CLI checks envelope shape and JSON-serializability only:
+  semantic validation, replay and conflict resolution for a definition belong
+  to the server, so `comfy workflow apply` and `comfy workflow foreach` refuse
+  to persist the op locally. New frozen op kind, documented as amendment v1.17
+  of `docs/op-vocabulary-v1.md`.
+
 ### Fixed
 
 - Telemetry no longer loses the last event of a run when `posthog` resolves to
