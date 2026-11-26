@@ -49,6 +49,11 @@ history.
   jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
   now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
   the timeout.
+- The workspace venv that `comfy install` creates (comfy-cli in pipx, uv tool
+  or a PEP 668 system Python) now upgrades its pip. The bundled pip (22.3.1 on
+  Python 3.11) could not install torch from the PyTorch index (`No matching
+  distribution found for flit_core<4,>=3.11`). The upgrade is best effort: if
+  it fails or times out, the venv is kept and a warning is printed.
 
 ## [1.29.0] - 2026-11-24
 
