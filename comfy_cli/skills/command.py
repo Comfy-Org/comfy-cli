@@ -146,21 +146,62 @@ def _shaped_like_path(token: str) -> bool:
     return bool(token) and ("/" in token or os.sep in token or token.startswith((".", "~")))
 
 
+def _path_parts(token: str) -> list[str]:
+    """A path-shaped option value as its non-empty, lowercased segments."""
+    return [part for part in token.lower().replace(os.sep, "/").split("/") if part]
+
+
+def _is_foreign_agents_md(parts: list[str]) -> bool:
+    """True when *parts* names an AGENTS.md that no scope of this command writes.
+
+    ``--target agents-md`` writes exactly ``~/AGENTS.md`` at ``--scope user``
+    and ``<project root>/AGENTS.md`` at ``--scope project``. An AGENTS.md inside
+    a tool's own config directory is a different file: ``~/.codex/AGENTS.md`` is
+    where Codex reads its GLOBAL instructions, which is the whole reason ``codex``
+    is refused as an alias. Hinting ``--target agents-md`` for it sent the user to
+    a command that writes ``~/AGENTS.md`` and reports success, contradicting that
+    refusal two screens away.
+
+    Identified by the parent segment being a dot-directory. ``.`` and ``..`` are
+    not: ``./AGENTS.md`` and ``../AGENTS.md`` are ordinary project paths.
+    """
+    if len(parts) < 2 or parts[-1] != "agents.md":
+        return False
+    parent = parts[-2]
+    return parent.startswith(".") and parent not in (".", "..")
+
+
+def _is_skill_path(parts: list[str]) -> bool:
+    """True when *parts* names one skill rather than a destination.
+
+    A skill is a directory named after the skill containing ``SKILL.md``, and the
+    loader takes either form. The file form was already excluded from the hints
+    by its ``.md`` suffix; the directory form has no suffix, so
+    ``~/.claude/skills/my-skill`` reached the destination scan and came back as
+    ``--target claude-code`` — a command that installs the bundled defaults and
+    not ``my-skill``. Both forms name the same thing and belong to ``--skill``.
+    """
+    if not parts:
+        return False
+    if parts[-1].endswith(".md"):
+        # AGENTS.md is the one markdown file that IS a destination.
+        return parts[-1] != "agents.md"
+    return any(part == "skills" and index + 1 < len(parts) for index, part in enumerate(parts))
+
+
 def _destination_hint(token: str) -> TargetKind | None:
     """The target a path-shaped value is pointing at, when it names one.
 
-    A markdown file other than AGENTS.md gets no hint even under a destination
-    directory: ``~/.claude/skills/x/SKILL.md`` is a skill file that belongs to
-    ``--skill``, and telling that user to pass ``--target claude-code`` would
-    answer a question they did not ask.
+    Nothing that names one SKILL gets a hint, and neither does an AGENTS.md this
+    command does not write — in both cases the hint would answer a different
+    question than the one asked, and following it would write the wrong thing
+    while reporting success.
     """
-    parts = [part for part in token.lower().replace(os.sep, "/").split("/") if part]
-    if not parts:
+    parts = _path_parts(token)
+    if not parts or _is_skill_path(parts) or _is_foreign_agents_md(parts):
         return None
     if parts[-1] == "agents.md":
         return "agents-md"
-    if parts[-1].endswith(".md"):
-        return None
     for part in parts:
         kind = _DESTINATION_PARTS.get(part)
         if kind is not None:
@@ -193,6 +234,12 @@ def _unknown_target(token: str) -> typer.BadParameter:
             return typer.BadParameter(
                 f"--target got {token!r}, which looks like a path. --target takes a target name, "
                 f"and that destination is the {hint} target; pass `--target {hint}`"
+            )
+        if _is_foreign_agents_md(_path_parts(normalized)):
+            return typer.BadParameter(
+                f"--target got {token!r}, which is an AGENTS.md this command does not write. "
+                "`--target agents-md` writes ~/AGENTS.md at --scope user and "
+                "<project root>/AGENTS.md at --scope project, and nothing else"
             )
         return typer.BadParameter(
             f"--target got {token!r}, which looks like a path. --target picks where skills are "

@@ -1938,3 +1938,57 @@ def test_install_notice_does_not_promise_codex_reads_a_user_scope_agents_md(
     # The claim that cannot hold at user scope must be gone, not merely
     # qualified further down.
     assert "Codex when run from this directory" not in flattened, flattened
+
+
+def test_an_agents_md_this_command_does_not_write_is_not_hinted_at_agents_md():
+    """`--target ~/.codex/AGENTS.md` was answered with "pass --target agents-md".
+
+    That command writes `~/AGENTS.md` at the default scope, not the Codex file,
+    so following the hint produced a `Done` for a file Codex never reads -- the
+    same silent no-op `_TARGET_NOT_AN_ALIAS["codex"]` refuses the `codex` alias
+    to prevent, two screens away in the same module. An AGENTS.md inside a
+    tool's own dot-directory now says which files this command does write.
+    """
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token in ("~/.codex/AGENTS.md", "~/.config/AGENTS.md"):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        message = str(refused.value)
+        assert "does not write" in message, message
+        assert "~/AGENTS.md at --scope user" in message, message
+        # The hint that sent them there is gone. The message may still NAME
+        # `--target agents-md` -- it has to, to say what that writes instead.
+        assert "pass `--target agents-md`" not in message, message
+        assert "that destination is the" not in message, message
+
+    # And an ordinary project or home AGENTS.md keeps the hint. `.` and `..` are
+    # paths, not dot-directories.
+    for token in ("./AGENTS.md", "../AGENTS.md", "~/AGENTS.md", "/home/someone/proj/AGENTS.md"):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert "--target agents-md" in str(refused.value), str(refused.value)
+
+
+def test_a_skill_directory_gets_the_same_guidance_as_its_skill_md():
+    """A skill is a directory containing SKILL.md, and the loader takes either
+    form. The file form was excluded from the destination hints by its `.md`
+    suffix, but the directory form has none, so `~/.claude/skills/my-skill` came
+    back as "--target claude-code" -- a command that installs the bundled
+    defaults and not `my-skill`."""
+    import typer
+
+    from comfy_cli.skills.command import _kinds
+
+    for token in ("~/.claude/skills/my-skill", "~/.claude/skills/my-skill/SKILL.md", "./.cursor/skills/x"):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert "goes to --skill" in str(refused.value), str(refused.value)
+
+    # The destination directories themselves still resolve to their target.
+    for token, kind in (("~/.claude", "claude-code"), ("~/.cursor/rules", "cursor")):
+        with pytest.raises(typer.BadParameter) as refused:
+            _kinds([token])
+        assert f"--target {kind}" in str(refused.value), str(refused.value)

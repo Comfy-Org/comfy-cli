@@ -85,7 +85,11 @@ history.
   inside this directory", which is the answer at `--scope project` and no answer
   at the default `--scope user`, where the file is `~/AGENTS.md` and Codex reads
   it from nowhere — so it now points a user-scope install at `--scope project`
-  instead.
+  instead. Two paths that are not destinations no longer get pointed at one:
+  an `AGENTS.md` inside a tool's own dot-directory (`~/.codex/AGENTS.md`) is a
+  file this command does not write at any scope and now says so, and a skill
+  DIRECTORY under a destination (`~/.claude/skills/my-skill`) goes to `--skill`
+  like its `SKILL.md` already did.
 
 ### Removed
 
