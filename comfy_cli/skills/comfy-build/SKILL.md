@@ -262,6 +262,10 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
 - **`unresolvedClasses` is the list to take to the user.** Those node classes are
   ones nothing installable provides, so the graph will not run. Cutting anyway
   ships an environment that cannot execute the workflow it was built for.
+  **Don't fill the gap by writing node code into the build.** A build packages
+  published packs; a node you author is unreviewed code the user never chose.
+  Stop before you change the spec, list the classes, and ask the user how to go
+  on.
 
 ## Path C — from a description, a Dockerfile, or a Modal script
 

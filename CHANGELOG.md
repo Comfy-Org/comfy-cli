@@ -35,6 +35,11 @@ history.
 
 ### Changed
 
+- The `comfy-build` skill now tells an agent not to write node code into a
+  build for node classes nothing installable provides (`unresolvedClasses`). It
+  stops before changing the spec, lists the classes, and asks the user how to go
+  on. `comfy-build-failures` says the same where it lists `unresolvedClasses`.
+
 - **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
   longer returns every capability's description. The payload keeps the full
   id-sorted `capabilities` list but drops `description` from its items on a
