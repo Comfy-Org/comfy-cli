@@ -4,7 +4,15 @@ from unittest.mock import Mock, patch
 import typer.testing
 
 from comfy_cli import constants
-from comfy_cli.command.models.models import _format_elapsed, app, check_civitai_url, check_huggingface_url, list_models
+from comfy_cli.command.models.models import (
+    _format_elapsed,
+    _huggingface_blob_to_resolve,
+    app,
+    check_civitai_url,
+    check_huggingface_url,
+    is_huggingface_page_url,
+    list_models,
+)
 
 
 def _make_model_tree(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -324,6 +332,231 @@ def test_invalid_huggingface_url():
 def test_invalid_huggingface_url_structure():
     url = "https://huggingface.co/CompVis/stable-diffusion-v1-4/main/sd-v1-4.ckpt"
     assert check_huggingface_url(url) == (False, None, None, None, None)
+
+
+# --------------------------------------------------------------------------- #
+# is_huggingface_page_url — a Hugging Face PAGE is not a download source.
+#
+# Hugging Face answers every page URL `200 text/html`, so before this split the
+# "source is unknown, treat it as a direct file URL" branch *succeeded* on them:
+# 276 KB of model-card HTML written to `models/checkpoints/<--filename>`, "Done",
+# and `comfy models search` listing it as installed because it reads filenames
+# and never content.
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_huggingface_repo_url_is_a_page():
+    """The form a person copies out of the address bar, and the most pasted one."""
+    assert is_huggingface_page_url("https://huggingface.co/black-forest-labs/FLUX.1-dev") is True
+
+
+def test_huggingface_tree_url_is_a_page():
+    assert is_huggingface_page_url("https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main") is True
+
+
+def test_huggingface_dataset_url_is_a_page():
+    assert is_huggingface_page_url("https://huggingface.co/datasets/foo/bar") is True
+
+
+def test_huggingface_org_url_is_a_page():
+    assert is_huggingface_page_url("https://huggingface.co/stabilityai") is True
+
+
+def test_huggingface_com_page_is_a_page():
+    """Host parity with `check_huggingface_url`, which accepts both spellings."""
+    assert is_huggingface_page_url("https://huggingface.com/black-forest-labs/FLUX.1-dev") is True
+
+
+def test_huggingface_resolve_url_is_not_a_page():
+    """A `/resolve/` link names one file, so it keeps the working path."""
+    url = "https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
+    assert is_huggingface_page_url(url) is False
+    assert check_huggingface_url(url)[0] is True
+
+
+def test_huggingface_blob_url_is_not_a_page():
+    url = "https://huggingface.co/stabilityai/stable-audio-open-1.0/blob/main/model.safetensors"
+    assert is_huggingface_page_url(url) is False
+    assert check_huggingface_url(url)[0] is True
+
+
+def test_non_huggingface_host_is_never_a_page():
+    """Only Hugging Face is claimed here: every other host keeps the plain
+    direct-file-URL path, which is a supported source."""
+    assert is_huggingface_page_url("https://example.com/sd-v1-4.ckpt") is False
+    assert is_huggingface_page_url("https://civitai.com/models/43331") is False
+    assert is_huggingface_page_url("https://nothuggingface.co/org/repo") is False
+
+
+def test_huggingface_file_urls_the_hub_parser_cannot_read_are_not_pages():
+    """The regression the first cut of this would have shipped.
+
+    `is_huggingface_page_url` was `not check_huggingface_url(url)[0]`, and that
+    parser accepts only `/<org>/<repo>/{resolve,blob}/<branch>/<path>`. Every
+    URL below names real file bytes, reaches the generic direct-URL branch, and
+    worked before this change — so refusing it with `hf_not_a_file`, under a
+    hint naming the `/resolve/` form it already uses, would be a worse bug than
+    the one being fixed. Each is a shape somebody downloads today: ReActor ships
+    `inswapper_128.onnx` from a dataset repo, and `gpt2` is the unnamespaced
+    legacy form.
+    """
+    file_urls = [
+        "https://huggingface.co/datasets/org/weights/resolve/main/inswapper_128.onnx",
+        "https://huggingface.co/spaces/org/demo/resolve/main/model.safetensors",
+        "https://huggingface.co/gpt2/resolve/main/model.safetensors",
+        "https://huggingface.co/org/repo/raw/main/config.json",
+    ]
+    for url in file_urls:
+        assert is_huggingface_page_url(url) is False, url
+        # And they are NOT hub-parseable either: not a page and not a hub file
+        # is the third state, and it is the one that works. The two recognizers
+        # are deliberately not each other's complement.
+        assert check_huggingface_url(url)[0] is False, url
+
+
+def test_huggingface_branch_listing_with_no_file_after_it_is_a_page():
+    """`/resolve/<branch>` with nothing after it addresses no file."""
+    assert is_huggingface_page_url("https://huggingface.co/org/repo/resolve/main") is True
+
+
+def test_huggingface_page_detection_covers_the_hosts_people_paste():
+    """`netloc` kept the port, the case and any userinfo, so each of these
+    skipped the guard and saved the page HTML as the model."""
+    for url in [
+        "https://hf.co/black-forest-labs/FLUX.1-dev",
+        "https://www.huggingface.co/black-forest-labs/FLUX.1-dev",
+        "https://HuggingFace.co/black-forest-labs/FLUX.1-dev",
+        "https://huggingface.co:443/black-forest-labs/FLUX.1-dev",
+        "https://huggingface.co./black-forest-labs/FLUX.1-dev",
+    ]:
+        assert is_huggingface_page_url(url) is True, url
+
+
+def test_huggingface_host_set_is_shared_by_both_recognizers():
+    """One host set, so "on Hugging Face" cannot mean two things two lines
+    apart: a `/resolve/` link on HF's short domain parses as a hub file."""
+    url = "https://hf.co/stabilityai/sdxl-turbo/resolve/main/sd_xl_turbo_1.0_fp16.safetensors"
+    assert is_huggingface_page_url(url) is False
+    assert check_huggingface_url(url) == (
+        True,
+        "stabilityai/sdxl-turbo",
+        "sd_xl_turbo_1.0_fp16.safetensors",
+        None,
+        "main",
+    )
+
+
+def test_huggingface_blob_url_is_rewritten_to_resolve():
+    """`/blob/` is the HTML file viewer. On a public repo the URL goes to
+    `download_file` unchanged, so without this rewrite a `/blob/` link saved the
+    viewer page as the model — and `hf_not_a_file`'s hint recommends `/blob/`."""
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/org/repo/blob/main/x.safetensors")
+        == "https://huggingface.co/org/repo/resolve/main/x.safetensors"
+    )
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/datasets/org/repo/blob/main/x.bin")
+        == "https://huggingface.co/datasets/org/repo/resolve/main/x.bin"
+    )
+
+
+def test_blob_rewrite_leaves_a_file_named_blob_and_other_hosts_alone():
+    for url in [
+        "https://huggingface.co/org/repo/resolve/main/blob",
+        "https://huggingface.co/org/repo/resolve/main/weights/blob.safetensors",
+        "https://example.com/a/blob/b/c.safetensors",
+    ]:
+        assert _huggingface_blob_to_resolve(url) == url, url
+
+
+def test_blob_rewrite_touches_only_the_marker_not_a_repo_or_directory_named_blob():
+    """`resolve`, `blob` and `raw` are legal repo, branch and directory names.
+
+    A left-to-right scan for the word `blob` rewrote the FIRST one with two
+    segments after it, so these two WORKING `/resolve/` URLs came back pointing
+    at a file that does not exist — a URL that downloaded before being broken by
+    the fix. The marker is found by position in Hugging Face's grammar instead.
+    """
+    for url in [
+        # Repo named `blob`: the scan rewrote the repo segment, giving
+        # `/org/resolve/resolve/main/model.safetensors`.
+        "https://huggingface.co/org/blob/resolve/main/model.safetensors",
+        # Directory named `blob`, two segments deep so it cleared the length
+        # test: `/org/repo/resolve/main/resolve/sub/model.safetensors`.
+        "https://huggingface.co/org/repo/resolve/main/blob/sub/model.safetensors",
+        # Branch named `blob`.
+        "https://huggingface.co/org/repo/resolve/blob/model.safetensors",
+    ]:
+        assert _huggingface_blob_to_resolve(url) == url, url
+
+    # And the viewer URL of a repo named `blob` still rewrites — at the marker,
+    # which here is the second `blob`, not the first.
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/org/blob/blob/main/model.safetensors")
+        == "https://huggingface.co/org/blob/resolve/main/model.safetensors"
+    )
+
+
+def test_blob_rewrite_covers_every_hf_url_shape_not_only_hub_parseable_ones():
+    """The hole the first cut left open, and the one `hf_not_a_file`'s hint
+    walked users into.
+
+    The rewrite used to run only inside the `check_huggingface_url` branch, and
+    that parser accepts only `/<org>/<repo>/{resolve,blob}/<branch>/<path>`. So
+    a dataset's, a space's or a legacy unnamespaced repo's `/blob/` link was
+    neither rewritten nor refused: it reached the generic direct-URL branch and
+    saved Hugging Face's HTML file viewer as the model, reporting `Done`.
+    """
+    for blob_url, resolve_url in [
+        (
+            "https://huggingface.co/datasets/org/weights/blob/main/inswapper_128.onnx",
+            "https://huggingface.co/datasets/org/weights/resolve/main/inswapper_128.onnx",
+        ),
+        (
+            "https://huggingface.co/spaces/org/demo/blob/main/model.safetensors",
+            "https://huggingface.co/spaces/org/demo/resolve/main/model.safetensors",
+        ),
+        (
+            "https://huggingface.co/gpt2/blob/main/model.safetensors",
+            "https://huggingface.co/gpt2/resolve/main/model.safetensors",
+        ),
+        # Legacy single-segment dataset repo: the repo-type prefix is present
+        # but the namespace is not, so the marker falls to the second candidate.
+        (
+            "https://huggingface.co/datasets/squad/blob/main/train.json",
+            "https://huggingface.co/datasets/squad/resolve/main/train.json",
+        ),
+        # `/datasets/<x>/blob/<branch>/<file>` reads two ways — a legacy
+        # dataset repo named `<x>`, or an ORG named `datasets` with repo `<x>`.
+        # The ambiguity is harmless because both readings put the marker in the
+        # same place, which is why the second candidate index is enough and no
+        # repo-type lookup is needed.
+        (
+            "https://huggingface.co/datasets/repo/blob/main/x.safetensors",
+            "https://huggingface.co/datasets/repo/resolve/main/x.safetensors",
+        ),
+    ]:
+        assert _huggingface_blob_to_resolve(blob_url) == resolve_url, blob_url
+        # `/resolve/` is where the bytes are, so none of these is a page.
+        assert is_huggingface_page_url(resolve_url) is False, resolve_url
+
+
+def test_blob_rewrite_preserves_the_rest_of_the_path_verbatim():
+    """Only the marker segment changes: a trailing slash, a doubled separator
+    and the query string all come back as they went in."""
+    assert (
+        _huggingface_blob_to_resolve("https://huggingface.co/org/repo/blob/main//x.safetensors?download=true")
+        == "https://huggingface.co/org/repo/resolve/main//x.safetensors?download=true"
+    )
+
+
+def test_a_directory_named_like_a_marker_under_a_tree_listing_is_still_a_page():
+    """`/tree/` is a web page whatever is under it.
+
+    The scan read the `blob` DIRECTORY as a file marker and called this URL a
+    file, so it reached the generic branch and saved the listing page.
+    """
+    assert is_huggingface_page_url("https://huggingface.co/org/repo/tree/main/blob/sub/weights") is True
 
 
 def test_huggingface_url_with_com_domain():

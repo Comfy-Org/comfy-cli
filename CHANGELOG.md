@@ -130,6 +130,33 @@ history.
   subdirectory of a project wrote to `<cwd>/outputs` instead of the project
   root's. Passing `--out-dir`/`-o` is unchanged.
 
+- `comfy model download --url` now refuses a Hugging Face *page* URL instead of
+  downloading the page. A bare repo link
+  (`https://huggingface.co/<org>/<repo>`), a `/tree/<branch>` browser, or a
+  dataset or space landing page is not a model file, but Hugging Face answers
+  all of them `200 text/html`. The URL was not recognised as Hugging Face (only
+  `/resolve/` and `/blob/` links are), so it fell through to the "source is
+  unknown, treat it as a direct file URL" path and the transfer **succeeded**:
+  with `--filename flux1-dev.safetensors` the command printed `Done` after
+  writing 276 KB of model-card HTML into `models/checkpoints/`, and
+  `comfy models search` listed it as installed because it reads filenames and
+  never content. The failure then surfaced much later as an opaque parse error
+  inside ComfyUI. It is now a `hf_not_a_file` `envelope/1` error whose hint
+  names the form that works, raised before anything is fetched or written.
+  A page is identified by its own shape, not as "whatever the Hugging Face hub
+  parser rejects", so the file forms that parser cannot read still download
+  through the direct-URL path as they did before: dataset and space files
+  (`/datasets/<org>/<repo>/resolve/<branch>/<file>`), unnamespaced legacy repos
+  (`/gpt2/resolve/main/<file>`) and `/raw/<branch>/<file>`. The refusal covers
+  Hugging Face's own hosts rather than two literal spellings, so `hf.co`,
+  a `www.` prefix, a capitalised host and an explicit `:443` are refused too
+  instead of falling through and saving the page. A `/blob/` link — Hugging
+  Face's HTML file viewer, and the second form the hint names — now downloads
+  its `/resolve/` sibling, so following the hint cannot land the viewer page
+  where the model belongs. That holds for every Hugging Face URL shape,
+  including a dataset's, a space's and a legacy repo's, so the hint is true
+  wherever it is shown. Plain file URLs on every other host are unchanged.
+
 ## [1.29.0] - 2026-11-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.29.0) · 16 commits since v1.28.0. Breaking changes are marked **Breaking** under Changed.
