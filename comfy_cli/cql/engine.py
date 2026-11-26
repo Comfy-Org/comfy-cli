@@ -5911,6 +5911,50 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     return _UNRESOLVED
 
 
+def _update_named_widget_value(node: dict, order: list[str], input_name: str, value: Any) -> None:
+    """Keep the frontend's name-keyed ``widgets_values_named`` register coherent.
+
+    Implements **Amendment A23** (``comfy-multi-player``
+    ``docs/multiplayer-schema.md``, 2026-10-02), which this package was not
+    maintaining outside DynamicGroup nodes: a ``set-widget`` published the new
+    value positionally while leaving the PRE-OP value in the name register, so a
+    consumer restoring by name reverted the write on reload. The frontend writes
+    that register on every save and prefers it when restoring, so the register
+    going stale is a real divergence, not a cosmetic one.
+
+    A23's three gates, in its own order, and the reasoning is its own:
+
+    1. The register must already be stored as a **name-keyed object**. A foreign
+       producer's array is left alone rather than reshaped.
+    2. It must already **carry this name**. "A register that does not hold the
+       name is not stale for it, and inventing an entry would publish a value the
+       producer deliberately omitted."
+    3. The addressed pair must be the name's **final occurrence**, evaluated
+       against the layout AFTER the write. A serializer writing in widget order
+       leaves the final same-named widget's value in the register, so one slot
+       cannot hold two values. An earlier occurrence must leave it untouched:
+       writing there "replaces the final occurrence's value with an earlier
+       one's — a corrupt read rather than a stale one."
+
+    This package addresses a widget by name and writes its FIRST occurrence
+    (``order.index``), so gate 3 reduces to "the name occurs exactly once". A
+    duplicated name means the write did not land on the final occurrence, and the
+    register is correctly left as it is rather than updated or dropped.
+
+    Finality is false whenever the layout cannot be resolved — an empty or absent
+    order — matching A23: "a node whose layout this package cannot resolve has no
+    projected position to be final at."
+    """
+    stored = node.get("widgets_values_named")
+    if not isinstance(stored, dict):
+        return
+    if input_name not in stored:
+        return
+    if not order or order.count(input_name) != 1:
+        return
+    stored[input_name] = value
+
+
 def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, extend: bool) -> list[dict]:
     """Write ``value`` into ``node``'s ``widgets_values`` slot for ``input_name``.
 
@@ -6123,8 +6167,10 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         node["widgets_values"] = {**raw_values, input_name: value}
     else:
         node["widgets_values"] = widgets
-    if has_group and "widgets_values_named" in node:
-        node["widgets_values_named"][input_name] = value
+    # Not gated on ``has_group``: the frontend writes this register for every
+    # node, so a plain node's edit left it holding the value the edit replaced.
+    # ``order`` is the post-write layout, which is what A23's finality gate wants.
+    _update_named_widget_value(node, order, input_name, value)
     return warnings
 
 
@@ -6283,6 +6329,11 @@ def _write_dynamic_combo_selector(
             widgets.extend([None] * (widget_idx + 1 - len(widgets)))
         widgets[widget_idx] = value
         node["widgets_values"] = {**raw_values, input_name: value} if preserve_named else widgets
+        # Not gated on DynamicGroup: the frontend writes this register for every
+        # node, so a plain node's selector edit left the PRE-OP option sitting in
+        # the name register. The roster is unchanged here, so the entries' own
+        # names are already the post-write layout.
+        _update_named_widget_value(node, [entry.name for entry in entries], input_name, value)
         return []
 
     # Sub-entries owned (directly or via nesting) by this combo sit contiguously
@@ -6309,19 +6360,38 @@ def _write_dynamic_combo_selector(
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
     _clear_dynamic_combo_widget_markers(node, input_name)
-    if any(entry.port and entry.port.is_dynamic_group for entry in entries):
-        if "widgets_values_form" in node:
-            node["widgets_values_form"]["order"] = (
-                [entry.name for entry in entries[: widget_idx + 1]]
-                + new_names
-                + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
-            )
-        if "widgets_values_named" in node:
-            named = node["widgets_values_named"]
-            for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
-                named.pop(entry.name, None)
+    new_order = (
+        [entry.name for entry in entries[: widget_idx + 1]]
+        + new_names
+        + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
+    )
+    has_dynamic_group = any(entry.port and entry.port.is_dynamic_group for entry in entries)
+    if has_dynamic_group and "widgets_values_form" in node:
+        node["widgets_values_form"]["order"] = new_order
+    if isinstance(node.get("widgets_values_named"), dict):
+        named = node["widgets_values_named"]
+        # The removed sub-entries' names no longer exist in `new_order` either
+        # way, so drop them regardless of which branch below repopulates it.
+        for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
+            named.pop(entry.name, None)
+        if has_dynamic_group:
+            # A DynamicGroup node's composite form owns the whole roster, so
+            # its register entries are (re)written unconditionally — this is
+            # the pre-existing, form-specific (A24) behavior, not A23's gates.
             named[input_name] = value
             named.update(zip(new_names, new_subs))
+        else:
+            # Not gated on DynamicGroup: the frontend writes this register for
+            # every node, so a plain node's roster rebuild left the OLD
+            # selector value sitting in the name register.
+            # `_update_named_widget_value` applies A23's gates (dict-shaped,
+            # already carries the name, exactly one occurrence) to the
+            # selector and to each freshly defaulted sub-widget, same as every
+            # other writer — a name the register never held is left
+            # uninvented rather than published.
+            _update_named_widget_value(node, new_order, input_name, value)
+            for name, sub_value in zip(new_names, new_subs):
+                _update_named_widget_value(node, new_order, name, sub_value)
     return [
         {
             "code": "dynamic_combo_roster_rebuilt",
@@ -6582,6 +6652,13 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             values.append(None)
         values[0] = value
         node["widgets_values"] = values
+        # A23: a legacy PrimitiveNode has no catalog entry, so its layout is
+        # the frontend's own fixed order (``value``, then an optional
+        # ``control_after_generate``) rather than something `_write_widget`
+        # can resolve — mirror a present register under that fixed name
+        # directly, through the same gates (foreign/non-dict register, name
+        # never carried, duplicated name) every other writer uses.
+        _update_named_widget_value(node, list(_promoted._PRIMITIVE_WIDGET_ORDER), "value", value)
         return []
     # --- Direct mode: a regular top-level node (or the primitive feeding a promoted input). ---
     return _write_widget(target.node, target.widget, value, graph, extend=True)
