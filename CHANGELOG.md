@@ -383,6 +383,20 @@ history.
   Build picker. It needs no sign-in then, since it reads nothing from the
   builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
   when no Build is named, so it stays a string wherever it appears.
+- A `nodes` or `validate` command that cannot read `object_info` now names the
+  reason it actually hit instead of telling you to start a server that is
+  already running. Over the 64 MiB fetch cap, the hint says so and points at
+  the route that works — save the catalog and pass `--input` (the file loader
+  has no cap). The command it gives you is one you can paste: loud on failure
+  (`-f`, so a 401 body is never saved as a catalog), size-capped by
+  `--max-filesize` where the server states the size up front, and on a Comfy
+  Cloud target it carries the API key the fetch needs, since an anonymous one
+  cannot work there. For a non-loopback host in local
+  mode it names both real routes, `--where cloud` for Comfy Cloud and a saved
+  catalog for a self-hosted remote. The generic "pass `--input <path>`, or
+  start the server" hint is unchanged for every other load failure, and so is
+  that failure's `error.details`
+  ([comfy-mcp#252](https://github.com/Comfy-Org/comfy-mcp/issues/252)).
 
 ## [1.26.0] - 2026-11-11
 
