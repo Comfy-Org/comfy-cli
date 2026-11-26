@@ -80,7 +80,12 @@ history.
   refused on purpose, each naming the reason: Codex reads `~/.codex/AGENTS.md`
   rather than the `~/AGENTS.md` that `agents-md` writes at the default scope,
   Aider loads a conventions file only when one is passed to it, and `agents` is
-  ambiguous with a `.agents/` directory.
+  ambiguous with a `.agents/` directory. The follow-up notice an `agents-md`
+  install prints now matches the scope it wrote at: it said to run Codex "from
+  inside this directory", which is the answer at `--scope project` and no answer
+  at the default `--scope user`, where the file is `~/AGENTS.md` and Codex reads
+  it from nowhere — so it now points a user-scope install at `--scope project`
+  instead.
 
 ### Removed
 

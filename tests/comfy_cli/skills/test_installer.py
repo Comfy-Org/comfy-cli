@@ -1892,3 +1892,49 @@ def test_deploy_skills_say_a_file_being_removed_while_added_is_added_again_only_
     assert "`comfy deploy models ls <deployment>` no longer lists it" in row
     deploy = " ".join(skill_content("comfy-deploy").split())
     assert "`deploy_model_removed` (once `ls` no longer lists it, add it again)" in deploy
+
+
+# ---------------------------------------------------------------------------
+# The AGENTS.md follow-up notice is scope-dependent
+# ---------------------------------------------------------------------------
+
+
+def _install_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str) -> str:
+    """Run `skill install --target agents-md` at *scope* and flatten the panel.
+
+    Rich wraps the notice inside a bordered panel, so it is only a contiguous
+    string once borders, colour escapes and wrap points are collapsed.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(knowledge, "refresh_if_stale", lambda: None)
+    (tmp_path / "AGENTS.md").touch()
+    result = CliRunner().invoke(app, ["install", "--scope", scope, "--target", "agents-md"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    return " ".join(_ANSI_RE.sub("", result.output).replace("│", " ").split())
+
+
+def test_install_notice_tells_a_project_scope_user_to_run_codex_here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """At project scope the written AGENTS.md IS one Codex reads, from here."""
+    flattened = _install_notice(tmp_path, monkeypatch, "project")
+    assert "Codex when run from this directory" in flattened, flattened
+
+
+def test_install_notice_does_not_promise_codex_reads_a_user_scope_agents_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """At the default user scope the notice was advice that cannot work.
+
+    It said to run "Codex from inside this directory", but user scope writes
+    ``~/AGENTS.md`` and Codex reads a project AGENTS.md from the directory it
+    runs in and globally only ``~/.codex/AGENTS.md`` — so there is no directory
+    to run it from, and the install the notice called Done is one Codex never
+    sees. That is the same silent no-op ``_TARGET_NOT_AN_ALIAS`` refuses the
+    ``codex`` alias to prevent, arriving by the other door.
+    """
+    flattened = _install_notice(tmp_path, monkeypatch, "user")
+    assert "Codex not at all at --scope user" in flattened, flattened
+    assert "--scope project" in flattened, flattened
+    # The claim that cannot hold at user scope must be gone, not merely
+    # qualified further down.
+    assert "Codex when run from this directory" not in flattened, flattened

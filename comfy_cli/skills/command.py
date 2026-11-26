@@ -395,12 +395,27 @@ def install_cmd(
             # named agent never sees reads as a success.
             agents_md = [r for r in results if r.action == "wrote" and r.kind == "agents-md"]
             if agents_md:
+                # The Codex half is SCOPE-DEPENDENT, and getting it wrong is how
+                # this notice became the same silent no-op the alias refusals
+                # exist to prevent. Codex reads a project AGENTS.md from the
+                # directory it runs in, and globally only ~/.codex/AGENTS.md.
+                # So at project scope "run it from here" is the whole answer,
+                # while at the default user scope the file written is
+                # ~/AGENTS.md, which Codex never reads from anywhere — there is
+                # no directory to run it from and the answer is a project-scope
+                # install instead.
+                codex_note = (
+                    "Codex when run from this directory (globally it reads only ~/.codex/AGENTS.md)"
+                    if s == "project"
+                    else "Codex not at all at --scope user — it reads ~/.codex/AGENTS.md, never "
+                    "~/AGENTS.md, so run `comfy skill install --target agents-md --scope project` "
+                    "inside a repository for one it does read"
+                )
                 body = Group(
                     body,
                     Text(
                         f"Agents that do not read AGENTS.md on their own need pointing at "
-                        f"{agents_md[0].path} — Aider with `--read`, Codex from inside this "
-                        f"directory (it reads ~/.codex/AGENTS.md, not ~/AGENTS.md).",
+                        f"{agents_md[0].path} — Aider with `--read`, {codex_note}.",
                         style="yellow",
                     ),
                 )
