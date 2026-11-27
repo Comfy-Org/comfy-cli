@@ -506,6 +506,23 @@ def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
     assert "Where the workspace has deployment updates on, `up` moves the deployment onto it" in flat
 
 
+def test_comfy_build_skill_stops_on_unresolved_classes_instead_of_authoring_nodes():
+    """`unresolvedClasses` names node classes nothing installable provides. The
+    skill is the only place that tells an agent what to do with them: stop
+    before changing the spec, list every class (including the `(+N more)` the
+    advisory line truncates), and ask. Authoring node code into the build to fill
+    the gap would ship unreviewed code the user never chose; packs the user
+    already has are allowed. Every agent route into a Cloud build now reaches
+    this list only through the build's own output, so losing this text removes
+    the stop entirely."""
+    text = " ".join(skill_content("comfy-build").split())
+    assert "**`unresolvedClasses` is the list to take to the user.**" in text
+    assert "**Don't fill the gap by writing node code into the build.**" in text
+    assert "packs the user already has, published or local, are fine" in text
+    assert "Stop before you change the spec, list the classes, and ask the user how to go on" in text
+    assert "say how many more there are rather than presenting the eight as the whole list" in text
+
+
 def test_build_and_deploy_skills_hand_off_to_each_other():
     """Splitting one skill in two only works if each names the other.
 
