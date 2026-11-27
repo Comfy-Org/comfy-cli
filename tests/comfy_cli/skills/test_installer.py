@@ -509,10 +509,10 @@ def test_deploy_skill_does_not_send_a_model_file_back_to_the_build():
 def test_comfy_build_skill_stops_on_unresolved_classes_instead_of_authoring_nodes():
     """`unresolvedClasses` names node classes nothing installable provides. The
     skill is the only place that tells an agent what to do with them: stop
-    before changing the spec, list every class (including the `(+N more)` the
-    advisory line truncates), and ask. Authoring node code into the build to fill
-    the gap would ship unreviewed code the user never chose; packs the user
-    already has are allowed. Every agent route into a Cloud build now reaches
+    before changing the spec, list every disclosed class, report the `(+N more)`
+    count the advisory line truncates, and ask. Authoring node code into the
+    build to fill the gap would ship unreviewed code the user never chose; packs
+    the user already has are allowed. Every agent route into a Cloud build now reaches
     this list only through the build's own output, so losing this text removes
     the stop entirely."""
     text = " ".join(skill_content("comfy-build").split())
