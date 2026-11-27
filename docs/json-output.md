@@ -290,14 +290,22 @@ that a missing target may not be an output node:
 
 ### `partial_execution_targets_ignored` warning
 
-On a `--output-node-ids` cloud `--wait` run, a node outside the targets and
-the nodes they depend on that still produced outputs means the server ran
-more than was asked for, most likely because it does not support
+On a `--output-node-ids` cloud `--wait` run, an **output node** outside the
+targets and the nodes they depend on that still produced outputs means the
+server ran more than was asked for, most likely because it does not support
 `partial_execution_targets` and ran the whole graph:
 
 ```json
 {"code": "partial_execution_targets_ignored", "message": "ran with --output-node-ids but node(s) outside the targets also produced outputs: 9; the server likely ignored partial_execution_targets and ran the whole graph", "untargeted_output_node_ids": ["9"]}
 ```
+
+Only output-class nodes count. At the end of a run ComfyUI can replay the
+cached previews of intermediate-output nodes (Crop Image, Painter, ...), so a
+run that did exactly what was asked can show outputs outside the targets
+without the targets having been ignored. The submitted graph's output-node ids
+are needed to tell the two apart, and they come from the node catalog: when it
+was not available, the warning falls back to counting every producing node
+outside the targets.
 
 A local run has no `data.warnings`; compare `data.executed_node_ids` with the
 targets to check the same thing.
@@ -306,11 +314,13 @@ A cloud `--output-node-ids` run without `--wait` cannot check anything at
 submit time. Its `queued` envelope carries a `data.note` naming the
 `comfy jobs watch <prompt_id> --where cloud` command, and the job's state file
 records the targets (`output_node_ids`, `run_graph_node_ids`,
-`output_node_ids_checked`). Once the job completes, `comfy jobs watch --where
-cloud` and `comfy jobs status --where cloud` run the same check and carry the
-same entries in `data.warnings`; `comfy jobs wait` copies them onto the job's
-row. That key is present only for a targeted job. If the cloud has not
-returned the job's outputs yet, the one entry is `output_node_ids_unchecked`:
+`output_node_ids_checked`) and the submitted graph's output nodes
+(`graph_output_node_ids`, null when the catalog was unavailable). Once the job
+completes, `comfy jobs watch --where cloud` and `comfy jobs status --where
+cloud` run the same check and carry the same entries in `data.warnings`;
+`comfy jobs wait` copies them onto the job's row. That key is present only for
+a targeted job. If the cloud has not returned the job's outputs yet, the one
+entry is `output_node_ids_unchecked`:
 run `comfy jobs status <prompt_id> --where cloud` again.
 
 ## Event reference

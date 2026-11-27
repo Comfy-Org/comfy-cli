@@ -1205,6 +1205,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "interrupt it with Ctrl-C in the terminal running it",
     ),
     ErrorCode(
+        "hf_not_a_file",
+        "The `--url` is a Hugging Face page (a bare repo, a `tree` browser, a dataset or space) "
+        "rather than one model file. Hugging Face serves those as `200 text/html`, so without this "
+        "refusal the download would succeed and write the page's HTML to the model destination.",
+        "use the file's own download link, `https://huggingface.co/<org>/<repo>/resolve/<branch>/<file>`",
+    ),
+    ErrorCode(
         "hf_unauthorized",
         "Hugging Face returned 401 for the model URL and no Hugging Face API token is configured "
         "(gated or private repo).",

@@ -99,7 +99,7 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
     ``on_stale``, if provided, is fired when a stale-cache fallback occurs:
     ``on_stale(host_key, error_str)``.
     """
-    from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.cql.engine import Graph, LoadError, load_error_envelope_fields
 
     renderer = get_renderer()
     try:
@@ -133,10 +133,11 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         graph._try_default_annotations()
         return graph
     except LoadError as e:
+        hint, _ = load_error_envelope_fields(e, "pass --input <path>, or start the server with `comfy launch`")
         renderer.error(
             code="cql_no_graph",
             message=str(e),
-            hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
+            hint=hint,
         )
         raise typer.Exit(code=1) from e
 
@@ -2673,7 +2674,7 @@ def validate_api_workflow(
     from comfy_cli import where as where_module
     from comfy_cli.command.run import is_ui_workflow
     from comfy_cli.command.run.preflight import _detect_partner_nodes
-    from comfy_cli.cql.engine import Graph, LoadError
+    from comfy_cli.cql.engine import Graph, LoadError, load_error_envelope_fields
     from comfy_cli.env_checker import _bracket_host, _unbracket_host
     from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
 
@@ -2784,12 +2785,13 @@ def validate_api_workflow(
         graph = Graph.from_object_info(raw)
         graph._try_default_annotations()
     except LoadError as e:
+        hint, details = load_error_envelope_fields(e, "pass --input <object_info.json>, or start the server")
         renderer.error(
             command=command,
             code="cql_no_graph",
             message=str(e),
-            hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
-            details=e.details,
+            hint=hint,
+            details=details,
         )
         raise typer.Exit(code=1) from e
 
@@ -3123,6 +3125,9 @@ app.add_typer(_wfrag.fragment_app, name="fragment")
 
 from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
 
+app.command("define-subgraph", help="Create a subgraph definition; emits one define_subgraph op.")(
+    _wedit.define_subgraph_cmd
+)
 app.command("insert-workflow", help="Insert a complete workflow; emits one insert_workflow op.")(
     _wedit.insert_workflow_cmd
 )

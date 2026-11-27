@@ -1,4 +1,4 @@
-"""``comfy skills`` — install the agent skills so Claude / Cursor / Aider can drive comfy directly.
+"""``comfy skills`` — install the agent skills so Claude / Cursor / an AGENTS.md reader can drive comfy.
 
 The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
@@ -33,6 +33,7 @@ direct ``install()`` call, still writes one, and ``uninstall <name>`` removes it
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -70,7 +71,7 @@ from comfy_cli.skills import (
 
 app = typer.Typer(
     no_args_is_help=True,
-    help="Install the comfy agent skills — Claude, Cursor, Aider, and any AGENTS.md-aware tool.",
+    help="Install the comfy agent skills — Claude Code, Cursor, and an AGENTS.md any agent can be pointed at.",
 )
 
 
@@ -83,14 +84,182 @@ def _print_skill_panel(title: str, body) -> None:
     get_renderer().console().print(branded_panel(body, title=title, version=ConfigManager().get_cli_version()))
 
 
+# The names people pass to ``--target``, mapped onto the three kinds that exist.
+# Only spellings of a kind this command actually writes are in here. Matching is
+# case-insensitive and ignores surrounding whitespace.
+_TARGET_ALIASES: dict[str, TargetKind] = {
+    "claude-code": "claude-code",
+    "claude": "claude-code",
+    "claudecode": "claude-code",
+    "claude_code": "claude-code",
+    "cursor": "cursor",
+    "agents-md": "agents-md",
+    "agents.md": "agents-md",
+    "agents_md": "agents-md",
+    "agentsmd": "agents-md",
+}
+
+_TARGET_CHOICES = ("claude-code", "cursor", "agents-md")
+
+# Names that are NOT aliases, each with the reason and what to do instead. A
+# tool only earns an alias when the file it actually reads is the file the
+# target writes; mapping it on anyway turns a loud refusal into a silent no-op,
+# which is strictly worse than being refused. ``agents-md`` writes
+# ``~/AGENTS.md`` at user scope and ``<project root>/AGENTS.md`` at project
+# scope, and that is the whole of what it writes.
+_TARGET_NOT_AN_ALIAS: dict[str, str] = {
+    "codex": (
+        "Codex reads its global instructions from ~/.codex/AGENTS.md, which is not the ~/AGENTS.md "
+        "that `--target agents-md` writes at the default --scope user. Inside a repository, "
+        "`--target agents-md --scope project` writes an AGENTS.md that Codex does read"
+    ),
+    "aider": (
+        "Aider does not pick up AGENTS.md on its own: it reads a conventions file only when one is "
+        "passed with --read or listed under read: in .aider.conf.yml. Install `--target agents-md` "
+        "and then point Aider at the file it reports writing"
+    ),
+    "agents": (
+        "`agents` is ambiguous between the AGENTS.md file and a .agents/ skills directory, and this "
+        "command writes only the first. Pass agents-md for it"
+    ),
+}
+
+# A path-shaped value is often one of our own destinations, named instead of
+# chosen. Mapping it back saves the user a second refusal from --skill.
+_DESTINATION_PARTS: dict[str, TargetKind] = {
+    ".claude": "claude-code",
+    ".cursor": "cursor",
+    "agents.md": "agents-md",
+}
+
+
+def _shaped_like_path(token: str) -> bool:
+    """Classify an option value as path-shaped on its spelling alone.
+
+    Deliberately does not touch the filesystem. ``skills._looks_like_path``
+    ends in an ``exists()`` probe, which is right for a ``--skill`` token (it
+    may genuinely be a file) and wrong here: on an option value it makes an
+    unknown name that happens to collide with a file in the working directory
+    read as a path, and it can raise ``OSError`` — ENAMETOOLONG on a long value,
+    EACCES from an unsearchable cwd — out of what should be a ``BadParameter``.
+    """
+    return bool(token) and ("/" in token or os.sep in token or token.startswith((".", "~")))
+
+
+def _path_parts(token: str) -> list[str]:
+    """A path-shaped option value as its non-empty, lowercased segments."""
+    return [part for part in token.lower().replace(os.sep, "/").split("/") if part]
+
+
+def _is_foreign_agents_md(parts: list[str]) -> bool:
+    """True when *parts* names an AGENTS.md that no scope of this command writes.
+
+    ``--target agents-md`` writes exactly ``~/AGENTS.md`` at ``--scope user``
+    and ``<project root>/AGENTS.md`` at ``--scope project``. An AGENTS.md inside
+    a tool's own config directory is a different file: ``~/.codex/AGENTS.md`` is
+    where Codex reads its GLOBAL instructions, which is the whole reason ``codex``
+    is refused as an alias. Hinting ``--target agents-md`` for it sent the user to
+    a command that writes ``~/AGENTS.md`` and reports success, contradicting that
+    refusal two screens away.
+
+    Identified by the parent segment being a dot-directory. ``.`` and ``..`` are
+    not: ``./AGENTS.md`` and ``../AGENTS.md`` are ordinary project paths.
+    """
+    if len(parts) < 2 or parts[-1] != "agents.md":
+        return False
+    parent = parts[-2]
+    return parent.startswith(".") and parent not in (".", "..")
+
+
+def _is_skill_path(parts: list[str]) -> bool:
+    """True when *parts* names one skill rather than a destination.
+
+    A skill is a directory named after the skill containing ``SKILL.md``, and the
+    loader takes either form. The file form was already excluded from the hints
+    by its ``.md`` suffix; the directory form has no suffix, so
+    ``~/.claude/skills/my-skill`` reached the destination scan and came back as
+    ``--target claude-code`` — a command that installs the bundled defaults and
+    not ``my-skill``. Both forms name the same thing and belong to ``--skill``.
+    """
+    if not parts:
+        return False
+    if parts[-1].endswith(".md"):
+        # AGENTS.md is the one markdown file that IS a destination.
+        return parts[-1] != "agents.md"
+    return any(part == "skills" and index + 1 < len(parts) for index, part in enumerate(parts))
+
+
+def _destination_hint(token: str) -> TargetKind | None:
+    """The target a path-shaped value is pointing at, when it names one.
+
+    Nothing that names one SKILL gets a hint, and neither does an AGENTS.md this
+    command does not write — in both cases the hint would answer a different
+    question than the one asked, and following it would write the wrong thing
+    while reporting success.
+    """
+    parts = _path_parts(token)
+    if not parts or _is_skill_path(parts) or _is_foreign_agents_md(parts):
+        return None
+    if parts[-1] == "agents.md":
+        return "agents-md"
+    for part in parts:
+        kind = _DESTINATION_PARTS.get(part)
+        if kind is not None:
+            return kind
+    return None
+
+
+def _unknown_target(token: str) -> typer.BadParameter:
+    """Refuse one ``--target`` token, saying which mistake it looks like.
+
+    Four shapes show up in practice and each needs a different sentence: a tool
+    we have deliberately not aliased, a flag the option swallowed as its value,
+    a filesystem path meant for ``--skill``, and a name we simply do not have a
+    target for. The old single message named the choices for all four, which
+    answers only the last. No message names a command, because ``_kinds`` is
+    shared with ``uninstall``: the choices are spelled out instead.
+    """
+    normalized = token.strip().lower()
+    reason = _TARGET_NOT_AN_ALIAS.get(normalized)
+    if reason is not None:
+        return typer.BadParameter(f"--target has no {normalized} target. {reason}")
+    if normalized.startswith("-"):
+        return typer.BadParameter(
+            f"--target got {token!r}, which looks like another flag rather than a value. "
+            f"Pass one of {', '.join(_TARGET_CHOICES)}"
+        )
+    if _shaped_like_path(normalized):
+        hint = _destination_hint(normalized)
+        if hint is not None:
+            return typer.BadParameter(
+                f"--target got {token!r}, which looks like a path. --target takes a target name, "
+                f"and that destination is the {hint} target; pass `--target {hint}`"
+            )
+        if _is_foreign_agents_md(_path_parts(normalized)):
+            return typer.BadParameter(
+                f"--target got {token!r}, which is an AGENTS.md this command does not write. "
+                "`--target agents-md` writes ~/AGENTS.md at --scope user and "
+                "<project root>/AGENTS.md at --scope project, and nothing else"
+            )
+        return typer.BadParameter(
+            f"--target got {token!r}, which looks like a path. --target picks where skills are "
+            f"written ({', '.join(_TARGET_CHOICES)}); a skill file or directory goes to --skill"
+        )
+    return typer.BadParameter(f"unknown target {token!r}; pick {', '.join(_TARGET_CHOICES)}")
+
+
 def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
     if not targets:
         return None
     valid: list[TargetKind] = []
     for t in targets:
-        if t not in ("claude-code", "cursor", "agents-md"):
-            raise typer.BadParameter(f"unknown target {t!r}; pick claude-code, cursor, or agents-md")
-        valid.append(t)  # type: ignore[arg-type]
+        kind = _TARGET_ALIASES.get(t.strip().lower())
+        if kind is None:
+            raise _unknown_target(t)
+        # An alias and its canonical name can both be passed in one command
+        # line; writing that target twice is not what either meant.
+        if kind not in valid:
+            valid.append(kind)
     return valid
 
 
@@ -144,9 +313,19 @@ def _validate_skills(skills: list[str] | None, *, refuse_reference: bool = True)
 
 
 def _scope(scope: str) -> Literal["user", "project"]:
-    if scope not in ("user", "project"):
-        raise typer.BadParameter("scope must be 'user' or 'project'")
-    return scope  # type: ignore[return-value]
+    normalized = scope.strip().lower()
+    if normalized in ("user", "project"):
+        return normalized  # type: ignore[return-value]
+    if normalized.startswith("-"):
+        raise typer.BadParameter(
+            f"--scope got {scope!r}, which looks like another flag rather than a value. Pass user or project"
+        )
+    if _shaped_like_path(normalized):
+        raise typer.BadParameter(
+            f"--scope got {scope!r}, which looks like a path. --scope is user (your home) or "
+            "project (this directory); it does not take a destination"
+        )
+    raise typer.BadParameter(f"unknown scope {scope!r}; scope must be 'user' or 'project'")
 
 
 _PROJECT_MARKERS = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "AGENTS.md")
@@ -178,7 +357,7 @@ def install_cmd(
         list[str] | None,
         typer.Option(
             "--target",
-            help="Install only the named target(s). Repeatable. Default: all three.",
+            help="Install only the named target(s): claude-code, cursor, agents-md. Repeatable. Default: all three.",
         ),
     ] = None,
     skill: Annotated[
@@ -257,6 +436,36 @@ def install_cmd(
                     style="bold green",
                 ),
             )
+            # Claude Code and Cursor find their own files; an AGENTS.md is only
+            # read by the agents that look for one, and several have to be told
+            # where it is. Saying "Done" and nothing else is how an install the
+            # named agent never sees reads as a success.
+            agents_md = [r for r in results if r.action == "wrote" and r.kind == "agents-md"]
+            if agents_md:
+                # The Codex half is SCOPE-DEPENDENT, and getting it wrong is how
+                # this notice became the same silent no-op the alias refusals
+                # exist to prevent. Codex reads a project AGENTS.md from the
+                # directory it runs in, and globally only ~/.codex/AGENTS.md.
+                # So at project scope "run it from here" is the whole answer,
+                # while at the default user scope the file written is
+                # ~/AGENTS.md, which Codex never reads from anywhere — there is
+                # no directory to run it from and the answer is a project-scope
+                # install instead.
+                codex_note = (
+                    "Codex when run from this directory (globally it reads only ~/.codex/AGENTS.md)"
+                    if s == "project"
+                    else "Codex not at all at --scope user — it reads ~/.codex/AGENTS.md, never "
+                    "~/AGENTS.md, so run `comfy skill install --target agents-md --scope project` "
+                    "inside a repository for one it does read"
+                )
+                body = Group(
+                    body,
+                    Text(
+                        f"Agents that do not read AGENTS.md on their own need pointing at "
+                        f"{agents_md[0].path} — Aider with `--read`, {codex_note}.",
+                        style="yellow",
+                    ),
+                )
         _print_skill_panel("skill install", body)
     renderer.emit(
         {
@@ -273,7 +482,10 @@ def install_cmd(
 @tracking.track_command("skill")
 def uninstall_cmd(
     scope: Annotated[str, typer.Option("--scope")] = "user",
-    target: Annotated[list[str] | None, typer.Option("--target")] = None,
+    target: Annotated[
+        list[str] | None,
+        typer.Option("--target", help="Remove from the named target(s): claude-code, cursor, agents-md."),
+    ] = None,
     skill: Annotated[
         list[str] | None,
         typer.Option(

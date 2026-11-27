@@ -83,8 +83,13 @@ def test_group_with_upload_keeps_serializable_values_editable(shape, node_type, 
     }
 
 
-@pytest.mark.parametrize("named", [None, [], "invalid", {"value": 1}])
-def test_plain_node_edit_leaves_named_sidecar_unchanged(named):
+@pytest.mark.parametrize("named", [None, [], "invalid"])
+def test_plain_node_edit_leaves_an_unusable_named_sidecar_unchanged(named):
+    """A register that is not a name-keyed object is left alone (Amendment A23 gate 1).
+
+    A foreign producer's array is left as found rather than reshaped, and the
+    edit itself is never refused: this path has always been editable.
+    """
     saved_named = copy.deepcopy(named)
     graph = Graph.from_object_info({"Plain": {"input": {"required": {"value": ["INT", {"default": 1}]}}}})
     workflow = {
@@ -96,6 +101,59 @@ def test_plain_node_edit_leaves_named_sidecar_unchanged(named):
 
     assert edited["nodes"][0]["widgets_values"] == [2]
     assert edited["nodes"][0]["widgets_values_named"] == saved_named
+
+
+def test_plain_node_edit_updates_a_usable_named_sidecar():
+    """CHANGED 2026-11-19 to follow Amendment A23, which predates this test.
+
+    This case asserted that a plain node's edit leaves the register untouched,
+    which arrived with the DynamicGroup work in #973 (2026-10-14) as that
+    change's boundary. Amendment A23 (`comfy-multi-player`
+    `docs/multiplayer-schema.md`, 2026-10-02) had already specified the opposite
+    for an ordinary single-name widget: the register must be updated, because
+    the frontend writes it on every save and prefers it when restoring, so
+    leaving it holds the PRE-OP value and a consumer reading back by name
+    reverts the write.
+
+    A23 is explicit that this is the larger half of what it fixes and has
+    nothing to do with duplicates: "every `set_widget` against an ordinary
+    single-name widget was reverted the same way." The duplicate case is
+    unchanged and still leaves the register alone, now for A23's stated reason
+    rather than by omission — see `cql/test_named_widget_values_a23.py`.
+    """
+    graph = Graph.from_object_info({"Plain": {"input": {"required": {"value": ["INT", {"default": 1}]}}}})
+    workflow = {
+        "nodes": [{"id": 1, "type": "Plain", "widgets_values": [1], "widgets_values_named": {"value": 1}}],
+        "links": [],
+    }
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "value", 2)
+
+    assert edited["nodes"][0]["widgets_values"] == [2]
+    assert edited["nodes"][0]["widgets_values_named"] == {"value": 2}
+
+
+def test_group_node_edit_does_not_invent_a_missing_named_entry():
+    """Amendment A23 gate 2 applies uniformly, including to DynamicGroup nodes.
+
+    Before this PR, a group node's register was updated with
+    ``node["widgets_values_named"][input_name] = value``, which inserts the key
+    if absent. That insertion contradicted A23 gate 2 ("a register that does not
+    hold the name is not stale for it, and inventing an entry would publish a
+    value the producer deliberately omitted") just as much for a group node's
+    own plain widgets as for an ordinary node's. ``_update_named_widget_value``
+    is not gated on ``has_group``, so this is now uniform rather than a
+    group-node carve-out.
+    """
+    case = FIXTURE["cases"]["populated"]
+    workflow = copy.deepcopy(case["workflow"])
+    del workflow["nodes"][0]["widgets_values_named"]["after"]
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "after", "changed")
+
+    assert edited["nodes"][0]["widgets_values"][-1] == "changed"
+    assert "after" not in edited["nodes"][0]["widgets_values_named"]
 
 
 @pytest.mark.parametrize("shape", ["array", "object", "explicit_form"])

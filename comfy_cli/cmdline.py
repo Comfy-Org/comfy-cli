@@ -2420,9 +2420,17 @@ def download(
         typer.Argument(help="Prompt ID to download outputs for. Omit to read from piped stdin.", show_default=False),
     ] = None,
     out_dir: Annotated[
-        str,
-        typer.Option("--out-dir", "-o", help="Directory to save outputs to."),
-    ] = "./outputs",
+        str | None,
+        typer.Option(
+            "--out-dir",
+            "-o",
+            show_default=False,
+            help=(
+                "Directory to save outputs to. Omit to use the governing project/1 root's "
+                "`outputs/`, else the `default_project_dir` config key's `outputs/`, else `./outputs`."
+            ),
+        ),
+    ] = None,
     where: Annotated[
         str | None,
         typer.Option("--where", show_default=False, help="Routing target: 'local' or 'cloud'."),
@@ -3215,7 +3223,7 @@ _RootGroup.lazy_subcommands = {
     ),
     "skills": LazySubcommand(
         "comfy_cli.skills.command",
-        help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
+        help="Install the comfy agent skills into Claude Code, Cursor, or an AGENTS.md other agents can read.",
     ),
     # Keep the singular alias for backward compat
     "skill": LazySubcommand("comfy_cli.skills.command", hidden=True),

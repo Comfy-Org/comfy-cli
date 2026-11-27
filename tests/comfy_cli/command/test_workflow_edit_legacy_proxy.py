@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,83 @@ def test_legacy_write_repairs_the_definition_and_writes_the_host(graph):
     assert repair["entry"] == ["52", "seed"]
     assert repair["ids"] == {"52.seed": promoted.repair_ids(["56"], "52", "seed", 1)}
     assert repair["ids"]["52.seed"]["links"][0] == sg["inputs"][-1]["linkIds"][0]
+
+
+def test_set_widget_does_not_claim_a_repair_marker_for_an_unrepairable_plan(graph):
+    """The op's own ``repair`` marker must gate on ``e.repairable`` — not
+    ``e.plan != PLAN_PREVIEW``, which is also true for ``alreadyLinked``/
+    ``quarantine`` entries that a flush would not touch. A stray
+    ``promoted.repair`` on an op that triggers no structural change is
+    misleading to anything that reads the op (it implies a migration ran).
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+    """
+    wf = _load(FLUX)
+    inst = _node(wf, 56)
+    inst["properties"]["proxyWidgets"] = [e for e in inst["properties"]["proxyWidgets"] if e != ["52", "seed"]]
+    wf, op = workflow_ops.set_widget(wf, graph, 56, "width", 800)
+    assert "repair" not in op["promoted"]
+
+
+def test_old_value_reads_the_legacy_slot_when_proxy_order_outruns_declaration_order(graph):
+    """``old`` used to be read with ``effective_value``, which indexes the
+    host ``widgets_values`` by the DECLARATION-order ``pi.value_index``. While
+    legacy tuples are still pending, the array is laid out in ``proxyWidgets``
+    order instead — and when the two orders differ, that read lands on a
+    different widget's slot. Swap the first two legacy entries (``text`` and
+    ``width``) so the array is proxy-ordered (``[640, None]``) while the
+    definition still declares ``text`` before ``width``: a write to ``width``
+    must report ``640``, not whatever ``text``'s slot (or the interior
+    default) holds.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941919
+    """
+    wf = _load(FLUX)
+    inst = _node(wf, 56)
+    proxies = inst["properties"]["proxyWidgets"]
+    proxies[0], proxies[1] = proxies[1], proxies[0]  # now: width, text, height, ...
+    inst["widgets_values"] = [640, None]  # proxy-position 0 (width) = 640, 1 (text) = hole
+    wf, op = workflow_ops.set_widget(wf, graph, 56, "width", 800)
+    assert op["old"] == 640
+    assert _node(wf, 56)["widgets_values"][1] == 800  # width is sg.inputs[1] (declaration order)
+
+
+@pytest.mark.parametrize("order", list(permutations(["text", "width", "seed"])))
+@pytest.mark.parametrize("reload_between_writes", [False, True])
+def test_mixed_legacy_and_declared_writes_preserve_values(graph, order, reload_between_writes):
+    wf = _load(FLUX)
+    # Legacy widget order need not match the definition's linked-input order.
+    proxies = _node(wf, 56)["properties"]["proxyWidgets"]
+    proxies[0], proxies[1] = proxies[1], proxies[0]
+    baseline = copy.deepcopy(wf)
+    updates = {"text": "a lighthouse at dusk", "width": 768, "seed": 424242}
+    for name in ["seed", "text", "width"]:
+        baseline, _ = workflow_ops.set_widget(baseline, graph, 56, name, updates[name])
+
+    original = copy.deepcopy(wf)
+    ops = []
+    for name in order:
+        wf, op = workflow_ops.set_widget(wf, graph, 56, name, updates[name])
+        ops.append(op)
+        if reload_between_writes:
+            wf = json.loads(json.dumps(wf))
+
+    assert _node(wf, 56)["widgets_values"] == _node(baseline, 56)["widgets_values"]
+    slots = {s["address"]: s for s in graph.get_template_schema("t", wf)["slots"]}
+    for name, value in updates.items():
+        assert promoted.effective_value(wf, _node(wf, 56), name, graph) == value
+        assert slots[f"56.{name}"]["current_value"] == value
+    assert _api(wf) == _api(baseline)
+
+    via_slots = copy.deepcopy(original)
+    if reload_between_writes:
+        for name in order:
+            via_slots, _ = graph.apply_slots(via_slots, {f"56.{name}": updates[name]})
+            via_slots = json.loads(json.dumps(via_slots))
+    else:
+        via_slots, _ = graph.apply_slots(via_slots, {f"56.{name}": updates[name] for name in order})
+    assert _stripped(via_slots) == _stripped(wf)
+    for op in ops:
+        workflow_ops.apply_op(original, op, graph)
+    assert _stripped(original) == _stripped(wf)
 
 
 def test_interior_address_of_a_legacy_promotion_is_redirected_to_the_host(graph):
@@ -228,14 +306,44 @@ def test_concurrent_repairs_of_one_instance_converge(graph):
     assert _node(ab, 143)["widgets_values"] == ["Nano Banana 2", "1K", "1:1"]
 
 
-def test_shared_definition_is_forked_not_mutated(graph):
+def test_second_write_without_repair_still_migrates_a_peer_that_sees_it_first(graph):
+    """Only the FIRST write on a replica that ever observes the pending
+    legacy tuples carries ``promoted.repair`` — by the second write, that
+    replica has already flushed locally, so its op carries none. If a peer
+    replica is delivered that second (higher-stamped, repair-less) op
+    BEFORE the first one, gating the flush on the op's own ``repair`` field
+    used to skip the migration there entirely: the peer's definition is
+    never repaired, so writing the host value on it (``set_host_value``)
+    raised ``ValueError`` — the promoted input doesn't exist yet. The flush
+    must run from the live document instead, on every apply, independent of
+    which op carries the ``repair`` payload.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941925
+    """
+    base = _load(FLUX)
+    replica_a = copy.deepcopy(base)
+    replica_a, op1 = workflow_ops.set_widget(replica_a, graph, 56, "seed", 111, actor="a", base_version=0)
+    replica_a, op2 = workflow_ops.set_widget(replica_a, graph, 56, "seed", 222, actor="a", base_version=1)
+    assert "repair" in op1["promoted"]
+    assert "repair" not in op2["promoted"]  # already flushed locally by the time op2 was created
+
+    # A peer meets the second (higher-stamped) op FIRST.
+    replica_b = copy.deepcopy(base)
+    replica_b = workflow_ops.apply_op(replica_b, op2, graph)
+    replica_b = workflow_ops.apply_op(replica_b, op1, graph)  # the lower-stamped op loses LWW, but must still migrate
+
+    assert _stripped(replica_b) == _stripped(replica_a)
+    assert promoted.effective_value(replica_b, _node(replica_b, 56), "seed", graph) == 222
+
+
+@pytest.mark.parametrize(("widget", "value"), [("seed", 5), ("text", "new prompt")])
+def test_shared_definition_is_forked_not_mutated(graph, widget, value):
     wf = _load(FLUX)
     sibling = copy.deepcopy(_node(wf, 56))
     sibling["id"] = 156
     wf["nodes"].append(sibling)
     original_def_id = sibling["type"]
     original_def = copy.deepcopy(_def_of(wf, sibling))
-    wf, op = workflow_ops.set_widget(wf, graph, 56, "seed", 5)
+    wf, _ = workflow_ops.set_widget(wf, graph, 56, widget, value)
     assert _node(wf, 56)["type"] == _deterministic_fork_id(original_def_id, 56)
     assert _node(wf, 156)["type"] == original_def_id
     assert _def_of(wf, _node(wf, 156)) == original_def
@@ -248,7 +356,8 @@ def test_shared_definition_is_forked_not_mutated(graph):
     assert _node(wf, 156)["type"] == original_def_id
     assert [i["name"] for i in _def_of(wf, _node(wf, 156))["inputs"]][-1] == "seed"
     assert _def_of(wf, _node(wf, 56)) == forked
-    assert _node(wf, 56)["widgets_values"][-1] == 5 and _node(wf, 156)["widgets_values"][-1] == 6
+    assert promoted.effective_value(wf, _node(wf, 56), widget, graph) == value
+    assert _node(wf, 156)["widgets_values"][-1] == 6
 
 
 # --------------------------------------------------------------------------- #

@@ -4257,9 +4257,90 @@ _opener = build_http_only_opener(NoRedirectHandler())
 class LoadError(Exception):
     """Failed to load object_info from a source."""
 
-    def __init__(self, message: str, *, details: dict[str, Any] | None = None):
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None, hint: str | None = None):
         super().__init__(message)
         self.details = details or {}
+        # `hint` rides beside `details` rather than inside it. Raise sites that
+        # already publish `details["hint"]` keep publishing it -- a consumer
+        # reading `error.details.hint` is a contract this cannot break -- while
+        # a long envelope-only hint stays out of `details` and so is never
+        # rendered twice.
+        self.hint = hint
+
+
+def load_error_envelope_fields(e: LoadError, default_hint: str) -> tuple[str, dict[str, Any]]:
+    """The ``hint`` and ``details`` a ``cql_no_graph`` envelope should carry for ``e``.
+
+    A ``LoadError`` that knows its own cause states the next step -- in
+    ``e.hint`` when that text belongs only in the envelope's ``hint`` field, or
+    in ``details["hint"]`` for the raise sites that have always published it
+    there. Everything else falls back to ``default_hint``.
+
+    ``details`` is returned UNCHANGED. The HTTPError and URLError raise sites
+    below set ``details["hint"]`` ("run ``comfy cloud login``"), and a `nodes`
+    or `validate` consumer reading ``error.details.hint`` has been able to read
+    it for as long as those sites existed; dropping it to avoid rendering a
+    hint twice would silently change that JSON contract for errors this change
+    is not about. The long cause-specific hints avoid the duplicate by never
+    entering ``details`` in the first place.
+    """
+    return (e.hint or e.details.get("hint") or default_hint, e.details)
+
+
+def _hint_url(url: str) -> str:
+    """``url`` as safe copy-paste shell text: no credential, no metacharacter.
+
+    Two things make a hint different from ``details["url"]``. It is meant to be
+    pasted into a shell, so an unquoted ``;``, ``&``, ``$(...)`` or backtick in
+    a configured base URL would run as a command, and even a bare IPv6
+    loopback trips shell globbing. And it reaches surfaces ``details`` does
+    not: ``workflow._get_graph`` renders ``hint`` and drops ``details``
+    entirely, so a proxy token riding in a configured URL's userinfo would
+    reach a terminal that was never meant to show it. Userinfo, query and
+    fragment are therefore removed and the remainder is quoted.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:  # urlsplit unwraps IPv6 brackets; a bare v6 host is not a URL
+        host = f"[{host}]"
+    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    return shlex.quote(urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", "")))
+
+
+def _oversize_catalog_hint(url: str, *, is_cloud: bool) -> str:
+    """The next step for a catalog that is over the fetch cap.
+
+    Cloud and local get different text because the same command does not work
+    on both. The fetch that hit the cap on a cloud target only worked because
+    ``target_auth_headers`` attached a Bearer or ``X-API-Key`` header, so an
+    anonymous ``curl`` would save a 401 body as ``object_info.json`` and
+    ``--input`` would then load a bogus catalog without complaint; and
+    ``comfy launch`` is not even a thing a Comfy Cloud user can be told to
+    rule out.
+
+    Both forms fail loudly (``-f``) and carry ``--max-filesize``, which curl
+    applies only when the response advertises its size up front: on a chunked
+    reply it has no effect, so this is a guard on the ordinary case and not a
+    hard ceiling. It is still worth sending -- the cap this hint routes around
+    exists to stop a hostile or broken endpoint exhausting memory and disk --
+    but nothing here or in the CHANGELOG may describe the download as bounded
+    without that condition, and the condition is not restated per curl
+    version because no inspected source establishes which versions enforce it.
+    """
+    cap_mib = _MAX_OBJECT_INFO_BYTES // (1024 * 1024)
+    lead = f"this server's object_info is over the {cap_mib} MiB fetch cap, so the server being up is not the problem"
+    if is_cloud:
+        return (
+            f"{lead}; save the catalog and read the file instead — the fetch is authenticated, so "
+            f"the command needs your key too: `curl -fsS --max-filesize 512M "
+            f'-H "X-API-Key: $COMFY_API_KEY" {_hint_url(url)} > object_info.json`, then pass '
+            f"`--input object_info.json` (the file loader has no size cap)"
+        )
+    return (
+        f"{lead} and `comfy launch` is not the fix; save the catalog and read the file instead — "
+        f"`curl -fsS --max-filesize 512M {_hint_url(url)} > object_info.json`, then pass "
+        f"`--input object_info.json` (the file loader has no size cap)"
+    )
 
 
 def _load_from_file(path: str) -> dict[str, Any]:
@@ -4299,7 +4380,22 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
         if not is_loopback_host(parsed_host):
             raise LoadError(
                 f"Refusing to fetch object_info from non-loopback host {parsed_host!r} "
-                f"in local mode (potential SSRF). Use --where cloud for remote targets."
+                f"in local mode (potential SSRF). Use --where cloud for remote targets.",
+                # No `url` here, unlike the branches below: this one is reached
+                # only for a host the caller configured, and a configured URL is
+                # where a proxy token rides. The message already names the host.
+                #
+                # The example is a QUOTED PLACEHOLDER rather than the resolved
+                # URL for the same reason, and that also keeps it from naming a
+                # port: hard-coding 8188 would hand a remote on :9000 a command
+                # that fetches from the wrong endpoint, and an unquoted
+                # `<remote>` is parsed by the shell as input redirection.
+                hint=(
+                    "the catalog fetch is loopback-only in local mode; for Comfy Cloud pass "
+                    "`--where cloud`, and for a self-hosted remote save its catalog and read the "
+                    "file: `curl -fsS --max-filesize 512M 'http://HOST:PORT/object_info' > "
+                    "object_info.json`, then pass `--input object_info.json`"
+                ),
             )
 
     req = urllib.request.Request(url)
@@ -4318,6 +4414,7 @@ def _load_from_target(*, mode: str = "local", host: str | None = None, port: int
                 raise LoadError(
                     f"response exceeds {_MAX_OBJECT_INFO_BYTES} bytes",
                     details={"url": url},
+                    hint=_oversize_catalog_hint(url, is_cloud=target.is_cloud),
                 )
             return json.loads(raw)
     except urllib.error.HTTPError as e:
@@ -5928,6 +6025,50 @@ def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph:
     return _UNRESOLVED
 
 
+def _update_named_widget_value(node: dict, order: list[str], input_name: str, value: Any) -> None:
+    """Keep the frontend's name-keyed ``widgets_values_named`` register coherent.
+
+    Implements **Amendment A23** (``comfy-multi-player``
+    ``docs/multiplayer-schema.md``, 2026-10-02), which this package was not
+    maintaining outside DynamicGroup nodes: a ``set-widget`` published the new
+    value positionally while leaving the PRE-OP value in the name register, so a
+    consumer restoring by name reverted the write on reload. The frontend writes
+    that register on every save and prefers it when restoring, so the register
+    going stale is a real divergence, not a cosmetic one.
+
+    A23's three gates, in its own order, and the reasoning is its own:
+
+    1. The register must already be stored as a **name-keyed object**. A foreign
+       producer's array is left alone rather than reshaped.
+    2. It must already **carry this name**. "A register that does not hold the
+       name is not stale for it, and inventing an entry would publish a value the
+       producer deliberately omitted."
+    3. The addressed pair must be the name's **final occurrence**, evaluated
+       against the layout AFTER the write. A serializer writing in widget order
+       leaves the final same-named widget's value in the register, so one slot
+       cannot hold two values. An earlier occurrence must leave it untouched:
+       writing there "replaces the final occurrence's value with an earlier
+       one's — a corrupt read rather than a stale one."
+
+    This package addresses a widget by name and writes its FIRST occurrence
+    (``order.index``), so gate 3 reduces to "the name occurs exactly once". A
+    duplicated name means the write did not land on the final occurrence, and the
+    register is correctly left as it is rather than updated or dropped.
+
+    Finality is false whenever the layout cannot be resolved — an empty or absent
+    order — matching A23: "a node whose layout this package cannot resolve has no
+    projected position to be final at."
+    """
+    stored = node.get("widgets_values_named")
+    if not isinstance(stored, dict):
+        return
+    if input_name not in stored:
+        return
+    if not order or order.count(input_name) != 1:
+        return
+    stored[input_name] = value
+
+
 def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, extend: bool) -> list[dict]:
     """Write ``value`` into ``node``'s ``widgets_values`` slot for ``input_name``.
 
@@ -6140,8 +6281,10 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         node["widgets_values"] = {**raw_values, input_name: value}
     else:
         node["widgets_values"] = widgets
-    if has_group and "widgets_values_named" in node:
-        node["widgets_values_named"][input_name] = value
+    # Not gated on ``has_group``: the frontend writes this register for every
+    # node, so a plain node's edit left it holding the value the edit replaced.
+    # ``order`` is the post-write layout, which is what A23's finality gate wants.
+    _update_named_widget_value(node, order, input_name, value)
     return warnings
 
 
@@ -6300,6 +6443,11 @@ def _write_dynamic_combo_selector(
             widgets.extend([None] * (widget_idx + 1 - len(widgets)))
         widgets[widget_idx] = value
         node["widgets_values"] = {**raw_values, input_name: value} if preserve_named else widgets
+        # Not gated on DynamicGroup: the frontend writes this register for every
+        # node, so a plain node's selector edit left the PRE-OP option sitting in
+        # the name register. The roster is unchanged here, so the entries' own
+        # names are already the post-write layout.
+        _update_named_widget_value(node, [entry.name for entry in entries], input_name, value)
         return []
 
     # Sub-entries owned (directly or via nesting) by this combo sit contiguously
@@ -6326,19 +6474,38 @@ def _write_dynamic_combo_selector(
     else:
         node["widgets_values"] = head + [value] + new_subs + tail
     _clear_dynamic_combo_widget_markers(node, input_name)
-    if any(entry.port and entry.port.is_dynamic_group for entry in entries):
-        if "widgets_values_form" in node:
-            node["widgets_values_form"]["order"] = (
-                [entry.name for entry in entries[: widget_idx + 1]]
-                + new_names
-                + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
-            )
-        if "widgets_values_named" in node:
-            named = node["widgets_values_named"]
-            for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
-                named.pop(entry.name, None)
+    new_order = (
+        [entry.name for entry in entries[: widget_idx + 1]]
+        + new_names
+        + [entry.name for entry in entries[widget_idx + 1 + old_span :]]
+    )
+    has_dynamic_group = any(entry.port and entry.port.is_dynamic_group for entry in entries)
+    if has_dynamic_group and "widgets_values_form" in node:
+        node["widgets_values_form"]["order"] = new_order
+    if isinstance(node.get("widgets_values_named"), dict):
+        named = node["widgets_values_named"]
+        # The removed sub-entries' names no longer exist in `new_order` either
+        # way, so drop them regardless of which branch below repopulates it.
+        for entry in entries[widget_idx + 1 : widget_idx + 1 + old_span]:
+            named.pop(entry.name, None)
+        if has_dynamic_group:
+            # A DynamicGroup node's composite form owns the whole roster, so
+            # its register entries are (re)written unconditionally — this is
+            # the pre-existing, form-specific (A24) behavior, not A23's gates.
             named[input_name] = value
             named.update(zip(new_names, new_subs))
+        else:
+            # Not gated on DynamicGroup: the frontend writes this register for
+            # every node, so a plain node's roster rebuild left the OLD
+            # selector value sitting in the name register.
+            # `_update_named_widget_value` applies A23's gates (dict-shaped,
+            # already carries the name, exactly one occurrence) to the
+            # selector and to each freshly defaulted sub-widget, same as every
+            # other writer — a name the register never held is left
+            # uninvented rather than published.
+            _update_named_widget_value(node, new_order, input_name, value)
+            for name, sub_value in zip(new_names, new_subs):
+                _update_named_widget_value(node, new_order, name, sub_value)
     return [
         {
             "code": "dynamic_combo_roster_rebuilt",
@@ -6451,7 +6618,9 @@ def _count_instances(workflow: dict, def_id: str) -> int:
     return count
 
 
-def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[str, dict]) -> None:
+def _isolate_shared_subgraph(
+    workflow: dict, instance: dict, defs_by_id: dict[str, dict], *, prefer_retainer: bool = False
+) -> None:
     """If ``instance``'s subgraph definition is shared with another instance,
     deep-copy it under a fresh id and repoint ``instance`` so an interior write
     can't alias sibling instances. No-op when the instance already owns its def.
@@ -6460,16 +6629,151 @@ def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[st
     — never a random UUID — so two replicas replaying the same op produce
     byte-identical graphs (a convergence requirement of the op model in
     :mod:`comfy_cli.workflow_ops`).
+
+    ``prefer_retainer=False`` (the default, used by every interior-WRITE
+    caller via ``_resolve_node_path``) keeps the original rule: fork whenever
+    ``def_id`` is CURRENTLY shared by more than one instance, else mutate it
+    in place. That rule is correct there because an interior write always
+    targets exactly one instance per call — the sibling, if any, is never
+    itself the subject of a concurrent decision in the same apply, so "am I
+    currently alone" is a stable question.
+
+    ``prefer_retainer=True`` (the two legacy-proxy-migration call sites in
+    this module and in ``workflow_ops.py``) is for the case CodeRabbit flagged
+    on comfy-cli#1168 (discussion r4693109354): TWO instances sharing one
+    definition can EACH independently need their own repair, so each one's
+    fork-or-retain decision is itself part of the same cross-replica
+    convergence question. There, the LIVE share count is the wrong signal:
+    whichever instance is applied FIRST sees the definition still shared and
+    forks; the other is then applied against what looks like a now-unshared
+    definition and keeps the original id, mutating it in place. Reversing
+    the apply order flips which of the two instances ends up on which id —
+    same final widget values, different documents.
+
+    ``prefer_retainer=True`` instead asks ``_shared_definition_cohort`` for
+    the full, ORIGINAL set of instances that ever shared ``def_id`` (an
+    instance that already forked is still recognized as a cohort member:
+    its current type is ``_deterministic_fork_id(def_id, its own scoped
+    key)`` — see ``_cohort_member_key`` for why the key is scope-qualified
+    rather than a bare local id), and always forks every member except the
+    one whose scoped key sorts first (string order) — a decision that
+    depends only on instance identity, never on which of the cohort's
+    members has been applied yet.
+
+    Forking every non-retainer happens EAGERLY, the first time ANY cohort
+    member is processed while the definition is still pristine (nobody has
+    forked yet) — not lazily, one at a time as each member's own write
+    happens to come up. Forking lazily would let the retainer's own flush
+    mutate the STILL-SHARED original in place before an unprocessed
+    non-retainer sibling gets a turn; that sibling's later fork would then
+    deep-copy the retainer's already-mutated original, baking the
+    retainer's unrelated repair into a definition the sibling never asked
+    for — a structural difference an opposite apply order would not
+    produce (the non-retainer would have forked a still-pristine original
+    instead). Forking every non-retainer up front, before either of them
+    has run its own flush, means both the retainer's in-place mutation and
+    every non-retainer's own fork always start from the same pristine
+    content regardless of apply order.
     """
     def_id = str(instance.get("type", ""))
     sg = defs_by_id.get(def_id)
-    if sg is None or _count_instances(workflow, def_id) <= 1:
+    if sg is None:
         return
-    new_sg = copy.deepcopy(sg)
-    new_id = _deterministic_fork_id(def_id, instance.get("id"))
-    new_sg["id"] = new_id
-    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
-    instance["type"] = new_id
+    if not prefer_retainer:
+        if _count_instances(workflow, def_id) <= 1:
+            return
+        new_sg = copy.deepcopy(sg)
+        new_id = _deterministic_fork_id(def_id, instance.get("id"))
+        new_sg["id"] = new_id
+        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
+        instance["type"] = new_id
+        return
+    cohort = _shared_definition_cohort_nodes(workflow, def_id)
+    if len(cohort) <= 1:
+        return
+    retainer_key = min((key for key, _n in cohort), key=str)
+    pristine = copy.deepcopy(sg)
+    for key, n in cohort:
+        if key == retainer_key or str(n.get("type", "")) != def_id:
+            continue  # the retainer, or a member some earlier call already forked
+        new_sg = copy.deepcopy(pristine)
+        new_id = _deterministic_fork_id(def_id, key)
+        new_sg["id"] = new_id
+        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
+        n["type"] = new_id
+
+
+def _cohort_member_key(scope: str, local_id: Any) -> str:
+    """Scope-qualify a cohort member's bare local id by the id of its
+    immediately enclosing subgraph definition (``scope == ""`` for a
+    top-level workflow node).
+
+    ``definitions.subgraphs`` is a FLAT, global table — a definition nested
+    ten levels deep sits in the same list, at the same single level, as a
+    top-level one. A bare local node id is only unique WITHIN its own
+    immediate container, not across that whole flat table: two unrelated
+    definitions can each independently contain a node with local id ``"2"``.
+    Without this qualifier, retainer selection and fork-id generation in
+    ``_isolate_shared_subgraph`` compared (and hashed) those bare ids
+    directly, so two such nodes sharing one target definition were
+    indistinguishable from each other — both satisfied "am I the retainer",
+    so neither forked, aliasing two logically independent instances the
+    moment either one's flush mutated the still-shared definition in place.
+    https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4699160878
+
+    Top-level workflow nodes (``scope == ""``) have no such ambiguity —
+    ``workflow["nodes"]`` is a single flat list, so their ids are already
+    unique document-wide — so they keep the bare (unqualified) id rather
+    than gaining a vestigial prefix. That preserves the exact fork ids
+    already pinned for the top-level-only case (e.g.
+    ``test_shared_definition_is_forked_not_mutated``), and only changes the
+    id actually used for a nested host.
+    """
+    if not scope:
+        return str(local_id)
+    return f"{scope}\x1f{local_id}"
+
+
+def _shared_definition_cohort_nodes(workflow: dict, def_id: str) -> list[tuple[str, dict]]:
+    """``(scoped_key, node)`` pairs for every instance that ORIGINALLY shared
+    ``def_id`` (top-level + interior-of-definitions), independent of how many
+    of them this replica's apply order has already forked away from it.
+
+    ``scoped_key`` is ``_cohort_member_key(scope, node id)`` — see that
+    function for why a bare local id is not enough to identify a cohort
+    member uniquely.
+
+    An instance still pointing at ``def_id`` directly is a cohort member, and
+    so is one whose current ``type`` equals ``_deterministic_fork_id(def_id,
+    its own scoped key)`` — the exact marker ``_isolate_shared_subgraph``
+    leaves behind when it forks that instance off this ``def_id``. Checking
+    for that marker (rather than only counting live sharers of ``def_id``, as
+    ``_count_instances`` does) is what makes the cohort — and so the fork/
+    retain decision above — the same regardless of which sharing instance is
+    processed first. Returning the actual node dicts (not just ids) lets the
+    caller repoint a cohort member OTHER than the one it was invoked for.
+    """
+    cohort: list[tuple[str, dict]] = []
+
+    def _collect(scope: str, nodes: Any) -> None:
+        if not isinstance(nodes, list):
+            return
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            key = _cohort_member_key(scope, n.get("id"))
+            t = str(n.get("type", ""))
+            if t == def_id or t == _deterministic_fork_id(def_id, key):
+                cohort.append((key, n))
+
+    _collect("", workflow.get("nodes"))
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                _collect(str(sg.get("id", "")), sg.get("nodes"))
+    return cohort
 
 
 def _deterministic_fork_id(def_id: str, instance_id: Any) -> str:
@@ -6580,11 +6884,28 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
-        if target.repair is not None:
+        plan = _promoted.plan_proxy_migration(workflow, instance, graph)
+        if target.repair is not None or plan:
             # A legacy ``proxyWidgets`` promotion: run the frontend's forward
-            # migration on this instance first (forking a shared definition,
-            # since the repair mutates it), exactly as the op path does.
-            _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow))
+            # migration on this instance first, exactly as the op path does.
+            # Unconditional over the WHOLE plan — not just a ``repairable``
+            # (``createSubgraphInput``/``primitiveBypass``) entry — because
+            # ``set_host_value`` below writes by DECLARED-order
+            # ``value_index`` into ``widgets_values``, which stays in legacy
+            # PROXY order until a flush runs at least once. A plan of only
+            # ``alreadyLinked``/``quarantine`` entries never flushed here
+            # would leave that array misaligned forever, so a later write
+            # would land in the wrong widget's slot.
+            # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4670514870
+            if target.repair is not None or any(e.repairable for e in plan):
+                # The definition is MUTATED only for a repairable entry, so
+                # the (possibly shared) definition is forked only then — a
+                # plan of only ``alreadyLinked``/``quarantine`` entries
+                # leaves the definition exactly as the flush found it, so
+                # forking a shared definition for it would fork it for
+                # nothing.
+                # https://github.com/Comfy-Org/comfy-cli/pull/1168#discussion_r4623941911
+                _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow), prefer_retainer=True)
             _promoted.flush_proxy_migration(workflow, instance, graph, instance_path=list(target.segments))
         _promoted.set_host_value(workflow, instance, target.widget, value, graph)
         return warnings
@@ -6599,6 +6920,13 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             values.append(None)
         values[0] = value
         node["widgets_values"] = values
+        # A23: a legacy PrimitiveNode has no catalog entry, so its layout is
+        # the frontend's own fixed order (``value``, then an optional
+        # ``control_after_generate``) rather than something `_write_widget`
+        # can resolve — mirror a present register under that fixed name
+        # directly, through the same gates (foreign/non-dict register, name
+        # never carried, duplicated name) every other writer uses.
+        _update_named_widget_value(node, list(_promoted._PRIMITIVE_WIDGET_ORDER), "value", value)
         return []
     # --- Direct mode: a regular top-level node (or the primitive feeding a promoted input). ---
     return _write_widget(target.node, target.widget, value, graph, extend=True)

@@ -25,6 +25,14 @@ history.
   `sha256`. A replace links the workflow only when Cloud's record of it shows
   the new content; otherwise the link opens the folder (`record_stale`, with a
   `workflow_record_stale` warning).
+- `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`
+  emits one `define_subgraph` op for the cloud merge consumer without touching
+  the local workflow file. The id comes from `--id`, the definition's own `id`,
+  or a new UUID. The CLI checks envelope shape and JSON-serializability only:
+  semantic validation, replay and conflict resolution for a definition belong
+  to the server, so `comfy workflow apply` and `comfy workflow foreach` refuse
+  to persist the op locally. New frozen op kind, documented as amendment v1.17
+  of `docs/op-vocabulary-v1.md`.
 
 ### Fixed
 
@@ -36,7 +44,20 @@ history.
   the delivery consumers against its own 1-second budget, and the queued
   `command_finished` event went with them.
 
+- A cloud `comfy run --output-node-ids` (and `comfy jobs watch` / `jobs status`
+  on such a job) no longer warns `partial_execution_targets_ignored` when the
+  only output outside the targets is a cached preview from an intermediate
+  node such as Crop Image or Painter, which ComfyUI can replay at the end of a
+  run. Only output nodes outside the targets count. The submitted graph's
+  output nodes are kept on the job record, since `jobs watch` has no node
+  catalog; older records and runs without the catalog keep the old check.
+
 ### Changed
+
+- The `comfy-build` skill now tells an agent not to write node code into a
+  build for node classes nothing installable provides (`unresolvedClasses`). It
+  stops before changing the spec, lists the classes, and asks the user how to go
+  on. `comfy-build-failures` says the same where it lists `unresolvedClasses`.
 
 - **Breaking:** `comfy knowledge pick <phrase>` that matches no capability no
   longer returns every capability's description. The payload keeps the full
@@ -65,6 +86,27 @@ history.
   large, so a push used to upload it and the release's build then failed.
   `build pull`, `build init`, `build update` and `build status` still read such
   a node, so a pull can drop it from the spec.
+- `comfy skills install --target` takes the names people type: `claude` for
+  `claude-code` and `AGENTS.md` for `agents-md`. Matching ignores case and
+  surrounding spaces, and passing two spellings of one target writes it once.
+  `--scope` is matched the same way. A refused value now says which mistake it
+  looks like — a flag the option swallowed, a path that is one of our own
+  destinations (pointed back at that target's name), a path meant for `--skill`,
+  or a name with no target — and both `--target` options' help names the three
+  choices, which it never did. `codex`, `aider` and the bare `agents` are
+  refused on purpose, each naming the reason: Codex reads `~/.codex/AGENTS.md`
+  rather than the `~/AGENTS.md` that `agents-md` writes at the default scope,
+  Aider loads a conventions file only when one is passed to it, and `agents` is
+  ambiguous with a `.agents/` directory. The follow-up notice an `agents-md`
+  install prints now matches the scope it wrote at: it said to run Codex "from
+  inside this directory", which is the answer at `--scope project` and no answer
+  at the default `--scope user`, where the file is `~/AGENTS.md` and Codex reads
+  it from nowhere — so it now points a user-scope install at `--scope project`
+  instead. Two paths that are not destinations no longer get pointed at one:
+  an `AGENTS.md` inside a tool's own dot-directory (`~/.codex/AGENTS.md`) is a
+  file this command does not write at any scope and now says so, and a skill
+  DIRECTORY under a destination (`~/.claude/skills/my-skill`) goes to `--skill`
+  like its `SKILL.md` already did.
 
 ### Removed
 
@@ -93,6 +135,28 @@ history.
   models makes no extra request. The library lookup, `comfy workflow check`'s
   included, refuses a redirect instead of following it with the Cloud
   credentials attached.
+- A `comfy workflow set-widget` edit keeps the frontend's name-keyed
+  `widgets_values_named` register coherent, not just on DynamicGroup nodes.
+  Editing any ordinary node published the new value positionally and left the
+  pre-edit value in that register, so a consumer restoring values by name
+  reverted the write — the frontend writes the register on every save and
+  prefers it when restoring. This implements Amendment A23 of the multiplayer
+  schema, which already specified the behaviour: update only a register that is
+  already a name-keyed object and already carries the name, and only when the
+  addressed widget is that name's final occurrence. A duplicated name is left
+  alone, because one name-keyed slot belongs to the final occurrence and writing
+  an earlier one's value there would be a corrupt read rather than a stale one.
+- `comfy workflow add-node` now names the successor for a deprecated family
+  split by a format qualifier. Core's audio writers retire as `Save Audio
+  (FLAC|MP3|Opus) (DEPRECATED)` with `Save Audio (Advanced)` as the live
+  successor, so stripping only `(DEPRECATED)` left `save audio (flac)`, matched
+  nothing, and all three reported `"replacement": null` — the caller was told
+  the class was retired but not what to use. The lookup falls back to the name
+  before the qualifier, and only when exactly one live class answers to it in
+  the same pack, category and billing kind, the retirement marker was actually
+  removed from the retired name, and the candidate does not announce its own
+  retirement by name; anything else still reports no replacement rather than
+  guessing, because the caller substitutes this class id directly.
 - `comfy generate seedance` with a Seedance 2.x model (`--model
   dreamina-seedance-2-*`) now polls the job on
   `/proxy/byteplus-seedance2/...`, the route that serves those tasks. It polled
@@ -104,6 +168,57 @@ history.
   jobs still poll `/proxy/byteplus/...`. A Seedance poll that answers `expired`
   now ends as a failure, for 1.x and 2.x jobs alike, instead of polling on until
   the timeout.
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
+
+- The two dynamic-combo mismatch reports in UI→API conversion are logged at
+  ERROR, so the CLI's default `LOG_LEVEL` no longer drops them. A saved
+  `COMFY_DYNAMICCOMBO_V3` selector that names no option in the current schema
+  (a partner model renamed or removed server-side) leaves its sub-input slots
+  unconsumed and shifts every later widget — on a Seedance text-to-video graph
+  the prompt string lands in `seed` and a resolution string in `watermark`.
+  The converter cannot recover that alignment and reported it so the corruption
+  would not be silent, but the report was a WARNING and `setup_logging`
+  defaults the level to ERROR, so nothing was printed. The same applied to a
+  nesting chain past the expansion depth limit. Both tests asserted the record
+  was created under a forced `caplog` floor rather than that it survived the
+  level the CLI runs at; a third test now pins that.
+
+- `comfy download` with no `--out-dir` now resolves the output directory the
+  way it has always documented: the governing `project/1` root's `outputs/`,
+  else the `default_project_dir` config key's `outputs/`, else `./outputs`.
+  The option's default was the literal `./outputs`, which is truthy, so that
+  resolution was unreachable from the command and a download run from a
+  subdirectory of a project wrote to `<cwd>/outputs` instead of the project
+  root's. Passing `--out-dir`/`-o` is unchanged.
+
+- `comfy model download --url` now refuses a Hugging Face *page* URL instead of
+  downloading the page. A bare repo link
+  (`https://huggingface.co/<org>/<repo>`), a `/tree/<branch>` browser, or a
+  dataset or space landing page is not a model file, but Hugging Face answers
+  all of them `200 text/html`. The URL was not recognised as Hugging Face (only
+  `/resolve/` and `/blob/` links are), so it fell through to the "source is
+  unknown, treat it as a direct file URL" path and the transfer **succeeded**:
+  with `--filename flux1-dev.safetensors` the command printed `Done` after
+  writing 276 KB of model-card HTML into `models/checkpoints/`, and
+  `comfy models search` listed it as installed because it reads filenames and
+  never content. The failure then surfaced much later as an opaque parse error
+  inside ComfyUI. It is now a `hf_not_a_file` `envelope/1` error whose hint
+  names the form that works, raised before anything is fetched or written.
+  A page is identified by its own shape, not as "whatever the Hugging Face hub
+  parser rejects", so the file forms that parser cannot read still download
+  through the direct-URL path as they did before: dataset and space files
+  (`/datasets/<org>/<repo>/resolve/<branch>/<file>`), unnamespaced legacy repos
+  (`/gpt2/resolve/main/<file>`) and `/raw/<branch>/<file>`. The refusal covers
+  Hugging Face's own hosts rather than two literal spellings, so `hf.co`,
+  a `www.` prefix, a capitalised host and an explicit `:443` are refused too
+  instead of falling through and saving the page. A `/blob/` link — Hugging
+  Face's HTML file viewer, and the second form the hint names — now downloads
+  its `/resolve/` sibling, so following the hint cannot land the viewer page
+  where the model belongs. That holds for every Hugging Face URL shape,
+  including a dataset's, a space's and a legacy repo's, so the hint is true
+  wherever it is shown. Plain file URLs on every other host are unchanged.
 
 ## [1.29.0] - 2026-11-24
 
@@ -395,6 +510,20 @@ history.
   Build picker. It needs no sign-in then, since it reads nothing from the
   builder. `remote.state` is `"pushed"` otherwise. `build.id` is left out
   when no Build is named, so it stays a string wherever it appears.
+- A `nodes` or `validate` command that cannot read `object_info` now names the
+  reason it actually hit instead of telling you to start a server that is
+  already running. Over the 64 MiB fetch cap, the hint says so and points at
+  the route that works — save the catalog and pass `--input` (the file loader
+  has no cap). The command it gives you is one you can paste: loud on failure
+  (`-f`, so a 401 body is never saved as a catalog), size-capped by
+  `--max-filesize` where the server states the size up front, and on a Comfy
+  Cloud target it carries the API key the fetch needs, since an anonymous one
+  cannot work there. For a non-loopback host in local
+  mode it names both real routes, `--where cloud` for Comfy Cloud and a saved
+  catalog for a self-hosted remote. The generic "pass `--input <path>`, or
+  start the server" hint is unchanged for every other load failure, and so is
+  that failure's `error.details`
+  ([comfy-mcp#252](https://github.com/Comfy-Org/comfy-mcp/issues/252)).
 
 ## [1.26.0] - 2026-11-11
 

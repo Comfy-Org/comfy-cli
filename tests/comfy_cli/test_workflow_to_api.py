@@ -2364,7 +2364,11 @@ class TestDynamicComboAfterControlMarker:
         with caplog.at_level(logging.WARNING):
             result = convert_ui_to_api(workflow, object_info)
         assert result["1"]["inputs"]["model"] == "renamed_server_side"
-        assert any("matched no option" in rec.message for rec in caplog.records)
+        matching = [rec for rec in caplog.records if "matched no option" in rec.message]
+        assert matching
+        # At ERROR, so the CLI's default LOG_LEVEL does not drop it; see
+        # ``test_graph_corruption_survives_the_cli_default_log_level``.
+        assert [rec.levelno for rec in matching] == [logging.ERROR]
 
     def test_deeply_nested_dynamic_combos_do_not_recurse_forever(self, caplog):
         # An unbounded chain of nested COMFY_*COMBO* sub-inputs
@@ -2408,7 +2412,74 @@ class TestDynamicComboAfterControlMarker:
         with caplog.at_level(logging.WARNING):
             result = convert_ui_to_api(workflow, object_info)  # must not raise
         assert "1" in result
-        assert any("exceeded depth" in rec.message for rec in caplog.records)
+        matching = [rec for rec in caplog.records if "exceeded depth" in rec.message]
+        assert matching
+        assert [rec.levelno for rec in matching] == [logging.ERROR]
+
+    def test_graph_corruption_survives_the_cli_default_log_level(self, monkeypatch):
+        """The two mismatch reports must reach a handler under the real CLI config.
+
+        ``caplog.at_level`` forces a floor, so the two tests above prove only
+        that the record is *created*. ``comfy_cli.logging.setup_logging`` — run
+        by ``cmdline`` at import on every real invocation — defaults LOG_LEVEL to
+        ERROR, so a WARNING record is dropped before any handler sees it and the
+        caller converts a misaligned graph with nothing printed. This asserts the
+        level the CLI actually runs at, not one the test chose.
+        """
+        import logging
+
+        from comfy_cli.logging import setup_logging
+
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        root = logging.getLogger()
+        monkeypatch.setattr(root, "handlers", [])
+        setup_logging()
+        assert root.level == logging.ERROR, "guard: this test is about the ERROR default"
+
+        seen: list[logging.LogRecord] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                seen.append(record)
+
+        handler = Collect(level=root.level)
+        root.addHandler(handler)
+        try:
+            object_info = {
+                "StaleCombo": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMFY_DYNAMICCOMBO_V3",
+                                {"options": [{"key": "known", "inputs": {"required": {"x": ["FLOAT"]}}}]},
+                            ]
+                        }
+                    },
+                    "input_order": {"required": ["model"]},
+                    "output_node": True,
+                    "display_name": "SC",
+                }
+            }
+            workflow = {
+                "nodes": [
+                    {
+                        "id": 1,
+                        "type": "StaleCombo",
+                        "inputs": [],
+                        "outputs": [],
+                        "widgets_values": ["renamed_server_side", 1.5],
+                        "mode": 0,
+                    }
+                ],
+                "links": [],
+            }
+            convert_ui_to_api(workflow, object_info)
+        finally:
+            root.removeHandler(handler)
+
+        assert [rec.getMessage() for rec in seen if "matched no option" in rec.getMessage()], (
+            "the selector-skew report was dropped at the CLI's default log level"
+        )
 
 
 class TestSeedControlMarkerOffByOne:
