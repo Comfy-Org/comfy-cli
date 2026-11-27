@@ -5,6 +5,7 @@ accessor hands ``Comfy()``; the real import is covered in
 ``tests/comfy_cli/test_tracking_lazy_import.py``.
 """
 
+import os
 import sys
 import types
 
@@ -16,15 +17,24 @@ from comfy_cli.command.generate import router_client
 class _FakeComfy:
     calls: list[dict] = []
 
+    router_urls: list[str | None] = []
+
     def __init__(self, **kwargs):
         _FakeComfy.calls.append(kwargs)
+        # The real SDK reads the Router host at construction, so record it here.
+        _FakeComfy.router_urls.append(os.environ.get("COMFY_ROUTER_BASE_URL"))
         self.models = ("models", kwargs)
 
 
 @pytest.fixture
 def fake_sdk(monkeypatch):
     _FakeComfy.calls = []
-    monkeypatch.setitem(sys.modules, "comfy_sdk", types.SimpleNamespace(Comfy=_FakeComfy))
+    _FakeComfy.router_urls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "comfy_sdk",
+        types.SimpleNamespace(Comfy=_FakeComfy, ROUTER_BASE_URL_ENV_VAR="COMFY_ROUTER_BASE_URL"),
+    )
     # setenv first so teardown restores the pre-test state even after
     # router_models writes the var itself.
     monkeypatch.setenv("COMFY_ROUTER_BASE_URL", "")
@@ -50,16 +60,58 @@ def test_explicit_timeout_is_passed_through(fake_sdk):
 def test_api_base_url_is_bridged_onto_the_router_var(fake_sdk, monkeypatch):
     monkeypatch.setenv("COMFY_API_BASE_URL", "https://stagingapi.example")
     router_client.router_models("comfyui-k")
-    assert router_client.os.environ["COMFY_ROUTER_BASE_URL"] == "https://stagingapi.example"
+    assert fake_sdk.router_urls[-1] == "https://stagingapi.example"
+
+
+def test_bridge_is_scoped_to_construction(fake_sdk, monkeypatch):
+    monkeypatch.setenv("COMFY_API_BASE_URL", "https://stagingapi.example")
+    router_client.router_models("comfyui-k")
+    assert "COMFY_ROUTER_BASE_URL" not in os.environ
+    # A later change to COMFY_API_BASE_URL is honoured, not shadowed by the first call.
+    monkeypatch.setenv("COMFY_API_BASE_URL", "https://other.example")
+    router_client.router_models("comfyui-k")
+    assert fake_sdk.router_urls[-1] == "https://other.example"
+
+
+def test_bridged_url_is_normalised(fake_sdk, monkeypatch):
+    monkeypatch.setenv("COMFY_API_BASE_URL", "  https://stagingapi.example/  ")
+    router_client.router_models("comfyui-k")
+    assert fake_sdk.router_urls[-1] == "https://stagingapi.example"
+
+
+def test_blank_api_base_url_is_not_bridged(fake_sdk, monkeypatch):
+    monkeypatch.setenv("COMFY_API_BASE_URL", "   ")
+    router_client.router_models("comfyui-k")
+    assert fake_sdk.router_urls[-1] is None
 
 
 def test_explicit_router_base_url_wins(fake_sdk, monkeypatch):
     monkeypatch.setenv("COMFY_API_BASE_URL", "https://stagingapi.example")
     monkeypatch.setenv("COMFY_ROUTER_BASE_URL", "https://router.example")
     router_client.router_models("comfyui-k")
-    assert router_client.os.environ["COMFY_ROUTER_BASE_URL"] == "https://router.example"
+    assert fake_sdk.router_urls[-1] == "https://router.example"
+    assert os.environ["COMFY_ROUTER_BASE_URL"] == "https://router.example"
 
 
 def test_no_base_url_leaves_the_router_var_unset(fake_sdk):
     router_client.router_models("comfyui-k")
-    assert "COMFY_ROUTER_BASE_URL" not in router_client.os.environ
+    assert fake_sdk.router_urls[-1] is None
+    assert "COMFY_ROUTER_BASE_URL" not in os.environ
+
+
+def test_bridge_is_restored_when_construction_raises(fake_sdk, monkeypatch):
+    def boom(**kwargs):
+        raise ValueError("bad url")
+
+    monkeypatch.setattr(sys.modules["comfy_sdk"], "Comfy", boom)
+    monkeypatch.setenv("COMFY_API_BASE_URL", "https://stagingapi.example")
+    with pytest.raises(ValueError):
+        router_client.router_models("comfyui-k")
+    assert "COMFY_ROUTER_BASE_URL" not in os.environ
+
+
+def test_real_sdk_reads_the_router_var_the_bridge_sets():
+    """The bridge writes whatever variable the installed SDK names; pin that the
+    SDK still reads it, so an SDK rename cannot silently route to production."""
+    comfy_sdk = pytest.importorskip("comfy_sdk")
+    assert comfy_sdk.ROUTER_BASE_URL_ENV_VAR == "COMFY_ROUTER_BASE_URL"

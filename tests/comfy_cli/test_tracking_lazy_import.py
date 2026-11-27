@@ -155,7 +155,7 @@ def test_router_models_degrades_when_sdk_is_missing():
         "_real = builtins.__import__\n"
         "def boom(name, *a, **k):\n"
         "    if name == 'comfy_sdk':\n"
-        "        raise ImportError('no comfy_sdk')\n"
+        "        raise ModuleNotFoundError(\"No module named 'comfy_sdk'\", name='comfy_sdk')\n"
         "    return _real(name, *a, **k)\n"
         "builtins.__import__ = boom\n"
         "from comfy_cli.command.generate.router_client import router_models\n"
@@ -166,6 +166,30 @@ def test_router_models_degrades_when_sdk_is_missing():
         "    assert 'pip install -U comfy-cli' in str(e), f'unexpected message: {e}'\n"
         "else:\n"
         "    raise AssertionError('router_models did not raise ApiError when comfy_sdk was missing')\n"
+    )
+
+
+def test_router_models_names_the_cause_when_the_sdk_is_broken():
+    """An SDK that is installed but fails importing a dependency (e.g. a
+    half-replaced pydantic_core) must not be misreported as a missing SDK."""
+    _modules_after(
+        "import builtins\n"
+        "_real = builtins.__import__\n"
+        "def boom(name, *a, **k):\n"
+        "    if name == 'comfy_sdk':\n"
+        "        raise ImportError(\"cannot import name '__version__' from 'pydantic_core'\", name='pydantic_core')\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = boom\n"
+        "from comfy_cli.command.generate.router_client import router_models\n"
+        "from comfy_cli.command.generate.client import ApiError\n"
+        "try:\n"
+        "    router_models('comfyui-test')\n"
+        "except ApiError as e:\n"
+        "    assert 'pydantic_core' in str(e), f'cause missing: {e}'\n"
+        "    assert 'pip install -U comfy-cli' not in str(e), f'misreported as missing: {e}'\n"
+        "    assert e.body == str(e), 'body must carry the hint for status+body renderers'\n"
+        "else:\n"
+        "    raise AssertionError('router_models did not raise ApiError when comfy_sdk was broken')\n"
     )
 
 
