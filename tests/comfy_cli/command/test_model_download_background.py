@@ -796,6 +796,28 @@ class TestWorkerCredentialScoping:
         monkeypatch.setattr(models, "_hf_headers", lambda: {"Authorization": "Bearer secret"})
         assert models._worker_headers(_state(url=url, needs_hf_auth=True))["Authorization"] == "Bearer secret"
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://huggingface.co./org/repo/resolve/main/m.safetensors",
+            "https://www.huggingface.co./org/repo/resolve/main/m.safetensors",
+            "https://hf.co./org/repo/resolve/main/m.safetensors",
+        ],
+    )
+    def test_hf_token_is_sent_to_a_fully_qualified_hugging_face_host(self, monkeypatch, url):
+        """A trailing-dot FQDN is the same host, and the foreground already said so.
+
+        `is_huggingface_host` strips the dot, so `download()` resolves the file,
+        decides a token is required and sets `needs_hf_auth`. This gate did not
+        strip it, so `--background` dropped the header the foreground had just
+        established was required and the transfer failed unauthorized against a
+        repo the token could read -- while the same URL downloaded fine in the
+        foreground, which goes through `hf_hub_download(repo_id=...)` and never
+        looks at the host.
+        """
+        monkeypatch.setattr(models, "_hf_headers", lambda: {"Authorization": "Bearer secret"})
+        assert models._worker_headers(_state(url=url, needs_hf_auth=True))["Authorization"] == "Bearer secret"
+
 
 # ---------------------------------------------------------------------------
 # 4. submit: fail fast, then detach

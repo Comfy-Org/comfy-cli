@@ -28,6 +28,17 @@ history.
 
 ### Fixed
 
+- `comfy model download --background` no longer drops the Hugging Face token
+  when the URL names the host in its fully-qualified, trailing-dot form
+  (`https://huggingface.co./org/repo/resolve/main/model.safetensors`). The
+  foreground resolved the file, decided the token was required and recorded
+  that; the background worker then re-checked the URL against a second,
+  separately written list of HF hosts that did not strip the trailing dot, sent
+  no `Authorization` header, and failed unauthorized against a repo the token
+  could read — while the same URL downloaded fine without `--background`. The
+  recognizer's host set and the token gate's are now derived from one tuple, so
+  adding a host to one and not the other fails a test instead of a download.
+
 - Telemetry no longer loses the last event of a run when `posthog` resolves to
   7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
   bounded flush is the only shutdown drain, but PostHog renamed that hook from

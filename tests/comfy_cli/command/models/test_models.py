@@ -5,11 +5,14 @@ import typer.testing
 
 from comfy_cli import constants
 from comfy_cli.command.models.models import (
+    HUGGINGFACE_HOSTS,
     _format_elapsed,
+    _host_allowed,
     _huggingface_blob_to_resolve,
     app,
     check_civitai_url,
     check_huggingface_url,
+    is_huggingface_host,
     is_huggingface_page_url,
     list_models,
 )
@@ -352,6 +355,42 @@ def test_bare_huggingface_repo_url_is_a_page():
 
 def test_huggingface_tree_url_is_a_page():
     assert is_huggingface_page_url("https://huggingface.co/black-forest-labs/FLUX.1-dev/tree/main") is True
+
+
+def test_hf_host_sets_agree():
+    """Every host the recognizer calls Hugging Face must also be a host the
+    bearer token may be sent to.
+
+    These two sets were written out separately in two modules and agreed only by
+    accident of `_host_allowed`'s subdomain rule. They are now both derived from
+    `constants.HF_BASE_HOSTS`; this pins the property rather than the derivation,
+    so adding a host to one place and not the other fails here instead of in a
+    user's `--background` download.
+
+    The trailing-dot spelling is included because it is where they actually
+    disagreed: the recognizer strips the dot and the token gate did not.
+    """
+    assert HUGGINGFACE_HOSTS, "the recognizer host set must not be empty"
+    for host in sorted(HUGGINGFACE_HOSTS):
+        for spelling in (host, f"{host}."):
+            url = f"https://{spelling}/org/repo/resolve/main/model.safetensors"
+            assert is_huggingface_host(url) is True, url
+            assert _host_allowed(url, constants.HF_ALLOWED_HOSTS) is True, url
+
+
+def test_hf_host_set_covers_every_base_domain():
+    """The `www.` spelling is derived, not hand-listed, for each base domain."""
+    for base in constants.HF_BASE_HOSTS:
+        assert base in HUGGINGFACE_HOSTS
+        assert f"www.{base}" in HUGGINGFACE_HOSTS
+
+
+def test_host_allowed_still_refuses_a_lookalike_domain():
+    """The trailing-dot strip must not turn a suffix match into a substring one."""
+    for host in ("huggingface.co.evil.example", "nothuggingface.co", "hf.co.attacker.test"):
+        url = f"https://{host}/org/repo/resolve/main/model.safetensors"
+        assert _host_allowed(url, constants.HF_ALLOWED_HOSTS) is False, url
+        assert is_huggingface_host(url) is False, url
 
 
 def test_huggingface_dataset_url_is_a_page():

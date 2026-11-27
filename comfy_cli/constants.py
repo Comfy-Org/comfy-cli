@@ -59,9 +59,24 @@ CIVITAI_API_TOKEN_ENV_KEY = "CIVITAI_API_TOKEN"
 CIVITAI_ALLOWED_HOSTS: tuple[str, ...] = ("civitai.com", "civitai.red")
 HF_API_TOKEN_KEY = "hf_api_token"
 HF_API_TOKEN_ENV_KEY = "HF_API_TOKEN"
-# Hosts the HF bearer token may be sent to. `check_huggingface_url` accepts the
-# first two; `hf.co` is the official short form Hugging Face redirects from.
-HF_ALLOWED_HOSTS: tuple[str, ...] = ("huggingface.co", "huggingface.com", "hf.co")
+# Hugging Face's own registrable domains, stated ONCE and read by both the URL
+# recognizer (`models.HUGGINGFACE_HOSTS`, which adds the `www.` spellings) and
+# the bearer-token gate (`HF_ALLOWED_HOSTS` below, which `_host_allowed` widens
+# to subdomains so HF's own CDN redirect targets keep the token).
+#
+# Why one tuple and not two: these two sets used to be written out separately,
+# in two modules, and agreed only by accident of the subdomain rule. They
+# already disagreed on one live input -- a trailing-dot FQDN
+# (`https://huggingface.co./org/repo/resolve/main/f`), which the recognizer
+# accepts as Hugging Face and the token gate did not, so `comfy model download`
+# resolved the file and then `--background` stripped the `Authorization` header
+# the foreground had just decided was required. `models.py` carries the comment
+# "one set, read by both recognizers, so 'on Hugging Face' cannot mean two
+# different things two lines apart"; it was true inside that module and false
+# across the two.
+HF_BASE_HOSTS: tuple[str, ...] = ("huggingface.co", "huggingface.com", "hf.co")
+# Hosts the HF bearer token may be sent to.
+HF_ALLOWED_HOSTS: tuple[str, ...] = HF_BASE_HOSTS
 
 ARIA2_SERVER_ENV_KEY = "COMFYUI_MANAGER_ARIA2_SERVER"
 ARIA2_SECRET_ENV_KEY = "COMFYUI_MANAGER_ARIA2_SECRET"
