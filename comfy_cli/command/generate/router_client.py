@@ -29,8 +29,13 @@ from __future__ import annotations
 
 import contextlib
 import os
+import threading
 
 from comfy_cli.command.generate.client import ApiError
+
+# The bridge mutates the process environment, so overlapping calls must not
+# interleave their guard / override / construction / restore.
+_BRIDGE_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -41,23 +46,26 @@ def _router_base_url_bridge(router_var: str):
     its Router variable at construction only, so a custom ``COMFY_API_BASE_URL``
     deployment is bridged onto it while ``Comfy()`` runs — when the Router
     variable is unset — and the process environment is restored afterwards so
-    later calls and child processes see what the user set.
+    later calls and child processes see what the user set. The whole lifecycle
+    runs under ``_BRIDGE_LOCK`` so overlapping calls each construct against the
+    configured target.
     """
     # TODO: drop once comfy-sdk exposes router_base_url=
-    # Normalised like ``spec.base_url()``; blank counts as unset.
-    api_base_url = (os.environ.get("COMFY_API_BASE_URL") or "").strip().rstrip("/")
-    if (os.environ.get(router_var) or "").strip() or not api_base_url:
-        yield
-        return
-    previous = os.environ.get(router_var)
-    os.environ[router_var] = api_base_url
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(router_var, None)
-        else:
-            os.environ[router_var] = previous
+    with _BRIDGE_LOCK:
+        # Normalised like ``spec.base_url()``; blank counts as unset.
+        api_base_url = (os.environ.get("COMFY_API_BASE_URL") or "").strip().rstrip("/")
+        if (os.environ.get(router_var) or "").strip() or not api_base_url:
+            yield
+            return
+        previous = os.environ.get(router_var)
+        os.environ[router_var] = api_base_url
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop(router_var, None)
+            else:
+                os.environ[router_var] = previous
 
 
 def router_models(api_key: str, *, timeout: float | None = None):
