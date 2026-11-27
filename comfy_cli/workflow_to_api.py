@@ -2102,7 +2102,14 @@ def _schema_widget_pairs(
                     ):
                         legacy_buttons_consumed = True
                         vidx += 1
-            if vidx >= len(widget_values):
+            # A named hit can supply a widget after the positional array is
+            # exhausted.  This is the package reader's name-first rule: the
+            # array still determines slot consumption when a slot exists, but
+            # it does not prevent a current frontend's named register from
+            # restoring a truncated tail.
+            structural = spec[0] == "COMFY_DYNAMICGROUP_V3" or is_dynamic
+            named_hit = use_named is not None and not structural and name in use_named and use_named[name] is not None
+            if vidx >= len(widget_values) and not named_hit:
                 if legacy_buttons_consumed:
                     # A save truncated after its button markers still names this
                     # LOAD_3D slot; emit the component's empty state rather than
@@ -2111,9 +2118,9 @@ def _schema_widget_pairs(
                     return
                 short = True
                 return
-            # A positional slot exists for this widget and is consumed either
-            # way, so the named map changes only the VALUE in the pair, per
-            # widget, when the name is present there.
+            # A positional slot, when present, is consumed either way, so the
+            # named map changes only the VALUE in the pair.  With no slot, a
+            # named hit still emits the widget and consumes nothing.
             #
             # EXCEPT where the value is not just a value: a dynamic group's
             # value is its ROW COUNT and a dynamic combo's is its SELECTOR, and
@@ -2128,12 +2135,12 @@ def _schema_widget_pairs(
             # raised ``DynamicGroup row count does not match the saved widget
             # values`` on a workflow that converts cleanly. Neither is a value
             # disagreement the map can legitimately express.
-            structural = spec[0] == "COMFY_DYNAMICGROUP_V3" or is_dynamic
-            if use_named is not None and not structural and name in use_named:
+            if named_hit:
                 value = use_named[name]
             else:
                 value = widget_values[vidx]
-            vidx += 1
+            if vidx < len(widget_values):
+                vidx += 1
             if spec[0] == "COMFY_DYNAMICGROUP_V3":
                 template = spec[1].get("template", {})
                 fields = [(n, s) for section in ("required", "optional") for n, s in template.get(section, {}).items()]
@@ -2232,17 +2239,16 @@ def _schema_widget_pairs(
     # unaffected by any named lookup). Mirrors the package's basis
     # (``widgetMapper.ts:1660-1664``): every widget this positional-only pass
     # sourced from a REAL (non-``None``) slot must be present, and non-``None``,
-    # in the map. Vacuously true (and so usable) when the positional pass
-    # produced no such name, same as an empty ``every`` in the reference
-    # implementation.
+    # in the map. An empty basis is not enough to trust a map-only walk:
+    # without one real positional slot there is no evidence that the map
+    # belongs to this saved layout rather than an older or foreign one.
     #
     # Two slots are excluded from the requirement, and they are NOT symmetric:
     #
-    # * A widget with no slot at all stays short and takes its schema default,
-    #   here and in the named walk alike. ``widgets_values``'s LENGTH is what
-    #   decides which widgets the save addressed, so a map naming a widget the
-    #   array never reached does not materialise it -- the map supplies values
-    #   for widgets, not the set of widgets.
+    # * A widget with no slot at all is absent from the candidate requirement.
+    #   The positional walk stays short, while the named walk may emit it from
+    #   the map. This mirrors the package's name-first read and restores a
+    #   truncated tail without pretending a positional slot was consumed.
     # * A ``None`` slot -- what ``serialize()`` leaves for a widget it does not
     #   serialize -- is excluded so a map need not carry it, which is what makes
     #   the per-widget fallback work. The map MAY still name it, and then the
@@ -2252,20 +2258,29 @@ def _schema_widget_pairs(
     named = _usable_named_values(node)
     if named is not None:
         positional_names = {name for name, value in pairs if value is not None}
-        if all(name in named and named[name] is not None for name in positional_names):
+        if positional_names and all(name in named and named[name] is not None for name in positional_names):
             named_pairs, named_exact, named_warnings = walk(
                 strict=chosen_strict, saved_node=chosen_saved_node, use_named=named
             )
-            # Adopt the named walk only when it walked the SAME STRUCTURE: as
-            # exact as the chosen positional walk, over the same widget names in
-            # the same order. Keeping the group row count and the dynamic-combo
+            # Adopt the named walk only when it preserves the positional
+            # walk's structure. It may extend that structure with a named-only
+            # tail after the array ran out (A-3), so the positional names must
+            # be an exact prefix rather than the whole list. Keeping the group
+            # row count and the dynamic-combo
             # selector positional above should already make that identity hold
             # by construction, since nothing else in ``consume`` derives slot
             # consumption from the value -- this enforces it instead of relying
             # on that staying true. A named walk that diverges is not a
             # different set of values, it is a walk desynchronised from the
             # array, and the positional result is the one to keep.
-            if named_exact == exact and [name for name, _ in named_pairs] == [name for name, _ in pairs]:
+            positional_pair_names = [name for name, _ in pairs]
+            named_pair_names = [name for name, _ in named_pairs]
+            preserves_positional_structure = named_pair_names[: len(positional_pair_names)] == positional_pair_names
+            saved_widget_names = _saved_widget_names(node, schema, positional_pair_names)
+            named_tail_is_saved = saved_widget_names is None or all(
+                name in _marker_coverage(saved_widget_names) for name in named_pair_names[len(positional_pair_names) :]
+            )
+            if preserves_positional_structure and named_tail_is_saved and (not exact or named_exact):
                 pairs, warnings = named_pairs, named_warnings
 
     for warning in warnings:

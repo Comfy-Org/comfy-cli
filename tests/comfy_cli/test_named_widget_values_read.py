@@ -288,25 +288,39 @@ def test_a_groups_own_field_values_are_still_read_from_the_map(dynamic_group_fix
 
 
 # --------------------------------------------------------------------------- #
-# What the map does NOT decide: which widgets the save addressed at all.
+# A-3: a named value survives beyond a truncated positional tail.
 # --------------------------------------------------------------------------- #
 
 
-def test_a_map_does_not_materialise_a_widget_the_array_never_reached(object_info):
-    """``widgets_values``'s length decides which widgets the save addressed.
+def test_a_map_fills_a_truncated_positional_tail(object_info):
+    """The package reads by name before asking whether a slot remains.
 
-    A truncated array leaves the widgets past its end short, and they take
-    their schema defaults here exactly as they did before this read existed,
-    even when the map names them. The map supplies values FOR widgets, not the
-    set of widgets: honouring it past the end of the array would let a map
-    naming a widget the save never serialized conjure a value for it.
-
-    The candidate test does not constrain those names, because a widget with no
-    slot gets no pair, so this is reachable rather than theoretical.
+    The positional walk still establishes the layout and candidate basis, but
+    the named walk restores later schema widgets from a current frontend's map
+    instead of silently replacing them with catalog defaults.
     """
     node = _node([1024], {"width": 1024, "height": 768, "batch_size": 4})
     inputs = _convert(node, object_info)
-    assert inputs == {"width": 1024, "height": 512, "batch_size": 1}  # 512/1 are the schema defaults
+    assert inputs == {"width": 1024, "height": 768, "batch_size": 4}
+
+
+def test_a_none_named_tail_entry_falls_back_to_the_schema_default(object_info):
+    node = _node([1024], {"width": 1024, "height": None, "batch_size": 4})
+    inputs = _convert(node, object_info)
+    assert inputs == {"width": 1024, "height": 512, "batch_size": 4}
+
+
+def test_an_empty_positional_array_does_not_authorize_a_map_only_walk(object_info):
+    node = _node([], {"width": 1024, "height": 768, "batch_size": 4})
+    inputs = _convert(node, object_info)
+    assert inputs == {"width": 512, "height": 512, "batch_size": 1}
+
+
+def test_a_complete_marker_inventory_can_exclude_a_stale_named_tail(object_info):
+    node = _node([1024], {"width": 1024, "height": 768, "batch_size": 4})
+    node["inputs"] = [{"name": "width", "widget": {"name": "width"}}]
+    inputs = _convert(node, object_info)
+    assert inputs == {"width": 1024, "height": 512, "batch_size": 1}
 
 
 def test_a_map_may_fill_a_none_hole_the_array_left(object_info):

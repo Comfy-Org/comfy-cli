@@ -42,6 +42,11 @@ history.
   GPU/region move whose `pendingUpdate` reads `failed` has ended. An update
   still waiting after that exits 75 with `deploy_watch_lost`.
 
+- Workflow conversion can restore an ordinary, non-structural widget from
+  `widgets_values_named` when the positional `widgets_values` array ends after
+  at least one corroborating slot. A complete `inputs[]` widget inventory
+  remains authoritative about which widgets the save actually carried.
+
 - Telemetry no longer loses the last event of a run when `posthog` resolves to
   7.38.1 or newer. The CLI drops PostHog's own exit hook so its own 5-second,
   bounded flush is the only shutdown drain, but PostHog renamed that hook from
